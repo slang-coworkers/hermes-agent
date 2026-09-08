@@ -1,14 +1,10 @@
-"""Acceptance test for the ``hello`` plugin (requirement P0-LOOP).
+"""Behaviour and acceptance tests for the ``hello`` plugin.
 
-Extends the P1-HELLO hook-only scaffold's contract: the plugin still registers
-exactly one ``post_tool_call`` observer hook whose firing appends one line to
-the plugin's own durable storage under ``<HERMES_HOME>/plugin-data/hello/``,
-and it now ALSO registers a ``/hello`` slash command whose handler returns a
-greeting naming the active profile.
-
-``test_ac_p0_loop_1`` is the single ``pytest:`` acceptance criterion
-(AC-P0-LOOP-1); the remaining tests are the retained P1 behavioural contract,
-with the "no command" ownership assertion updated for the added command.
+``test_ac_p0_loop_1`` is the AC-P0-LOOP-1 pytest criterion. The remaining tests
+assert the registration surface (exactly one ``post_tool_call`` observer hook
+and one ``/hello`` slash command) and that firing the hook appends one line per
+tool call to the plugin's durable storage under
+``<HERMES_HOME>/plugin-data/hello/``.
 """
 
 import hashlib
@@ -252,15 +248,13 @@ def test_manifest_declares_and_is_loaded_as_version_1(manager, hermes_home):
 
 
 def test_registers_one_hook_and_one_command_and_nothing_else(manager):
-    """One hook AND one slash command, and no other registration.
+    """The plugin owns exactly the post_tool_call hook and the /hello command.
 
-    P0-LOOP supersedes the P1-HELLO "no command" assertion: the plugin now owns
-    exactly the ``post_tool_call`` observer hook and the ``/hello`` slash
-    command. Asserted against the per-plugin ownership ledger, which is broader
-    than any single registry and — unlike ``_registration_order`` — also carries
+    Asserted against the per-plugin ownership ledger, which is broader than any
+    single registry and — unlike ``_registration_order`` — also carries
     ``persistent`` registrations. Excluding HOST_INJECTED_KINDS keeps it strict
     rather than weakening it: a tool, middleware, second hook, or second command
-    still fails this. Ledger order follows registration order, and register()
+    still fails this. Ledger order follows registration order — register()
     registers the hook before the command.
     """
     owned = [
@@ -440,3 +434,38 @@ def test_ac_p0_loop_1(profile_manager):
     # is a defined string, not a fuzzy match.
     reply = entry["handler"]("")
     assert reply == EXPECTED_GREETING, f"unexpected greeting: {reply!r}"
+
+
+def test_hello_tracks_active_profile(tmp_path, monkeypatch):
+    """The greeting names whichever profile is active, not a fixed string.
+
+    A second, different profile name (``p0-loop-peer``) proves the handler calls
+    ``get_active_profile_name()`` per invocation rather than returning a constant
+    that happens to match the AC-1 fixture's ``p0-loop-bot``.
+    """
+    other = "p0-loop-peer"
+    home_root = tmp_path / "os-home"
+    hermes_home = home_root / ".hermes" / "profiles" / other
+    (hermes_home / "plugins").mkdir(parents=True)
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY)
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}),
+        encoding="utf-8",
+    )
+    empty_bundled = tmp_path / "bundled-plugins"
+    empty_bundled.mkdir()
+
+    monkeypatch.setenv("HOME", str(home_root))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(empty_bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+
+    from hermes_cli.plugins import PluginManager
+
+    mgr = PluginManager()
+    mgr.discover_and_load()
+    try:
+        entry = mgr._plugin_commands[PLUGIN_KEY]
+        assert entry["handler"]("") == f"Hello from {other}!"
+    finally:
+        mgr.unload()

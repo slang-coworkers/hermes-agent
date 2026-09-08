@@ -1,8 +1,5 @@
-"""hello plugin.
-
-Registers a ``/hello`` slash command whose handler returns a greeting naming
-the active profile, and retains the P1-HELLO ``post_tool_call`` observer hook
-that appends one line per tool call to the plugin's own durable storage under
+"""hello plugin: register the ``/hello`` slash command and record completed
+tool calls in the plugin's durable storage under
 ``<HERMES_HOME>/plugin-data/hello/``.
 """
 

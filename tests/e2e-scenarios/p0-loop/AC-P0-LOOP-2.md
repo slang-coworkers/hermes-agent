@@ -25,8 +25,9 @@ before this section runs; do not re-install it here. After install, with
 `$HERMES_HOME` = the shared testbed home:
 
 1. The empty `HERMES_BUNDLED_PLUGINS` dir means each profile owns its plugins,
-   so copy the plugin from the worktree into the profile:
-   `cp -r "$WT/plugins/hello" "$HERMES_HOME/profiles/p0-loop-hello/plugins/hello"`.
+   and `hermes profile install` does not create a `plugins/` dir, so make it
+   and copy the plugin in from the worktree:
+   `mkdir -p "$HERMES_HOME/profiles/p0-loop-hello/plugins" && cp -r "$WT/plugins/hello" "$HERMES_HOME/profiles/p0-loop-hello/plugins/"`.
    The installed `config.yaml` already sets `plugins.enabled: [hello]`.
 2. Write the stub key post-install (`.env` is user-owned and stripped on
    install): `printf 'MOCK_API_KEY=e2e-mock-key\n' >> "$HERMES_HOME/profiles/p0-loop-hello/.env"`.

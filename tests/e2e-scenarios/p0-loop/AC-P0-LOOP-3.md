@@ -26,9 +26,11 @@ inference host below. The provider both fixtures configure is NVIDIA integrate �
 `nvidia/llama-3.1-nemotron-70b-instruct` (also `model.default` in each bot's
 `config.yaml`, so the config is authoritative for the run; the frontmatter
 `base_url`/`model_id` are the values hermes-testbed §325 reads and the host the
-socket guard must allow, `integrate.api.nvidia.com`). The OneCLI proxy injects
-the real `NVIDIA_API_KEY` per request, so `LIVE_API_KEY` stays the placeholder
-`unused-testbed` and no real key ever touches `$TB`/`$WT`/`$ART`. Budget bound:
+socket guard must allow, `integrate.api.nvidia.com`). `nvidia` is a canonical
+provider whose credential lookup is `NVIDIA_API_KEY` (`hermes_cli/auth.py:450-455`),
+and the OneCLI proxy injects the real key per request, so `NVIDIA_API_KEY` stays
+the placeholder `unused-testbed` and no real key ever touches `$TB`/`$WT`/`$ART`.
+Budget bound:
 `LIVE_MODEL_CALLS_MAX=40` / `LIVE_BUDGET_USD=5` for this scenario — past either,
 stop and record `FAIL(budget)`.
 
@@ -44,9 +46,10 @@ them here. After install, with `$HERMES_HOME` = the shared testbed home:
    flat as `a2a`, so its discovery key is the manifest name `a2a-platform`):
    ```bash
    for b in p0-loop-bot-a p0-loop-bot-b; do
-     cp -r "$WT/plugins/hello"          "$HERMES_HOME/profiles/$b/plugins/hello"
+     mkdir -p "$HERMES_HOME/profiles/$b/plugins"
+     cp -r "$WT/plugins/hello"          "$HERMES_HOME/profiles/$b/plugins/"
      cp -r "$WT/plugins/platforms/a2a"  "$HERMES_HOME/profiles/$b/plugins/a2a"
-     printf 'LIVE_API_KEY=unused-testbed\n' >> "$HERMES_HOME/profiles/$b/.env"
+     printf 'NVIDIA_API_KEY=unused-testbed\n' >> "$HERMES_HOME/profiles/$b/.env"
    done
    ```
    Each installed `config.yaml` already sets `plugins.enabled: [hello, a2a-platform]`.
@@ -57,13 +60,14 @@ them here. After install, with `$HERMES_HOME` = the shared testbed home:
    9120–9129; the dashboard keeps 9119):
    ```bash
    ( source $TB/harness.live.env && cd $WT
-     hermes -p p0-loop-bot-b gateway run --force --no-supervise \
+     hermes -p p0-loop-bot-b gateway run -v --force --no-supervise \
        > $ART/scenario-AC-P0-LOOP-3/peer.log 2>&1 & )
-   timeout 300 bash -c "until grep -qiE 'a2a|listening|9120' \
+   timeout 300 bash -c "until grep -qF 'A2A: serving Agent Card + JSON-RPC on http://127.0.0.1:9120' \
      $ART/scenario-AC-P0-LOOP-3/peer.log; do sleep 3; done"
    ```
-   (`hermes_cli/subcommands/gateway.py:46,66,76`; a2a listener binds
-   `http://127.0.0.1:9120` — `plugins/platforms/a2a/adapter.py:346`.)
+   (`-v` raises stderr to INFO — `hermes_cli/subcommands/gateway.py:51-55`; the
+   readiness line is logged at INFO — `plugins/platforms/a2a/adapter.py:444-446`;
+   a2a listener binds `http://127.0.0.1:9120` — `adapter.py:346`.)
 3. **bot-a (driver).** Its `config.yaml` already names the peer
    (`a2a_agents.bot-b.url: http://127.0.0.1:9120`). Launch bot-a's dashboard
    with the `a2a` toolset pinned so `a2a_call` reaches bot-a's model (the pin is

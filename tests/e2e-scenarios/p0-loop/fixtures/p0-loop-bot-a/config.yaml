@@ -5,7 +5,10 @@ providers:
   nvidia:
     api: https://integrate.api.nvidia.com/v1
     api_mode: chat_completions
-    key_env: LIVE_API_KEY
+    # nvidia is a canonical provider whose credential lookup is NVIDIA_API_KEY
+    # (hermes_cli/auth.py:450-455); the OneCLI proxy injects the real key per
+    # request, so the value written post-install stays a placeholder.
+    key_env: NVIDIA_API_KEY
     models:
       nvidia/llama-3.1-nemotron-70b-instruct: {}
 plugins:
