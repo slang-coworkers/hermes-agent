@@ -2,8 +2,8 @@
 ac: AC-P0-LOOP-3
 kind: live
 model: live
-base_url: "${ANTHROPIC_BASE_URL}"
-model_id: "aws/anthropic/bedrock-claude-opus-4-8[1m]"
+base_url: https://inference-api.nvidia.com
+model_id: aws/anthropic/bedrock-claude-opus-4-8
 fixtures:
   - fixtures/p0-loop-bot-a
   - fixtures/p0-loop-bot-b
@@ -18,25 +18,28 @@ reply is persisted in its own `state.db` under a `source='a2a'` session and is
 rendered back in bot-a's dashboard. This proves the a2a **round trip +
 visibility** (profile-naming itself is proved by AC-1 and AC-2).
 
-**Live tier / provider (round-2 amendment).** `kind: live` + `model: live`
-select the OneCLI live tier: the tester sources `$TB/harness.live.env` (not
-`harness.env`), which drops the proxy pin back to the container's OneCLI proxy
-and allow-lists the resolved inference host. Both fixtures configure a custom
-provider `coworkers-live` pointing at the coworkers' OWN gateway through that
-proxy — `api: "${ANTHROPIC_BASE_URL}"`, `api_mode: anthropic_messages`,
-`key_env: ANTHROPIC_API_KEY`, model `aws/anthropic/bedrock-claude-opus-4-8[1m]`
-(also `model.default`, so the config is authoritative for the run). `api` is an
-env reference expanded on every `load_config()`
-(`hermes_cli/config.py:2931-2945`, applied `:4042-4043`); the value is
-**container-specific** (a coworkers'-gateway host in one container, a localhost
-proxy port in another), so the fixture commits the literal `${ANTHROPIC_BASE_URL}`
-and the tester's live env supplies the real value at runtime.
-`anthropic_messages` is a valid api_mode (`hermes_cli/providers.py:38,470`). The
-local OneCLI proxy substitutes the outbound `x-api-key` for that host, so
-`ANTHROPIC_API_KEY` stays a dummy and no real key ever touches
-`$TB`/`$WT`/`$ART`. Budget bound: `LIVE_MODEL_CALLS_MAX=40` /
-`LIVE_BUDGET_USD=5` for this scenario — past either, stop and record
-`FAIL(budget)`.
+**Live tier / provider.** `kind: live` + `model: live` select the OneCLI live
+tier: the tester sources `$TB/harness.live.env` (not `harness.env`) and extends
+its OneCLI egress allowance for the inference host below. Both fixtures configure
+a custom provider `coworkers-live` — `api: https://inference-api.nvidia.com`,
+`api_mode: anthropic_messages`, `key_env: ANTHROPIC_API_KEY`, model
+`aws/anthropic/bedrock-claude-opus-4-8` (also `model.default`, so the config is
+authoritative for the run). `anthropic_messages` is a valid api_mode
+(`hermes_cli/providers.py:38,470`). Two properties make this reach the model with
+a dummy key:
+- **Literal non-loopback host** `https://inference-api.nvidia.com`, not
+  `${ANTHROPIC_BASE_URL}` (which in a traced container is the loopback
+  claude-trace proxy that authorizes on the client-supplied key, so a dummy is
+  scoped to `default-models` — round 2's 403). A non-loopback host routes through
+  the OneCLI **egress** proxy (`host.docker.internal:10255`), which substitutes
+  the dummy `x-api-key` with the real credential, so `ANTHROPIC_API_KEY` stays a
+  dummy and no real key touches `$TB`/`$WT`/`$ART`.
+- **Model `aws/anthropic/bedrock-claude-opus-4-8` (no `[1m]`)** — `[1m]` is a
+  Claude Code client-side convention stripped before the call; a Hermes client
+  sends the id verbatim and no `[1m]` model exists behind the key.
+
+Budget bound: `LIVE_MODEL_CALLS_MAX=40` / `LIVE_BUDGET_USD=5` for this scenario —
+past either, stop and record `FAIL(budget)`.
 
 The a2a transport, round trip, and `state.db` recording are independently proven
 **hermetically** by the T-suite (T5: bot-b `state.db` gains a `source='a2a'`
@@ -65,8 +68,10 @@ them here. After install, with `$HERMES_HOME` = the shared testbed home:
      printf 'ANTHROPIC_API_KEY=dummy\n' >> "$HERMES_HOME/profiles/$b/.env"
    done
    ```
-   Each installed `config.yaml` already sets `plugins.enabled: [hello, a2a-platform]`.
-   `${ANTHROPIC_BASE_URL}` is supplied by `$TB/harness.live.env`.
+   Each installed `config.yaml` already sets `plugins.enabled: [hello, a2a-platform]`
+   and the literal `api: https://inference-api.nvidia.com`. The tester extends
+   `$TB/harness.live.env`'s OneCLI egress allowance for `inference-api.nvidia.com`
+   (non-loopback host — the same allowance step round 1 used for its host).
 2. **bot-b (inbound peer).** Its `config.yaml` already sets
    `platforms.a2a.enabled: true` and `platforms.a2a.extra.port: 9120` (loopback;
    no `extra.agents`, so the default agent answers the root url). Start bot-b's

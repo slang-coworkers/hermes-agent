@@ -7,5 +7,5 @@ env_requires:
   # real outbound credential per request (hermes-testbed §3a). A real key never
   # touches the fixture — ANTHROPIC_API_KEY stays a dummy.
   - name: ANTHROPIC_API_KEY
-    description: "Dummy key for the coworkers-live provider; harness writes ANTHROPIC_API_KEY=dummy post-install and the OneCLI proxy substitutes the real credential for ${ANTHROPIC_BASE_URL}'s host."
+    description: "Dummy key for the coworkers-live provider; harness writes ANTHROPIC_API_KEY=dummy post-install and the OneCLI egress proxy substitutes the real credential for inference-api.nvidia.com's host."
     required: false
