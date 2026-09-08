@@ -1,16 +1,15 @@
 model:
-  default: nvidia/llama-3.1-nemotron-70b-instruct
-  provider: nvidia
+  default: "aws/anthropic/bedrock-claude-opus-4-8[1m]"
+  provider: coworkers-live
 providers:
-  nvidia:
-    api: https://integrate.api.nvidia.com/v1
-    api_mode: chat_completions
-    # nvidia is a canonical provider whose credential lookup is NVIDIA_API_KEY
-    # (hermes_cli/auth.py:450-455); the OneCLI proxy injects the real key per
-    # request, so the value written post-install stays a placeholder.
-    key_env: NVIDIA_API_KEY
+  # Use a non-canonical key so this fixture's endpoint, protocol, and
+  # credential source remain authoritative over built-in provider resolution.
+  coworkers-live:
+    api: "${ANTHROPIC_BASE_URL}"
+    api_mode: anthropic_messages
+    key_env: ANTHROPIC_API_KEY
     models:
-      nvidia/llama-3.1-nemotron-70b-instruct: {}
+      "aws/anthropic/bedrock-claude-opus-4-8[1m]": {}
 plugins:
   enabled:
     - hello

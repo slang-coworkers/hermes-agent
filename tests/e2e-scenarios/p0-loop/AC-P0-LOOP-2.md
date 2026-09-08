@@ -48,25 +48,44 @@ before this section runs; do not re-install it here. After install, with
 
 ## Steps
 
-1. Open the `p0-loop-hello` chat: `agent-browser open "http://127.0.0.1:9119/chat"`,
-   `agent-browser wait --load networkidle`, `agent-browser snapshot -i`
-   → expect: the chat composer textbox is present in the snapshot (backend
-   ready line already in `dashboard.log`); screenshot `step-1.png`.
+The dashboard SPA opens the **default** profile's chat regardless of
+`-p p0-loop-hello … --isolated` (`--isolated` scopes the server, not the SPA's
+active chat); the launched profile is a **non-selected** combobox option
+labelled `this dashboard (p0-loop-hello)`. So the launched profile must be
+selected in the UI before `/hello` is typed, or the greeting names `default`
+(the round-1 AC-2 defect).
+
+1. In the dashboard (`agent-browser open "http://127.0.0.1:9119/chat"`,
+   `agent-browser wait --load networkidle`, `agent-browser snapshot -i`), open
+   the profile combobox and select the launched profile `p0-loop-hello` (the
+   option labelled `this dashboard (p0-loop-hello)`, by `@ref`), then re-snapshot
+   (the page rerenders, so earlier refs are dead)
+   → expect: the composer prompt is **prefixed with the profile name**
+   `p0-loop-hello ` (a named profile renders `<profile> <glyph>` —
+   `ui-tui/src/lib/prompt.ts:31-33`; the glyph is skin/termux-configurable,
+   default `❯`, so assert the `p0-loop-hello ` **prefix**, NOT a specific glyph).
+   Until selected, the SPA shows the default profile's chat (no profile prefix);
+   screenshot `step-1.png`.
 2. Fill the composer with `/hello` and submit
    (`agent-browser fill @e<composer> "/hello"`, `agent-browser press Enter`),
    then `timeout 300 agent-browser wait --text "Hello from p0-loop-hello!"`
    → expect: the visible command **output** `Hello from p0-loop-hello!` appears
-   in the transcript (a command output line, not an assistant-role model
-   bubble); screenshot `step-2.png`.
+   in the transcript. The Ink client sends `slash.exec` and renders `r.output`
+   via `sys()` (`ui-tui/src/app/createSlashHandler.ts:154-168`); Python runs the
+   plugin handler and returns `{"output": …}`
+   (`tui_gateway/methods_tools.py:1260-1279`). Assert the visible command output
+   text — not an assistant-role model bubble and not a persisted model turn;
+   screenshot `step-2.png`.
 
 ## Pass
 
-The dashboard chat visibly shows `Hello from p0-loop-hello!` as the `/hello`
+With `p0-loop-hello` selected (composer prompt prefixed `p0-loop-hello `),
+typing `/hello` visibly shows `Hello from p0-loop-hello!` as the `/hello`
 command output.
 
 ## Evidence
 
-- `step-1.png` — composer ready in the `p0-loop-hello` chat.
+- `step-1.png` — `p0-loop-hello` selected in the combobox; composer prompt prefixed `p0-loop-hello `.
 - `step-2.png` — `Hello from p0-loop-hello!` visible as the `/hello` output.
 
 The observable is a rendered string, so the screenshot is the proof; no

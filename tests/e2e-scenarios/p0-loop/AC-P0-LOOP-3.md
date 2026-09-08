@@ -2,8 +2,8 @@
 ac: AC-P0-LOOP-3
 kind: live
 model: live
-base_url: https://integrate.api.nvidia.com/v1
-model_id: nvidia/llama-3.1-nemotron-70b-instruct
+base_url: "${ANTHROPIC_BASE_URL}"
+model_id: "aws/anthropic/bedrock-claude-opus-4-8[1m]"
 fixtures:
   - fixtures/p0-loop-bot-a
   - fixtures/p0-loop-bot-b
@@ -18,21 +18,31 @@ reply is persisted in its own `state.db` under a `source='a2a'` session and is
 rendered back in bot-a's dashboard. This proves the a2a **round trip +
 visibility** (profile-naming itself is proved by AC-1 and AC-2).
 
-**Live tier / provider.** `kind: live` + `model: live` select the OneCLI live
-tier: the tester sources `$TB/harness.live.env` (not `harness.env`), which drops
-the proxy pin back to the container's OneCLI proxy and allow-lists the one
-inference host below. The provider both fixtures configure is NVIDIA integrate —
-`base_url: https://integrate.api.nvidia.com/v1`, model
-`nvidia/llama-3.1-nemotron-70b-instruct` (also `model.default` in each bot's
-`config.yaml`, so the config is authoritative for the run; the frontmatter
-`base_url`/`model_id` are the values hermes-testbed §325 reads and the host the
-socket guard must allow, `integrate.api.nvidia.com`). `nvidia` is a canonical
-provider whose credential lookup is `NVIDIA_API_KEY` (`hermes_cli/auth.py:450-455`),
-and the OneCLI proxy injects the real key per request, so `NVIDIA_API_KEY` stays
-the placeholder `unused-testbed` and no real key ever touches `$TB`/`$WT`/`$ART`.
-Budget bound:
-`LIVE_MODEL_CALLS_MAX=40` / `LIVE_BUDGET_USD=5` for this scenario — past either,
-stop and record `FAIL(budget)`.
+**Live tier / provider (round-2 amendment).** `kind: live` + `model: live`
+select the OneCLI live tier: the tester sources `$TB/harness.live.env` (not
+`harness.env`), which drops the proxy pin back to the container's OneCLI proxy
+and allow-lists the resolved inference host. Both fixtures configure a custom
+provider `coworkers-live` pointing at the coworkers' OWN gateway through that
+proxy — `api: "${ANTHROPIC_BASE_URL}"`, `api_mode: anthropic_messages`,
+`key_env: ANTHROPIC_API_KEY`, model `aws/anthropic/bedrock-claude-opus-4-8[1m]`
+(also `model.default`, so the config is authoritative for the run). `api` is an
+env reference expanded on every `load_config()`
+(`hermes_cli/config.py:2931-2945`, applied `:4042-4043`); the value is
+**container-specific** (a coworkers'-gateway host in one container, a localhost
+proxy port in another), so the fixture commits the literal `${ANTHROPIC_BASE_URL}`
+and the tester's live env supplies the real value at runtime.
+`anthropic_messages` is a valid api_mode (`hermes_cli/providers.py:38,470`). The
+local OneCLI proxy substitutes the outbound `x-api-key` for that host, so
+`ANTHROPIC_API_KEY` stays a dummy and no real key ever touches
+`$TB`/`$WT`/`$ART`. Budget bound: `LIVE_MODEL_CALLS_MAX=40` /
+`LIVE_BUDGET_USD=5` for this scenario — past either, stop and record
+`FAIL(budget)`.
+
+The a2a transport, round trip, and `state.db` recording are independently proven
+**hermetically** by the T-suite (T5: bot-b `state.db` gains a `source='a2a'`
+session with the inbound nonce and the assistant reply, no live model), so this
+criterion adds only the **live-model** leg (bot-a autonomously issuing
+`a2a_call`, and bot-b generating its reply from a real model).
 
 ## Setup
 
@@ -43,16 +53,20 @@ them here. After install, with `$HERMES_HOME` = the shared testbed home:
 
 1. The empty `HERMES_BUNDLED_PLUGINS` dir means each profile owns its plugins,
    so copy both plugins from the worktree into **each** profile (a2a copied
-   flat as `a2a`, so its discovery key is the manifest name `a2a-platform`):
+   flat as `a2a`, so its discovery key is the manifest name `a2a-platform`), and
+   write the dummy key post-install (`.env` is user-owned and stripped on
+   install — the OneCLI proxy substitutes the real credential, so a dummy is all
+   Hermes ever holds):
    ```bash
    for b in p0-loop-bot-a p0-loop-bot-b; do
      mkdir -p "$HERMES_HOME/profiles/$b/plugins"
      cp -r "$WT/plugins/hello"          "$HERMES_HOME/profiles/$b/plugins/"
      cp -r "$WT/plugins/platforms/a2a"  "$HERMES_HOME/profiles/$b/plugins/a2a"
-     printf 'NVIDIA_API_KEY=unused-testbed\n' >> "$HERMES_HOME/profiles/$b/.env"
+     printf 'ANTHROPIC_API_KEY=dummy\n' >> "$HERMES_HOME/profiles/$b/.env"
    done
    ```
    Each installed `config.yaml` already sets `plugins.enabled: [hello, a2a-platform]`.
+   `${ANTHROPIC_BASE_URL}` is supplied by `$TB/harness.live.env`.
 2. **bot-b (inbound peer).** Its `config.yaml` already sets
    `platforms.a2a.enabled: true` and `platforms.a2a.extra.port: 9120` (loopback;
    no `extra.agents`, so the default agent answers the root url). Start bot-b's
@@ -88,21 +102,35 @@ them here. After install, with `$HERMES_HOME` = the shared testbed home:
 
 ## Steps
 
-1. In bot-a's dashboard chat (`agent-browser open "http://127.0.0.1:9119/chat"`,
-   `wait --load networkidle`, `snapshot -i`), fill the composer with a
-   natural-language ask and submit — **never** send `/hello` over a2a: a2a
-   frames every inbound message including `/`-text, so a peer can never reach
-   the gateway's slash commands (`plugins/platforms/a2a/security.py:214-222`;
-   `adapter.py:734,766-780`). Prompt:
+The dashboard SPA opens the **default** profile's chat regardless of
+`-p p0-loop-bot-a … --isolated` (the same round-1 fact AC-2 established), so
+bot-a's profile must be selected in the UI before the ask — otherwise the
+composer talks to `default`, which has no `a2a_agents.bot-b` peer and no
+`coworkers-live` model in scope.
+
+1. Open bot-a's dashboard chat (`agent-browser open "http://127.0.0.1:9119/chat"`,
+   `wait --load networkidle`, `snapshot -i`), open the profile combobox and
+   select the launched profile `p0-loop-bot-a` (the option labelled
+   `this dashboard (p0-loop-bot-a)`, by `@ref`), then re-snapshot (refs are dead
+   after the rerender)
+   → expect: the composer prompt is **prefixed with the profile name**
+   `p0-loop-bot-a ` (a named profile renders `<profile> <glyph>` —
+   `ui-tui/src/lib/prompt.ts:31-33`; the glyph is skin-configurable, so assert
+   the `p0-loop-bot-a ` **prefix**, not a specific glyph); screenshot `step-1.png`.
+2. Fill the composer with a natural-language ask and submit — **never** send
+   `/hello` over a2a: a2a frames every inbound message including `/`-text, so a
+   peer can never reach the gateway's slash commands
+   (`plugins/platforms/a2a/security.py:214-222`; `adapter.py:734,766-780`).
+   Prompt:
    `Use a2a to contact bot-b and ask it to reply with a short hello that contains the marker P0LOOP-<nonce>; then tell me bot-b's exact reply.`
    (substitute the real `$NONCE`) → expect: bot-a's model issues
    `a2a_call(agent="bot-b", message="… P0LOOP-<nonce> …")`
-   (`plugins/platforms/a2a/tools.py:259-302`); screenshot `step-1.png`.
-2. Wait (≤ `timeout_s`) for bot-a's chat to render bot-b's returned greeting
+   (`plugins/platforms/a2a/tools.py:259-302`); screenshot `step-2.png`.
+3. Wait (≤ `timeout_s`) for bot-a's chat to render bot-b's returned greeting
    containing `P0LOOP-<nonce>`
    (`timeout 600 agent-browser wait --text "P0LOOP-<nonce>"`) → expect: the
    marker-bearing greeting is visible in bot-a's dashboard; screenshot
-   `step-2.png`.
+   `step-3.png`.
 
 ## Pass
 
@@ -112,8 +140,9 @@ renders the returned greeting/marker.
 
 ## Evidence
 
-- `step-1.png` — bot-a issues the a2a delegation.
-- `step-2.png` — bot-a's chat shows the returned greeting containing `P0LOOP-<nonce>`.
+- `step-1.png` — `p0-loop-bot-a` selected in the combobox; composer prompt prefixed `p0-loop-bot-a `.
+- `step-2.png` — bot-a issues the a2a delegation.
+- `step-3.png` — bot-a's chat shows the returned greeting containing `P0LOOP-<nonce>`.
 - State half — bot-b's own per-profile `state.db` (the image has no `sqlite3`
   CLI, so the stdlib form; schema `hermes_state_common.py:395-460`, per-profile
   db `hermes_cli/profiles.py:385-390`):
