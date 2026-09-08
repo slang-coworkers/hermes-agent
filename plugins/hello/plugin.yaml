@@ -1,0 +1,6 @@
+manifest_version: 1
+name: hello
+version: "0.2.0"
+description: "Registers a /hello slash command that greets, naming the active profile."
+provides_hooks:
+  - post_tool_call
