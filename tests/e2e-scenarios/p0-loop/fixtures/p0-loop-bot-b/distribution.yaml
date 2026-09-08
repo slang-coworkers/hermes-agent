@@ -1,0 +1,11 @@
+name: p0-loop-bot-b
+version: "0.1.0"
+description: "P0-LOOP AC-3 fixture: the inbound peer. Loads hello + a2a-platform, serves its default agent behind an a2a listener on 127.0.0.1:9120, runs against the live tier."
+author: hermes-builder
+env_requires:
+  # Written post-install by the harness; the OneCLI proxy injects the real
+  # NVIDIA credential per request (hermes-testbed §3a). A real key never
+  # touches the fixture — LIVE_API_KEY stays the placeholder unused-testbed.
+  - name: LIVE_API_KEY
+    description: "Dummy key for the live provider; harness writes LIVE_API_KEY=unused-testbed post-install."
+    required: false

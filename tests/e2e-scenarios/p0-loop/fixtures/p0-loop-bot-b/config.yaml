@@ -1,0 +1,21 @@
+model:
+  default: nvidia/llama-3.1-nemotron-70b-instruct
+  provider: nvidia
+providers:
+  nvidia:
+    api: https://integrate.api.nvidia.com/v1
+    api_mode: chat_completions
+    key_env: LIVE_API_KEY
+    models:
+      nvidia/llama-3.1-nemotron-70b-instruct: {}
+plugins:
+  enabled:
+    - hello
+    - a2a-platform
+# a2a inbound listener on loopback; no extra.agents, so the default agent
+# answers the root url bot-a dials (plugins/platforms/a2a/adapter.py:346).
+platforms:
+  a2a:
+    enabled: true
+    extra:
+      port: 9120
