@@ -3,19 +3,25 @@
 Resolves a ``coworker-types.yaml`` lego spec (identity leaf-wins;
 invariants/context/skills/workflows/overlays append+dedup; trait-domain
 bindings to config) and writes, per coworker type, a complete Hermes profile
-distribution SOURCE tree. Pure file output — no gateway, no network, no
-monkeypatched seams — so it is safe to import into the plugin package and call
-from the onboarding paths.
+distribution SOURCE tree. Pure, offline file output.
+
+Spec-controlled names and source paths are constrained to safe relative
+components under the spec directory, so a hostile spec cannot read or overwrite
+files outside its own tree.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
+
+# Spec-controlled names become directory/file components and profile names.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # Traits are a small, closed domain — an unknown trait is a spec error, never a
 # silently-dropped (inert) config key. Extend this map when a new trait domain
@@ -43,6 +49,23 @@ _OVERLAY_SPLICE_MARKER = "OVERLAY-SPLICE-POINT"
 
 class CompositionError(Exception):
     """Raised when a coworker-types.yaml spec cannot be composed."""
+
+
+def _safe_name(kind: str, name: Any) -> str:
+    """A spec name safe to use as a path component and a profile name."""
+    if not isinstance(name, str) or not _SAFE_NAME_RE.match(name):
+        raise CompositionError(f"unsafe {kind} name: {name!r}")
+    return name
+
+
+def _safe_join(root: Path, *parts: str) -> Path:
+    """Resolve ``parts`` beneath ``root``, rejecting absolute paths and ``..``
+    escapes so a spec cannot reach outside its own tree."""
+    resolved_root = root.resolve()
+    target = resolved_root.joinpath(*parts).resolve()
+    if target != resolved_root and resolved_root not in target.parents:
+        raise CompositionError(f"path escapes {resolved_root}: {parts!r}")
+    return target
 
 
 def load_spec(spec: str) -> Dict[str, Any]:
@@ -175,7 +198,7 @@ def _write_common(pdir: Path) -> None:
 def _load_overlays(names: List[Any], overlays_root: Path) -> List[Dict[str, Any]]:
     out = []
     for name in names:
-        src = overlays_root / f"{name}.yaml"
+        src = _safe_join(overlays_root, f"{_safe_name('overlay', name)}.yaml")
         if src.is_file():
             out.append(yaml.safe_load(src.read_text(encoding="utf-8")) or {})
     return out
@@ -215,20 +238,22 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     skills_dir = pdir / "skills"
     skills_dir.mkdir(exist_ok=True)
     for skill in resolved["skills"]:
-        src = skills_root / str(skill) / "SKILL.md"
+        skill = _safe_name("skill", skill)
+        src = _safe_join(skills_root, skill, "SKILL.md")
         if not src.is_file():
             raise CompositionError(f"{tname}: skill {skill!r} has no SKILL.md at {src}")
-        dest = skills_dir / str(skill)
+        dest = skills_dir / skill
         dest.mkdir(exist_ok=True)
         (dest / "SKILL.md").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
     overlays = _load_overlays(resolved["overlays"], overlays_root)
     for workflow in resolved["workflows"]:
-        src = workflows_root / str(workflow) / "SKILL.md"
+        workflow = _safe_name("workflow", workflow)
+        src = _safe_join(workflows_root, workflow, "SKILL.md")
         if not src.is_file():
             raise CompositionError(f"{tname}: workflow {workflow!r} has no SKILL.md at {src}")
-        body = _splice_overlays(src.read_text(encoding="utf-8"), str(workflow), tname, overlays)
-        dest = skills_dir / str(workflow)
+        body = _splice_overlays(src.read_text(encoding="utf-8"), workflow, tname, overlays)
+        dest = skills_dir / workflow
         dest.mkdir(exist_ok=True)
         (dest / "SKILL.md").write_text(body, encoding="utf-8")
 
@@ -273,26 +298,28 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     out_root = Path(out)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    skills_root = spec_dir / data.get("skills_root", "skills")
-    workflows_root = spec_dir / data.get("workflows_root", "workflows")
-    overlays_root = spec_dir / data.get("overlays_root", "overlays")
+    skills_root = _safe_join(spec_dir, str(data.get("skills_root", "skills")))
+    workflows_root = _safe_join(spec_dir, str(data.get("workflows_root", "workflows")))
+    overlays_root = _safe_join(spec_dir, str(data.get("overlays_root", "overlays")))
 
     spines: Dict[str, Any] = {}
     for sname, sinfo in (data.get("spines") or {}).items():
         source = (sinfo or {}).get("source")
         if not source:
             raise CompositionError(f"spine {sname!r} has no source")
-        spines[sname] = yaml.safe_load((spec_dir / source).read_text(encoding="utf-8")) or {}
+        src = _safe_join(spec_dir, str(source))
+        spines[sname] = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
 
     rendered: Dict[str, str] = {}
     types = data.get("types") or {}
     for tname, tinfo in types.items():
+        tname = _safe_name("type", tname)
         resolved = _resolve_type(tname, tinfo or {}, spines)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
 
-    default_profile = data.get("default_profile", "default")
+    default_profile = _safe_name("profile", data.get("default_profile", "default"))
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)

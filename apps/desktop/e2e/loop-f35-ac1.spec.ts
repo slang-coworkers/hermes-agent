@@ -19,18 +19,16 @@ import { expect, test } from './test'
 //    onboarded coworker profile, each row displaying that profile's title
 //    next to its avatar"
 //
-// Re-scoped to the ROSTER RENDER only. The message_agent round trip is the
-// live tier's job (AC-LOOP-F35-5, real model) — a stubbed message_agent is
-// undrivable here (apps/desktop/e2e/mock-server.ts scripts only E2E_* keyword
-// turns, never message_agent). The row shows title + avatar but not
-// description (bot-row.tsx:179-181,212), so description is confirmed from
-// profile.yaml, not the DOM.
+// This spec proves the roster render. The message_agent round trip belongs to
+// the live tier (AC-LOOP-F35-5, real model): the desktop mock server scripts
+// only E2E_* keyword turns (apps/desktop/e2e/mock-server.ts), so it cannot
+// drive message_agent. The Bots row shows title + avatar but not description
+// (bot-row.tsx:179-181,212), so description is confirmed from profile.yaml.
 //
-// Seeding: the roster is bot-managed only once ui_meta['hermes-bots'] is on a
-// profile.yaml (tools/bot_mode_probe.py), and no fixtures helper writes it — so
-// this spec seeds it on disk, using bot-mode-closed-chat-stays-closed.spec.ts
-// :93-114 as the profile-dir/provider/session bootstrap and additionally
-// writing ui_meta['hermes-bots'].
+// The roster treats a profile as a bot once ui_meta['hermes-bots'] is present
+// on its profile.yaml (tools/bot_mode_probe.py). This spec seeds that on disk
+// per bot, reusing bot-mode-closed-chat-stays-closed.spec.ts:93-114 for the
+// profile-dir/provider/session bootstrap and adding ui_meta['hermes-bots'].
 
 type Page = MockBackendFixture['page']
 
@@ -75,9 +73,9 @@ async function seedCoworker(
     await builder.close()
   }
 
-  // No existing helper seeds ui_meta['hermes-bots']; write it directly. JSON is
-  // valid YAML, so profile.yaml parses cleanly and bot_mode_probe reads the
-  // BotMeta from it. Merge onto any profile.yaml the bootstrap already wrote.
+  // Write ui_meta['hermes-bots'] directly. JSON is valid YAML, so profile.yaml
+  // parses cleanly and bot_mode_probe reads the BotMeta from it. Merge onto any
+  // profile.yaml the bootstrap already wrote.
   const profileYaml = path.join(dir, 'profile.yaml')
   let existing: Record<string, unknown> = {}
   if (fs.existsSync(profileYaml)) {

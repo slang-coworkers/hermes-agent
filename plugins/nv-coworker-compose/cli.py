@@ -2,9 +2,9 @@
 
 Parser-only: these build the ``hermes coworker`` and ``hermes onboard``
 sub-subparser trees and nothing else. The handlers live in the package
-``__init__`` so their references to the monkeypatched onboarding/dispatch seams
-resolve through the package module's globals (never through an imported alias
-captured here).
+``__init__`` and are resolved there at dispatch time, so the onboarding and
+dispatch seams are looked up through the package module's globals rather than
+through an alias captured in this module.
 """
 
 from __future__ import annotations

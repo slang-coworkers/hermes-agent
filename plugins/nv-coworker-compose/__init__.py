@@ -1,26 +1,24 @@
 """nv-coworker-compose — render Hermes coworker-type profile distributions from a
 coworker-types.yaml lego spec and onboard them into a Bot-Mode gateway.
 
-Everything the frozen acceptance test drives or monkeypatches on the plugin
-MODULE lives here, in the package ``__init__``: the render entry point
-``compose`` (re-exported from :mod:`compose`), the onboarding functions, and the
-seams ``validate_gateway_url`` / ``_gateway_preflight`` / ``_ws_probe`` /
-``_dispatch_rpc`` / ``_clone_repo``. Python resolves a called name from the
-DEFINING module's globals at call time, so a caller and the seam it calls must
-share this module for ``monkeypatch.setattr(loaded.module, ...)`` to take —
-hence they are all defined here rather than imported from a submodule.
+The onboarding functions and the gateway transport they use are defined together
+in this package module so the transport is a single swappable surface: every
+gateway effect (profiles.create / profiles.configure / session.* / groups.*)
+flows through the one ``_dispatch_rpc`` seam, and the read-only liveness check
+through ``_gateway_preflight`` → ``_ws_probe``. That keeps the coupling to
+``tui_gateway.server`` (an internal callable, not documented PluginContext API)
+confined to a single function that can be replaced if that surface moves.
 
-The gateway-side effects (profiles.create / profiles.configure / session.* /
-groups.*) are dispatched through the single ``_dispatch_rpc`` seam. In-process
-gateway-tool execution routes to ``tui_gateway.server.handle_request``; the
-standalone CLI path (an explicit --gateway-url with a ?token/?ticket
-credential) routes to an authenticated WebSocket requester bound only after a
-read-only liveness preflight. This is the one internal-coupling point to
-``tui_gateway.server``; keeping it behind ``_dispatch_rpc`` keeps it swappable.
+``_dispatch_rpc`` chooses the transport: in-process gateway-tool execution calls
+``tui_gateway.server.handle_request`` directly; the standalone CLI path (an
+explicit ``--gateway-url`` carrying a ?token/?ticket credential) routes to an
+authenticated WebSocket bound once, after a read-only liveness preflight, and
+reused for the whole onboarding so a single-use ticket is not spent twice.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import itertools
 import json
@@ -38,12 +36,14 @@ from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT
 
 logger = logging.getLogger(__name__)
 
-# Canonical Bot Chat session title (tools/bot_mode_probe.py:41). Inlined as a
-# constant to avoid importing gateway internals at plugin load.
+# Canonical Bot Chat session title (tools/bot_mode_probe.py:41).
 BOT_CHAT_TITLE = "Bot Chat"
 
 _TOOLSET = "coworker_admin"
 _CLONE_PREFIX = "nv_onboard_clone_"
+
+# tui_gateway hosted-room error code for an absent room (tui_gateway/methods_groups.py:559).
+_ROOM_NOT_FOUND_CODE = 4114
 
 _rpc_ids = itertools.count(1)
 
@@ -53,9 +53,23 @@ _standalone_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.
     "nv_coworker_standalone_ctx", default=None
 )
 
+# A WebSocket requester opened by the preflight probe, handed to the onboarding
+# call so the authenticated connection (and any single-use ticket) is reused.
+_pending_ws_requester: Optional[Callable[[Dict[str, Any]], Any]] = None
+
 
 class RpcError(Exception):
-    """A JSON-RPC error returned by the gateway."""
+    """A JSON-RPC error returned by the gateway; carries the structured code."""
+
+    def __init__(self, error: Any):
+        self.code: Optional[int] = None
+        self.data: Any = None
+        message = str(error)
+        if isinstance(error, dict):
+            self.code = error.get("code")
+            self.data = error.get("data")
+            message = str(error.get("message") or error)
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------
@@ -81,29 +95,74 @@ def validate_gateway_url(url: str) -> Tuple[bool, str]:
     return (False, "no_credential")
 
 
-def _ws_probe(url: str) -> Dict[str, Any]:
-    """Read-only liveness probe of the gateway; real transport, opened lazily.
+def _ws_connect(url: str):
+    """Open a raw WebSocket connection (lazy import); replaceable in tests."""
+    from websockets.sync.client import connect  # pragma: no cover - runtime-only path
 
-    Returns ``{"authed": bool, ...}``; raises ``ConnectionError``/``OSError``
-    when the gateway is unreachable. Never invoked by the hermetic tests (they
-    monkeypatch it, or ``validate_gateway_url`` refuses before it runs).
-    """
+    return connect(url, open_timeout=5)
+
+
+def _drain_ready(conn) -> bool:
+    """Consume the unsolicited ``gateway.ready`` event sent on connection accept
+    (tui_gateway/ws.py:369-374). Returns False when the first frame reports a
+    JSON-RPC error instead (a rejected credential)."""
+    raw = conn.recv(timeout=10)
+    frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    return not (isinstance(frame, dict) and frame.get("error"))
+
+
+def _open_ws_requester(url: str) -> Callable[[Dict[str, Any]], Any]:
+    """Open an authenticated WebSocket, consume ``gateway.ready``, and return a
+    request->envelope callable that correlates responses by JSON-RPC ``id``
+    (ignoring unsolicited event frames). Secondary (standalone-CLI) transport."""
+    conn = _ws_connect(url)
+    _drain_ready(conn)
+
+    def _request(request: Dict[str, Any]) -> Any:
+        conn.send(json.dumps(request))
+        while True:
+            raw = conn.recv(timeout=30)
+            frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if isinstance(frame, dict) and frame.get("id") == request.get("id"):
+                return frame
+            # A frame without the matching id is an unsolicited event/broadcast.
+
+    _request._conn = conn  # type: ignore[attr-defined]
+    return _request
+
+
+def _ws_probe(url: str) -> Dict[str, Any]:
+    """Read-only liveness probe: open the connection, consume ``gateway.ready``,
+    and retain the requester for the onboarding call so the socket (and its
+    single-use ticket) is not spent twice. Raises ``ConnectionError``/``OSError``
+    when the gateway is unreachable; ``{"authed": False}`` on a rejected
+    credential."""
+    global _pending_ws_requester
+    conn = _ws_connect(url)
     try:
-        from websockets.sync.client import connect  # type: ignore
-    except ImportError as exc:  # pragma: no cover - runtime-only path
-        raise ConnectionError(f"websocket client unavailable: {exc}") from exc
-    try:  # pragma: no cover - runtime-only path
-        with connect(url, open_timeout=5) as ws:
-            ws.send(json.dumps({"jsonrpc": "2.0", "id": next(_rpc_ids), "method": "status", "params": {}}))
-            raw = ws.recv()
-        resp = json.loads(raw) if isinstance(raw, (str, bytes)) else {}
-        if isinstance(resp, dict) and resp.get("error"):
-            return {"authed": False, "reason": "auth_rejected"}
-        return {"authed": True}
+        authed = _drain_ready(conn)
     except (ConnectionError, OSError):
         raise
-    except Exception as exc:  # pragma: no cover - runtime-only path
+    except Exception as exc:
         raise ConnectionError(str(exc)) from exc
+    if not authed:
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("probe close failed", exc_info=True)
+        return {"authed": False, "reason": "auth_rejected"}
+
+    def _request(request: Dict[str, Any]) -> Any:
+        conn.send(json.dumps(request))
+        while True:
+            raw = conn.recv(timeout=30)
+            frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if isinstance(frame, dict) and frame.get("id") == request.get("id"):
+                return frame
+
+    _request._conn = conn  # type: ignore[attr-defined]
+    _pending_ws_requester = _request
+    return {"authed": True}
 
 
 def _gateway_preflight(url: str) -> Tuple[bool, str]:
@@ -121,7 +180,7 @@ def _gateway_preflight(url: str) -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# RPC transport — one seam, two transports
+# RPC transport — one seam, two transports, wire adaptation
 # ---------------------------------------------------------------------------
 
 def _unwrap_rpc_envelope(resp: Any) -> Any:
@@ -130,57 +189,51 @@ def _unwrap_rpc_envelope(resp: Any) -> Any:
         return None
     if isinstance(resp, dict):
         if resp.get("error"):
-            raise RpcError(str(resp["error"]))
+            raise RpcError(resp["error"])
         if "result" in resp:
             return resp["result"]
     return resp
 
 
 def _room_exists(resp: Any) -> bool:
-    """True when a groups.state response reports an existing room.
-
-    Tolerates the frozen fake shape ``{"exists": bool}`` and the production
-    shape ``{"room": {...}}``.
-    """
+    """True when a groups.state response reports an existing room. Tolerates the
+    absent-shape ``{"exists": False}`` and the present-shape ``{"room": {...}}``."""
     if not isinstance(resp, dict):
         return False
     return bool(resp.get("exists")) or isinstance(resp.get("room"), dict)
 
 
+def _member_object(member: Any) -> Dict[str, Any]:
+    """Adapt a member name to the object hosted rooms require (each member must be
+    an object — gateway/hosted_rooms.py:343-344)."""
+    if isinstance(member, dict):
+        return member
+    name = str(member)
+    return {"member_id": name, "profile": name, "handle": name}
+
+
 def _gateway_handle_request(request: Dict[str, Any]) -> Any:
-    """In-process dispatch to the running gateway (lazy import)."""
+    """In-process dispatch to the running gateway (lazy import); replaceable in tests."""
     from tui_gateway import server  # pragma: no cover - runtime-only path
+
     return server.handle_request(request)
-
-
-def _open_ws_requester(url: str) -> Callable[[Dict[str, Any]], Any]:
-    """Open an authenticated WebSocket and return a request->envelope callable.
-
-    Secondary (standalone-CLI) transport, opened lazily. Never invoked by the
-    hermetic tests (the transport unit test monkeypatches this).
-    """
-    from websockets.sync.client import connect  # type: ignore  # pragma: no cover
-
-    ws = connect(url, open_timeout=5)  # pragma: no cover - runtime-only path
-
-    def _request(request: Dict[str, Any]) -> Any:  # pragma: no cover - runtime-only path
-        ws.send(json.dumps(request))
-        raw = ws.recv()
-        return json.loads(raw) if isinstance(raw, (str, bytes)) else raw
-
-    _request._ws = ws  # type: ignore[attr-defined]
-    return _request
 
 
 def _dispatch_rpc(method: str, params: Dict[str, Any]) -> Any:
     """Dispatch one JSON-RPC method and return its normalized result body.
 
     Routes to the standalone authenticated WS requester when the standalone
-    context is bound, otherwise to the in-process gateway handler. The frozen
-    tests monkeypatch this whole function; the transport routing below is what
-    the transport unit test exercises.
+    context is bound, otherwise to the in-process gateway handler. Adapts the
+    wire shape the real gateway expects — ``groups.create`` members become
+    member objects, and an absent-room ``groups.state`` (error 4114) is
+    normalized to ``{"exists": False}`` rather than raised — while the logical
+    call sites keep working with profile-name strings.
     """
-    request = {"jsonrpc": "2.0", "id": next(_rpc_ids), "method": method, "params": params}
+    wire = dict(params)
+    if method == "groups.create" and isinstance(wire.get("members"), list):
+        wire["members"] = [_member_object(m) for m in wire["members"]]
+
+    request = {"jsonrpc": "2.0", "id": next(_rpc_ids), "method": method, "params": wire}
     ctx = _standalone_ctx.get()
     if ctx is not None:
         if ctx.get("requester") is None:
@@ -188,17 +241,23 @@ def _dispatch_rpc(method: str, params: Dict[str, Any]) -> Any:
         envelope = ctx["requester"](request)
     else:
         envelope = _gateway_handle_request(request)
-    return _unwrap_rpc_envelope(envelope)
+
+    try:
+        return _unwrap_rpc_envelope(envelope)
+    except RpcError as exc:
+        if method == "groups.state" and exc.code == _ROOM_NOT_FOUND_CODE:
+            return {"exists": False}
+        raise
 
 
 def _close_standalone(token) -> None:
     ctx = _standalone_ctx.get()
     if ctx is not None:
         requester = ctx.get("requester")
-        ws = getattr(requester, "_ws", None)
-        if ws is not None:
+        conn = getattr(requester, "_conn", None)
+        if conn is not None:
             try:  # pragma: no cover - runtime-only path
-                ws.close()
+                conn.close()
             except Exception:  # pragma: no cover
                 logger.debug("standalone WS close failed", exc_info=True)
     _standalone_ctx.reset(token)
@@ -231,7 +290,8 @@ def _clone_repo(url: str) -> str:
 
 def _is_binary(path: Path) -> bool:
     try:
-        chunk = path.read_bytes()[:4096]
+        with path.open("rb") as fh:
+            chunk = fh.read(4096)
     except OSError:
         return True
     if b"\x00" in chunk:
@@ -244,12 +304,9 @@ def _is_binary(path: Path) -> bool:
 
 
 def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
-    """Return up to ``max_files`` (relpath, text) eligible source files.
-
-    Deterministic: filter out symlinks, VCS/dependency dirs, and binaries
-    FIRST, then sort by relative path, then take the bound. Filtering before the
-    bound is what keeps a binary from consuming a slot.
-    """
+    """Return up to ``max_files`` (relpath, text) eligible source files, filtering
+    symlinks, VCS/dependency dirs, and binaries FIRST, then sorting, then taking
+    the bound — so a binary never consumes a slot."""
     skip_dirs = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
     candidates: List[Tuple[str, Path]] = []
     for path in root.rglob("*"):
@@ -310,7 +367,7 @@ def onboard_project(source: str, settings: Optional[Dict[str, Any]] = None) -> D
         scaffold = Path(out) if out else src_path.parent / f"{src_path.name}-dist"
         _write_project_scaffold(scaffold, src_path.name, files)
     finally:
-        # Only clean a dir WE cloned (our temp prefix) — never a caller/monkeypatched path.
+        # Clean only a dir WE cloned (our temp prefix) — never a caller's path.
         if cloned is not None and cloned.name.startswith(_CLONE_PREFIX):
             shutil.rmtree(cloned, ignore_errors=True)
 
@@ -341,14 +398,10 @@ def _has_bot_chat(rows: Any) -> bool:
 
 
 def _ensure_canonical_bot_chat(profile: str) -> bool:
-    """Materialise the profile's canonical Bot Chat session.
-
-    Lookup exact title -> adopt existing -> else create + title to materialise
-    the durable row -> re-consult + adopt the winner on a uniqueness/title race.
-    Returns True only when a Bot Chat is confirmed; a session hiccup is logged
-    and reported (never aborts onboarding — the live/desktop tiers are the
-    authoritative proof of this path).
-    """
+    """Materialise the profile's canonical Bot Chat: lookup exact title -> adopt
+    existing -> else create + title to materialise the durable row -> re-consult
+    + adopt on a uniqueness/title race. Returns True only when confirmed; a
+    session hiccup is logged and reported (never aborts onboarding)."""
     try:
         listed = _dispatch_rpc("session.list", {"profile": profile, "title": BOT_CHAT_TITLE, "include_hidden": True})
         if _has_bot_chat(listed):
@@ -379,48 +432,73 @@ def _install(rendered_dir: str, name: str) -> None:
     install_distribution(str(rendered_dir), name=name, force=True)
 
 
+def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
+    """Write ui_meta['hermes-bots'] via per-key CAS; one retry from the current
+    revision on a CAS conflict. Returns True when the write applied."""
+    for attempt in range(2):
+        current = int((revisions.get(profile) or {}).get("hermes-bots", 0))
+        try:
+            result = _dispatch_rpc("profiles.configure", {
+                "name": profile,
+                "ui_meta": {"hermes-bots": ui_meta},
+                "ui_meta_expected_revisions": {"hermes-bots": current},
+            })
+        except RpcError:
+            if attempt == 0:
+                revisions[profile] = (_profile_revisions().get(profile) or {})
+                continue
+            return False
+        if isinstance(result, dict) and isinstance(result.get("ui_meta_revisions"), dict):
+            revisions[profile] = result["ui_meta_revisions"]
+        return not isinstance(result, dict) or bool(result.get("applied", {}).get("ui_meta", True))
+    return False
+
+
 def _run_onboard(spec: str) -> Dict[str, Any]:
     data = load_spec(spec)
     types = data.get("types") or {}
-    warnings: List[str] = []
+    failures: List[str] = []
 
     with tempfile.TemporaryDirectory(prefix="nv_coworker_onboard_") as tmp:
         rendered = compose(spec, tmp)
-        # Install only the coworker TYPE profiles. The DEFAULT multiplexer
-        # config is applied to the gateway root separately — install_distribution
-        # rejects the name "default".
+        # Install only the coworker TYPE profiles; the DEFAULT multiplexer config
+        # is applied to the gateway root separately (install_distribution rejects
+        # the name "default").
         for tname in types:
             try:
                 _install(rendered[tname], tname)
             except Exception as exc:
-                warnings.append(f"install {tname}: {exc}")
+                failures.append(f"install {tname}: {exc}")
 
         revisions = _profile_revisions()
         for tname, tinfo in types.items():
             ui_meta = (tinfo or {}).get("ui_meta") or {}
-            current = int((revisions.get(tname) or {}).get("hermes-bots", 0))
-            _dispatch_rpc("profiles.configure", {
-                "name": tname,
-                "ui_meta": {"hermes-bots": ui_meta},
-                "ui_meta_expected_revisions": {"hermes-bots": current},
-            })
+            if not _configure_bot_meta(tname, ui_meta, revisions):
+                failures.append(f"ui_meta configure failed for {tname}")
             if not _ensure_canonical_bot_chat(tname):
-                warnings.append(f"bot chat not confirmed for {tname}")
+                failures.append(f"bot chat not confirmed for {tname}")
 
         for room_id, room in (data.get("rooms") or {}).items():
             members = (room or {}).get("members") or []
-            state = _dispatch_rpc("groups.state", {"room_id": room_id})
-            if not _room_exists(state):
-                _dispatch_rpc("groups.create", {
-                    "room_id": room_id,
-                    "name": (room or {}).get("name", room_id),
-                    "members": members,
-                })
+            try:
+                state = _dispatch_rpc("groups.state", {"room_id": room_id})
+                exists = _room_exists(state)
+            except RpcError as exc:
+                failures.append(f"groups.state {room_id}: {exc}")
+                exists = True  # don't attempt a create we can't verify
+            if not exists:
+                try:
+                    _dispatch_rpc("groups.create", {
+                        "room_id": room_id,
+                        "name": (room or {}).get("name", room_id),
+                        "members": members,
+                    })
+                except RpcError as exc:
+                    failures.append(f"groups.create {room_id}: {exc}")
 
-    result: Dict[str, Any] = {"ok": True}
-    if warnings:
-        result["warnings"] = warnings
-    return result
+    if failures:
+        return {"ok": False, "error": "; ".join(failures), "warnings": failures}
+    return {"ok": True}
 
 
 def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -429,15 +507,18 @@ def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Di
     Standalone path (``settings['gateway_url']`` present): a read-only liveness
     preflight runs FIRST and, on failure, the onboard refuses with zero profile
     mutations. In-process path (no URL, e.g. the gateway tool): dispatch runs in
-    the gateway process, no URL preflight.
-    """
+    the gateway process, no URL preflight."""
+    global _pending_ws_requester
     settings = settings or {}
     url = settings.get("gateway_url")
     if url:
+        _pending_ws_requester = None
         ok, reason = _gateway_preflight(url)
         if not ok:
             return {"ok": False, "error": f"gateway preflight failed: {reason}"}
-        token = _standalone_ctx.set({"url": url, "requester": None})
+        requester = _pending_ws_requester
+        _pending_ws_requester = None
+        token = _standalone_ctx.set({"url": url, "requester": requester})
         try:
             return _run_onboard(spec)
         finally:
@@ -446,44 +527,58 @@ def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Di
 
 
 # ---------------------------------------------------------------------------
-# Gateway tool handlers (JSON-string returning; orchestrator-gated)
+# Gateway tool handlers (JSON-string returning; orchestrator-gated; never raise)
 # ---------------------------------------------------------------------------
 
 def _tool_onboard_coworker(args: Dict[str, Any], **_kwargs) -> str:
-    spec = args.get("spec") or args.get("coworker_types")
-    if not spec:
-        return json.dumps({"ok": False, "error": "missing 'spec'"})
-    return json.dumps(onboard_coworker(spec, settings={}))
+    try:
+        spec = args.get("spec") or args.get("coworker_types")
+        if not spec:
+            return json.dumps({"ok": False, "error": "missing 'spec'"})
+        return json.dumps(onboard_coworker(spec, settings={}))
+    except Exception as exc:
+        logger.warning("onboard_coworker tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
 
 
 def _tool_onboard_project(args: Dict[str, Any], **_kwargs) -> str:
-    source = args.get("source") or args.get("src")
-    if not source:
-        return json.dumps({"ok": False, "error": "missing 'source'"})
-    return json.dumps(onboard_project(source, settings=dict(args)))
+    try:
+        source = args.get("source") or args.get("src")
+        if not source:
+            return json.dumps({"ok": False, "error": "missing 'source'"})
+        return json.dumps(onboard_project(source, settings=dict(args)))
+    except Exception as exc:
+        logger.warning("onboard_project tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
 
 
 def _tool_create_agent(args: Dict[str, Any], **_kwargs) -> str:
-    _dispatch_rpc("profiles.create", dict(args))
-    return json.dumps({"ok": True, "created": args.get("name")})
+    try:
+        _dispatch_rpc("profiles.create", dict(args))
+        return json.dumps({"ok": True, "created": args.get("name")})
+    except Exception as exc:
+        logger.warning("create_agent tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
 
 
 # ---------------------------------------------------------------------------
 # Slash-command + CLI handlers
 # ---------------------------------------------------------------------------
 
-def _slash_onboard_coworker(args: str = "", **_kwargs) -> str:
-    spec = (args or "").strip().split()[0] if (args or "").strip() else ""
+async def _slash_onboard_coworker(args: str = "", **_kwargs) -> str:
+    spec = (args or "").strip()
     if not spec:
         return "usage: /onboard-coworker <coworker-types.yaml>"
-    return json.dumps(onboard_coworker(spec, settings={}))
+    result = await asyncio.to_thread(onboard_coworker, spec, {})
+    return json.dumps(result)
 
 
-def _slash_onboard_project(args: str = "", **_kwargs) -> str:
-    source = (args or "").strip().split()[0] if (args or "").strip() else ""
+async def _slash_onboard_project(args: str = "", **_kwargs) -> str:
+    source = (args or "").strip()
     if not source:
         return "usage: /onboard-project <path|url>"
-    return json.dumps(onboard_project(source, settings={}))
+    result = await asyncio.to_thread(onboard_project, source, {})
+    return json.dumps(result)
 
 
 def _cli_coworker(args, **_kwargs) -> int:
@@ -500,12 +595,14 @@ def _cli_onboard(args, **_kwargs) -> int:
     sub = getattr(args, "onboard_command", None)
     if sub == "project":
         settings = {"out": getattr(args, "out", None), "max_files": getattr(args, "max_files", 64)}
-        print(json.dumps(onboard_project(args.src, settings=settings), indent=2))
-        return 0
+        result = onboard_project(args.src, settings=settings)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
     if sub == "coworker":
         settings = {"gateway_url": getattr(args, "gateway_url", None)}
-        print(json.dumps(onboard_coworker(args.spec, settings=settings), indent=2))
-        return 0
+        result = onboard_coworker(args.spec, settings=settings)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
     print("usage: hermes onboard {project <path|url>|coworker <coworker-types.yaml>}")
     return 2
 
@@ -552,10 +649,12 @@ def register(ctx) -> None:
     ctx.register_command(
         name="onboard-project", handler=_slash_onboard_project,
         description="Scaffold a Hermes project distribution from a path or git URL.",
+        args_hint="<path|url>",
     )
     ctx.register_command(
         name="onboard-coworker", handler=_slash_onboard_coworker,
         description="Render + onboard coworker profiles into the gateway.",
+        args_hint="<coworker-types.yaml>",
     )
 
 
