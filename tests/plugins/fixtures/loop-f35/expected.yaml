@@ -1,0 +1,114 @@
+# FROZEN expected outcomes for the LOOP-F35 acceptance test — architect-owned.
+# The builder makes nv-coworker-compose RENDER to satisfy this; it does NOT edit this file.
+# The reviewer confirms this file is byte-identical to the ADR's shipped fixture.
+
+profiles: [default, orchestrator, reviewer, fixer]
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+# Fleet-invariant keys every rendered coworker config.yaml must carry, with value (dotted → value).
+coworker_config:
+  timezone: "Asia/Kolkata"
+  sessions.auto_prune: false
+  checkpoints.auto_prune: false
+  compression.in_place: true
+  memory.memory_char_limit: 4000
+  memory.user_char_limit: 2000
+  skills.external_dirs: ["/data/shared-skills"]
+  terminal.backend: "docker"
+  terminal.docker_env: {}
+  terminal.docker_mount_cwd_to_workspace: true
+  terminal.docker_image: "hermes-sandbox:pinned"
+  terminal.docker_volumes: []
+  approvals.mode: "smart"
+  approvals.timeout: 300
+  approvals.cron_mode: "deny"
+  approvals.unattended_mode: "deny"
+  approvals.single_query_mode: "deny"
+  agent.disabled_toolsets: []
+  plugins.enabled: ["nv-fleet-gates"]
+  plugins.entries.nv-fleet-gates.settings.policy: "deny-admin-to-workers"
+  plugins.entries.nv-cost-cap.settings.ceiling_usd: 20
+  cron.failure_nudge_threshold: 3
+
+# DEFAULT (multiplexer) profile only.
+default_config:
+  gateway.multiplex_profiles: true
+  gateway.multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
+  sessions.auto_prune: false
+
+# Webhook routes live at platforms.webhook.extra.routes as a MAPPING keyed by route name
+# (gateway/platforms/webhook.py:195,253); each value carries its own secret + profile binding.
+webhook_config_path: "platforms.webhook.extra.routes"
+webhook_routes:
+  pr:
+    secret: "SECRET-PR"
+    profile: reviewer
+    events: [pull_request]
+
+# extends resolution proof (child = reviewer, parent = base spine).
+extends:
+  child_type: reviewer
+  parent_type: base
+  expected_identity: "REVIEWER-IDENTITY"        # leaf-wins
+  shadowed_parent_identity: "BASE-IDENTITY"      # must be ABSENT from the child SOUL
+  expected_skills_superset: ["shared-skill", "review-skill"]
+  expected_context_contains: ["CTX-SHARED", "CTX-REVIEWER"]   # each exactly once (dedup)
+  expected_workflows: ["hermes-verify"]
+  expected_overlays: ["OVERLAY-CRITIQUE-GATE"]                 # exactly once in the child skills
+  expected_invariants_contains: ["INV-SHARED", "INV-REVIEWER"]  # each exactly once (dedup)
+  expected_trait_binding: ["agent.command_allowlist", ["git status", "gh pr view"]]
+
+workflow:
+  name: hermes-verify
+  declared_by: [orchestrator, reviewer, fixer]
+  body_marker: "WORKFLOW-VERIFY-BODY"
+
+# Per-type skill-bundle aliases (skills + the anchored instruction prepend).
+bundles:
+  orchestrator:
+    skills: ["hermes-verify"]
+    instruction: "Run the hermes-verify workflow anchored for the orchestrator coworker."
+  reviewer:
+    skills: ["hermes-verify"]
+    instruction: "Run the hermes-verify workflow anchored for the reviewer coworker."
+  fixer:
+    skills: ["hermes-verify"]
+    instruction: "Run the hermes-verify workflow anchored for the fixer coworker."
+
+overlay:
+  marker: "OVERLAY-CRITIQUE-GATE"
+  applies_to: reviewer
+  not_applies_to: fixer
+
+# ui_meta['hermes-bots'] fields the render writes + the desktop Bots list displays
+# (Electron BotMeta schema: title, description, shape — types.ts:55-69).
+bot_meta:
+  reviewer: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer: {title: "Fixer", description: "Implementer", shape: "square"}
+  orchestrator: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+
+# Standing rooms → members (for the groups.create dispatch assertion).
+rooms:
+  fleet-room: [orchestrator, reviewer, fixer]
+
+# Registered surface.
+cli_verbs: [coworker, onboard]
+cli_subcommands:
+  - [coworker, compose, "SPEC"]
+  - [onboard, project, "SRC"]
+  - [onboard, coworker, "SPEC"]
+slash_commands: [onboard-project, onboard-coworker]
+tools_orchestrator_only: [onboard_coworker, onboard_project, create_agent]
+create_agent_fields:
+  name: "new-bot"
+  description: "A new coworker"
+  role: "worker"
+
+# onboard project: the scan is FINITE (max_files) and skips binaries.
+# excluded_marker: a binary file that must NOT become a skill.
+# max_files: the scan bound — with 3 eligible text files only the first 2 may reach the scaffold.
+project_scan:
+  excluded_marker: "EXCLUDE-ME"
+  max_files: 2
