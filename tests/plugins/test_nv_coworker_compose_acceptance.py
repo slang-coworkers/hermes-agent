@@ -382,7 +382,7 @@ def test_ac_self_f56_2(tmp_path, monkeypatch):
 
 
 def test_ac_self_f56_3(tmp_path, monkeypatch):
-    """AC-SELF-F56-3: onboard coworker dispatches one profiles.configure per profile carrying ui_meta hermes-bots with the current ui_meta_expected_revisions, never a raw profile.yaml write, leaving a competing ui_meta key intact"""
+    """AC-SELF-F56-3: onboard coworker dispatches one profiles.configure per profile carrying a ui_meta hermes-bots blob whose title, description, shape match the spec, with the current ui_meta_expected_revisions, never a raw profile.yaml write, leaving a competing ui_meta key intact"""
     home = _write_home(tmp_path, monkeypatch)
     manager = PluginManager()
     manager.discover_and_load()
@@ -422,6 +422,13 @@ def test_ac_self_f56_3(tmp_path, monkeypatch):
         params = configures[p][0]
         assert params.get("ui_meta_expected_revisions") == {"hermes-bots": 3}, f"{p}: wrong/absent CAS precondition"
         assert set(params["ui_meta"].keys()) == {"hermes-bots"}, f"{p}: must write only its own key"
+        # The written BotMeta must carry the spec's title/description/shape — not just the key,
+        # else an empty/wrong blob would still pass (the desktop tier only consumes these values).
+        written = params["ui_meta"]["hermes-bots"]
+        for field, value in exp["bot_meta"][p].items():
+            assert written.get(field) == value, (
+                f"{p}: BotMeta {field} mismatch ({written.get(field)!r} != {value!r})"
+            )
         assert "custom-badge" in server[p]["ui_meta"], f"{p}: competing ui_meta key was clobbered"
         assert server[p]["ui_meta_revisions"]["hermes-bots"] == 4, f"{p}: hermes-bots revision did not advance"
         # No out-of-band raw write: the installed profile.yaml (if any) carries no ui_meta.hermes-bots.
