@@ -1,0 +1,11 @@
+name: p0-loop-hello
+version: "0.1.0"
+description: "P0-LOOP AC-2 fixture: a profile that loads the hello plugin and shows /hello in the dashboard against the loopback stub."
+author: hermes-builder
+env_requires:
+  # Written post-install by the harness (.env is user-owned and stripped on
+  # install — hermes_cli/profile_distribution.py:101-103). Not required at
+  # install time; the /hello slash command never calls the model.
+  - name: MOCK_API_KEY
+    description: "Dummy key for the loopback stub provider; harness writes MOCK_API_KEY=e2e-mock-key post-install."
+    required: false
