@@ -1,0 +1,11 @@
+# Live provider block (LOOP-F35 §Scenario outlines): a real base URL with a
+# dummy key; the OneCLI egress proxy injects the real credential. Never a real
+# key here.
+model:
+  default: aws/anthropic/bedrock-claude-opus-4-8
+api: https://inference-api.nvidia.com
+api_mode: anthropic_messages
+key_env: ANTHROPIC_API_KEY
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

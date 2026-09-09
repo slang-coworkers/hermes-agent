@@ -1,0 +1,14 @@
+# Base spine for the LOOP-F35 live scenario. Its config is IDENTICAL to the two
+# installed fixtures' config.yaml, so the onboard render+install (force) in
+# ## Setup rewrites the same live-provider config it already has — the onboard
+# adds the Bot-Mode identity (ui_meta + Bot Chat) without changing the model.
+identity: "LOOP-F35 live base"
+config:
+  model:
+    default: aws/anthropic/bedrock-claude-opus-4-8
+  api: https://inference-api.nvidia.com
+  api_mode: anthropic_messages
+  key_env: ANTHROPIC_API_KEY
+  timezone: Asia/Kolkata
+  sessions:
+    auto_prune: false
