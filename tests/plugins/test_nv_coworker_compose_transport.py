@@ -97,7 +97,6 @@ def test_onboard_no_url_dispatches_in_process_without_preflight(tmp_path, monkey
 
     result = mod.onboard_coworker(str(FIXTURE_SPEC), settings={})
     assert result.get("ok") is True
-    # In-process path reached the gateway handler for the real onboarding methods.
     assert "profiles.configure" in seen
     assert "groups.create" in seen
 
@@ -186,10 +185,8 @@ def test_ws_requester_consumes_ready_and_correlates_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_ws_connect", lambda url: conn, raising=True)
 
     requester = mod._open_ws_requester("ws://127.0.0.1:9/api/ws?token=t")
-    # gateway.ready was consumed at open, not treated as a response.
     envelope = requester({"jsonrpc": "2.0", "id": 7, "method": "m", "params": {}})
     assert envelope == matched
-    # Only the request was sent; the id-less broadcast was skipped, id 7 correlated.
     assert len(conn.sent) == 1
     assert json.loads(conn.sent[0])["id"] == 7
 
@@ -237,7 +234,6 @@ def test_dispatch_maps_members_and_normalizes_absent_room(tmp_path, monkeypatch)
 
     monkeypatch.setattr(mod, "_gateway_handle_request", _handle, raising=True)
 
-    # groups.create: profile-name strings are adapted to member objects on the wire.
     mod._dispatch_rpc("groups.create",
                       {"room_id": "r", "name": "R", "members": ["orchestrator", "reviewer"]})
     create_req = [r for r in seen if r["method"] == "groups.create"][0]
@@ -245,7 +241,6 @@ def test_dispatch_maps_members_and_normalizes_absent_room(tmp_path, monkeypatch)
     assert all(isinstance(m, dict) for m in wire_members)
     assert {m["profile"] for m in wire_members} == {"orchestrator", "reviewer"}
 
-    # groups.state absent-room (error 4114) is normalized, not raised.
     state = mod._dispatch_rpc("groups.state", {"room_id": "missing"})
     assert state == {"exists": False}
     assert mod._room_exists(state) is False
@@ -273,7 +268,6 @@ def test_tool_handlers_return_json_never_raise(tmp_path, monkeypatch):
     parsed = json.loads(mod._tool_onboard_coworker({"spec": "x.yaml"}))
     assert parsed["ok"] is False and "kaboom" in parsed["error"]
 
-    # Missing required arg → structured error, not an exception.
     missing = json.loads(mod._tool_onboard_coworker({}))
     assert missing["ok"] is False and "spec" in missing["error"]
 
@@ -285,37 +279,47 @@ def test_tool_handlers_return_json_never_raise(tmp_path, monkeypatch):
 def test_configure_bot_meta_retries_on_cas_conflict(tmp_path, monkeypatch):
     mod = _load(tmp_path, monkeypatch)
     calls = {"configure": 0}
+    seen_expected = []
 
     def _rpc(method, params):
-        if method == "profiles.list":
-            return {"profiles": [{"name": "reviewer", "ui_meta_revisions": {"hermes-bots": 5}}]}
         if method == "profiles.configure":
             calls["configure"] += 1
+            seen_expected.append(params["ui_meta_expected_revisions"]["hermes-bots"])
             if calls["configure"] == 1:
-                raise mod.RpcError({"code": 4113, "message": "revision conflict"})
-            return {"applied": {"ui_meta": True}, "ui_meta_revisions": {"hermes-bots": 6}}
+                return {"ok": False, "applied": {
+                    "ui_meta": False,
+                    "ui_meta_conflicts": {"hermes-bots": {"expected": 5, "actual": 6}},
+                    "ui_meta_revisions": {"hermes-bots": 6},
+                }}
+            return {"ok": True, "applied": {"ui_meta": True, "ui_meta_revisions": {"hermes-bots": 7}}}
         return {"ok": True}
 
     monkeypatch.setattr(mod, "_dispatch_rpc", _rpc, raising=True)
-    revisions = {"reviewer": {"hermes-bots": 0}}
+    revisions = {"reviewer": {"hermes-bots": 5}}
     assert mod._configure_bot_meta("reviewer", {"title": "Reviewer"}, revisions) is True
     assert calls["configure"] == 2
-    # The retry re-read the current revision from the gateway, not the stale 0.
-    assert revisions["reviewer"]["hermes-bots"] == 6
+    # The retry re-armed its expected revision from the conflict's current value.
+    assert seen_expected == [5, 6]
+    assert revisions["reviewer"]["hermes-bots"] == 7
 
 
 def test_configure_bot_meta_gives_up_after_retry(tmp_path, monkeypatch):
     mod = _load(tmp_path, monkeypatch)
+    calls = {"configure": 0}
 
     def _rpc(method, params):
-        if method == "profiles.list":
-            return {"profiles": []}
         if method == "profiles.configure":
-            raise mod.RpcError({"code": 4113, "message": "conflict"})
+            calls["configure"] += 1
+            return {"ok": False, "applied": {
+                "ui_meta": False,
+                "ui_meta_conflicts": {"hermes-bots": {"expected": 0, "actual": 9}},
+                "ui_meta_revisions": {"hermes-bots": 9},
+            }}
         return {"ok": True}
 
     monkeypatch.setattr(mod, "_dispatch_rpc", _rpc, raising=True)
     assert mod._configure_bot_meta("reviewer", {"title": "R"}, {}) is False
+    assert calls["configure"] == 2
 
 
 def test_run_onboard_reports_failure_on_install_error(tmp_path, monkeypatch):
@@ -350,7 +354,6 @@ def test_slash_handler_is_async_and_offloads(tmp_path, monkeypatch):
     out = asyncio.run(mod._slash_onboard_coworker("some.yaml"))
     assert json.loads(out) == {"ok": True, "spec": "some.yaml"}
 
-    # Empty args → usage string, no onboard dispatch.
     usage = asyncio.run(mod._slash_onboard_coworker(""))
     assert "usage" in usage
 

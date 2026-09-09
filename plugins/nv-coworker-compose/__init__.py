@@ -433,8 +433,12 @@ def _install(rendered_dir: str, name: str) -> None:
 
 
 def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
-    """Write ui_meta['hermes-bots'] via per-key CAS; one retry from the current
-    revision on a CAS conflict. Returns True when the write applied."""
+    """Write ui_meta['hermes-bots'] via per-key CAS, retrying once on a stale
+    revision. profiles.configure signals a CAS conflict as a *successful*
+    result (applied.ui_meta False + applied.ui_meta_conflicts), not an RpcError,
+    and echoes the current revisions in applied.ui_meta_revisions; the retry
+    re-arms its expected revision from those. Returns True once the write
+    applies."""
     for attempt in range(2):
         current = int((revisions.get(profile) or {}).get("hermes-bots", 0))
         try:
@@ -445,12 +449,25 @@ def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[s
             })
         except RpcError:
             if attempt == 0:
-                revisions[profile] = (_profile_revisions().get(profile) or {})
+                revisions[profile] = _profile_revisions().get(profile) or {}
                 continue
             return False
-        if isinstance(result, dict) and isinstance(result.get("ui_meta_revisions"), dict):
-            revisions[profile] = result["ui_meta_revisions"]
-        return not isinstance(result, dict) or bool(result.get("applied", {}).get("ui_meta", True))
+        applied = result.get("applied") if isinstance(result, dict) else None
+        if not isinstance(applied, dict):
+            return True
+        new_rev = applied.get("ui_meta_revisions")
+        if not isinstance(new_rev, dict) and isinstance(result, dict):
+            new_rev = result.get("ui_meta_revisions")
+        if isinstance(new_rev, dict):
+            revisions[profile] = {
+                str(k): int(v) for k, v in new_rev.items()
+                if isinstance(v, int) and not isinstance(v, bool)
+            }
+        if applied.get("ui_meta") is not False:
+            return True
+        if applied.get("ui_meta_conflicts") and attempt == 0:
+            continue
+        return False
     return False
 
 
@@ -461,9 +478,9 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
 
     with tempfile.TemporaryDirectory(prefix="nv_coworker_onboard_") as tmp:
         rendered = compose(spec, tmp)
-        # Install only the coworker TYPE profiles; the DEFAULT multiplexer config
-        # is applied to the gateway root separately (install_distribution rejects
-        # the name "default").
+        # Install only the coworker TYPE profiles. The rendered DEFAULT artifact
+        # is not installed here: install_distribution rejects the reserved name
+        # "default"; the DEFAULT profile is the gateway root itself.
         for tname in types:
             try:
                 _install(rendered[tname], tname)

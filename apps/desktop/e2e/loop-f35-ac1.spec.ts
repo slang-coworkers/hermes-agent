@@ -14,27 +14,15 @@ import { startMockServer } from './mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 
-// AC-SELF-F56-1 (desktop, model: stub) — per the LOOP-F35 ADR ## Amendment:
-//   "After onboard coworker the desktop app Bots list renders one row per
-//    onboarded coworker profile, each row displaying that profile's title
-//    next to its avatar"
-//
-// This spec proves the roster render. The message_agent round trip belongs to
-// the live tier (AC-LOOP-F35-5, real model): the desktop mock server scripts
-// only E2E_* keyword turns (apps/desktop/e2e/mock-server.ts), so it cannot
-// drive message_agent. The Bots row shows title + avatar but not description
-// (bot-row.tsx:179-181,212), so description is confirmed from profile.yaml.
-//
-// The roster treats a profile as a bot once ui_meta['hermes-bots'] is present
-// on its profile.yaml (tools/bot_mode_probe.py). This spec seeds that on disk
-// per bot, reusing bot-mode-closed-chat-stays-closed.spec.ts:93-114 for the
-// profile-dir/provider/session bootstrap and adding ui_meta['hermes-bots'].
+// AC-SELF-F56-1 (desktop, stub): after onboard, the Bots list renders one row
+// per coworker profile with its title beside its avatar. A profile counts as a
+// bot once ui_meta['hermes-bots'] is present on its profile.yaml, so each bot is
+// seeded with that key below. The row renders title + avatar but not description
+// (bot-row.tsx:179-181,212), so description is asserted from profile.yaml.
 
 type Page = MockBackendFixture['page']
 
-// Mirrors tests/plugins/fixtures/loop-f35/expected.yaml `bot_meta` (FROZEN) —
-// the same BotMeta values the strengthened test_ac_self_f56_3 proves the plugin
-// emits, and that the desktop roster renders here.
+// BotMeta values mirror tests/plugins/fixtures/loop-f35/expected.yaml `bot_meta`.
 const BOTS = [
   { name: 'reviewer', title: 'Reviewer', description: 'PR reviewer', shape: 'diamond' },
   { name: 'fixer', title: 'Fixer', description: 'Implementer', shape: 'square' },
@@ -52,10 +40,9 @@ async function openBots(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
 }
 
-/** Seed one bot-managed coworker profile before launch: the profile dir + mock
- *  provider + a durable canonical "Bot Chat" (the :93-114 pattern), then
- *  additionally write ui_meta['hermes-bots'] into profile.yaml so the roster
- *  renders it as a bot with its title + avatar. */
+/** Seed a bot-managed coworker profile before launch: profile dir + mock
+ *  provider + a durable canonical "Bot Chat", plus ui_meta['hermes-bots'] on
+ *  profile.yaml so the roster renders it as a bot with its title + avatar. */
 async function seedCoworker(
   hermesHome: string,
   mockUrl: string,
@@ -127,7 +114,6 @@ test('AC-SELF-F56-1: Bots list renders one row per onboarded coworker profile, e
   await openBots(page)
   await page.screenshot({ path: test.info().outputPath('step-1-bots-pane.png') })
 
-  // Step: one row per onboarded coworker profile, located by title, avatar present.
   for (const bot of BOTS) {
     const row = page
       .getByRole('button', { name: new RegExp(`^${bot.title}\\b`, 'i') })
@@ -142,9 +128,8 @@ test('AC-SELF-F56-1: Bots list renders one row per onboarded coworker profile, e
 
   await page.screenshot({ path: test.info().outputPath('step-2-rows-with-avatars.png') })
 
-  // Evidence / fixture-consumption check: description is not rendered in the row
-  // (bot-row.tsx), so confirm each profile.yaml carries the seeded BotMeta
-  // title/description/shape that the roster consumed.
+  // Confirm the complete seeded BotMeta independently: description is not
+  // rendered in the row (bot-row.tsx), so assert it from profile.yaml.
   for (const bot of BOTS) {
     const raw = fs.readFileSync(path.join(sandbox.hermesHome, 'profiles', bot.name, 'profile.yaml'), 'utf8')
     expect(raw, `${bot.name} profile.yaml carries its BotMeta title`).toContain(bot.title)
