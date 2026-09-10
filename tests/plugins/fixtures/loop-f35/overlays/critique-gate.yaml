@@ -1,0 +1,6 @@
+# Overlay spliced into the hermes-verify SKILL.md at render time, for matching types only.
+name: critique-gate
+applies-to: [reviewer]
+target-workflow: hermes-verify
+marker: "OVERLAY-CRITIQUE-GATE"
+body: "OVERLAY-CRITIQUE-GATE: run the critique gate before reporting."

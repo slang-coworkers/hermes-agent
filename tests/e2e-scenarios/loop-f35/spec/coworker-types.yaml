@@ -1,0 +1,27 @@
+# Onboard spec for the LOOP-F35 live scenario ## Setup. Declares the two bots
+# the fixtures already installed, so `hermes onboard coworker` writes each one's
+# ui_meta['hermes-bots'] (via profiles.configure CAS) and materialises its
+# canonical Bot Chat — the Bot-Mode identity a distribution file cannot carry.
+project: loop-f35-live
+default_profile: default
+orchestrator_profile: loop-f35-bot-a
+worker_profile: loop-f35-bot-b
+
+spines:
+  live-base:
+    source: spines/live-base.yaml
+
+types:
+  loop-f35-bot-a:
+    extends: [live-base]
+    identity: "LOOP-F35 live bot A (sender)"
+    ui_meta: {title: "Bot A", description: "LOOP-F35 live a2a sender", shape: "circle"}
+  loop-f35-bot-b:
+    extends: [live-base]
+    identity: "LOOP-F35 live bot B (responder)"
+    ui_meta: {title: "Bot B", description: "LOOP-F35 live a2a responder", shape: "square"}
+
+rooms:
+  loop-f35-room:
+    name: "LOOP-F35 Live"
+    members: [loop-f35-bot-a, loop-f35-bot-b]
