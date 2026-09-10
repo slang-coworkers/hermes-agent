@@ -888,6 +888,9 @@ Active sessions are never auto-pruned, regardless of age. Ended sessions are
 aged from their latest message, so a long-lived conversation used recently is
 not deleted merely because it began before the retention window.
 
+Fleets that must retain every transcript on disk pin `sessions.auto_prune: false`
+and prune deliberately — see the [Fleet transcript retention runbook](./fleet-transcript-retention.md).
+
 ### Manual Cleanup
 
 ```bash
