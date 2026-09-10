@@ -1,0 +1,66 @@
+# MEM-F44 compose input — the lego spec nv-coworker-compose renders from.
+# Retention keys are intentionally unsafe (auto_prune) or omitted; the render
+# must enforce the fleet-safe retention invariants on every profile it emits.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+# Shared spine (parent in the extends chain). Its source body is a sibling file.
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# Coworker types. extends resolves against the spines above (identity leaf-wins;
+# invariants/context/skills/workflows/overlays append+dedup; traits bind to config).
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+    # ui_meta['hermes-bots'] fields match the Electron BotMeta schema (types.ts:55-69):
+    # title, description (the role text), and an appearance field (shape/color).
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"          # leaf-wins over BASE-IDENTITY
+    invariants: ["INV-SHARED", "INV-REVIEWER"]   # INV-SHARED also in base → dedup to once
+    context: ["CTX-SHARED", "CTX-REVIEWER"]       # CTX-SHARED also in base → dedup to once
+    skills: ["review-skill"]                # appended to base's shared-skill
+    overlays: ["critique-gate"]             # applies-to reviewer only
+    traits:
+      command_allowlist: ["git status", "gh pr view"]   # overrides base trait → config
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer:
+    extends: [base]
+    identity: "FIXER-IDENTITY"
+    skills: ["fix-skill"]
+    ui_meta: {title: "Fixer", description: "Implementer", shape: "square"}
+
+# Standing rooms — created via groups.create at onboard, NOT rendered into any file.
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer, fixer]
+
+# DEFAULT (multiplexer) profile only — multiplex + webhook routes.
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
+  # All four retention keys unsafe on the DEFAULT (multiplexer) tier too — the
+  # render must override every one to the fleet-safe value on this profile.
+  sessions: {auto_prune: true, auto_archive: false}
+  compression: {in_place: false}
+  checkpoints: {auto_prune: true}
+  platforms:
+    webhook:
+      extra:
+        routes:
+          pr:
+            secret: "SECRET-PR"
+            profile: reviewer
+            events: [pull_request]
