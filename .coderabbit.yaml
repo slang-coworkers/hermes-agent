@@ -1,16 +1,18 @@
-# CodeRabbit configuration — slang-coworkers fork override.
+# CodeRabbit configuration.
 #
-# Upstream (NousResearch/hermes-agent) ships `auto_review.enabled: false` and summons the
-# bot by hand. This fork is driven by the coworker chain: hermes-builder files DRAFT PRs
-# against release/<tag>-e2e-fixed and hermes-review consumes CodeRabbit's review of the
-# exact head under review (hermes-review WORKFLOW.md, step 5c). Reviews therefore run
-# automatically, on drafts, on every push, for release/* bases.
+# Auto-review is DISABLED repo-wide: the app was enabled at the org level on
+# 2026-08-14 and immediately began reviewing every opened PR. This repo's
+# merge gate is CI ("All required checks pass") plus maintainer review —
+# CodeRabbit reviews carry no merge weight (protect-main ruleset requires
+# 0 approving reviews), so auto-firing on the full PR firehose adds comment
+# noise without gating value.
 #
-# Manual commands still work: `@coderabbitai review` (incremental), `@coderabbitai full review`.
+# The bot stays installed and summonable on demand: comment
+# `@coderabbitai review` on any PR to request a one-off review, or
+# `@coderabbitai ignore` to mute it on a PR it has already joined.
+#
+# To re-enable auto-review, flip `enabled: true` below (or delete this file —
+# the app default is on).
 reviews:
   auto_review:
-    enabled: true
-    drafts: true
-    # Bases other than the default branch (regex). The chain never targets main.
-    base_branches:
-      - "release/.*"
+    enabled: false
