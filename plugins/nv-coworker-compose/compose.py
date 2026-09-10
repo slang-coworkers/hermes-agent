@@ -38,6 +38,19 @@ _TRAIT_DOMAIN: Dict[str, str] = {
 # keeps them usable only on the orchestrator profile.
 _SELF_PLUGIN = "nv-coworker-compose"
 
+# Transcript-retention keys enforced as fleet invariants on every rendered
+# profile (the DEFAULT multiplexer and every coworker), written whether the input
+# spec omits them or declares a different value. Pinned explicitly so a re-pin to
+# a tree whose sessions.auto_prune default has flipped to True cannot silently
+# start deleting on-disk transcripts + request_dump_* files. Every key has a real
+# reader at the pin (see the MEM-F44 fleet-transcript-retention runbook).
+_RETENTION_INVARIANTS: Dict[str, Any] = {
+    "sessions.auto_prune": False,
+    "sessions.auto_archive": True,
+    "compression.in_place": True,
+    "checkpoints.auto_prune": False,
+}
+
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
 # (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
 _DIST_OWNED: List[str] = [
@@ -118,6 +131,15 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
             node[key] = nxt
         node = nxt
     node[parts[-1]] = copy.deepcopy(value)
+
+
+def _enforce_retention(config: Dict[str, Any]) -> None:
+    """Force the fleet-safe retention values onto ``config``, overriding a
+    declared value and inserting an omitted one alike — the requirement's
+    "explicitly and never by assumption". A setdefault-style fill would leave a
+    stale unsafe value untouched, so this always overwrites the leaf."""
+    for dotted, value in _RETENTION_INVARIANTS.items():
+        _set_dotted(config, dotted, value)
 
 
 def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> Dict[str, Any]:
@@ -337,12 +359,14 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         tname = _safe_name("type", tname)
         resolved = _resolve_type(tname, tinfo or {}, spines)
         _inject_self_plugin(resolved["config"], orchestrator_profile)
+        _enforce_retention(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
 
     default_profile = _safe_name("profile", data.get("default_profile", "default"))
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
+    _enforce_retention(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
