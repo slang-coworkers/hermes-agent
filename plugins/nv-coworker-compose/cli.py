@@ -31,4 +31,6 @@ def setup_onboard(parser: argparse.ArgumentParser) -> None:
 
     coworker_p = subs.add_parser("coworker", help="Render + onboard coworker profiles into a gateway")
     coworker_p.add_argument("spec", help="Path to coworker-types.yaml")
-    coworker_p.add_argument("--gateway-url", default=None, help="Gateway /api/ws URL with a ?token or ?ticket credential")
+    # Required on the standalone verb: without a gateway URL the read-only
+    # preflight cannot run, so onboarding must not render/install anything.
+    coworker_p.add_argument("--gateway-url", required=True, help="Loopback gateway /api/ws URL with a ?token or ?ticket credential")

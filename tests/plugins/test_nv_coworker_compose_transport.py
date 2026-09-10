@@ -12,8 +12,11 @@ test_plugin_api_compat.py).
 import asyncio
 import inspect
 import json
+import logging
 from pathlib import Path
 import shutil
+import subprocess
+import threading
 
 import pytest
 import yaml
@@ -95,10 +98,61 @@ def test_onboard_no_url_dispatches_in_process_without_preflight(tmp_path, monkey
 
     monkeypatch.setattr(mod, "_gateway_handle_request", _handle, raising=True)
 
-    result = mod.onboard_coworker(str(FIXTURE_SPEC), settings={})
+    result = mod.onboard_coworker(str(FIXTURE_SPEC), settings={"in_process": True})
     assert result.get("ok") is True
     assert "profiles.configure" in seen
     assert "groups.create" in seen
+
+
+def test_onboard_without_url_or_in_process_refuses_zero_mutation(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+
+    def _no_render(*a, **k):
+        raise AssertionError("must refuse before any render/install")
+
+    monkeypatch.setattr(mod, "compose", _no_render, raising=True)
+    monkeypatch.setattr(mod, "_install", _no_render, raising=True)
+    monkeypatch.setattr(mod, "_gateway_preflight", _no_render, raising=True)
+    monkeypatch.setattr(mod, "_gateway_handle_request", _no_render, raising=True)
+
+    result = mod.onboard_coworker(str(FIXTURE_SPEC), settings={})
+    assert result.get("ok") is False
+    assert "requires_gateway_url" in result.get("error", "")
+
+
+def test_tool_onboard_coworker_passes_in_process(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    seen = {}
+
+    def _fake_onboard(spec, settings=None):
+        seen["settings"] = settings
+        return {"ok": True}
+
+    monkeypatch.setattr(mod, "onboard_coworker", _fake_onboard, raising=True)
+    out = json.loads(mod._tool_onboard_coworker({"spec": "s.yaml"}))
+    assert out["ok"] is True
+    assert seen["settings"] == {"in_process": True}
+
+
+def test_slash_onboard_coworker_requires_url_and_never_in_process(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    calls = []
+
+    def _fake_onboard(spec, settings=None):
+        calls.append((spec, settings))
+        return {"ok": True}
+
+    monkeypatch.setattr(mod, "onboard_coworker", _fake_onboard, raising=True)
+    usage = asyncio.run(mod._slash_onboard_coworker("only-a-spec.yaml"))
+    assert "usage" in usage and not calls
+    out = asyncio.run(mod._slash_onboard_coworker("s.yaml ws://127.0.0.1:9/api/ws?token=t"))
+    assert json.loads(out)["ok"] is True
+    assert calls == [("s.yaml", {"gateway_url": "ws://127.0.0.1:9/api/ws?token=t"})]
+    # A remote wss ticket is valid for the CLI verb but the slash is loopback-only:
+    # it must refuse without dispatching onboard.
+    refused = asyncio.run(mod._slash_onboard_coworker("s.yaml wss://remote.example/api/ws?ticket=x"))
+    assert json.loads(refused)["ok"] is False
+    assert len(calls) == 1
 
 
 def test_onboard_standalone_routes_through_ws_requester(tmp_path, monkeypatch):
@@ -126,7 +180,7 @@ def test_onboard_standalone_routes_through_ws_requester(tmp_path, monkeypatch):
 
     result = mod.onboard_coworker(str(FIXTURE_SPEC), settings={"gateway_url": "ws://127.0.0.1:9/api/ws?token=t"})
     assert result.get("ok") is True
-    assert opened == ["ws://127.0.0.1:9/api/ws?token=t"]  # requester opened once, reused
+    assert opened == ["ws://127.0.0.1:9/api/ws?token=t"]
     assert "profiles.configure" in ws_methods and "groups.create" in ws_methods
 
 
@@ -204,7 +258,7 @@ def test_ticket_reuses_preflight_socket(tmp_path, monkeypatch):
     def _fake_preflight(url):
         # A real preflight opens the socket and retains its requester so the
         # single-use ticket is not spent twice.
-        mod._pending_ws_requester = _requester
+        mod._pending_ws_requester.set(_requester)
         return (True, "ok")
 
     monkeypatch.setattr(mod, "_gateway_preflight", _fake_preflight, raising=True)
@@ -351,7 +405,7 @@ def test_slash_handler_is_async_and_offloads(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "onboard_coworker",
                         lambda spec, settings: {"ok": True, "spec": spec}, raising=True)
-    out = asyncio.run(mod._slash_onboard_coworker("some.yaml"))
+    out = asyncio.run(mod._slash_onboard_coworker("some.yaml ws://127.0.0.1:9/api/ws?token=t"))
     assert json.loads(out) == {"ok": True, "spec": "some.yaml"}
 
     usage = asyncio.run(mod._slash_onboard_coworker(""))
@@ -369,3 +423,96 @@ def test_compose_rejects_path_traversal_spec(tmp_path, monkeypatch):
     )
     with pytest.raises(mod.CompositionError):
         mod.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_validate_gateway_url_boundary(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    v = mod.validate_gateway_url
+    assert v("ws://127.0.0.1/api/ws?token=t") == (True, "ok")
+    assert v("wss://localhost/api/ws?token=t") == (True, "ok")
+    assert v("ws://evil.example/api/ws?token=t")[0] is False
+    assert v("wss://remote.example/api/ws?ticket=x") == (True, "ok")
+    assert v("ws://remote.example/api/ws?ticket=x")[0] is False
+    assert v("ws://127.0.0.1/api/ws?internal=x")[0] is False
+    # A blank ?internal= (no value) must still be caught, not treated as absent.
+    assert v("ws://127.0.0.1/api/ws?internal=&ticket=x") == (False, "forbidden_internal")
+    assert v("http://127.0.0.1/api/ws?token=t")[0] is False
+    assert v("ws://127.0.0.1/other?token=t")[0] is False
+    assert v("ws://127.0.0.1/api/ws")[0] is False
+
+
+def test_gateway_preflight_maps_handshake_rejection(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    url = "ws://127.0.0.1:9/api/ws?token=t"
+
+    class _Resp:
+        status_code = 403
+
+    class _InvalidStatus(Exception):
+        response = _Resp()
+
+    def _reject_403(_u):
+        raise _InvalidStatus("HTTP 403")
+
+    monkeypatch.setattr(mod, "_ws_connect", _reject_403, raising=True)
+    # A handshake rejected at the HTTP upgrade is an auth failure, not connectivity.
+    assert mod._gateway_preflight(url) == (False, "auth_rejected")
+
+    def _refuse(_u):
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(mod, "_ws_connect", _refuse, raising=True)
+    assert mod._gateway_preflight(url) == (False, "connection_refused")
+
+
+def test_redact_url_strips_credentials(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    assert mod._redact_url("https://user:sekret@host.example/repo.git?x=secret") == "https://host.example/repo.git"
+    assert mod._redact_url("https://user:tok@host.example:8443/a/b.git") == "https://host.example:8443/a/b.git"
+
+
+def test_clone_repo_and_tool_never_leak_credentials(tmp_path, monkeypatch, caplog):
+    mod = _load(tmp_path, monkeypatch)
+    secret = "sekrettoken123"
+    url = f"https://user:{secret}@example.com/repo.git?k=v"
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git", raising=True)
+
+    def _fake_run(cmd, **kw):
+        raise subprocess.CalledProcessError(128, cmd, stderr=f"fatal: auth failed for {url}".encode())
+
+    monkeypatch.setattr(subprocess, "run", _fake_run, raising=True)
+
+    # _clone_repo raises a message built only from the redacted URL + exit code.
+    with pytest.raises(RuntimeError) as ei:
+        mod._clone_repo(url)
+    assert secret not in str(ei.value)
+
+    # The real leak sink is _tool_onboard_project logging exc_info=True: the
+    # credential must appear in neither the returned JSON nor the captured logs.
+    with caplog.at_level(logging.WARNING):
+        out = json.loads(mod._tool_onboard_project({"source": url}))
+    assert out["ok"] is False
+    assert secret not in out["error"]
+    assert secret not in caplog.text
+
+
+def test_concurrent_standalone_preflights(tmp_path, monkeypatch):
+    mod = _load(tmp_path, monkeypatch)
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def _worker(tag):
+        # Each thread stores its own requester, then waits so both have stored
+        # before either reads: a process-global would let one thread read the
+        # other's authenticated connection / single-use ticket.
+        mod._pending_ws_requester.set(f"requester-{tag}")
+        barrier.wait(timeout=5)
+        results[tag] = mod._pending_ws_requester.get()
+
+    threads = [threading.Thread(target=_worker, args=(t,)) for t in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert results == {"a": "requester-a", "b": "requester-b"}

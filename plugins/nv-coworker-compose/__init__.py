@@ -9,11 +9,13 @@ through ``_gateway_preflight`` → ``_ws_probe``. That keeps the coupling to
 ``tui_gateway.server`` (an internal callable, not documented PluginContext API)
 confined to a single function that can be replaced if that surface moves.
 
-``_dispatch_rpc`` chooses the transport: in-process gateway-tool execution calls
-``tui_gateway.server.handle_request`` directly; the standalone CLI path (an
-explicit ``--gateway-url`` carrying a ?token/?ticket credential) routes to an
-authenticated WebSocket bound once, after a read-only liveness preflight, and
-reused for the whole onboarding so a single-use ticket is not spent twice.
+``_dispatch_rpc`` chooses the transport: only the in-process gateway TOOL calls
+``tui_gateway.server.handle_request`` directly; the standalone CLI verb carries
+an explicit ``--gateway-url`` option, while the ``/onboard-coworker`` slash
+command takes the equivalent positional URL (?token/?ticket credential). Both
+route to an authenticated WebSocket bound once, after a read-only liveness
+preflight, and reused for the whole onboarding so a single-use ticket is not
+spent twice.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from hermes_cli.profiles import get_active_profile_name
 
@@ -47,15 +49,19 @@ _ROOM_NOT_FOUND_CODE = 4114
 
 _rpc_ids = itertools.count(1)
 
-# Bound {"url", "requester"} while the standalone CLI path is active; None for
-# in-process gateway-tool/slash execution.
+# Bound {"url", "requester"} while a URL (CLI or slash) onboarding is active;
+# None for the in-process gateway-tool path. Both this and _pending_ws_requester
+# are ContextVars so concurrent onboards (e.g. two slash calls dispatched via
+# asyncio.to_thread) never exchange authenticated connections or tickets.
 _standalone_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
     "nv_coworker_standalone_ctx", default=None
 )
 
 # A WebSocket requester opened by the preflight probe, handed to the onboarding
 # call so the authenticated connection (and any single-use ticket) is reused.
-_pending_ws_requester: Optional[Callable[[Dict[str, Any]], Any]] = None
+_pending_ws_requester: contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], Any]]] = contextvars.ContextVar(
+    "nv_coworker_pending_ws_requester", default=None
+)
 
 
 class RpcError(Exception):
@@ -76,22 +82,44 @@ class RpcError(Exception):
 # Gateway URL credential form + read-only liveness preflight
 # ---------------------------------------------------------------------------
 
-def validate_gateway_url(url: str) -> Tuple[bool, str]:
-    """Local credential-form check, before any transport.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-    Rejects a ``?internal`` URL (the process-lifetime credential reserved for
-    WS clients the server spawns itself) and a URL with no ``?token``/``?ticket``
-    credential; accepts a well-formed loopback token/ticket URL.
+
+def validate_gateway_url(url: str) -> Tuple[bool, str]:
+    """Local credential-form + destination check, before any transport.
+
+    Enforces a ``ws``/``wss`` scheme and the ``/api/ws`` path, rejects a
+    ``?internal`` URL (the process-lifetime credential reserved for WS clients
+    the server spawns itself), and requires a credential. A ``?token`` (a live
+    session credential) is accepted only on a loopback host so it cannot be sent
+    to an arbitrary remote; a single-use ``?ticket`` is accepted on loopback or a
+    remote ``wss`` endpoint.
     """
     try:
         parsed = urlparse(url or "")
     except (ValueError, TypeError):
         return (False, "invalid_url")
-    query = parse_qs(parsed.query)
+    if parsed.scheme not in ("ws", "wss"):
+        return (False, "bad_scheme")
+    if parsed.path != "/api/ws":
+        return (False, "bad_path")
+    if not parsed.hostname:
+        return (False, "bad_host")
+    # keep_blank_values so a valueless ``?internal=`` is still caught.
+    query = parse_qs(parsed.query, keep_blank_values=True)
     if "internal" in query:
         return (False, "forbidden_internal")
-    if "token" in query or "ticket" in query:
-        return (True, "ok")
+
+    def _has_cred(name: str) -> bool:
+        return any(v for v in query.get(name, []))
+
+    is_loopback = parsed.hostname.lower() in _LOOPBACK_HOSTS
+    if _has_cred("token"):
+        return (True, "ok") if is_loopback else (False, "non_loopback")
+    if _has_cred("ticket"):
+        if is_loopback or parsed.scheme == "wss":
+            return (True, "ok")
+        return (False, "non_loopback")
     return (False, "no_credential")
 
 
@@ -131,25 +159,49 @@ def _open_ws_requester(url: str) -> Callable[[Dict[str, Any]], Any]:
     return _request
 
 
-def _ws_probe(url: str) -> Dict[str, Any]:
-    """Read-only liveness probe: open the connection, consume ``gateway.ready``,
-    and retain the requester for the onboarding call so the socket (and its
-    single-use ticket) is not spent twice. Raises ``ConnectionError``/``OSError``
-    when the gateway is unreachable; ``{"authed": False}`` on a rejected
-    credential."""
-    global _pending_ws_requester
-    conn = _ws_connect(url)
-    try:
-        authed = _drain_ready(conn)
-    except (ConnectionError, OSError):
-        raise
-    except Exception as exc:
-        raise ConnectionError(str(exc)) from exc
-    if not authed:
+def _handshake_status(exc: Exception) -> Optional[int]:
+    """Best-effort HTTP status from a websockets handshake-rejection exception
+    (InvalidStatus carries ``.response.status_code``; older InvalidStatusCode
+    carries ``.status_code``)."""
+    resp = getattr(exc, "response", None)
+    for obj, attr in ((resp, "status_code"), (exc, "status_code"), (exc, "status")):
+        val = getattr(obj, attr, None) if obj is not None else None
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _safe_close(conn) -> None:
+    if conn is not None:
         try:
             conn.close()
         except Exception:
-            logger.debug("probe close failed", exc_info=True)
+            logger.debug("ws close failed", exc_info=True)
+
+
+def _ws_probe(url: str) -> Dict[str, Any]:
+    """Read-only liveness probe: open the connection, consume ``gateway.ready``,
+    and retain the requester (in a ContextVar) for the onboarding call so the
+    socket (and its single-use ticket) is not spent twice. Raises
+    ``ConnectionError``/``OSError`` when the gateway is unreachable;
+    ``{"authed": False}`` on a rejected credential (including a 401/403 handshake
+    rejection). Any socket opened before a failure is closed."""
+    conn = None
+    try:
+        conn = _ws_connect(url)
+        authed = _drain_ready(conn)
+    except (ConnectionError, OSError):
+        _safe_close(conn)
+        raise
+    except Exception as exc:
+        _safe_close(conn)
+        # A handshake rejected at the HTTP upgrade (401/403) is an auth failure,
+        # not a connectivity failure — map it so the preflight refuses cleanly.
+        if _handshake_status(exc) in (401, 403):
+            return {"authed": False, "reason": "auth_rejected"}
+        raise ConnectionError(str(exc)) from exc
+    if not authed:
+        _safe_close(conn)
         return {"authed": False, "reason": "auth_rejected"}
 
     def _request(request: Dict[str, Any]) -> Any:
@@ -161,7 +213,7 @@ def _ws_probe(url: str) -> Dict[str, Any]:
                 return frame
 
     _request._conn = conn  # type: ignore[attr-defined]
-    _pending_ws_requester = _request
+    _pending_ws_requester.set(_request)
     return {"authed": True}
 
 
@@ -272,19 +324,42 @@ def _looks_like_url(source: str) -> bool:
     return s.startswith(("http://", "https://", "git@", "ssh://", "git://")) or s.endswith(".git")
 
 
-def _clone_repo(url: str) -> str:
-    """Shallow-clone a git URL into a temp dir; return its path (lazy import)."""
-    import subprocess  # pragma: no cover - runtime-only path
+def _redact_url(url: str) -> str:
+    """Drop userinfo (``user:token@``) and query from a URL so a credential-bearing
+    clone URL is safe to put in an error message or a log line."""
+    try:
+        p = urlparse(url or "")
+        host = p.hostname or ""
+        netloc = f"{host}:{p.port}" if p.port else host
+        return urlunparse((p.scheme, netloc, p.path, "", "", ""))
+    except (ValueError, TypeError):
+        return "<redacted-url>"
 
+
+def _clone_repo(url: str) -> str:
+    """Shallow-clone a git URL into a temp dir; return its path.
+
+    Never lets a credential-bearing URL reach an error string or the logs: the
+    raised message is built only from the redacted URL and the exit code, and the
+    underlying exception (whose command/stderr may echo the raw URL) is not
+    chained (``from None``) so ``exc_info`` logging cannot surface it."""
+    import subprocess
+
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git executable not found on PATH")
     dest = tempfile.mkdtemp(prefix=_CLONE_PREFIX)
-    try:  # pragma: no cover - runtime-only path
+    try:
         subprocess.run(
-            ["git", "clone", "--depth", "1", url, dest],
+            [git, "clone", "--depth", "1", url, dest],
             check=True, capture_output=True, stdin=subprocess.DEVNULL,
         )
-    except Exception as exc:  # pragma: no cover
+    except subprocess.CalledProcessError as exc:
         shutil.rmtree(dest, ignore_errors=True)
-        raise RuntimeError(f"clone failed for {url}: {exc}") from exc
+        raise RuntimeError(f"clone failed for {_redact_url(url)} (exit {exc.returncode})") from None
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise RuntimeError(f"clone failed for {_redact_url(url)}") from None
     return dest
 
 
@@ -303,10 +378,16 @@ def _is_binary(path: Path) -> bool:
     return False
 
 
+def _is_sensitive_file(name: str) -> bool:
+    """A dotenv-style credential file whose contents must never be copied into a
+    model-facing scaffold (``.env``, ``.env.<anything>``, ``.envrc``)."""
+    return name == ".env" or name.startswith(".env.") or name == ".envrc"
+
+
 def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
     """Return up to ``max_files`` (relpath, text) eligible source files, filtering
-    symlinks, VCS/dependency dirs, and binaries FIRST, then sorting, then taking
-    the bound — so a binary never consumes a slot."""
+    symlinks, VCS/dependency dirs, secret files, and binaries FIRST, then
+    sorting, then taking the bound — so an excluded file never consumes a slot."""
     skip_dirs = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
     candidates: List[Tuple[str, Path]] = []
     for path in root.rglob("*"):
@@ -314,6 +395,8 @@ def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
             continue
         rel = path.relative_to(root)
         if any(part in skip_dirs for part in rel.parts):
+            continue
+        if _is_sensitive_file(path.name):
             continue
         if _is_binary(path):
             continue
@@ -523,24 +606,29 @@ def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Di
 
     Standalone path (``settings['gateway_url']`` present): a read-only liveness
     preflight runs FIRST and, on failure, the onboard refuses with zero profile
-    mutations. In-process path (no URL, e.g. the gateway tool): dispatch runs in
-    the gateway process, no URL preflight."""
-    global _pending_ws_requester
+    mutations. In-process path (``settings['in_process']`` — the gateway tool,
+    which imports the server and dispatches in-process): no URL, no preflight.
+    A call with neither refuses before any render/install: a standalone onboard
+    without a loopback gateway URL cannot preflight, so it must not mutate."""
     settings = settings or {}
     url = settings.get("gateway_url")
+    # A supplied URL always preflights first, so it can never bypass the
+    # zero-mutation guard even if an in-process flag were also set.
     if url:
-        _pending_ws_requester = None
+        _pending_ws_requester.set(None)
         ok, reason = _gateway_preflight(url)
         if not ok:
             return {"ok": False, "error": f"gateway preflight failed: {reason}"}
-        requester = _pending_ws_requester
-        _pending_ws_requester = None
+        requester = _pending_ws_requester.get()
+        _pending_ws_requester.set(None)
         token = _standalone_ctx.set({"url": url, "requester": requester})
         try:
             return _run_onboard(spec)
         finally:
             _close_standalone(token)
-    return _run_onboard(spec)
+    if settings.get("in_process") is True:
+        return _run_onboard(spec)
+    return {"ok": False, "error": "requires_gateway_url: standalone onboard coworker needs a loopback ?token/?ticket gateway URL"}
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +640,9 @@ def _tool_onboard_coworker(args: Dict[str, Any], **_kwargs) -> str:
         spec = args.get("spec") or args.get("coworker_types")
         if not spec:
             return json.dumps({"ok": False, "error": "missing 'spec'"})
-        return json.dumps(onboard_coworker(spec, settings={}))
+        # The tool runs inside the gateway process (imports tui_gateway.server),
+        # so it dispatches in-process — no URL/credential/preflight.
+        return json.dumps(onboard_coworker(spec, settings={"in_process": True}))
     except Exception as exc:
         logger.warning("onboard_coworker tool failed", exc_info=True)
         return json.dumps({"ok": False, "error": str(exc)})
@@ -583,10 +673,19 @@ def _tool_create_agent(args: Dict[str, Any], **_kwargs) -> str:
 # ---------------------------------------------------------------------------
 
 async def _slash_onboard_coworker(args: str = "", **_kwargs) -> str:
-    spec = (args or "").strip()
-    if not spec:
-        return "usage: /onboard-coworker <coworker-types.yaml>"
-    result = await asyncio.to_thread(onboard_coworker, spec, {})
+    parts = (args or "").split()
+    if len(parts) < 2:
+        return "usage: /onboard-coworker <coworker-types.yaml> <loopback-gateway-ws-url>"
+    spec, url = parts[0], parts[1]
+    # The slash verb targets the local gateway, so it is loopback-only — stricter
+    # than the CLI verb, which may carry a remote wss ticket. Refuse before any
+    # mutation if the URL is not a valid loopback credential URL.
+    ok, reason = validate_gateway_url(url)
+    if ok and (urlparse(url).hostname or "").lower() not in _LOOPBACK_HOSTS:
+        ok, reason = False, "non_loopback"
+    if not ok:
+        return json.dumps({"ok": False, "error": f"gateway preflight failed: {reason}"})
+    result = await asyncio.to_thread(onboard_coworker, spec, {"gateway_url": url})
     return json.dumps(result)
 
 
@@ -671,7 +770,7 @@ def register(ctx) -> None:
     ctx.register_command(
         name="onboard-coworker", handler=_slash_onboard_coworker,
         description="Render + onboard coworker profiles into the gateway.",
-        args_hint="<coworker-types.yaml>",
+        args_hint="<coworker-types.yaml> <loopback-gateway-ws-url>",
     )
 
 

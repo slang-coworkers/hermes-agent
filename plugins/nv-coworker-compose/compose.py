@@ -24,11 +24,19 @@ import yaml
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # Traits are a small, closed domain — an unknown trait is a spec error, never a
-# silently-dropped (inert) config key. Extend this map when a new trait domain
-# is genuinely wired to a config reader.
+# silently-dropped (inert) config key. The dotted target must be a key a reader
+# actually consults: the command allowlist is read TOP-LEVEL via
+# config.get("command_allowlist") (approval.py:3188), so a nested
+# agent.command_allowlist would be inert. Extend this map only when a new trait
+# domain is genuinely wired to a config reader.
 _TRAIT_DOMAIN: Dict[str, str] = {
-    "command_allowlist": "agent.command_allowlist",
+    "command_allowlist": "command_allowlist",
 }
+
+# This plugin's own key. The render enables it fleet-wide on the coworker
+# profiles so its orchestrator-gated onboard tools LOAD everywhere; check_fn then
+# keeps them usable only on the orchestrator profile.
+_SELF_PLUGIN = "nv-coworker-compose"
 
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
 # (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
@@ -278,6 +286,18 @@ def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     _write_distribution(pdir, name, "Composed Hermes multiplexer (DEFAULT) profile")
 
 
+def _inject_self_plugin(config: Dict[str, Any], orchestrator_profile: str) -> None:
+    """Enable this plugin on a rendered coworker config and record which profile
+    is the orchestrator, so its onboard tools load fleet-wide and check_fn can
+    gate them. Append-if-absent preserves the fixture's list order."""
+    plugins = config.setdefault("plugins", {})
+    enabled = plugins.setdefault("enabled", [])
+    if _SELF_PLUGIN not in enabled:
+        enabled.append(_SELF_PLUGIN)
+    settings = plugins.setdefault("entries", {}).setdefault(_SELF_PLUGIN, {}).setdefault("settings", {})
+    settings["orchestrator_profile"] = orchestrator_profile
+
+
 def _merged_spine_config(spines: Dict[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for spine in spines.values():
@@ -310,11 +330,13 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         src = _safe_join(spec_dir, str(source))
         spines[sname] = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
 
+    orchestrator_profile = _safe_name("profile", data.get("orchestrator_profile", "orchestrator"))
     rendered: Dict[str, str] = {}
     types = data.get("types") or {}
     for tname, tinfo in types.items():
         tname = _safe_name("type", tname)
         resolved = _resolve_type(tname, tinfo or {}, spines)
+        _inject_self_plugin(resolved["config"], orchestrator_profile)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)

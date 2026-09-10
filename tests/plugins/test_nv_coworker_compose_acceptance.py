@@ -35,14 +35,17 @@ def _dig(mapping, dotted):
     return (True, node)
 
 
-def _write_home(tmp_path, monkeypatch, profile_name=None):
+def _write_home(tmp_path, monkeypatch, profile_name=None, config=None):
     root = tmp_path / "hermes-root"
     home = root / "profiles" / profile_name if profile_name else root / "hermes-home"
     plugins_dir = home / "plugins"
     plugins_dir.mkdir(parents=True)
     shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY)
+    # config=None writes a minimal enable for tests that only need the module loaded;
+    # pass a rendered profile config to verify a deployable profile's own settings instead.
     (home / "config.yaml").write_text(
-        yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}), encoding="utf-8"
+        yaml.safe_dump(config if config is not None else {"plugins": {"enabled": [PLUGIN_KEY]}}),
+        encoding="utf-8",
     )
     empty_bundled = tmp_path / "bundled-plugins"
     empty_bundled.mkdir(exist_ok=True)
@@ -52,8 +55,8 @@ def _write_home(tmp_path, monkeypatch, profile_name=None):
     return home
 
 
-def _load(tmp_path, monkeypatch, profile_name=None):
-    _write_home(tmp_path, monkeypatch, profile_name=profile_name)
+def _load(tmp_path, monkeypatch, profile_name=None, config=None):
+    _write_home(tmp_path, monkeypatch, profile_name=profile_name, config=config)
     manager = PluginManager()
     manager.discover_and_load()
     loaded = manager._plugins[PLUGIN_KEY]
@@ -161,6 +164,8 @@ def test_ac_loop_f35_4(tmp_path, monkeypatch):
         ("ws://127.0.0.1:1/api/ws", None, "no_credential"),                   # missing cred (local reject)
         ("ws://127.0.0.1:1/api/ws?token=bogus", "auth_reject", "auth_rejected"),  # invalid cred (auth boundary)
         ("ws://127.0.0.1:1/api/ws?internal=x", None, "forbidden_internal"),   # forbidden (local reject)
+        (None, "no_url", "requires_gateway_url"),                             # standalone call, URL omitted: must refuse before render
+        ("ws://evil.example/api/ws?token=secret", "non_loopback", "non_loopback"),  # remote host with a token: rejected locally
     ],
 )
 def test_ac_loop_f35_6(tmp_path, monkeypatch, gateway_url, probe, expect_reason):
@@ -170,14 +175,34 @@ def test_ac_loop_f35_6(tmp_path, monkeypatch, gateway_url, probe, expect_reason)
     manager.discover_and_load()
     loaded = manager._plugins[PLUGIN_KEY]
 
-    # Credential-form boundary: ?internal and form-invalid (no-credential) URLs are rejected
-    # LOCALLY before any transport; a valid ?token URL passes the form check.
-    assert loaded.module.validate_gateway_url("ws://h/api/ws?internal=x")[0] is False
-    assert loaded.module.validate_gateway_url("ws://h/api/ws")[0] is False
-    assert loaded.module.validate_gateway_url("ws://h/api/ws?token=t")[0] is True
+    profiles_root = Path(home) / "profiles"
+    watched = [Path(home) / "profile.yaml", Path(home) / "config.yaml"]
 
-    # Fake the transport BENEATH the real _gateway_preflight so the credential-recognition
-    # code (form check + response mapping) is the code under test, not a mock of its verdict.
+    def _snapshot():
+        return (
+            _tree_state(profiles_root),
+            {str(p): (p.read_bytes() if p.exists() else None) for p in watched},
+        )
+
+    # URL/host boundary, all rejected before any transport: an embedded query credential is
+    # accepted only on a loopback host; an ?internal or credential-less URL is refused.
+    assert loaded.module.validate_gateway_url("ws://127.0.0.1/api/ws?internal=x")[0] is False
+    assert loaded.module.validate_gateway_url("ws://127.0.0.1/api/ws")[0] is False
+    assert loaded.module.validate_gateway_url("ws://evil.example/api/ws?token=t")[0] is False   # non-loopback host with a token
+    assert loaded.module.validate_gateway_url("ws://127.0.0.1/api/ws?token=t")[0] is True         # loopback ?token OK
+
+    # Invalid settings must be rejected before install_distribution writes any profile-owned
+    # state: a URL-omitted call or a non-loopback host leaves the profiles tree untouched.
+    if probe in ("no_url", "non_loopback"):
+        settings = {} if probe == "no_url" else {"gateway_url": gateway_url}
+        before = _snapshot()
+        result = loaded.module.onboard_coworker(str(FIXTURE_SPEC), settings=settings)
+        assert result.get("ok") is False, f"{probe}: onboard must refuse"
+        assert result.get("error"), f"{probe}: a refusal must carry an error reason"
+        assert _snapshot() == before, f"{probe}: onboard mutated profile-owned state before refusing"
+        return
+
+    # Fake only the socket probe so the preflight's own credential-recognition runs under test.
     def _fake_probe(url):
         if probe == "refuse":
             raise ConnectionError("refused")
@@ -187,17 +212,8 @@ def test_ac_loop_f35_6(tmp_path, monkeypatch, gateway_url, probe, expect_reason)
 
     if probe is not None:
         monkeypatch.setattr(loaded.module, "_ws_probe", _fake_probe, raising=True)
-    ok, reason = loaded.module._gateway_preflight(gateway_url)  # REAL preflight
+    ok, reason = loaded.module._gateway_preflight(gateway_url)
     assert ok is False and reason == expect_reason, f"preflight mapped {gateway_url} to ({ok},{reason})"
-
-    profiles_root = Path(home) / "profiles"
-    watched = [Path(home) / "profile.yaml", Path(home) / "config.yaml"]
-
-    def _snapshot():
-        return (
-            _tree_state(profiles_root),
-            {str(p): (p.read_bytes() if p.exists() else None) for p in watched},
-        )
 
     before = _snapshot()
     result = loaded.module.onboard_coworker(str(FIXTURE_SPEC), settings={"gateway_url": gateway_url})
@@ -230,6 +246,8 @@ def test_ac_loop_f35_7(tmp_path, monkeypatch):
         manager._cli_commands[verb]["setup_fn"](sub.add_parser(verb))
     for argv in exp["cli_subcommands"]:
         assert parser.parse_args(argv) is not None, f"failed to parse {argv}"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["onboard", "coworker", "SPEC"])
     for slash in exp["slash_commands"]:
         assert slash in loaded.commands_registered, f"slash /{slash} not registered"
     for tool in exp["tools_orchestrator_only"]:
@@ -310,7 +328,20 @@ def test_ac_self_f54_1(tmp_path, monkeypatch):
     exp = _expected()
     tools = exp["tools_orchestrator_only"]
 
-    orch_mgr, _ = _load(tmp_path / "orch", monkeypatch, profile_name=exp["orchestrator_profile"])
+    # Verify from the rendered profile configs: a rendered coworker that omits the plugin
+    # from plugins.enabled exposes no onboard tools, so the per-role assertion fails closed.
+    _, seed = _load(tmp_path / "seed", monkeypatch)
+    rendered = _render(seed, tmp_path / "rendered")
+
+    def _load_role(role):
+        cfg = _config(rendered[role])
+        assert PLUGIN_KEY in (cfg.get("plugins", {}).get("enabled") or []), (
+            f"{role}: rendered config does not enable {PLUGIN_KEY} — its onboard tools would be absent"
+        )
+        mgr, _ = _load(tmp_path / f"run-{role}", monkeypatch, profile_name=role, config=cfg)
+        return mgr
+
+    orch_mgr = _load_role(exp["orchestrator_profile"])
     orch_names = {d["function"]["name"] for d in registry.get_definitions(set(tools))}
     for tool in tools:
         entry = registry.get_entry(tool, scope=orch_mgr.scope_key)
@@ -318,7 +349,7 @@ def test_ac_self_f54_1(tmp_path, monkeypatch):
         assert entry.check_fn() is True, f"{tool} check_fn False for orchestrator"
         assert tool in orch_names, f"{tool} absent from orchestrator schema"
 
-    worker_mgr, _ = _load(tmp_path / "worker", monkeypatch, profile_name=exp["worker_profile"])
+    worker_mgr = _load_role(exp["worker_profile"])
     worker_names = {d["function"]["name"] for d in registry.get_definitions(set(tools))}
     for tool in tools:
         entry = registry.get_entry(tool, scope=worker_mgr.scope_key)
@@ -451,6 +482,9 @@ def test_ac_self_f56_4(tmp_path, monkeypatch):
     for i, mark in enumerate(markers):
         (repo / f"mod_{i}.py").write_text(f"# {mark}\n", encoding="utf-8")
     (repo / (excluded + ".bin")).write_bytes(b"\x00" * 1024)  # binary the scan must skip
+    env_secret = exp["project_scan"]["env_secret_marker"]
+    for secret_name in (".env", ".env.local", ".envrc"):  # credential files the scan must never copy into the scaffold
+        (repo / secret_name).write_text(f"API_KEY={env_secret}\n", encoding="utf-8")
 
     # URL source resolves through the same code via a clone seam pointed at the local repo.
     monkeypatch.setattr(loaded.module, "_clone_repo", lambda url: str(repo), raising=True)
@@ -470,3 +504,4 @@ def test_ac_self_f56_4(tmp_path, monkeypatch):
         present = [m for m in markers if m in scaffold_text]
         assert len(present) == max_files, f"bounded scan surfaced {len(present)} of {len(markers)} files, expected {max_files}"
         assert excluded not in scaffold_text, "excluded binary leaked into the scaffold"
+        assert env_secret not in scaffold_text, ".env secret leaked into the scaffold"

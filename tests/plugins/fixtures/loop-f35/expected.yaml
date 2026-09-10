@@ -27,9 +27,10 @@ coworker_config:
   approvals.unattended_mode: "deny"
   approvals.single_query_mode: "deny"
   agent.disabled_toolsets: []
-  plugins.enabled: ["nv-fleet-gates"]
+  plugins.enabled: ["nv-fleet-gates", "nv-coworker-compose"]
   plugins.entries.nv-fleet-gates.settings.policy: "deny-admin-to-workers"
   plugins.entries.nv-cost-cap.settings.ceiling_usd: 20
+  plugins.entries.nv-coworker-compose.settings.orchestrator_profile: "orchestrator"
   cron.failure_nudge_threshold: 3
 
 # DEFAULT (multiplexer) profile only.
@@ -58,7 +59,7 @@ extends:
   expected_workflows: ["hermes-verify"]
   expected_overlays: ["OVERLAY-CRITIQUE-GATE"]                 # exactly once in the child skills
   expected_invariants_contains: ["INV-SHARED", "INV-REVIEWER"]  # each exactly once (dedup)
-  expected_trait_binding: ["agent.command_allowlist", ["git status", "gh pr view"]]
+  expected_trait_binding: ["command_allowlist", ["git status", "gh pr view"]]        # top-level key: the reader is config.get("command_allowlist") (approval.py:3188); a nested agent.command_allowlist has no reader
 
 workflow:
   name: hermes-verify
@@ -98,7 +99,7 @@ cli_verbs: [coworker, onboard]
 cli_subcommands:
   - [coworker, compose, "SPEC"]
   - [onboard, project, "SRC"]
-  - [onboard, coworker, "SPEC"]
+  - [onboard, coworker, "SPEC", "--gateway-url", "ws://127.0.0.1:9/api/ws?token=t"]   # --gateway-url is required on the standalone verb
 slash_commands: [onboard-project, onboard-coworker]
 tools_orchestrator_only: [onboard_coworker, onboard_project, create_agent]
 create_agent_fields:
@@ -112,3 +113,4 @@ create_agent_fields:
 project_scan:
   excluded_marker: "EXCLUDE-ME"
   max_files: 2
+  env_secret_marker: "ENV-SECRET-DONOTCOPY"   # a .env credential the scan must never copy into a model-facing SKILL.md
