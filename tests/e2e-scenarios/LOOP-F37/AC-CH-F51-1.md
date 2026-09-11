@@ -81,38 +81,53 @@ The dashboard SPA opens the **default** profile's chat, so select
 `loop-f37-bot-a` in the profile combobox before the first message (the option
 labelled `this dashboard (loop-f37-bot-a)`), and re-snapshot after the switch.
 
-1. Open `loop-f37-bot-a`'s Bot Chat, select `loop-f37-bot-a` in the profile
-   combobox → expect: the composer prompt is prefixed `loop-f37-bot-a `.
-   Fill the composer with `Use message_agent to send loop-f37-bot-b the message
-   "ping from bot-a" and tell me what happens.` and submit; wait (bounded, up to
-   `timeout_s`) for the assistant to settle
-   → expect: the turn reports the send was **refused** and surfaces the refusal
-   text (naming that `loop-f37-bot-a` is not wired to `loop-f37-bot-b`, listing
-   wired teammates) — NOT a silent drop and NOT a delivered reply. `step-1.png`.
-2. Wire the edge, then re-prompt:
+1. Open `loop-f37-bot-a`'s Bot Chat and select `loop-f37-bot-a` in the profile
+   combobox (expect the composer prompt prefixed `loop-f37-bot-a `). In the
+   composer submit `/title Bot Chat` and wait (bounded) for the command
+   acknowledgement to render. This retitles the current SPA session to the
+   canonical `Bot Chat`, which — with the profile's bot-mode-managed
+   `ui_meta['hermes-bots']` — makes core inject `message_agent` on the next turn:
+   `ensure_message_agent_tool` gates on session title == `Bot Chat` AND
+   `is_bot_mode_managed` (bot_mode_dm.py:150-159; a session on any other title
+   never sees the tool). `step-1.png`. Confirm before step 2: the sender profile's
+   `state.db` has a `sessions` row titled `Bot Chat` (query in Evidence).
+2. In the same Bot Chat, fill the composer with `Use message_agent to send
+   loop-f37-bot-b the message "ping from bot-a" and tell me what happens.` and
+   submit; wait (bounded, up to `timeout_s`) for the assistant to settle → expect:
+   the turn reports the send was **refused** and surfaces the refusal text (naming
+   that `loop-f37-bot-a` is not wired to `loop-f37-bot-b`, listing wired teammates)
+   — NOT a silent drop and NOT a delivered reply. `step-2.png`.
+3. Wire the edge, then re-prompt:
    ```bash
    ( source $TB/harness.live.env && hermes -p loop-f37-bot-a wire add loop-f37-bot-a loop-f37-bot-b )
    ```
    In `loop-f37-bot-a`'s Bot Chat send the same prompt again; wait (bounded) for
    the reply → expect: the `message_agent` call is delivered and
    `loop-f37-bot-b`'s reply arrives back in `loop-f37-bot-a`'s session as the
-   background-completion notification. `step-2.png`.
+   background-completion notification (bot B's own `Bot Chat` is auto-created on
+   delivery — `--create-if-missing`, bot_mode_dm.py:362-374). `step-3.png`.
 
 ## Pass
 
-The unwired send is **refused and surfaced** to bot A (step 1), and after
-`hermes wire add` the same send **round-trips a real reply** from bot B (step 2).
+The unwired send is **refused and surfaced** to bot A (step 2), and after
+`hermes wire add` the same send **round-trips a real reply** from bot B (step 3).
 
 ## Evidence
 
-- `step-1.png` — bot A's transcript showing the refusal text (unwired).
-- `step-2.png` — bot A's transcript showing bot B's returned reply (wired).
-- The edge appeared only between the steps (stdlib `sqlite3`; the image has no
-  `sqlite3` CLI):
+- `step-1.png` — bot A's Bot Chat after `/title Bot Chat` (canonical session
+  ready). Confirm the retitle from bot A's `state.db` (stdlib `sqlite3`):
+  ```bash
+  python3 -c "import sqlite3, os; d=sqlite3.connect(os.environ['HERMES_HOME'] + '/profiles/loop-f37-bot-a/state.db'); print(d.execute(\"select id, title from sessions where title='Bot Chat'\").fetchall())"
+  ```
+  expect: exactly one `Bot Chat` row (so core injects `message_agent`).
+- `step-2.png` — bot A's transcript showing the refusal text (unwired).
+- `step-3.png` — bot A's transcript showing bot B's returned reply (wired).
+- The edge appeared only between the send steps (stdlib `sqlite3`; the image has
+  no `sqlite3` CLI):
   ```bash
   python3 -c "import sqlite3; d=sqlite3.connect('/tmp/loop-f37-fleet-edges.db'); print(d.execute('select from_profile,to_profile,gated from edges order by from_profile,to_profile').fetchall())"
   ```
-  expect: `[]`-equivalent before step 2 (or the file absent), and rows including
+  expect: `[]`-equivalent before step 3 (or the file absent), and rows including
   `('loop-f37-bot-a','loop-f37-bot-b',0)` and `('loop-f37-bot-b','loop-f37-bot-a',0)` after.
 - A reply row for the dispatched message in bot B's `state.db`
   (`$HERMES_HOME/profiles/loop-f37-bot-b/state.db`), per hermes-ui-driver §1f.

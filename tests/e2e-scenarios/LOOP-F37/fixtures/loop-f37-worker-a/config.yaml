@@ -1,21 +1,7 @@
-# Live provider block — self-contained, survives BOTH live-tier failure modes
-# (verified in the pinned tree):
-#   1. NO key_env: the recipient's message_agent reply runs in the secret-
-#      sanitised delivery subprocess, which BLOCKS ANTHROPIC_API_KEY and
-#      ANTHROPIC_BASE_URL (tools/environments/local.py:359-361), so a key_env
-#      block resolves empty there. A literal on-disk api_key is read from
-#      config.yaml (not env) and is the resolver's fallback credential
-#      (runtime_provider.py:819-821) → provider IS configured, and it is the
-#      x-api-key the egress proxy substitutes.
-#   2. REMOTE (non-loopback) base_url: the SKILL.md:304 live-tier mandate. The
-#      remote host routes through the OneCLI egress proxy (host.docker.internal;
-#      the proxy env vars survive the subprocess strip), which injects the real
-#      credential. Chosen over a loopback wire to avoid the ephemeral-port
-#      fragility that blocked LOOP-F35 — and the ${ANTHROPIC_BASE_URL} claude-
-#      trace gateway loopback would 403 the dummy key (no_proxy bypass). (Not
-#      "all loopback fails": the substrate LiteLLM wire serves 200; remote just
-#      avoids both the port fragility and the gateway-loopback 403.)
-# The dummy api_key never carries a real secret.
+# The inline dummy api_key survives message_agent's recipient subprocess,
+# which strips ANTHROPIC_* (tools/environments/local.py:359-361); the remote
+# host lets the OneCLI egress proxy inject the real credential without relying
+# on a loopback port. The literal is a placeholder, never a real secret.
 model:
   provider: coworkers-live
   default: aws/anthropic/bedrock-claude-opus-4-8

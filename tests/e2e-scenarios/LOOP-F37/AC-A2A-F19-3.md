@@ -95,28 +95,38 @@ The dashboard SPA opens the **default** profile's chat, so select
 `loop-f37-worker-a` in the profile combobox before the first message (the option
 labelled `this dashboard (loop-f37-worker-a)`), and re-snapshot after the switch.
 
-1. Open `loop-f37-worker-a`'s Bot Chat, select `loop-f37-worker-a` in the profile
-   combobox → expect: the composer prompt is prefixed `loop-f37-worker-a `. Fill
-   the composer with `Use message_agent to send loop-f37-orch the message "please
-   review" and tell me what happens.` and submit; wait (bounded, up to
-   `timeout_s`) for a **pending approval** to surface in the sender's session
-   rather than a completed send → expect: the `message_agent` call does NOT
-   complete; the gateway emits an `approval.request` carrying `pattern_key:
+1. Open `loop-f37-worker-a`'s Bot Chat and select `loop-f37-worker-a` in the
+   profile combobox (expect the composer prompt prefixed `loop-f37-worker-a `). In
+   the composer submit `/title Bot Chat` and wait (bounded) for the command
+   acknowledgement to render. This retitles the current SPA session to the
+   canonical `Bot Chat`, which — together with the profile's bot-mode-managed
+   `ui_meta['hermes-bots']` — is what makes core inject `message_agent` on the next
+   turn: `ensure_message_agent_tool` gates on session title == `Bot Chat` AND
+   `is_bot_mode_managed` (bot_mode_dm.py:150-159; a session on any other title
+   never sees the tool). `step-1.png`. Confirm before step 2: the sender profile's
+   `state.db` has a `sessions` row titled `Bot Chat` (query in Evidence).
+2. In the same Bot Chat, fill the composer with `Use message_agent to send
+   loop-f37-orch the message "please review" and tell me what happens.` and submit;
+   wait (bounded, up to `timeout_s`) for a **pending approval** to surface rather
+   than a completed send → expect: the `message_agent` call does NOT complete; the
+   gateway emits an `approval.request` carrying `pattern_key:
    plugin_rule:wire:loop-f37-worker-a:loop-f37-orch` (the runtime prefixes the
    plugin's `rule_key` `wire:loop-f37-worker-a:loop-f37-orch` with `plugin_rule:`),
-   rendered as a hold on the approvals surface. `step-1.png`.
-2. As the operator, answer the hold with choice **`once`** on the dashboard
+   rendered as a hold on the approvals surface. `step-2.png`.
+3. As the operator, answer the hold with choice **`once`** on the dashboard
    approvals surface (agent-browser click the approve-once control, which issues
    the gateway `approval.respond` RPC — the `hermes approvals` CLI is read-only and
    cannot answer a hold) → expect: the hold clears and the held `message_agent` is
-   released, delivering `please review` to `loop-f37-orch`. `step-2.png`.
+   released, delivering `please review` to `loop-f37-orch` (whose own `Bot Chat`
+   session is auto-created on delivery — `--create-if-missing`, bot_mode_dm.py:362-374,
+   so only the SENDER needs the retitle in step 1). `step-3.png`.
 
 ## Pass
 
 The gated-edge `message_agent` surfaces as a **held** approval keyed on
-`pattern_key: plugin_rule:wire:loop-f37-worker-a:loop-f37-orch` (step 1), and an
+`pattern_key: plugin_rule:wire:loop-f37-worker-a:loop-f37-orch` (step 2), and an
 operator **`once`**-approve **releases exactly that call** so it reaches
-`loop-f37-orch` (step 2).
+`loop-f37-orch` (step 3).
 
 ## Evidence
 
@@ -126,8 +136,15 @@ operator **`once`**-approve **releases exactly that call** so it reaches
   approval lives in the in-memory gateway queue (NOT `state.db`), and the desktop
   approval CARD renders only `description`/`command`/`choices` (not `pattern_key`),
   so this payload — not a screenshot — is what proves the key.
-- `step-1.png` — the approvals surface showing the hold surfaced to the operator.
-- `step-2.png` — the transcript / approvals surface after the `once`-approve,
+- `step-1.png` — the sender's Bot Chat after `/title Bot Chat` (the canonical
+  session ready). Confirm the retitle from the sender `state.db` (stdlib
+  `sqlite3`):
+  ```bash
+  python3 -c "import sqlite3, os; d=sqlite3.connect(os.environ['HERMES_HOME'] + '/profiles/loop-f37-worker-a/state.db'); print(d.execute(\"select id, title from sessions where title='Bot Chat'\").fetchall())"
+  ```
+  expect: exactly one `Bot Chat` row (so core injects `message_agent` next turn).
+- `step-2.png` — the approvals surface showing the hold surfaced to the operator.
+- `step-3.png` — the transcript / approvals surface after the `once`-approve,
   showing the hold cleared.
 - The released call reaching `loop-f37-orch`: a `python3 -c` read (stdlib
   `sqlite3`; the image has no `sqlite3` CLI) of
