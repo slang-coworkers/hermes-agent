@@ -220,10 +220,10 @@ def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[s
     or a ``gateway.platforms.<x>`` key.
 
     Platform membership is tested with the ``Platform(key)`` constructor (which
-    also resolves dynamically-registered plugin platforms), never by iterating
-    the enum. It deliberately does NOT consult ``platform_binds_port``: that
-    symbol is monkeypatched in the port-binding acceptance test, and coupling the
-    layout check to it would let the patch mask the distinct port-binding check.
+    also resolves dynamically-registered plugin platforms), never by iterating the
+    enum. Layout detection is kept independent of ``platform_binds_port``:
+    recognizing WHERE a platform is declared is a separate concern from deciding
+    WHETHER it binds a port, and the two checks must not share a predicate.
     """
     def _is_platform(key: Any) -> bool:
         if not isinstance(key, str):
@@ -250,29 +250,36 @@ def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[s
 
 
 def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
-    """Refuse any platform block spelled non-canonically.
+    """Refuse a platform block spelled non-canonically or carrying a non-mapping
+    ``extra``.
 
     A platform can hide from the port-binding / route checks two ways: an alias
     location (top-level ``<platform>``, ``gateway.<platform>``,
     ``gateway.platforms.<platform>``), and a non-canonical spelling of the key
-    itself under ``platforms`` — core normalizes ``"Webhook"`` and ``" webhook "``
-    to ``Platform.WEBHOOK`` and enables the listener, but the checks below match
-    the canonical value string. Both are refused, so exactly one canonical place
-    remains where a port binder or a route can live.
+    under ``platforms`` — core normalizes ``"Webhook"`` and ``" webhook "`` to
+    ``Platform.WEBHOOK`` and enables the listener, but the checks below match the
+    canonical value string. Both are refused, so exactly one canonical place
+    remains where a port binder or a route can live. A present ``extra`` that is
+    not a mapping is refused too: left in place it would be written to
+    ``config.yaml`` and break the runtime platform merge, discarding the
+    multiplex/allowlist enforcement the loader would otherwise apply.
     """
     platforms = config.get("platforms")
     if isinstance(platforms, dict):
-        for key in platforms:
-            if not isinstance(key, str):
-                continue
-            try:
-                canonical = Platform(key).value
-            except ValueError:
-                continue
-            if key != canonical:
-                raise CompositionError(
-                    f"platform {key!r} under 'platforms' must use its canonical name {canonical!r}"
-                )
+        for key, block in platforms.items():
+            if isinstance(key, str):
+                try:
+                    canonical = Platform(key).value
+                except ValueError:
+                    canonical = None
+                if canonical is not None and key != canonical:
+                    raise CompositionError(
+                        f"platform {key!r} under 'platforms' must use its canonical name {canonical!r}"
+                    )
+            if isinstance(block, dict):
+                extra = block.get("extra")
+                if extra is not None and not isinstance(extra, dict):
+                    raise CompositionError(f"platforms.{key}: 'extra' must be a mapping")
     for location, platform in _iter_noncanonical_platform_keys(config):
         raise CompositionError(
             f"platform {platform!r} must be declared under 'platforms.{platform}', "
@@ -577,9 +584,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     types = data.get("types") or {}
 
     _require_canonical_profile_names(types, default_profile, orchestrator_profile)
-    # Roster in spec (declaration) order — the criterion tests the allowlist as a
-    # SET, and preserving the spec's order keeps the render deterministic from the
-    # input without reordering a roster the operator already wrote.
     roster = list(types)
     served: Set[str] = {"default", *roster}
 

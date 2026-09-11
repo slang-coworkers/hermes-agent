@@ -107,6 +107,24 @@ def test_layout_refuses_noncanonical_platform_key_spelling(module, tmp_path, bad
         _render(module, tmp_path, spec, f"badkey_{badkey.strip()}")
 
 
+def test_layout_refuses_non_mapping_extra_on_coworker(module, tmp_path):
+    """A platform block whose 'extra' is a non-mapping scalar is refused at render
+    time. Left in place it would be written to config.yaml and break the runtime
+    platform merge, silently discarding the enforced multiplex/allowlist."""
+    spec = _spec()
+    spec["types"]["worker"]["config"] = {"platforms": {"telegram": {"enabled": True, "extra": "bad"}}}
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path, spec, "cw_bad_extra")
+
+
+def test_layout_refuses_non_mapping_extra_on_default(module, tmp_path):
+    """Same rejection on the DEFAULT profile's platform block."""
+    spec = _spec()
+    spec["default_config"] = {"platforms": {"telegram": {"enabled": True, "extra": "bad"}}}
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path, spec, "def_bad_extra")
+
+
 def test_enforce_multiplex_sets_roster_when_spec_is_silent(module, tmp_path):
     """A spec that never mentions multiplexing still renders a DEFAULT config
     whose gateway.multiplex_profiles is True and whose allowlist is the sorted
