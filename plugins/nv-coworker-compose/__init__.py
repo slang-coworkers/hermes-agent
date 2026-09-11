@@ -25,13 +25,17 @@ import contextvars
 import itertools
 import json
 import logging
+import os
+import re
 import shutil
+import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from hermes_cli.profiles import get_active_profile_name
+from utils import is_truthy_value
 
 from .compose import CompositionError, compose, load_spec
 from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT_SCHEMA
@@ -510,9 +514,124 @@ def _ensure_canonical_bot_chat(profile: str) -> bool:
         return False
 
 
-def _install(rendered_dir: str, name: str) -> None:
+# Fleet raw-request-capture toggle (OBS-F46). Read process-global via
+# env_var_enabled -> os.getenv at agent/conversation_loop.py, so it must reach a
+# process's os.environ; a coworker's ACTIVE .env is the file a spawned
+# `hermes -p <bot> chat` loads at startup, so install upserts it there.
+CAPTURE_KEY = "HERMES_DUMP_REQUESTS"
+CAPTURE_VALUE = "true"
+
+
+class CaptureEnvManagedError(Exception):
+    """Machine policy governs HERMES_DUMP_REQUESTS, so it is an explicit operator
+    action rather than a silent local override. Raised instead of writing the
+    profile .env when a managed scope pins the key falsy, when a package-managed
+    install owns the environment, or when managed policy cannot be read."""
+
+
+def _upsert_env_var(env_path: Union[str, Path], key: str, value: str) -> None:
+    """Atomically write exactly one ``key=value`` into a dotenv file.
+
+    Collapses every prior assignment of ``key`` — plain, leading-whitespace, or
+    ``export KEY=`` with whitespace around ``=`` — to a single canonical
+    ``key=value`` line, preserves all other lines verbatim and the file's mode,
+    and never mutates ``os.environ`` (unlike ``hermes_cli.config.save_env_value``,
+    which writes ``os.environ`` and would leak the toggle into the shared gateway
+    process). The write goes to a same-directory tempfile then ``os.replace`` so a
+    concurrent reader never sees a truncated file. ``os.replace`` is atomic on
+    every OS and ``\\n`` is the dotenv line ending on all platforms.
+    """
+    env_path = Path(env_path)
+    assign_re = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
+
+    existing_mode: Optional[int] = None
+    kept: List[str] = []
+    if env_path.exists():
+        existing_mode = stat.S_IMODE(env_path.stat().st_mode)
+        kept = [
+            line for line in env_path.read_text(encoding="utf-8").splitlines()
+            if not assign_re.match(line)
+        ]
+    kept.append(f"{key}={value}")
+    body = "\n".join(kept) + "\n"
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(env_path.parent), prefix=".env_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        if existing_mode is not None:
+            os.chmod(tmp_name, existing_mode)
+        os.replace(tmp_name, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def apply_capture_env(profile_home: Union[str, Path]) -> None:
+    """Idempotently enable ``HERMES_DUMP_REQUESTS`` in a profile's active ``.env``.
+
+    Respects machine-global managed policy: a managed value already truthy is a
+    no-op success; a managed value pinned falsy, or a package-managed install, is
+    surfaced as an explicit operator action instead of a silent local override.
+    Fails closed — if managed policy cannot be read, it raises rather than write a
+    value that might defy administrative policy. ``managed_scope.get_managed_dir()``
+    is ``None`` under pytest, so this guard is inert in the hermetic tests.
+    """
+    env_path = Path(profile_home) / ".env"
+    try:
+        from hermes_cli import managed_scope
+        from hermes_cli.config import get_managed_system
+
+        managed_dir = managed_scope.get_managed_dir()
+        managed_system = get_managed_system()
+    except Exception as exc:  # noqa: BLE001 — refuse the write rather than guess policy
+        raise CaptureEnvManagedError(
+            f"cannot verify managed policy for {CAPTURE_KEY}; refusing to modify {env_path}"
+        ) from exc
+
+    # load_managed_env() fails OPEN — managed_scope._cached_read swallows a read or
+    # decode error and returns {} — so probe the managed .env directly first: an
+    # unreadable managed policy must fail CLOSED here, never silently permit a local
+    # write that might defy it. An absent managed .env is the normal no-scope case.
+    if managed_dir is not None:
+        managed_env_path = managed_dir / ".env"
+        try:
+            managed_env_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read managed policy {managed_env_path}; refusing to modify {env_path}"
+            ) from exc
+
+    managed_values = managed_scope.load_managed_env()
+
+    if CAPTURE_KEY in managed_values:
+        if is_truthy_value(managed_values[CAPTURE_KEY]):
+            return
+        source = (managed_dir / ".env") if managed_dir else "the managed scope"
+        raise CaptureEnvManagedError(
+            f"{CAPTURE_KEY} is managed as {managed_values[CAPTURE_KEY]!r} by {source}; "
+            "set it to true there and re-run onboarding."
+        )
+    if managed_system is not None:
+        raise CaptureEnvManagedError(
+            f"Hermes is managed by {managed_system}; set {CAPTURE_KEY}=true in the "
+            "package-managed environment (service-unit env or /etc/hermes/.env)."
+        )
+
+    _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
+
+
+def _install(rendered_dir: str, name: str) -> str:
     from hermes_cli.profile_distribution import install_distribution
-    install_distribution(str(rendered_dir), name=name, force=True)
+    plan = install_distribution(str(rendered_dir), name=name, force=True)
+    installed_home = plan.target_dir
+    apply_capture_env(installed_home)
+    return str(installed_home)
 
 
 def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
