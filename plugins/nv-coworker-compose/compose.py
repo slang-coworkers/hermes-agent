@@ -62,6 +62,13 @@ _ENV_TEMPLATE_BODY = (
     "# Environment variables for this Hermes coworker distribution.\n"
     "# The installer renames this file to .env.EXAMPLE; copy it to .env and\n"
     "# fill in real values before running.\n"
+    "\n"
+    "# Fleet raw-request-capture default: dump preflight request payloads and\n"
+    "# terminal API-error response bodies (secret-redacted) beside each session\n"
+    "# file. This documents the default; the active .env the installer writes is\n"
+    "# what enables capture for spawned surfaces. See the fleet raw-request-\n"
+    "# capture runbook (website/docs/user-guide/fleet-raw-request-capture.md).\n"
+    "HERMES_DUMP_REQUESTS=true\n"
 )
 
 # Source workflow bodies carry this marker where render-time overlay bodies land.
