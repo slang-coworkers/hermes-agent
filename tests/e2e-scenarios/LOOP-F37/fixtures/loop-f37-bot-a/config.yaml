@@ -1,0 +1,45 @@
+# Live provider block (ADR §Scenario outlines): a self-contained on-disk
+# provider block so the delivery subprocess — whose env is sanitized of
+# provider secrets — can still resolve a provider. base_url is the substrate's
+# egress endpoint; api_key is a dummy literal (never a real key). The real
+# credential is injected at the OneCLI egress hop.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-loop-f37-not-a-real-key
+    key_env: ANTHROPIC_API_KEY
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
+plugins:
+  enabled:
+    - nv-fleet-gates
+  entries:
+    nv-fleet-gates:
+      settings:
+        profile: loop-f37-bot-a
+        # Shared, absolute, outside any profile home so both bots read the same
+        # fleet edges. The scenario Setup removes it first so the run starts unwired.
+        edges_db_path: /tmp/loop-f37-fleet-edges.db
+        profile_roles:
+          loop-f37-bot-a: worker
+          loop-f37-bot-b: worker
+          orch: orchestrator
+        enforce_sandbox: false
+        plan_gate: false
+        required_stages:
+          - OUTPUT_REVIEW
+        stage_markers:
+          - "[Fix Report]"
+          - "[Review Verdict]"
+          - "[Resolution]"
+          - "[handoff]"
+        admin_tools:
+          - onboard_coworker
+          - onboard_project
+          - create_agent
