@@ -1,0 +1,55 @@
+# MEM-F44 compose input — omitted variant. Same roster as coworker-types.yaml
+# but the input omits every retention key (spine base-omitted.yaml + this
+# default_config), so the render must INSERT all four at their fleet-safe values.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+spines:
+  base:
+    source: spines/base-omitted.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"
+    invariants: ["INV-SHARED", "INV-REVIEWER"]
+    context: ["CTX-SHARED", "CTX-REVIEWER"]
+    skills: ["review-skill"]
+    overlays: ["critique-gate"]
+    traits:
+      command_allowlist: ["git status", "gh pr view"]
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer:
+    extends: [base]
+    identity: "FIXER-IDENTITY"
+    skills: ["fix-skill"]
+    ui_meta: {title: "Fixer", description: "Implementer", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer, fixer]
+
+# DEFAULT (multiplexer) profile — every retention key omitted here too.
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
+  platforms:
+    webhook:
+      extra:
+        routes:
+          pr:
+            secret: "SECRET-PR"
+            profile: reviewer
+            events: [pull_request]
