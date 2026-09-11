@@ -281,6 +281,7 @@ def test_ac_loop_f37_7(tmp_path, monkeypatch):
     # clone. The schema-valid target still resolves outside the caller's tree -> block.
     mem_add = {"action": "add", "target": "memory", "content": "y"}
     (home_w / "shared-learnings").mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(home_w / "memories", ignore_errors=True)  # discover_builtin_tools bootstraps a real memories/ dir
     os.symlink(home_w / "shared-learnings", home_w / "memories")
     assert _act(_gate(worker, "memory", mem_add)) == "block"
 
@@ -292,6 +293,7 @@ def test_ac_loop_f37_7(tmp_path, monkeypatch):
     orch, home_o, _ = _load(tmp_path, monkeypatch, profile="orch", role="orchestrator", edges_db=edges)
     _loaded(orch)
     (home_o / "shared-learnings").mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(home_o / "memories", ignore_errors=True)  # discover_builtin_tools bootstraps a real memories/ dir
     os.symlink(home_o / "shared-learnings", home_o / "memories")
     assert _act(_gate(orch, "skill_manage", skill_op("write_file", outside))) != "block"
     assert _act(_gate(orch, "memory", mem_add)) != "block"   # orchestrator exempt even when the store path escapes
