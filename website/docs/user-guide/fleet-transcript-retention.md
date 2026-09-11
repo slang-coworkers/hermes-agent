@@ -152,3 +152,6 @@ configured, not built, by this fleet:
   store and `checkpoints.auto_prune`.
 - [Context compression and caching](../developer-guide/context-compression-and-caching.md)
   — `compression.in_place` soft-archiving.
+- [Fleet raw-request capture (on-call runbook)](./fleet-raw-request-capture.md)
+  — turning on `HERMES_DUMP_REQUESTS` capture, which relies on
+  `sessions.auto_prune: false` to keep its `request_dump_*` files on disk.
