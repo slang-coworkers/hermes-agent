@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import shlex
 from pathlib import Path
-from typing import Optional
 
 # --- GOV-F22 (c): unclassified shell-capable tool tripwire ------------------
 # The load-time guard sees only tool NAMES via registry.get_all_tool_names() —
@@ -54,29 +53,29 @@ def command_text(canon: str, args: dict) -> str:
     return ""
 
 
-class GhPr:
-    __slots__ = ("verb", "repo", "pr")
-
-    def __init__(self, verb, repo, pr):
-        self.verb = verb
-        self.repo = repo
-        self.pr = pr
+# Split a shell command on statement/pipe separators so a mutation or a gh-pr
+# verb hiding after `&&`/`;`/`|` in a compound command is not missed.
+_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||[;\n|])\s*")
 
 
+def _segments(command: str):
+    return [s for s in _SEGMENT_RE.split(command or "") if s.strip()]
+
+
+# --- gh pr egress + PR-comment invitation (LOOP-F37-2 / -6) -----------------
 _GH_PR_RE = re.compile(r"\bgh\s+pr\s+(create|review|comment)\b")
 
 
-def parse_gh_pr(command: str) -> Optional[GhPr]:
-    if not command:
-        return None
-    m = _GH_PR_RE.search(command)
-    if not m:
-        return None
-    verb = m.group(1)
+def gh_pr_egress(command: str) -> bool:
+    """True if the command runs any `gh pr create|review|comment` (any segment)."""
+    return bool(command) and bool(_GH_PR_RE.search(command))
+
+
+def _parse_repo_pr(segment: str):
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(segment)
     except ValueError:
-        tokens = command.split()
+        tokens = segment.split()
     repo = None
     for i, t in enumerate(tokens):
         if t == "--repo" and i + 1 < len(tokens):
@@ -84,39 +83,67 @@ def parse_gh_pr(command: str) -> Optional[GhPr]:
         elif t.startswith("--repo="):
             repo = t.split("=", 1)[1]
     pr = None
-    seen_verb = False
+    seen_comment = False
     for t in tokens:
-        if not seen_verb:
-            if t == verb:
-                seen_verb = True
+        if not seen_comment:
+            if t == "comment":
+                seen_comment = True
             continue
         if t.isdigit():
             pr = int(t)
             break
-    return GhPr(verb, repo, pr)
+    return repo, pr
 
 
+def gh_pr_comment_targets(command: str):
+    """One (repo, pr) per `gh pr comment` occurrence anywhere in the command.
+
+    Uses finditer over the whole string (not one search per segment) so a
+    comment nested in a command substitution — `gh pr create --body "$(gh pr
+    comment 12 --repo o/r ...)"` — is still caught. Each target is invitation-
+    checked; an unparseable one surfaces as (None, …), which the invitation
+    predicate treats as unauthorized (fail-closed).
+    """
+    if not command:
+        return []
+    matches = list(_GH_PR_RE.finditer(command))
+    out = []
+    for i, m in enumerate(matches):
+        if m.group(1) != "comment":
+            continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(command)
+        out.append(_parse_repo_pr(command[m.start():end]))
+    return out
+
+
+# --- mutation classification (plan gate + critique freshness) ---------------
 _MUTATING_CMDS = {
     "tee", "dd", "truncate", "cp", "mv", "rm", "mkdir", "touch",
     "chmod", "chown", "ln", "install", "rsync", "shred",
 }
 _GIT_MUTATING = {"apply", "checkout", "reset", "clean", "rm", "mv", "restore", "stash"}
 
-
-def _terminal_mutates(command: str) -> bool:
-    if not command:
+def _is_valid_python(code: str) -> bool:
+    if not code or not code.strip():
         return False
-    if ">" in command:  # output redirection (> or >>) writes a file
+    try:
+        compile(code, "<execute_code>", "exec")
+        return True
+    except (SyntaxError, ValueError):
+        return False
+
+
+def _segment_mutates(seg: str) -> bool:
+    if ">" in seg:  # output redirection (> or >>) writes a file
         return True
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(seg)
     except ValueError:
-        tokens = command.split()
+        tokens = seg.split()
     if not tokens:
         return False
-    # skip leading VAR=val assignment prefixes
     idx = 0
-    while idx < len(tokens):
+    while idx < len(tokens):  # skip leading VAR=val assignment prefixes
         t = tokens[idx]
         head = t.split("=", 1)[0]
         if "=" in t and not t.startswith("-") and "/" not in head and head.isidentifier():
@@ -133,16 +160,27 @@ def _terminal_mutates(command: str) -> bool:
         return True
     if cmd == "git" and rest and rest[0] in _GIT_MUTATING:
         return True
-    if cmd in _MUTATING_CMDS:
-        return True
-    return False
+    return cmd in _MUTATING_CMDS
+
+
+def _terminal_mutates(command: str) -> bool:
+    return any(_segment_mutates(seg) for seg in _segments(command))
 
 
 def is_mutation(canon: str, args: dict) -> bool:
     if canon in ("write_file", "patch"):
         return True
-    if canon in ("terminal", "execute_code"):
+    if canon == "terminal":
         return _terminal_mutates(command_text(canon, args))
+    if canon == "execute_code":
+        # execute_code runs Python: a valid script can write files, so treat any
+        # syntactically-valid Python as a potential mutation. A syntax-invalid
+        # payload (e.g. a bare `gh pr …` shell string, as AC-LOOP-F37-2 sends)
+        # is classified by the shell rules instead.
+        code = command_text(canon, args)
+        if _is_valid_python(code):
+            return True
+        return _terminal_mutates(code)
     return False
 
 
@@ -174,12 +212,11 @@ def within(child: Path, parent: Path) -> bool:
 
 
 def is_dangerous_command(command: str) -> bool:
+    # No inner except: a detector fault must reach the gate's try/except
+    # BaseException and fail closed, not be swallowed into "not dangerous".
     if not command:
         return False
-    try:
-        from tools.approval import detect_dangerous_command
+    from tools.approval import detect_dangerous_command
 
-        res = detect_dangerous_command(command)
-        return bool(res[0]) if isinstance(res, tuple) else bool(res)
-    except Exception:
-        return False
+    res = detect_dangerous_command(command)
+    return bool(res[0]) if isinstance(res, tuple) else bool(res)

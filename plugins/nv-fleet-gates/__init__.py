@@ -24,6 +24,7 @@ human PR-comment invitation token.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -56,7 +57,7 @@ _RESTRICTED_CANON = {
     "terminal", "execute_code", "write_file", "patch",
     "kanban_create", "kanban_request_review", "kanban_complete",
     "kanban_request_changes", "skill_manage", "cronjob_manage",
-    "process_manage", "delegate_task", "memory",
+    "delegate_task", "memory",
 }
 
 # Fleet-admin names always orchestrator-only (unioned with settings.admin_tools).
@@ -65,6 +66,14 @@ _RESTRICTED_CANON = {
 _VENDORED_ADMIN = {"cronjob_manage"}
 
 _MENTION_RE = re.compile(r"@\w")
+
+# Request-local (NOT process-global) carrier from the pre_command observer to
+# the /codex-critique slash handler in the same dispatch context, so the slash
+# alias can correlate to its session without a shared cell that would leak
+# across interleaved sessions. Empty when the surfaces do not share a context.
+_pending_slash_session: contextvars.ContextVar = contextvars.ContextVar(
+    "nv_fleet_gates_slash_session", default=None
+)
 
 
 def _edges_lookup(from_profile: str, to_profile: str, db_path: str):
@@ -94,6 +103,31 @@ def _current_profile() -> str:
         return Path(get_hermes_home()).name
     except Exception:
         return ""
+
+
+def _managed_profile_roles():
+    """The role map the managed layer pins, or None when it does not pin the key.
+
+    Read straight from managed scope, not ``ctx.get_config`` (which returns the
+    deep-merged map), so a per-profile addition for an unmanaged profile cannot
+    escalate. An EXPLICITLY-empty managed ``profile_roles: {}`` returns ``{}``
+    (not None) so it still shuts out the local map — only a genuinely-absent key
+    returns None. A non-dict pin is malformed and raises, failing the load
+    closed rather than silently falling back to the writable map. Loader errors
+    are not swallowed for the same reason.
+    """
+    from hermes_cli import managed_scope
+
+    mc = managed_scope.load_managed_config() or {}
+    settings = (
+        ((mc.get("plugins") or {}).get("entries") or {}).get(PLUGIN_KEY) or {}
+    ).get("settings") or {}
+    if "profile_roles" not in settings:
+        return None
+    roles = settings["profile_roles"]
+    if not isinstance(roles, dict):
+        raise RuntimeError("managed nv-fleet-gates profile_roles is not a mapping")
+    return roles
 
 
 def _status_ok(status) -> bool:
@@ -141,6 +175,11 @@ def register(ctx) -> None:
     admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN
     skills_root = ctx.get_config("skills_root")
     shared_learnings_path = ctx.get_config("shared_learnings_path")
+    # When the managed layer pins the role map, roles come ONLY from it (a
+    # profile absent from it defaults to worker) so a per-profile config cannot
+    # add itself as orchestrator — ctx.get_config alone returns the deep-merged
+    # map, where a per-profile entry for an unmanaged profile would survive.
+    managed_profile_roles = _managed_profile_roles()
 
     # --- LOAD-TIME RESTRICTED-SET ASSERTION ---------------------------------
     # A raise here makes discover_and_load record loaded.error and leave the
@@ -148,11 +187,11 @@ def register(ctx) -> None:
     from tools.registry import registry
 
     running = set(registry.get_all_tool_names() or [])
-    # Only meaningful against a POPULATED builtin registry. `hermes plugins
-    # doctor` calls register() with an empty registry (builtins undiscovered),
-    # so gate on "at least one core group present" to avoid a false fail-load.
-    populated = any(any(s in running for s in grp) for grp in _CORE_PRESENCE_GROUPS)
-    if populated:
+    # `hermes plugins doctor` calls register() with an EMPTY registry (builtins
+    # undiscovered) — the only case where the presence assertion is skipped. A
+    # non-empty registry that is missing a restricted core tool is a real
+    # rename/removal and must fail-load, not slip through.
+    if running:
         missing = [grp[0] for grp in _CORE_PRESENCE_GROUPS if not any(s in running for s in grp)]
         if missing:
             raise RuntimeError(
@@ -175,8 +214,8 @@ def register(ctx) -> None:
 
     # --- role / identity ----------------------------------------------------
     def _role() -> str:
-        # Managed profile_roles is authoritative; a per-profile role setting is
-        # ignored, so it cannot escalate a worker.
+        if managed_profile_roles is not None:
+            return managed_profile_roles.get(_current_profile(), "worker")
         return profile_roles.get(_current_profile(), "worker")
 
     def _is_orch() -> bool:
@@ -245,7 +284,7 @@ def register(ctx) -> None:
         return None
 
     def _host_writer_block(canon, args):
-        if _is_orch():  # orchestrator is exempt from the host-writer path check
+        if _is_orch():
             return None
         home = get_hermes_home()
         if canon == "skill_manage":
@@ -280,26 +319,26 @@ def register(ctx) -> None:
                         "plan gate: create a plan under .hermes/plans/*.md in this session before "
                         "mutating files"
                     )
-        gh = (
-            predicates.parse_gh_pr(predicates.command_text(canon, args))
-            if canon in ("terminal", "execute_code")
-            else None
-        )
+        cmd = predicates.command_text(canon, args) if canon in ("terminal", "execute_code") else ""
+        gh_egress = predicates.gh_pr_egress(cmd)
+        comment_targets = predicates.gh_pr_comment_targets(cmd)
         marked = (
             canon == "message_agent"
             and predicates.is_stage_marked((args or {}).get("message"), stage_markers)
         ) or predicates.is_kanban_terminator(canon)
-        if marked or gh is not None:
+        if marked or gh_egress:
             if not stores.critique_fresh(session_id, required_stages):
                 return _block(
                     f"critique gate: run /codex-critique for stages {required_stages} before this "
                     "delivery"
                 )
-            if gh is not None and gh.verb == "comment":
-                if not stores.has_invitation(gh.repo, gh.pr):
+            # every gh pr comment (any segment) needs its own human invitation;
+            # an unparseable target has repo/pr None, which has_invitation denies.
+            for repo, pr in comment_targets:
+                if not stores.has_invitation(repo, pr):
                     return _block(
-                        f"invitation gate: no human invitation for {gh.repo}#{gh.pr}; a human must "
-                        "@-mention the bot on the PR first"
+                        f"invitation gate: no human invitation for {repo}#{pr}; a human must "
+                        "@-mention on the PR first"
                     )
         return None
 
@@ -335,14 +374,15 @@ def register(ctx) -> None:
             logger.warning("nv-fleet-gates post_tool_call observer failed", exc_info=True)
         return None
 
-    _last_slash_session = {"key": None}
-
-    def _capture_session(surface=None, command=None, session_key=None, **kwargs):
-        # Best-effort slash correlation: the authoritative critique path is the
-        # codex_critique TOOL (session_id in kwargs); this only helps the gateway
-        # /codex-critique alias bind to a session.
-        if command in ("codex-critique", "/codex-critique") and session_key:
-            _last_slash_session["key"] = session_key
+    def _capture_session(surface=None, command=None, session_key=None, session_id=None, **kwargs):
+        # Stash this dispatch's session in a request-local ContextVar so the
+        # /codex-critique slash handler running in the same context can correlate.
+        # ContextVar (not a shared cell) means a different session's dispatch
+        # never sees it. The authoritative path remains the codex_critique tool.
+        if command in ("codex-critique", "/codex-critique"):
+            sid = session_id or session_key
+            if sid:
+                _pending_slash_session.set(sid)
         return None
 
     def _capture_invitation(event=None, gateway=None, session_store=None, **kwargs):
@@ -371,7 +411,10 @@ def register(ctx) -> None:
         return parsed.get("verdict") if isinstance(parsed, dict) else None
 
     async def _tool_codex_critique(args, **kwargs):
-        session_id = kwargs.get("session_id") or (args or {}).get("session_id")
+        # session_id comes ONLY from the authoritative dispatch kwargs, never
+        # from model-supplied args — otherwise a model could record a critique
+        # for another session and unlock its gate.
+        session_id = kwargs.get("session_id")
         stage = (args or {}).get("stage") or (required_stages[0] if required_stages else "OUTPUT_REVIEW")
         try:
             verdict = await _run_critique(stage)
@@ -391,14 +434,26 @@ def register(ctx) -> None:
         stage = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else (
             required_stages[0] if required_stages else "OUTPUT_REVIEW"
         )
-        session_id = kwargs.get("session_id") or _last_slash_session.get("key")
+        # Authoritative session id only: dispatch kwargs, else the request-local
+        # ContextVar the pre_command observer set for this same dispatch.
+        session_id = kwargs.get("session_id") or kwargs.get("session_key") or _pending_slash_session.get()
         try:
             verdict = await _run_critique(stage)
+            if not session_id:
+                # No session to attribute the critique to — report honestly
+                # rather than claim success while recording nothing.
+                return json.dumps({
+                    "ok": False,
+                    "error": "no session context for /codex-critique; invoke the codex_critique tool",
+                    "stage": stage, "verdict": verdict,
+                })
+            stores.record_critique(session_id, stage)
+            return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)})
-        if session_id:
-            stores.record_critique(session_id, stage)
-        return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
+        finally:
+            # Consume the request-local hint even on failure so it can't leak.
+            _pending_slash_session.set(None)
 
     CODEX_CRITIQUE_SCHEMA = {
         "description": (
