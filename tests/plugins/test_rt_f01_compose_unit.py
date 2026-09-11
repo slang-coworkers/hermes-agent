@@ -95,6 +95,18 @@ def test_layout_accepts_canonical_non_port_binding_platform(module, tmp_path):
     _render(module, tmp_path, spec, "discord_canonical")
 
 
+@pytest.mark.parametrize("badkey", ["Webhook", " webhook "])
+def test_layout_refuses_noncanonical_platform_key_spelling(module, tmp_path, badkey):
+    """A platform key spelled non-canonically under 'platforms' (mixed case or
+    surrounding whitespace) is refused. Core normalizes it to the real platform
+    and would enable the listener, so the canonical-name gate must catch it before
+    the raw-key port-binding check (which matches only the canonical value)."""
+    spec = _spec()
+    spec["types"]["worker"]["config"] = {"platforms": {badkey: {"enabled": True}}}
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path, spec, f"badkey_{badkey.strip()}")
+
+
 def test_enforce_multiplex_sets_roster_when_spec_is_silent(module, tmp_path):
     """A spec that never mentions multiplexing still renders a DEFAULT config
     whose gateway.multiplex_profiles is True and whose allowlist is the sorted

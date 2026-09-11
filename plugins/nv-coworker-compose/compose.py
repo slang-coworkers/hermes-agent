@@ -20,12 +20,6 @@ from typing import Any, Dict, Iterator, List, Set, Tuple
 
 import yaml
 
-# Pure, side-effect-free core symbols the RT-F01 enforcement consumes. Neither
-# reads disk nor mutates os.environ, so the renderer stays a pure offline file
-# writer: platform_binds_port is a frozenset+conditional-mode check and Platform
-# is an Enum; normalize/validate_profile_name are string predicates. The render
-# never calls load_gateway_config / GatewayConfig.from_dict (those read disk and
-# mutate the environment) — it writes config the native readers later consume.
 from gateway.config import Platform, platform_binds_port
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 
@@ -158,17 +152,6 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
-# --- RT-F01: Hermes-native entity model + human-privilege enforcement ---------
-#
-# The fleet's entity model IS Hermes's own: coworkers are profiles under ONE
-# gateway in multiplex mode; human privilege is the per-platform allowlist the
-# native ``_is_user_authorized`` config fallback reads. These render steps make
-# that model explicit and refuse the spec spellings that would break it. Each
-# step drives a real native reader (``profiles_to_serve`` via the allowlist,
-# ``platform_binds_port``, ``_is_user_authorized``) rather than re-implementing
-# one, so the render tracks core with zero drift.
-
-
 def _require_canonical_profile_names(
     types: Dict[str, Any], default_profile: str, orchestrator_profile: str
 ) -> None:
@@ -267,14 +250,29 @@ def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[s
 
 
 def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
-    """Refuse any platform block spelled outside the canonical ``platforms.<x>``.
+    """Refuse any platform block spelled non-canonically.
 
-    Core honors top-level ``<platform>``, ``gateway.<platform>`` and
-    ``gateway.platforms.<platform>`` too, so a port-binding platform or a webhook
-    route could otherwise hide from the coworker / route checks under an alias.
-    Forbidding the aliases leaves exactly one place either can live, making those
-    checks alias-proof.
+    A platform can hide from the port-binding / route checks two ways: an alias
+    location (top-level ``<platform>``, ``gateway.<platform>``,
+    ``gateway.platforms.<platform>``), and a non-canonical spelling of the key
+    itself under ``platforms`` — core normalizes ``"Webhook"`` and ``" webhook "``
+    to ``Platform.WEBHOOK`` and enables the listener, but the checks below match
+    the canonical value string. Both are refused, so exactly one canonical place
+    remains where a port binder or a route can live.
     """
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        for key in platforms:
+            if not isinstance(key, str):
+                continue
+            try:
+                canonical = Platform(key).value
+            except ValueError:
+                continue
+            if key != canonical:
+                raise CompositionError(
+                    f"platform {key!r} under 'platforms' must use its canonical name {canonical!r}"
+                )
     for location, platform in _iter_noncanonical_platform_keys(config):
         raise CompositionError(
             f"platform {platform!r} must be declared under 'platforms.{platform}', "
@@ -296,7 +294,8 @@ def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -
     webhook = platforms.get("webhook")
     if not isinstance(webhook, dict):
         return
-    routes = (webhook.get("extra") or {}).get("routes")
+    extra = webhook.get("extra")
+    routes = extra.get("routes") if isinstance(extra, dict) else None
     if not routes:
         return
     if not isinstance(routes, dict):
@@ -332,7 +331,8 @@ def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
     for pname, block in platforms.items():
         if not isinstance(block, dict) or not block.get("enabled"):
             continue
-        if platform_binds_port(pname, block.get("extra")):
+        extra = block.get("extra")
+        if platform_binds_port(pname, extra if isinstance(extra, dict) else None):
             raise CompositionError(
                 f"coworker {tname!r} may not enable port-binding platform {pname!r} — "
                 f"only the DEFAULT multiplexer profile owns the shared listener"
@@ -354,7 +354,8 @@ def _forbid_coworker_webhook_routes(config: Dict[str, Any], tname: str) -> None:
     webhook = platforms.get("webhook")
     if not isinstance(webhook, dict):
         return
-    if (webhook.get("extra") or {}).get("routes"):
+    extra = webhook.get("extra")
+    if isinstance(extra, dict) and extra.get("routes"):
         raise CompositionError(
             f"coworker {tname!r} may not carry webhook routes — "
             f"routes live only on the DEFAULT profile"
@@ -575,10 +576,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     default_profile = _safe_name("profile", data.get("default_profile", "default"))
     types = data.get("types") or {}
 
-    # RT-F01: gate profile names up front so the roster, the allowlist entries,
-    # the webhook profile: bindings and the served profile dirs are one join.
     _require_canonical_profile_names(types, default_profile, orchestrator_profile)
-    roster = sorted(types)
+    # Roster in spec (declaration) order — the criterion tests the allowlist as a
+    # SET, and preserving the spec's order keeps the render deterministic from the
+    # input without reordering a roster the operator already wrote.
+    roster = list(types)
     served: Set[str] = {"default", *roster}
 
     rendered: Dict[str, str] = {}
@@ -587,8 +589,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         resolved = _resolve_type(tname, tinfo or {}, spines)
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
-        # RT-F01: a coworker is a secondary multiplex profile — it may not spell a
-        # platform outside platforms.<x>, bind a host port, or carry a route.
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
         _forbid_coworker_webhook_routes(resolved["config"], tname)
@@ -598,9 +598,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
 
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     _enforce_retention(default_config)
-    # RT-F01: the DEFAULT profile is the fleet's multiplexer and the sole home of
-    # webhook routes; enforce multiplex, then validate routes (layout first, so
-    # an alias-spelled route cannot evade route validation).
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
     _validate_webhook_routes(default_config, served)
