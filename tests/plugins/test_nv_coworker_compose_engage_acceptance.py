@@ -1,21 +1,22 @@
 """Acceptance test for RT-F02 — Router engage modes (mention | mention-sticky |
 pattern | always-on) + sender_scope, rendered per profile by nv-coworker-compose.
 
-One ``test_ac_rt_f02_<n>`` per ADR §Acceptance criteria ``pytest:`` row (AC-1..5); each
-docstring's first line is ``AC-RT-F02-<n>:`` plus the criterion. AC-RT-F02-6 is a
-``live:`` criterion (ADR §Scenario outlines) whose hermetic equivalent ships as the
-non-criterion helper ``test_admission_path_mention_gate``. The plugin is loaded from
-an isolated HERMES_HOME with an EMPTY bundled dir through the real
+One ``test_ac_rt_f02_<n>`` per ADR §Acceptance criteria row (AC-1..6); each docstring's
+first physical line is ``AC-RT-F02-<n>: `` plus the ADR criterion-column text VERBATIM
+(the P5 docstring-to-criterion join key). The plugin is loaded from an isolated
+HERMES_HOME with an EMPTY bundled dir through the real
 ``PluginManager().discover_and_load()`` path (shape: tests/hermes_cli/
 test_plugin_api_compat.py:14-52); ``compose()`` is driven and the render asserted through
 the real core parser ``gateway.config.PlatformConfig.from_dict`` (the golden value lands
-in the exact ``.extra`` dict the resolver reads) plus the real platform resolvers when
-the platform extra is installed.
+in the exact ``.extra`` dict the resolver reads) plus the real platform resolvers.
 
 Run with the Slack platform extra so the adapter imports resolve:
 ``uv sync --locked --python 3.11 --extra slack --extra dev`` (CI ``--extra all``). The
-platform adapters ``import aiohttp`` at module top; the resolver / admission-path drives
-are gated on ``importlib.util.find_spec("aiohttp")`` and AC-6 uses ``importorskip``.
+platform adapters ``import aiohttp`` at module top; AC-1..5's real-resolver drives are
+gated on ``importlib.util.find_spec("aiohttp")`` (they also assert on the always-run
+``from_dict`` ``.extra`` values), while AC-6 imports the Slack adapter WITHOUT
+``importorskip`` — a missing extra makes AC-6 FAIL (not skip), per the P5 rule that a
+skipped criterion is not a PASS.
 """
 
 from __future__ import annotations
@@ -182,11 +183,7 @@ def _has_aiohttp() -> bool:
 
 # ── AC-RT-F02-1 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_1(loaded, tmp_path):
-    """AC-RT-F02-1: For a Slack coworker, engage mode `mention` renders require_mention/
-    strict_mention/thread_require_mention true with empty patterns/free-response/
-    require_mention_channels, and `pattern` renders the same with a non-empty
-    mention_patterns; the inert config.engage pseudo-key is removed from every rendered
-    profile (worker, orchestrator, default)."""
+    """AC-RT-F02-1: For a Slack coworker, engage mode `mention` renders `platforms.slack.extra.require_mention=true` (+ `strict_mention=true`, `thread_require_mention=true`, `mention_patterns=[]`, `free_response_channels=[]`, `require_mention_channels=[]`), and engage mode `pattern` renders the same with a non-empty `mention_patterns`; the inert `config.engage` spec pseudo-key is removed from every rendered profile."""
     module, _entry = loaded
 
     out = _render(module, tmp_path, _spec_with_engage(_engage_for("slack", "mention")), "s_m")
@@ -211,11 +208,7 @@ def test_ac_rt_f02_1(loaded, tmp_path):
 
 # ── AC-RT-F02-2 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_2(loaded, tmp_path):
-    """AC-RT-F02-2: Engage mode `mention-sticky` renders require_mention true with
-    strict_mention and thread_require_mention false (sticky on) and wins deterministically
-    over a contradicting inherited value planted at the root slack block, platforms.slack,
-    gateway.platforms.slack and gateway.slack (and their extra) — the controlled keys
-    survive only at platforms.slack.extra."""
+    """AC-RT-F02-2: Engage mode `mention-sticky` renders `require_mention=true` with `strict_mention=false` AND `thread_require_mention=false` (sticky ON) while `mention` renders them true (sticky OFF); the mode value wins deterministically over a contradicting inherited value planted at the root `slack:` block, `platforms.slack`, `gateway.platforms.slack`, and `gateway.slack` (and their `extra`) — the controlled keys survive only at `platforms.slack.extra`."""
     module, _entry = loaded
 
     contradiction = {
@@ -259,11 +252,7 @@ def test_ac_rt_f02_2(loaded, tmp_path):
 
 # ── AC-RT-F02-3 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_3(loaded, tmp_path):
-    """AC-RT-F02-3: Engage mode `always-on` renders a bounded free_response_channels
-    (Slack/Discord) / free_response_chats (Telegram) and declared sender_scope renders
-    allowed_channels (Slack/Discord) / allowed_chats (Telegram); Telegram uses its
-    chat-scoped key names while Discord's spellings match Slack; omitting sender_scope
-    preserves an inherited channel restriction while declaring it replaces it."""
+    """AC-RT-F02-3: Engage mode `always-on` renders a bounded non-empty `free_response_channels` (Slack/Discord) / `free_response_chats` (Telegram); declared `sender_scope` renders `allowed_channels` (Slack/Discord) / `allowed_chats` (Telegram); Telegram uses its chat-scoped key names while Discord's spellings match Slack; and omitting `sender_scope` PRESERVES an inherited channel restriction while declaring it replaces it."""
     module, _entry = loaded
 
     for (platform, mode), expected in _CAPS_EXPECTED.items():
@@ -309,11 +298,7 @@ def test_ac_rt_f02_3(loaded, tmp_path):
 
 # ── AC-RT-F02-4 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_4(loaded, tmp_path):
-    """AC-RT-F02-4: The plugin registers no pre_gateway_dispatch (routing) hook, and the
-    render fails closed with CompositionError on a blanket-forward always-on (no bounded
-    channels, empty, or a wildcard including a ["*"] list element), pattern on Discord,
-    mention-sticky on Telegram, pattern without patterns, an unknown mode, an empty/wildcard
-    sender_scope, and any unsupported platform."""
+    """AC-RT-F02-4: The plugin registers no `pre_gateway_dispatch` (routing) hook, and the render fails closed with `CompositionError` on: an `always-on` spec with no bounded channels (empty, missing, scalar `"*"`, or any list containing a `"*"` element — blanket-forward), a declared `sender_scope` that is empty / scalar `"*"` / any list containing a `"*"` element (silently widens access), `pattern` on Discord (no `mention_patterns`), `mention-sticky` on Telegram (no sticky model), `pattern` without `patterns`, an unknown mode, and any unsupported platform."""
     module, entry = loaded
 
     assert "pre_gateway_dispatch" not in entry.hooks_registered
@@ -341,12 +326,7 @@ def test_ac_rt_f02_4(loaded, tmp_path):
 
 # ── AC-RT-F02-5 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_5(loaded):
-    """AC-RT-F02-5: The doc page maps every supported (platform, engage mode) to its
-    exact Hermes key set and lists the unsupported combinations, and records that
-    sender_scope is channel/chat scope (per-user admission is RT-F01/RT-F05), room
-    deliberation is A2A-F18, the no-router/never-blanket-forward invariant, the Discord
-    env-precedence caveat, and that Slack mention-sticky is the native equivalent
-    (broader than NanoClaw), not exact parity."""
+    """AC-RT-F02-5: The doc page `website/docs/user-guide/fleet-engage-modes.md` carries a mapping table with one row per supported `(platform, engage mode)` naming its exact rendered Hermes key set, lists the unsupported combinations, and records: `sender_scope` is channel/chat scope only (per-user admission is RT-F01/RT-F05), room deliberation is A2A-F18 (not gateway fan-out), the no-router/never-blanket-forward invariant, the Discord env-precedence caveat, and that Slack mention-sticky is the native equivalent (broader than remembered-mentions), not exact NanoClaw parity."""
     assert DOC_PAGE.is_file(), f"missing doc page {DOC_PAGE}"
     text = DOC_PAGE.read_text(encoding="utf-8")
     import re as _re
@@ -383,15 +363,9 @@ def test_ac_rt_f02_5(loaded):
     assert "parity" in low or "broader" in low
 
 
-# ── additional hermetic coverage for AC-RT-F02-6 (live) ──────────────────────────
-# AC-RT-F02-6 is a live: criterion (ADR §Scenario outlines). This is the hermetic
-# admission-path proof of the same behaviour; it is deliberately NOT named test_ac_rt_f02_*
-# so an aiohttp skip on a minimal venv never fails an AC criterion.
-def test_admission_path_mention_gate(loaded, tmp_path):
-    """Hermetic coverage for AC-RT-F02-6: a mention-mode Slack render gates messages through
-    the real admission path — un-mentioned group message -> no turn, mentioned -> one turn,
-    thread follow-up without re-mention -> no further turn (strict disables sticky)."""
-    pytest.importorskip("aiohttp")  # non-criterion coverage; runs only with the slack extra
+# ── AC-RT-F02-6 ──────────────────────────────────────────────────────────────────
+def test_ac_rt_f02_6(loaded, tmp_path):
+    """AC-RT-F02-6: For a rendered Slack coworker in `mention` mode, driving the real `SlackAdapter._handle_slack_message` admission path calls the stubbed `handle_message` zero times for an un-mentioned channel message, exactly once for a mentioned one, and not again for an un-mentioned thread follow-up while strict mention is on."""
     module, _entry = loaded
     from gateway.config import PlatformConfig
     from plugins.platforms.slack.adapter import SlackAdapter
@@ -428,11 +402,104 @@ def test_admission_path_mention_gate(loaded, tmp_path):
 
     run = asyncio.run
     run(adapter._handle_slack_message(_event("vpn is down", "100.0")))
-    assert handled == [], "un-mentioned group message must not engage"
-    run(adapter._handle_slack_message(_event("<@UBOT> help", "101.0")))
-    assert len(handled) == 1, "mentioned message must engage"
-    run(adapter._handle_slack_message(_event("<@UBOT> start", "102.0", thread_ts="102.0")))
-    assert len(handled) == 2
-    # strict_mention disables the mentioned-thread sticky wake (this is the discriminator)
-    run(adapter._handle_slack_message(_event("follow up", "103.0", thread_ts="102.0")))
-    assert len(handled) == 2, "strict mention must not sticky-wake an un-mentioned follow-up"
+    assert len(handled) == 0, "un-mentioned channel message must not engage"
+    run(adapter._handle_slack_message(_event("<@UBOT> start", "101.0", thread_ts="101.0")))
+    assert len(handled) == 1, "mentioned message must engage once"
+    run(adapter._handle_slack_message(_event("follow up", "102.0", thread_ts="101.0")))
+    assert len(handled) == 1, "strict mention must not sticky-wake an un-mentioned follow-up"
+
+
+# ── additional hermetic hardening (non-criterion; append-only, does not touch the six
+#    architect-frozen test_ac_rt_f02_* functions or their P5-join docstrings) ─────────
+def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
+    """Hardening for AC-RT-F02-4: a blank/whitespace channel or sender_scope member
+    (an empty adapter allowlist == unrestricted) and a blank pattern (a
+    match-everything regex) are silent blanket-forwards, so the render rejects them
+    with CompositionError, not just the ``*`` wildcard the criterion enumerates."""
+    module, _entry = loaded
+
+    def _reject(engage: dict, tag: str):
+        with pytest.raises(module.CompositionError):
+            _render(module, tmp_path, _spec_with_engage(engage), tag)
+
+    _reject({"slack": {"mode": "always-on", "channels": [""]}}, "chan_blank")
+    _reject({"slack": {"mode": "always-on", "channels": ["   "]}}, "chan_ws")
+    _reject({"slack": {"mode": "always-on", "channels": ["C-ok", ""]}}, "chan_blank_member")
+    _reject({"slack": {"mode": "mention", "sender_scope": [""]}}, "scope_blank")
+    _reject({"slack": {"mode": "mention", "sender_scope": [" "]}}, "scope_ws")
+    _reject({"slack": {"mode": "mention", "sender_scope": ["C9", "  "]}}, "scope_blank_member")
+    _reject({"slack": {"mode": "pattern", "patterns": [""]}}, "pat_blank")
+    _reject({"slack": {"mode": "pattern", "patterns": ["  "]}}, "pat_ws")
+    _reject({"telegram": {"mode": "pattern", "patterns": [""]}}, "tg_pat_blank")
+
+
+def test_render_engage_alias_strip_all_platforms_preserves_sentinels(loaded, tmp_path):
+    """Hardening for AC-RT-F02-2/-3: every controlled key AND the scope key are
+    stripped from all eight loader-alias locations for slack, discord and telegram
+    (so nothing bridges over the rendered gate), the canonical set + declared scope
+    land only at platforms.<p>.extra, unrelated sentinel keys (enabled/token/custom
+    .extra) survive, the default and orchestrator profiles render canonical too, and
+    the inbound doc link is present in multi-profile-gateways.md."""
+    module, _entry = loaded
+
+    mode_for = {"slack": "mention-sticky", "discord": "mention-sticky", "telegram": "mention"}
+    for platform, mode in mode_for.items():
+        expected = _CAPS_EXPECTED[(platform, mode)]
+        scope_key = _SCOPE_KEY[platform]
+        controlled = set(expected)
+        checkset = controlled | {scope_key}
+
+        # a distinct stale value for every controlled key + the scope key, planted
+        # at each of the eight plain/.extra alias locations, alongside sentinels
+        stale = {k: f"STALE-{k}" for k in controlled}
+        stale[scope_key] = ["C-STALE"]
+
+        def _leaf(tag):
+            return {**copy.deepcopy(stale), "enabled": True, "token": f"tok-{tag}",
+                    "extra": {**copy.deepcopy(stale), "custom_sentinel": f"keep-{tag}"}}
+
+        alias_block = {
+            platform: _leaf("root"),
+            "platforms": {platform: _leaf("p")},
+            "gateway": {platform: _leaf("gw"),
+                        "platforms": {platform: _leaf("gwp")}},
+        }
+        out = _render(
+            module, tmp_path,
+            _spec_with_engage(_engage_for(platform, mode, sender_scope=["C-new"]), alias_block),
+            f"alias_{platform}")
+        cfg = _worker_config(out)
+
+        def _plain(node):
+            return set(node or {}) & checkset
+
+        def _in_extra(node):
+            return set((node or {}).get("extra", {})) & checkset
+
+        gw = cfg.get("gateway") or {}
+        assert _plain(cfg.get(platform)) == set() and _in_extra(cfg.get(platform)) == set()
+        pnode = cfg.get("platforms", {}).get(platform)
+        assert _plain(pnode) == set()  # platforms.<p>.extra legitimately holds canonical
+        assert _plain(gw.get(platform)) == set() and _in_extra(gw.get(platform)) == set()
+        gwp = gw.get("platforms", {}).get(platform)
+        assert _plain(gwp) == set() and _in_extra(gwp) == set()
+
+        got = _extra(cfg, platform)
+        for k, v in expected.items():
+            assert got[k] == v, (platform, k, got.get(k))
+        assert got[scope_key] == ["C-new"], (platform, got.get(scope_key))
+
+        # unrelated sentinels survive at platforms.<p> and its extra
+        assert pnode.get("enabled") is True
+        assert pnode.get("token") == "tok-p"
+        assert pnode.get("extra", {}).get("custom_sentinel") == "keep-p"
+
+        # default + orchestrator profiles render the canonical mode keys too
+        for prof in ("default", "orchestrator"):
+            pextra = _extra(_read_yaml(out / prof / "config.yaml"), platform)
+            for k, v in expected.items():
+                assert pextra[k] == v, (prof, platform, k)
+
+    mpg = REPO_ROOT / "website" / "docs" / "user-guide" / "multi-profile-gateways.md"
+    assert mpg.is_file(), f"missing {mpg}"
+    assert "fleet-engage-modes.md" in mpg.read_text(encoding="utf-8"), "inbound doc link absent"
