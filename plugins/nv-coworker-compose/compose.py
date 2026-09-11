@@ -51,6 +51,65 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Engage-mode → per-platform gate keys (RT-F02). ``config.engage`` is the plugin's
+# OWN spec vocabulary — a pseudo-key with no core reader — so _render_engage
+# translates it into the concrete keys each platform adapter reads under
+# ``platforms.<p>.extra`` and removes it. This table is fail-closed: a
+# (platform, mode) pair absent here raises CompositionError rather than rendering
+# an unrecognised or unrestricting gate. The key sets DIVERGE per platform because
+# the adapters diverge — Slack carries the full strict/thread/pattern set; Discord
+# has no strict_mention/mention_patterns resolver (so ``pattern`` is unsupported);
+# Telegram is chat-scoped (free_response_chats/allowed_chats) with no strict/thread
+# sticky model (so ``mention-sticky`` is unsupported). ``mention`` keeps sticky OFF
+# (strict + thread both true); ``mention-sticky`` turns it ON (both false), which is
+# what enables Slack's _register_mentioned_thread wake.
+_ALL_ENGAGE_MODES = ("mention", "mention-sticky", "pattern", "always-on")
+
+_ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
+    "slack": {
+        "scope_key": "allowed_channels",
+        "free_response_key": "free_response_channels",
+        "modes": {
+            "mention": {"require_mention": True, "strict_mention": True,
+                        "thread_require_mention": True, "mention_patterns": [],
+                        "free_response_channels": [], "require_mention_channels": []},
+            "mention-sticky": {"require_mention": True, "strict_mention": False,
+                               "thread_require_mention": False, "mention_patterns": [],
+                               "free_response_channels": [], "require_mention_channels": []},
+            "pattern": {"require_mention": True, "strict_mention": True,
+                        "thread_require_mention": True, "mention_patterns": [],
+                        "free_response_channels": [], "require_mention_channels": []},
+            "always-on": {"require_mention": True, "strict_mention": False,
+                          "thread_require_mention": False, "mention_patterns": [],
+                          "free_response_channels": [], "require_mention_channels": []},
+        },
+    },
+    "discord": {
+        "scope_key": "allowed_channels",
+        "free_response_key": "free_response_channels",
+        "modes": {
+            "mention": {"require_mention": True, "thread_require_mention": True,
+                        "free_response_channels": []},
+            "mention-sticky": {"require_mention": True, "thread_require_mention": False,
+                               "free_response_channels": []},
+            "always-on": {"require_mention": True, "thread_require_mention": False,
+                          "free_response_channels": []},
+        },
+    },
+    "telegram": {
+        "scope_key": "allowed_chats",
+        "free_response_key": "free_response_chats",
+        "modes": {
+            "mention": {"require_mention": True, "mention_patterns": [],
+                        "free_response_chats": [], "observe_unmentioned_group_messages": False},
+            "pattern": {"require_mention": True, "mention_patterns": [],
+                        "free_response_chats": [], "observe_unmentioned_group_messages": False},
+            "always-on": {"require_mention": True, "mention_patterns": [],
+                          "free_response_chats": [], "observe_unmentioned_group_messages": False},
+        },
+    },
+}
+
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
 # (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
 _DIST_OWNED: List[str] = [
@@ -147,6 +206,161 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
     stale unsafe value untouched, so this always overwrites the leaf."""
     for dotted, value in _RETENTION_INVARIANTS.items():
         _set_dotted(config, dotted, value)
+
+
+def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
+    """Every loader-alias location a controlled key can occupy for ``platform``:
+    root ``<p>``, ``platforms.<p>``, ``gateway.<p>``, ``gateway.platforms.<p>``.
+    The loader bridges values from these locations over ``platforms.<p>.extra`` at
+    load time (gateway/config.py:1676-1809 lifts require_mention/mention_patterns/
+    free_response_channels), so a stale inherited value left in any of them would
+    override the rendered gate — which is why they are all stripped."""
+    nodes: List[Dict[str, Any]] = []
+
+    def _add(node: Any) -> None:
+        if isinstance(node, dict) and not any(node is seen for seen in nodes):
+            nodes.append(node)
+
+    _add(config.get(platform))
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        _add(platforms.get(platform))
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        _add(gateway.get(platform))
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            _add(gplatforms.get(platform))
+    return nodes
+
+
+def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> None:
+    """Pop ``key`` from every alias location and its nested ``extra`` block."""
+    for node in _engage_alias_nodes(config, platform):
+        node.pop(key, None)
+        extra = node.get("extra")
+        if isinstance(extra, dict):
+            extra.pop(key, None)
+
+
+def _engage_extra_target(config: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    """The canonical write destination ``config["platforms"][<p>]["extra"]``,
+    created as needed. Never replaces an existing block, so unrelated keys (token,
+    enabled, a hand-set extra value, an inherited scope) are preserved."""
+    platforms = config.setdefault("platforms", {})
+    if not isinstance(platforms, dict):
+        platforms = config["platforms"] = {}
+    block = platforms.setdefault(platform, {})
+    if not isinstance(block, dict):
+        block = platforms[platform] = {}
+    extra = block.setdefault("extra", {})
+    if not isinstance(extra, dict):
+        extra = block["extra"] = {}
+    return extra
+
+
+def _is_blank_or_wildcard(value: Any) -> bool:
+    """A member meaning "no restriction" to an adapter: a blank/whitespace id or the
+    ``*`` wildcard. An empty allowlist is treated as unrestricted by the resolvers,
+    so such a member silently widens access — blanket-forward."""
+    return str(value).strip() in ("", "*")
+
+
+def _bounded_ids(values: Any, what: str) -> List[Any]:
+    """Validate a bounded, non-wildcard allowlist (always-on channels or
+    sender_scope). Missing/empty, a scalar, or any blank/``*`` member all mean "no
+    restriction" and are refused rather than rendered."""
+    if isinstance(values, str) or not isinstance(values, list) or not values:
+        raise CompositionError(
+            f"{what} must be a non-empty list of ids; empty, missing or a bare "
+            "scalar would blanket-forward (an empty allowlist is unrestricted)")
+    if any(_is_blank_or_wildcard(v) for v in values):
+        raise CompositionError(
+            f"{what} contains a blank or '*' wildcard member (blanket-forward); "
+            "list exact ids")
+    return list(values)
+
+
+def _bounded_patterns(values: Any, platform: str) -> List[str]:
+    """Validate the non-empty pattern list a ``pattern`` mode requires. A blank
+    pattern compiles to a match-everything regex, so every element must be a
+    non-empty string."""
+    if isinstance(values, str) or not isinstance(values, list) or not values:
+        raise CompositionError(
+            f"engage mode 'pattern' for platform {platform!r} requires a non-empty "
+            "'patterns' list")
+    if any(not isinstance(p, str) or not p.strip() for p in values):
+        raise CompositionError(
+            f"engage mode 'pattern' for platform {platform!r} requires non-empty "
+            "string patterns (a blank pattern matches everything)")
+    return list(values)
+
+
+def _render_engage(config: Dict[str, Any]) -> None:
+    """Translate the plugin's ``config.engage`` block into the concrete per-platform
+    gate keys the adapters read under ``platforms.<p>.extra``, then remove the inert
+    ``engage`` pseudo-key. Deterministic (canonical reset + alias strip), fail-closed
+    for unsupported platform/mode combinations, and never emits an unrestricting
+    (blanket-forward) gate. Registers no routing hook — engagement stays per-profile
+    adapter config. See website/docs/user-guide/fleet-engage-modes.md."""
+    engage = config.pop("engage", None)
+    if engage is None:
+        return
+    if not isinstance(engage, dict):
+        raise CompositionError(
+            f"engage must be a mapping of platform -> spec, got {type(engage).__name__}")
+    for platform, block in engage.items():
+        _render_engage_platform(config, str(platform), block)
+
+
+def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -> None:
+    caps = _ENGAGE_CAPS.get(platform)
+    if caps is None:
+        raise CompositionError(
+            f"engage-mode rendering not supported for platform {platform!r}; "
+            "supported: slack, discord, telegram")
+    if not isinstance(block, dict):
+        raise CompositionError(
+            f"engage spec for platform {platform!r} must be a mapping, "
+            f"got {type(block).__name__}")
+
+    mode = block.get("mode")
+    modes = caps["modes"]
+    if mode not in modes:
+        if mode not in _ALL_ENGAGE_MODES:
+            raise CompositionError(
+                f"unknown engage mode {mode!r} for platform {platform!r}; "
+                f"supported modes: {', '.join(_ALL_ENGAGE_MODES)}")
+        raise CompositionError(
+            f"engage mode {mode!r} not supported for platform {platform!r}; "
+            f"supported for {platform}: {', '.join(modes)}")
+
+    canonical = copy.deepcopy(modes[mode])
+    if mode == "pattern":
+        canonical["mention_patterns"] = _bounded_patterns(block.get("patterns"), platform)
+    elif mode == "always-on":
+        canonical[caps["free_response_key"]] = _bounded_ids(
+            block.get("channels"),
+            f"engage always-on channels for platform {platform!r}")
+
+    # Strip every controlled key (the union of the platform's mode-dict keys) from
+    # ALL aliases, then write the canonical set to platforms.<p>.extra so nothing
+    # bridges over it at load time. update() preserves unrelated keys in that extra.
+    controlled = {key for md in modes.values() for key in md}
+    for key in controlled:
+        _strip_engage_key(config, platform, key)
+    _engage_extra_target(config, platform).update(canonical)
+
+    # Scope is handled apart from the mode keys: written only when the coworker
+    # declares sender_scope (else an inherited channel/chat restriction is PRESERVED,
+    # never reset — resetting it would widen access).
+    if "sender_scope" in block:
+        scope = _bounded_ids(
+            block.get("sender_scope"),
+            f"engage sender_scope for platform {platform!r}")
+        scope_key = caps["scope_key"]
+        _strip_engage_key(config, platform, scope_key)
+        _engage_extra_target(config, platform)[scope_key] = scope
 
 
 def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> Dict[str, Any]:
@@ -367,6 +581,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         resolved = _resolve_type(tname, tinfo or {}, spines)
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        _render_engage(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
@@ -374,6 +589,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     default_profile = _safe_name("profile", data.get("default_profile", "default"))
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     _enforce_retention(default_config)
+    _render_engage(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
