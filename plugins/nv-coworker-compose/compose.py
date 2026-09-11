@@ -249,13 +249,17 @@ def _engage_extra_target(config: Dict[str, Any], platform: str) -> Dict[str, Any
     enabled, a hand-set extra value, an inherited scope) are preserved."""
     platforms = config.setdefault("platforms", {})
     if not isinstance(platforms, dict):
-        platforms = config["platforms"] = {}
+        raise CompositionError(
+            f"config 'platforms' must be a mapping to render engage keys, "
+            f"got {type(platforms).__name__}")
     block = platforms.setdefault(platform, {})
     if not isinstance(block, dict):
-        block = platforms[platform] = {}
+        raise CompositionError(
+            f"config 'platforms.{platform}' must be a mapping, got {type(block).__name__}")
     extra = block.setdefault("extra", {})
     if not isinstance(extra, dict):
-        extra = block["extra"] = {}
+        raise CompositionError(
+            f"config 'platforms.{platform}.extra' must be a mapping, got {type(extra).__name__}")
     return extra
 
 
@@ -326,11 +330,13 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
 
     mode = block.get("mode")
     modes = caps["modes"]
+    # isinstance guard first: a non-string mode (e.g. a YAML list) is unhashable
+    # and ``in`` would raise TypeError instead of failing closed.
+    if not isinstance(mode, str) or mode not in _ALL_ENGAGE_MODES:
+        raise CompositionError(
+            f"unknown engage mode {mode!r} for platform {platform!r}; "
+            f"supported modes: {', '.join(_ALL_ENGAGE_MODES)}")
     if mode not in modes:
-        if mode not in _ALL_ENGAGE_MODES:
-            raise CompositionError(
-                f"unknown engage mode {mode!r} for platform {platform!r}; "
-                f"supported modes: {', '.join(_ALL_ENGAGE_MODES)}")
         raise CompositionError(
             f"engage mode {mode!r} not supported for platform {platform!r}; "
             f"supported for {platform}: {', '.join(modes)}")

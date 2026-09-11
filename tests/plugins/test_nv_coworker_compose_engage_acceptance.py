@@ -409,19 +409,18 @@ def test_ac_rt_f02_6(loaded, tmp_path):
     assert len(handled) == 1, "strict mention must not sticky-wake an un-mentioned follow-up"
 
 
-# ── additional hermetic hardening (non-criterion; append-only, does not touch the six
-#    architect-frozen test_ac_rt_f02_* functions or their P5-join docstrings) ─────────
 def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     """Hardening for AC-RT-F02-4: a blank/whitespace channel or sender_scope member
-    (an empty adapter allowlist == unrestricted) and a blank pattern (a
-    match-everything regex) are silent blanket-forwards, so the render rejects them
-    with CompositionError, not just the ``*`` wildcard the criterion enumerates."""
+    (an empty adapter allowlist == unrestricted), a blank pattern (a match-everything
+    regex), and a non-string mode all fail closed with CompositionError, not just the
+    ``*`` wildcard the criterion enumerates."""
     module, _entry = loaded
 
     def _reject(engage: dict, tag: str):
         with pytest.raises(module.CompositionError):
             _render(module, tmp_path, _spec_with_engage(engage), tag)
 
+    _reject({"slack": {"mode": ["mention"]}}, "mode_non_string")
     _reject({"slack": {"mode": "always-on", "channels": [""]}}, "chan_blank")
     _reject({"slack": {"mode": "always-on", "channels": ["   "]}}, "chan_ws")
     _reject({"slack": {"mode": "always-on", "channels": ["C-ok", ""]}}, "chan_blank_member")

@@ -120,5 +120,8 @@ unrestricting gate.
 - **Native breadth, not exact NanoClaw parity.** Slack `mention-sticky` maps to
   Slack's native mentioned-thread wake, which also re-engages on bot-authored
   threads and active sessions — **broader** than NanoClaw's remembered-mention, so
-  it is the native equivalent, not exact parity. Discord and Telegram have no
-  `strict_mention` / thread-sticky analog at all (hence those modes fail closed).
+  it is the native equivalent, not exact parity. Discord lacks Slack's
+  `strict_mention` gate, but `mention-sticky` uses its native
+  `thread_require_mention: false` bot-thread wake. Telegram has no thread-sticky
+  mode; its `mention` and `pattern` modes also wake on a reply addressed to the
+  bot, so those mappings are broader than literal mention/pattern matching.
