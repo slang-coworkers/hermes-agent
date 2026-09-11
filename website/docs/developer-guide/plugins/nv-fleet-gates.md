@@ -58,12 +58,31 @@ runs in), never from a plugin-writable setting, so a worker cannot forge it.
   escalates to the human-approval gate with a stable `rule_key` of the form
   `wire:<from>:<to>`.
 
-## Load-time restricted-set assertion
+## Restricted-set integrity: load-time refusal + gate-time backstop
 
-At load the plugin asserts, against the running tool registry, that the core
-tools it floors are present (accepting both the legacy and canonical spellings so
-the check holds across a tool rename) and that no shell-capable/dangerous-named
-registry tool is left un-gated. If either fails the plugin refuses to load
-(`enabled: false`, `error` set) rather than fail open. `message_agent` is the one
-documented exclusion — it is injected, not registry-registered, so it is matched
-by constant.
+The plugin checks, against the running tool registry, that the core tools it
+floors are present (accepting both the legacy and canonical spellings so the
+check holds across a tool rename) and that no shell-capable/dangerous-named
+registry tool is left un-gated. Because raising in `register()` disables the
+plugin — which removes the veto and is therefore **fail open** — the check runs
+in two places:
+
+- **Load-time refusal (best-effort).** If the registry is essentially complete
+  (missing at most one restricted-core group — the shape of a genuine
+  rename/removal) and a core tool is absent or a dangerous tool is un-gated, the
+  plugin refuses to load (`enabled: false`, `error` set). This is the loud,
+  early signal for a tampered toolset.
+- **Deferral on a still-initializing registry.** `register()` can run before
+  core tool discovery has completed — `hermes plugins doctor` and `hermes kanban
+  dispatch` see an empty registry (0/12), an in-process dashboard profile-switch
+  reload sees 1/12. A registry missing that many tools is indistinguishable from
+  a genuine multi-tool removal, so refusing to load would fail open. Instead the
+  veto is registered anyway and the integrity check is deferred to the gate.
+- **Gate-time backstop (authoritative, fail-closed).** Each `pre_tool_call`
+  re-checks and stays **blocked** until the registry is complete; if restricted
+  core is genuinely absent or a dangerous tool is un-gated, no gated call is ever
+  approved. Once the set is clean the verdict is cached and later calls skip the
+  re-scan.
+
+`message_agent` is the one documented exclusion from the presence scan — it is
+injected, not registry-registered, so it is matched by constant in the gate.

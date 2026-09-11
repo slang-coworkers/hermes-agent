@@ -67,6 +67,41 @@ _VENDORED_ADMIN = {"cronjob_manage"}
 
 _MENTION_RE = re.compile(r"@\w")
 
+# Raising in register() disables the plugin, removing the veto = fail OPEN, so
+# the load-time refusal fires only when the registry is essentially complete (at
+# most one restricted group absent — the shape of a rename/removal). A larger
+# gap cannot be told apart from a still-initializing registry, so it is not
+# raised on; restricted-set enforcement defers to _restricted_block at the gate,
+# which fails closed.
+_MAX_ABSENT_WHEN_COMPLETE = 1
+
+
+def _scan_restricted(running):
+    """Return (missing restricted-core groups, unclassified shell-capable names).
+
+    ``running`` is the current registry tool-name set. ``message_agent`` is
+    injected (never ``registry.register``-ed) so it never appears here; it is
+    matched by constant in the gate instead.
+    """
+    missing = [grp[0] for grp in _CORE_PRESENCE_GROUPS if not any(s in running for s in grp)]
+    unclassified = sorted(
+        n for n in running
+        if predicates.looks_dangerous_name(n) and canonicalise(n) not in _RESTRICTED_CANON
+    )
+    return missing, unclassified
+
+
+def _registry_essentially_complete(missing) -> bool:
+    """True when the running registry is complete but for a small gap.
+
+    A gap this small (<= _MAX_ABSENT_WHEN_COMPLETE) is treated as a genuine
+    rename/removal worth a loud load-time refusal; a larger one cannot be told
+    apart from a still-initializing registry (`hermes plugins doctor` and `hermes
+    kanban dispatch` see 0/12, an in-process dashboard profile-switch reload
+    1/12) and is deferred to the gate-time fail-closed backstop instead.
+    """
+    return len(missing) <= _MAX_ABSENT_WHEN_COMPLETE
+
 # Request-local (NOT process-global) carrier from the pre_command observer to
 # the /codex-critique slash handler in the same dispatch context, so the slash
 # alias can correlate to its session without a shared cell that would leak
@@ -181,36 +216,29 @@ def register(ctx) -> None:
     # map, where a per-profile entry for an unmanaged profile would survive.
     managed_profile_roles = _managed_profile_roles()
 
-    # --- LOAD-TIME RESTRICTED-SET ASSERTION ---------------------------------
-    # A raise here makes discover_and_load record loaded.error and leave the
-    # plugin disabled (fail-LOAD, not fail-open).
+    # --- load-time restricted-set refusal (best-effort early signal) --------
+    # See _registry_essentially_complete: raising here disables the plugin
+    # (loaded.error), removing the veto = fail OPEN, so it fires only when the
+    # registry is essentially complete. On a still-initializing registry the veto
+    # is registered anyway and the check defers to the gate-time backstop
+    # (_restricted_block), which fails closed.
     from tools.registry import registry
 
-    running = set(registry.get_all_tool_names() or [])
-    # `hermes plugins doctor` calls register() with an EMPTY registry (builtins
-    # undiscovered) — the only case where the presence assertion is skipped. A
-    # non-empty registry that is missing a restricted core tool is a real
-    # rename/removal and must fail-load, not slip through.
-    if running:
-        missing = [grp[0] for grp in _CORE_PRESENCE_GROUPS if not any(s in running for s in grp)]
-        if missing:
+    _missing0, _unclassified0 = _scan_restricted(set(registry.get_all_tool_names() or []))
+    if _registry_essentially_complete(_missing0):
+        if _missing0:
             raise RuntimeError(
                 "nv-fleet-gates refusing to load: restricted core tools absent from the "
-                f"running registry (renamed/removed?): {sorted(missing)}"
+                f"running registry (renamed/removed?): {sorted(_missing0)}"
             )
-    # A shell-capable/dangerous-named registry tool that the gate does not floor
-    # would let the fleet run un-gated shell. message_agent is the one documented
-    # exclusion — it is injected, never registry.register-ed, so it never appears
-    # here and is matched by constant instead.
-    unclassified = sorted(
-        n for n in running
-        if predicates.looks_dangerous_name(n) and canonicalise(n) not in _RESTRICTED_CANON
-    )
-    if unclassified:
-        raise RuntimeError(
-            "nv-fleet-gates refusing to load: shell-capable/dangerous registry tools are "
-            f"not in the gated restricted set: {unclassified}"
-        )
+        # A shell-capable/dangerous-named tool the gate does not floor would let
+        # the fleet run un-gated shell. message_agent is injected, never
+        # registry.register-ed, so it never appears here (matched by constant).
+        if _unclassified0:
+            raise RuntimeError(
+                "nv-fleet-gates refusing to load: shell-capable/dangerous registry tools are "
+                f"not in the gated restricted set: {_unclassified0}"
+            )
 
     # --- role / identity ----------------------------------------------------
     def _role() -> str:
@@ -342,10 +370,40 @@ def register(ctx) -> None:
                     )
         return None
 
+    # Lazy restricted-set backstop: when register() ran against a still-
+    # initializing registry the load-time refusal was skipped (to avoid
+    # fail-open), so re-check here on each call and block until the restricted
+    # set is complete. A genuine missing-core / unclassified shell tool fails
+    # CLOSED (block), never open. Only a clean verdict is cached; once clean the
+    # registry does not lose tools mid-session, so later calls skip the re-scan.
+    _restricted_checked = {}
+
+    def _restricted_block():
+        if _restricted_checked.get("ok"):
+            return None
+        from tools.registry import registry as _reg
+
+        miss, uncl = _scan_restricted(set(_reg.get_all_tool_names() or []))
+        if miss:
+            return _block(
+                f"nv-fleet-gates: restricted core tools absent at gate time {sorted(miss)} "
+                "— refusing (fail-closed)"
+            )
+        if uncl:
+            return _block(
+                f"nv-fleet-gates: unclassified shell-capable tools present at gate time {uncl} "
+                "— refusing (fail-closed)"
+            )
+        _restricted_checked["ok"] = True
+        return None
+
     def _gate(tool_name=None, args=None, session_id=None, **kwargs):
         try:
             canon = canonicalise(tool_name or "")
             args = args if isinstance(args, dict) else {}
+            backstop = _restricted_block()
+            if backstop:
+                return backstop
             for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block):
                 blocked = predicate(canon, args)
                 if blocked:
@@ -491,7 +549,7 @@ def register(ctx) -> None:
         print("usage: hermes wire {add <from> <to> [--gated]|remove <from> <to>|list}")
         return 2
 
-    # --- registration (assertion has already passed) ------------------------
+    # --- registration -------------------------------------------------------
     ctx.register_hook("pre_tool_call", _gate)
     ctx.register_hook("post_tool_call", _observe)
     ctx.register_hook("pre_command", _capture_session)
