@@ -104,8 +104,16 @@ profile into its own environment at startup.
 exactly one `HERMES_DUMP_REQUESTS=true` line into each coworker profile's active
 `.env` (idempotently — a re-install collapses any prior conflicting assignment to
 the one canonical line and never mutates the running process's environment). No
-operator step is needed for these surfaces; the render also carries the toggle in
-each distribution's `.env.EXAMPLE` as the documented default.
+operator step is needed for these surfaces on an unmanaged install; the render
+also carries the toggle in each distribution's `.env.EXAMPLE` as the documented
+default.
+
+On a **managed install**, the profile write defers to machine policy: if the
+managed scope already sets `HERMES_DUMP_REQUESTS` to a truthy value, install
+treats the profile as already enabled and writes nothing; if managed policy pins
+the key falsy or the install is package-managed, install surfaces an explicit
+error instead of silently overriding policy — set `HERMES_DUMP_REQUESTS=true` in
+the managed environment (`/etc/hermes/.env`) and re-run onboarding.
 
 > In-process cron **agent** jobs tick inside a secret scope, like secondary
 > profiles, and are covered by the gateway process environment (surface 1), not

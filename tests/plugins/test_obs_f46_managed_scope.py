@@ -95,6 +95,24 @@ def test_managed_falsy_raises_and_leaves_target_untouched(tmp_path, monkeypatch)
     assert not (profile / ".env").exists()
 
 
+def test_managed_policy_read_failure_raises_and_leaves_target_untouched(tmp_path, monkeypatch):
+    module = _load(tmp_path, monkeypatch)
+    # Invalid UTF-8 in the managed .env: read_text(encoding="utf-8") raises
+    # UnicodeDecodeError, which managed_scope.load_managed_env swallows to {}
+    # (fail-open). apply_capture_env must fail CLOSED rather than write the profile.
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / ".env").write_bytes(b"\xff\xfe " + CAPTURE_KEY.encode() + b"=true\n")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    managed_scope.invalidate_managed_cache()
+
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    with pytest.raises(module.CaptureEnvManagedError):
+        module.apply_capture_env(str(profile))
+    assert not (profile / ".env").exists()
+
+
 def test_package_managed_install_raises_and_leaves_target_untouched(tmp_path, monkeypatch):
     module = _load(tmp_path, monkeypatch)
     # No managed .env carries the key, but the install is package-managed.

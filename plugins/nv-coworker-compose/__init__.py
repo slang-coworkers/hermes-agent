@@ -585,13 +585,29 @@ def apply_capture_env(profile_home: Union[str, Path]) -> None:
         from hermes_cli import managed_scope
         from hermes_cli.config import get_managed_system
 
-        managed_values = managed_scope.load_managed_env()
         managed_dir = managed_scope.get_managed_dir()
         managed_system = get_managed_system()
     except Exception as exc:  # noqa: BLE001 — refuse the write rather than guess policy
         raise CaptureEnvManagedError(
             f"cannot verify managed policy for {CAPTURE_KEY}; refusing to modify {env_path}"
         ) from exc
+
+    # load_managed_env() fails OPEN — managed_scope._cached_read swallows a read or
+    # decode error and returns {} — so probe the managed .env directly first: an
+    # unreadable managed policy must fail CLOSED here, never silently permit a local
+    # write that might defy it. An absent managed .env is the normal no-scope case.
+    if managed_dir is not None:
+        managed_env_path = managed_dir / ".env"
+        try:
+            managed_env_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read managed policy {managed_env_path}; refusing to modify {env_path}"
+            ) from exc
+
+    managed_values = managed_scope.load_managed_env()
 
     if CAPTURE_KEY in managed_values:
         if is_truthy_value(managed_values[CAPTURE_KEY]):
