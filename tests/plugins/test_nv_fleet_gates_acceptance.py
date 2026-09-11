@@ -10,8 +10,9 @@ resolver, asserting the OUTCOME of each acceptance criterion through production
 seams with realistic payloads.
 
 One ``test_ac_<req_id>_<n>`` per ``pytest:`` acceptance-criterion id, in ADR
-order. The ``desktop:`` (AC-A2A-F19-3) and ``live:`` (AC-CH-F51-1) ids are proven
-by the spec / scenario file and have no function here.
+order (19 pytest ids). The two ``live:`` ids (AC-A2A-F19-3 and AC-CH-F51-1) are
+proven by their scenario files under ``tests/e2e-scenarios/LOOP-F37/`` and have
+no function here.
 
 MUST fail on the stock v2026.8.31 tree (plugin dir absent -> the fixture's
 ``pytest.fail``) and pass once ``plugins/nv-fleet-gates/`` exists. Behaviour
@@ -122,6 +123,18 @@ def _gate(manager, tool_name, args, session_id="sess-1", **kwargs):
 
 def _act(d):
     return d.get("action") if isinstance(d, dict) else None
+
+
+def _relink(target, link):
+    """Point `link` at `target`, replacing whatever discover_builtin_tools()
+    bootstrapped there (it creates a real HERMES_HOME/memories dir)."""
+    link = Path(link)
+    if link.is_symlink() or link.exists():
+        if link.is_dir() and not link.is_symlink():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+    os.symlink(target, link)
 
 
 def _run_critique(monkeypatch, session_id, verdict="approve"):
@@ -281,8 +294,7 @@ def test_ac_loop_f37_7(tmp_path, monkeypatch):
     # clone. The schema-valid target still resolves outside the caller's tree -> block.
     mem_add = {"action": "add", "target": "memory", "content": "y"}
     (home_w / "shared-learnings").mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(home_w / "memories", ignore_errors=True)  # discover_builtin_tools bootstraps a real memories/ dir
-    os.symlink(home_w / "shared-learnings", home_w / "memories")
+    _relink(home_w / "shared-learnings", home_w / "memories")   # discover_builtin_tools() made a real memories dir
     assert _act(_gate(worker, "memory", mem_add)) == "block"
 
     intree, home_it, _ = _load(tmp_path, monkeypatch, profile="worker-b", edges_db=edges)
@@ -293,8 +305,7 @@ def test_ac_loop_f37_7(tmp_path, monkeypatch):
     orch, home_o, _ = _load(tmp_path, monkeypatch, profile="orch", role="orchestrator", edges_db=edges)
     _loaded(orch)
     (home_o / "shared-learnings").mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(home_o / "memories", ignore_errors=True)  # discover_builtin_tools bootstraps a real memories/ dir
-    os.symlink(home_o / "shared-learnings", home_o / "memories")
+    _relink(home_o / "shared-learnings", home_o / "memories")
     assert _act(_gate(orch, "skill_manage", skill_op("write_file", outside))) != "block"
     assert _act(_gate(orch, "memory", mem_add)) != "block"   # orchestrator exempt even when the store path escapes
 
