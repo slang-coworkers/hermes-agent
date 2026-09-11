@@ -276,10 +276,8 @@ def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
                     raise CompositionError(
                         f"platform {key!r} under 'platforms' must use its canonical name {canonical!r}"
                     )
-            if isinstance(block, dict):
-                extra = block.get("extra")
-                if extra is not None and not isinstance(extra, dict):
-                    raise CompositionError(f"platforms.{key}: 'extra' must be a mapping")
+            if isinstance(block, dict) and "extra" in block and not isinstance(block["extra"], dict):
+                raise CompositionError(f"platforms.{key}: 'extra' must be a mapping")
     for location, platform in _iter_noncanonical_platform_keys(config):
         raise CompositionError(
             f"platform {platform!r} must be declared under 'platforms.{platform}', "

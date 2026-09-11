@@ -107,28 +107,31 @@ def test_layout_refuses_noncanonical_platform_key_spelling(module, tmp_path, bad
         _render(module, tmp_path, spec, f"badkey_{badkey.strip()}")
 
 
-def test_layout_refuses_non_mapping_extra_on_coworker(module, tmp_path):
-    """A platform block whose 'extra' is a non-mapping scalar is refused at render
-    time. Left in place it would be written to config.yaml and break the runtime
-    platform merge, silently discarding the enforced multiplex/allowlist."""
+@pytest.mark.parametrize("bad_extra", ["bad", None])
+def test_layout_refuses_non_mapping_extra_on_coworker(module, tmp_path, bad_extra):
+    """A platform block whose present 'extra' is not a mapping — a scalar or an
+    explicit null — is refused at render time. Left in place it would be written
+    to config.yaml, and the runtime loader cannot merge that shape: it drops the
+    platform config, silently discarding the enforced allowlist."""
     spec = _spec()
-    spec["types"]["worker"]["config"] = {"platforms": {"telegram": {"enabled": True, "extra": "bad"}}}
+    spec["types"]["worker"]["config"] = {"platforms": {"telegram": {"enabled": True, "extra": bad_extra}}}
     with pytest.raises(module.CompositionError):
-        _render(module, tmp_path, spec, "cw_bad_extra")
+        _render(module, tmp_path, spec, f"cw_bad_extra_{bad_extra}")
 
 
-def test_layout_refuses_non_mapping_extra_on_default(module, tmp_path):
+@pytest.mark.parametrize("bad_extra", ["bad", None])
+def test_layout_refuses_non_mapping_extra_on_default(module, tmp_path, bad_extra):
     """Same rejection on the DEFAULT profile's platform block."""
     spec = _spec()
-    spec["default_config"] = {"platforms": {"telegram": {"enabled": True, "extra": "bad"}}}
+    spec["default_config"] = {"platforms": {"telegram": {"enabled": True, "extra": bad_extra}}}
     with pytest.raises(module.CompositionError):
-        _render(module, tmp_path, spec, "def_bad_extra")
+        _render(module, tmp_path, spec, f"def_bad_extra_{bad_extra}")
 
 
 def test_enforce_multiplex_sets_roster_when_spec_is_silent(module, tmp_path):
     """A spec that never mentions multiplexing still renders a DEFAULT config
-    whose gateway.multiplex_profiles is True and whose allowlist is the sorted
-    roster — enforcement is explicit, never by assumption."""
+    whose gateway.multiplex_profiles is True and whose allowlist is the
+    declaration-order roster — enforcement is explicit, never by assumption."""
     out = tmp_path / "out_silent"
     module.compose(str(_write_spec(tmp_path / "spec_silent", _spec())), str(out))
     default_cfg = yaml.safe_load((out / "default" / "config.yaml").read_text(encoding="utf-8"))
