@@ -288,6 +288,13 @@ the gateway rejects that ingress and logs the route and target. It does not run
 the default profile. Traffic that matches no route keeps the historical
 default-profile behavior.
 
+Once a chat resolves to a profile, **how that profile engages** in the chat
+(mention-only, mention-sticky, pattern wake-words, or always-on, plus an optional
+channel/chat scope) is per-profile adapter config. When you compose a fleet with
+`nv-coworker-compose`, declare it with an `engage` block and the renderer
+translates it into the per-platform gate keys — see
+[Fleet engage modes](./fleet-engage-modes.md).
+
 ## Start, stop, or restart all gateways at once
 
 The CLI ships with single-profile lifecycle commands. To act across every
