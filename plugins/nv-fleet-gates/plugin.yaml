@@ -1,0 +1,13 @@
+name: nv-fleet-gates
+version: 0.1.0
+description: "The fleet's single pre_tool_call veto: one ordered, block-before-approve predicate chain (SANDBOX -> FLEET-ADMIN SCOPE -> WIRING -> critique/plan/egress GATES) that fails closed on its own errors, canonicalises tool names through a vendored alias map, and asserts its restricted set against the running registry at load. Ships a session-correlated codex_critique tool (+ /codex-critique slash alias) that records the critique row the gate consumes, and a `hermes wire add|remove|list` CLI over a fleet-shared edges store."
+author: NousResearch
+kind: standalone
+manifest_version: 1
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_command
+  - pre_gateway_dispatch
+provides_tools:
+  - codex_critique
