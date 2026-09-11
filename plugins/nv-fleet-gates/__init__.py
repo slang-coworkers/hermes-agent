@@ -476,13 +476,13 @@ def register(ctx) -> None:
         stage = (args or {}).get("stage") or (required_stages[0] if required_stages else "OUTPUT_REVIEW")
         try:
             verdict = await _run_critique(stage)
+            if session_id:
+                # A critique HAVING RUN (not its verdict) is what the gate requires,
+                # porting NanoClaw's edits_since_critique==0 invariant.
+                stores.record_critique(session_id, stage)
         except Exception as exc:
-            logger.warning("codex_critique LLM lane failed", exc_info=True)
+            logger.warning("codex_critique failed", exc_info=True)
             return json.dumps({"ok": False, "error": str(exc), "session_id": session_id})
-        if session_id:
-            # A critique HAVING RUN (not its verdict) is what the gate requires,
-            # porting NanoClaw's edits_since_critique==0 invariant.
-            stores.record_critique(session_id, stage)
         return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
 
     def _check_codex_critique(*_a, **_k) -> bool:
