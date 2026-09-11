@@ -41,9 +41,11 @@ injected by the OneCLI proxy):
 2. Start unwired: `rm -f /tmp/loop-f37-fleet-edges.db` (the shared
    `edges_db_path` both configs name). Confirm no `loop-f37-bot-a -> loop-f37-bot-b`
    edge exists (the store is absent, so there is none).
-3. Write the dummy live key for both (`.env` is user-owned and stripped on
-   install): `printf 'ANTHROPIC_API_KEY=dummy-loop-f37\n' >> "$HERMES_HOME/profiles/$b/.env"` for each `$b`.
-4. Give each profile a Bot-Mode identity so both render as bots of the one
+   No `.env` key write and no `base_url` rewrite are needed: the fixture provider
+   block is self-contained (literal on-disk `api_key`, remote host), and
+   `$TB/harness.live.env` restores the egress proxy that substitutes the real
+   credential at the `inference-api.nvidia.com` hop.
+3. Give each profile a Bot-Mode identity so both render as bots of the one
    gateway (`ui_meta['hermes-bots']` is not distribution-owned, so write it
    post-install; JSON is valid YAML, so it merges onto `profile.yaml` cleanly):
    ```bash
@@ -62,7 +64,7 @@ injected by the OneCLI proxy):
    PY
    done
    ```
-5. Launch the one gateway dashboard over the shared home (both profiles are
+4. Launch the one gateway dashboard over the shared home (both profiles are
    discoverable as bots), and wait for the ready line:
    ```bash
    ( source $TB/harness.live.env && cd $WT

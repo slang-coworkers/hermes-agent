@@ -1,10 +1,10 @@
 # Live provider block — self-contained, survives both live-tier failure modes;
-# see loop-f37-bot-a for the full rationale: NO key_env (the delivery subprocess
-# blocks ANTHROPIC_* — local.py:359-361), REMOTE non-loopback base_url (the
-# SKILL.md:304 live-tier mandate — routes through the egress proxy that injects
-# the real key; avoids the loopback ephemeral-port fragility), literal on-disk
-# dummy api_key (survives the strip and is the x-api-key the egress proxy
-# substitutes). Same shared edges_db_path so both bots read one fleet edge store.
+# see loop-f37-worker-a/config.yaml for the full rationale: NO key_env (the
+# delivery subprocess blocks ANTHROPIC_* — local.py:359-361; the inline api_key
+# is the resolver fallback, runtime_provider.py:819-821), REMOTE non-loopback
+# base_url (the SKILL.md:304 live-tier mandate — routes through the egress proxy
+# that injects the real key; avoids the loopback ephemeral-port fragility),
+# literal on-disk dummy api_key (never a real key).
 model:
   provider: coworkers-live
   default: aws/anthropic/bedrock-claude-opus-4-8
@@ -17,18 +17,20 @@ providers:
 timezone: Asia/Kolkata
 sessions:
   auto_prune: false
+approvals:
+  mode: smart
 plugins:
   enabled:
     - nv-fleet-gates
   entries:
     nv-fleet-gates:
       settings:
-        profile: loop-f37-bot-b
-        edges_db_path: /tmp/loop-f37-fleet-edges.db
+        profile: loop-f37-orch
+        # Same shared edges store as loop-f37-worker-a for this scenario.
+        edges_db_path: /tmp/loop-f37-a2a-fleet-edges.db
         profile_roles:
-          loop-f37-bot-a: worker
-          loop-f37-bot-b: worker
-          orch: orchestrator
+          loop-f37-worker-a: worker
+          loop-f37-orch: orchestrator
         enforce_sandbox: false
         plan_gate: false
         required_stages:
