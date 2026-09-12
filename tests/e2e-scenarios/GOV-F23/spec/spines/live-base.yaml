@@ -1,0 +1,27 @@
+# GOV-F23 AC-6 compose-input spine (live). Carries the self-contained on-disk
+# live provider block so the `hermes chat -q` subprocess — whose env is sanitized
+# of provider secrets — still resolves a provider: base_url is the LITERAL remote
+# (a loopback base_url bypasses credential substitution and 403s for a non-default
+# model), api_key is a dummy literal (NEVER a real key). The OneCLI egress proxy
+# substitutes the real credential at the upstream hop. terminal.backend: local so
+# the dangerous-command guard stays ACTIVE (_should_skip_container_guards returns
+# False for a non-isolated backend, tools/approval.py:4075-4086) — an isolated
+# container backend would SKIP the guard and invalidate the probe.
+identity: "GOV-F23-BASE-IDENTITY"
+skills: ["worker-skill"]
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: false}
+  terminal:
+    backend: "local"
+  agent:
+    disabled_toolsets: []
+  model:
+    provider: gov-f23-live
+    default: aws/anthropic/bedrock-claude-opus-4-8
+  providers:
+    gov-f23-live:
+      base_url: https://inference-api.nvidia.com
+      api_mode: anthropic_messages
+      api_key: dummy-gov-f23-not-a-real-key
+      default_model: aws/anthropic/bedrock-claude-opus-4-8
