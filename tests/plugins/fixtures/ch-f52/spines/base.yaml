@@ -1,0 +1,10 @@
+# CH-F52 acceptance fixture — shared base spine for the coworker types.
+# Minimal by design: an identity plus a small fleet-invariant config block. It
+# declares NO platforms, so no coworker profile ever carries a webhook route or a
+# port-binding platform — the canonical GitHub ingress lives only on the DEFAULT
+# multiplexer profile (authored in coworker-types.yaml's default_config).
+identity: "Slang fleet coworker."
+config:
+  timezone: "Asia/Kolkata"
+  sessions:
+    auto_prune: false

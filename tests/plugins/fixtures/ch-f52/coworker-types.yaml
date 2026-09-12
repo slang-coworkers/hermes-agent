@@ -1,0 +1,82 @@
+# Compose spec for the CH-F52 acceptance test. Test secrets are literal and
+# pairwise-distinct so the test can compute a valid per-route HMAC; production
+# fleets use env-referenced secrets and their real bot handles.
+project: slang-github-ingress
+default_profile: default
+orchestrator_profile: orchestrator
+
+spines:
+  base:
+    source: spines/base.yaml
+
+# Coworker types. No skills/workflows/overlays are declared, so the render needs
+# no skill files.
+types:
+  orchestrator:
+    extends: [base]
+    identity: "Slang fleet orchestrator — triages GitHub issues and mention-gated comments."
+  reviewer:
+    extends: [base]
+    identity: "Slang fleet reviewer — reviews pull requests."
+  fixer:
+    extends: [base]
+    identity: "Slang fleet fixer — addresses review feedback and CI failures."
+
+# Webhook routes live only on the DEFAULT (multiplexer) profile; a coworker
+# profile that enables a port-binding platform is skipped at gateway startup.
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
+  platforms:
+    webhook:
+      enabled: true
+      extra:
+        routes:
+          gh-issues:
+            secret: "ch-f52-secret-issues"
+            profile: orchestrator
+            events: [issues]
+            filters:
+              - field: action
+                in: [opened, reopened]
+            prompt: "GitHub issues event on {repository.full_name}: issue #{issue.number} {issue.title}. Triage per the fleet workflow."
+            skills: [github-issue-triage]
+          gh-issue-comment:
+            secret: "ch-f52-secret-comment"
+            profile: orchestrator
+            events: [issue_comment]
+            filters:
+              - field: action
+                in: [created]
+              - field: comment.body
+                contains: "@slang-orchestrator"
+            prompt: "GitHub issue comment on {repository.full_name} (issue #{issue.number}): {comment.body}"
+            skills: [github-comment-triage]
+          gh-pull-request:
+            secret: "ch-f52-secret-pr"
+            profile: reviewer
+            events: [pull_request]
+            filters:
+              - field: action
+                in: [opened, reopened, synchronize, ready_for_review]
+            prompt: "GitHub pull_request event on {repository.full_name}: PR #{pull_request.number} {pull_request.title}. Review per the fleet workflow."
+            skills: [github-pr-review]
+          gh-pr-review:
+            secret: "ch-f52-secret-review"
+            profile: fixer
+            events: [pull_request_review]
+            filters:
+              - field: action
+                in: [submitted]
+            prompt: "GitHub pull_request_review on {repository.full_name}: PR #{pull_request.number}. Address the review feedback."
+            skills: [github-review-triage]
+          gh-check-suite:
+            secret: "ch-f52-secret-check"
+            profile: fixer
+            events: [check_suite]
+            filters:
+              - field: action
+                in: [completed]
+            prompt: "GitHub check_suite completed on {repository.full_name}: conclusion {check_suite.conclusion}. Investigate the CI failure."
+            skills: [github-ci-triage]
