@@ -246,4 +246,5 @@ resolvers' job). **No transport plugin ships for O1–O8.**
   acceptance test's migrate-survival criterion.
 - **Never** set any resolver or `approvals.mode` to `approve` in a rendered file;
   the render refuses a coworker type named `managed` (managed-fragment dir
-  collision) and rejects a malformed `command_allowlist` / `approvals.deny`.
+  collision) and rejects a malformed per-role `command_allowlist`, a malformed
+  `approvals.deny`, or a non-mapping `approvals` block.
