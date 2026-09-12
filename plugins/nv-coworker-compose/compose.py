@@ -422,13 +422,16 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
     target = _engage_extra_target(config, platform)
     target.update(canonical)
 
-    # Scope + scope-bypass keys are handled apart from the mode keys. The scope key
-    # (allowed_channels/allowed_chats) and each per-platform bypass key (a key that
-    # overrides the scope allowlist — Telegram guest_mode, Slack reaction_trigger_target)
-    # are written to their neutral value ONLY when the coworker declares sender_scope,
-    # making the declared scope authoritative. When sender_scope is omitted the scope
-    # is PRESERVED (never reset, which would widen access).
-    bypasses = caps.get("scope_bypass", {})
+    # Scope + scope-bypass keys are handled apart from the mode keys, and ONLY when the
+    # coworker declares sender_scope: the scope key (allowed_channels/allowed_chats) and
+    # each per-platform bypass key (a key that overrides the scope allowlist — Telegram
+    # guest_mode, Slack reaction_trigger_target) are stripped from every alias and written
+    # to their neutral value, making the declared scope authoritative. When sender_scope
+    # is OMITTED both are left ENTIRELY UNTOUCHED (ADR §Design §3.2): a canonical bypass
+    # value stays active (the operator's explicit choice, with no declared scope to widen),
+    # and a bypass left only at a noncanonical alias is NOT relocated — RT-F01's
+    # _require_canonical_platform_layout rejects the surviving noncanonical block
+    # (fail-closed), so it is never silently relocated to canonical and activated.
     if "sender_scope" in block:
         scope = _bounded_ids(
             block.get("sender_scope"),
@@ -436,35 +439,9 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
         scope_key = caps["scope_key"]
         stripped |= _strip_engage_key(config, platform, scope_key)
         target[scope_key] = scope
-        for bkey, breset in bypasses.items():
+        for bkey, breset in caps.get("scope_bypass", {}).items():
             stripped |= _strip_engage_key(config, platform, bkey)
             target[bkey] = copy.deepcopy(breset)
-    else:
-        # sender_scope omitted: there is no declared scope to protect, so PRESERVE
-        # the operator's inherited bypass value rather than resetting it — but still
-        # canonicalize it (a value left at a noncanonical alias would trip RT-F01's
-        # _require_canonical_platform_layout). Prefer the canonical .extra value;
-        # otherwise take a consistent inherited value from the aliases (rejecting a
-        # conflicting one), strip every alias, and write it to platforms.<p>.extra.
-        for bkey in bypasses:
-            values: List[Any] = []
-            for node in _engage_alias_nodes(config, platform):
-                if bkey in node:
-                    values.append(node[bkey])
-                extra = node.get("extra")
-                if isinstance(extra, dict) and bkey in extra:
-                    values.append(extra[bkey])
-            if not values:
-                continue
-            if bkey in target:
-                preserved = copy.deepcopy(target[bkey])
-            elif any(value != values[0] for value in values[1:]):
-                raise CompositionError(
-                    f"conflicting inherited {bkey!r} values for platform {platform!r}")
-            else:
-                preserved = copy.deepcopy(values[0])
-            stripped |= _strip_engage_key(config, platform, bkey)
-            target[bkey] = preserved
 
     _prune_vacuous_noncanonical(config, platform, stripped)
 

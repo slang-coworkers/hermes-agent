@@ -255,7 +255,7 @@ def test_ac_rt_f02_2(loaded, tmp_path):
 
 # ── AC-RT-F02-3 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_3(loaded, tmp_path):
-    """AC-RT-F02-3: Engage mode `always-on` renders a bounded non-empty `free_response_channels` (Slack/Discord) / `free_response_chats` (Telegram); Telegram also resets `free_response_topics` to `[]` in every mode so no inherited forum topic admits an unmentioned message; declared `sender_scope` renders `allowed_channels` (Slack/Discord) / `allowed_chats` (Telegram) AND neutralizes each per-platform scope bypass (Telegram `guest_mode=false`, Slack `reaction_trigger_target=""`) so the declared scope cannot be widened, while leaving Slack `reaction_triggers` unchanged; Telegram uses its chat-scoped key names while Discord's spellings match Slack; and omitting `sender_scope` PRESERVES an inherited channel restriction while declaring it replaces it."""
+    """AC-RT-F02-3: Engage mode `always-on` renders a bounded non-empty `free_response_channels` (Slack/Discord) / `free_response_chats` (Telegram); Telegram also resets `free_response_topics` to `[]` in every mode so no inherited forum topic admits an unmentioned message; declared `sender_scope` renders `allowed_channels` (Slack/Discord) / `allowed_chats` (Telegram) AND neutralizes each per-platform scope bypass (Telegram `guest_mode=false`, Slack `reaction_trigger_target=""`) so the declared scope cannot be widened, while leaving Slack `reaction_triggers` unchanged; Telegram uses its chat-scoped key names while Discord's spellings match Slack; and omitting `sender_scope` PRESERVES an inherited channel restriction and leaves a CANONICAL scope-bypass value untouched, while a scope-bypass value present only at a noncanonical alias is rejected (`CompositionError`, never silently relocated to canonical), and declaring `sender_scope` replaces the restriction."""
     module, _entry = loaded
 
     for (platform, mode), expected in _CAPS_EXPECTED.items():
@@ -308,13 +308,22 @@ def test_ac_rt_f02_3(loaded, tmp_path):
                     "tg_topic")
     _assert_canonical_only(_worker_config(out_t), "telegram", "free_response_topics", [])
 
-    # Without a declared sender_scope the inherited scope-bypass settings stay operator-owned;
-    # declaring one makes it authoritative over every alias (else the bypass widens the scope).
-    guest_aliases = _all_aliases("telegram", "guest_mode", True)
+    # Omitted sender_scope: scope-bypass keys are left ENTIRELY UNTOUCHED, never relocated. A
+    # CANONICAL bypass value (operator's explicit placement) stays; a bypass present ONLY at a
+    # noncanonical alias is left in place, where RT-F01's canonical-layout validator rejects it
+    # (CompositionError) — never silently relocated to canonical and activated.
+    canon_guest = {"platforms": {"telegram": {"extra": {"guest_mode": True}}}}
     out_g_keep = _render(module, tmp_path,
-                         _spec_with_engage(_engage_for("telegram", "mention"), guest_aliases),
+                         _spec_with_engage(_engage_for("telegram", "mention"), canon_guest),
                          "tg_guest_keep")
     assert _extra(_worker_config(out_g_keep), "telegram")["guest_mode"] is True
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path,
+                _spec_with_engage(_engage_for("telegram", "mention"),
+                                  {"gateway": {"telegram": {"extra": {"guest_mode": True}}}}),
+                "tg_guest_noncanon")
+
+    guest_aliases = _all_aliases("telegram", "guest_mode", True)
     out_g = _render(module, tmp_path,
                     _spec_with_engage(_engage_for("telegram", "mention", sender_scope=["chatA"]),
                                       guest_aliases), "tg_guest")
@@ -323,12 +332,19 @@ def test_ac_rt_f02_3(loaded, tmp_path):
     tge = _extra(guest_cfg, "telegram")
     assert tge["allowed_chats"] == ["chatA"]
 
-    reaction_aliases = _all_aliases("slack", "reaction_trigger_target", "C-elsewhere")
+    canon_rt = {"platforms": {"slack": {"extra": {"reaction_trigger_target": "C-elsewhere"}}}}
     out_r_keep = _render(module, tmp_path,
-                         _spec_with_engage(_engage_for("slack", "mention"), reaction_aliases),
+                         _spec_with_engage(_engage_for("slack", "mention"), canon_rt),
                          "slack_rt_keep")
     assert _extra(_worker_config(out_r_keep), "slack")["reaction_trigger_target"] == "C-elsewhere"
-    # the scope reset must neutralize the retarget bypass WITHOUT erasing the opt-in reaction feature
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path,
+                _spec_with_engage(_engage_for("slack", "mention"),
+                                  {"gateway": {"slack": {"extra": {"reaction_trigger_target": "C-x"}}}}),
+                "slack_rt_noncanon")
+
+    # the scope-declared reset neutralizes the retarget bypass WITHOUT erasing the opt-in reaction feature
+    reaction_aliases = _all_aliases("slack", "reaction_trigger_target", "C-elsewhere")
     reaction_aliases["platforms"]["slack"]["extra"]["reaction_triggers"] = ["white_check_mark"]
     out_r = _render(module, tmp_path,
                     _spec_with_engage(_engage_for("slack", "mention", sender_scope=["C9"]),
@@ -630,29 +646,25 @@ def test_render_engage_detaches_yaml_anchor_aliases(loaded, tmp_path):
     assert _extra(cfg_b, "telegram") == _CAPS_EXPECTED[("telegram", "mention")]
 
 
-def test_render_engage_omitted_scope_canonicalizes_alias_only_bypass(loaded, tmp_path):
-    """With sender_scope omitted (no declared scope to protect), a scope-bypass key
-    (Telegram guest_mode, Slack reaction_trigger_target) present ONLY at a noncanonical
-    loader alias — never at canonical platforms.<p>.extra — is stripped from every
-    alias so it cannot trip RT-F01's canonical-layout check, and the operator's
-    inherited value is PRESERVED by relocating it to canonical platforms.<p>.extra
-    (never reset when no scope is declared); the noncanonical alias is pruned."""
+def test_render_engage_rejects_alias_only_bypass(loaded, tmp_path):
+    """With sender_scope omitted, a scope-bypass key (Telegram guest_mode, Slack
+    reaction_trigger_target) present ONLY at a noncanonical loader alias — never at
+    canonical platforms.<p>.extra — is left entirely untouched (never relocated to
+    canonical), so the surviving noncanonical platform block trips RT-F01's
+    _require_canonical_platform_layout with CompositionError. A canonical bypass value
+    stays active (AC-3 keep-cases); this guards the fail-closed noncanonical-only path."""
     module, _entry = loaded
 
     # Telegram guest_mode only under gateway.telegram (a noncanonical alias)
-    out_t = _render(module, tmp_path,
-                    _spec_with_engage(_engage_for("telegram", "mention"),
-                                      {"gateway": {"telegram": {"extra": {"guest_mode": True}}}}),
-                    "guest_alias_only")
-    cfg_t = _worker_config(out_t)
-    assert "telegram" not in (cfg_t.get("gateway") or {})
-    assert _extra(cfg_t, "telegram")["guest_mode"] is True
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path,
+                _spec_with_engage(_engage_for("telegram", "mention"),
+                                  {"gateway": {"telegram": {"extra": {"guest_mode": True}}}}),
+                "guest_alias_only")
 
     # Slack reaction_trigger_target only under the root slack: block (a noncanonical alias)
-    out_s = _render(module, tmp_path,
-                    _spec_with_engage(_engage_for("slack", "mention"),
-                                      {"slack": {"extra": {"reaction_trigger_target": "C-elsewhere"}}}),
-                    "rtt_alias_only")
-    cfg_s = _worker_config(out_s)
-    assert "slack" not in cfg_s
-    assert _extra(cfg_s, "slack")["reaction_trigger_target"] == "C-elsewhere"
+    with pytest.raises(module.CompositionError):
+        _render(module, tmp_path,
+                _spec_with_engage(_engage_for("slack", "mention"),
+                                  {"slack": {"extra": {"reaction_trigger_target": "C-elsewhere"}}}),
+                "rtt_alias_only")
