@@ -107,8 +107,11 @@ present, then rename atomically so a concurrent reader never sees a truncated
 file:
 
 ```bash
-# MANAGED=/etc/hermes (default) or "$HERMES_MANAGED_DIR" when set.
-python3 - "$MANAGED/config.yaml" ./fleet-out/managed/config.yaml <<'PY'
+MANAGED="${HERMES_MANAGED_DIR:-/etc/hermes}"   # get_managed_dir() resolution
+PYTHON="$(command -v python3)"
+# sudo because the default managed dir (/etc/hermes) is root-owned; drop sudo
+# only when $HERMES_MANAGED_DIR points at a dir you already own.
+sudo "$PYTHON" - "$MANAGED/config.yaml" ./fleet-out/managed/config.yaml <<'PY'
 import os, sys, tempfile, yaml
 target, fragment = sys.argv[1], sys.argv[2]
 existing = {}

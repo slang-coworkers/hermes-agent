@@ -1,6 +1,7 @@
-# FROZEN expected outcomes for the LOOP-F35 acceptance test — architect-owned.
-# The builder makes nv-coworker-compose RENDER to satisfy this; it does NOT edit this file.
-# The reviewer confirms this file is byte-identical to the ADR's shipped fixture.
+# Expected outcomes for the LOOP-F35 acceptance test. The builder makes
+# nv-coworker-compose RENDER to satisfy this. The approvals rows were removed
+# under GOV-F23 Amendment 1 (those keys are now managed-scope, asserted by
+# GOV-F23 AC-1/AC-3); the non-approvals expectations remain the LOOP-F35 contract.
 
 profiles: [default, orchestrator, reviewer, fixer]
 default_profile: default
