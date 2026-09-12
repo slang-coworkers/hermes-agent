@@ -11,8 +11,11 @@ with an in-process-only token. Both paths are first-write-wins per
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import sqlite3
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,37 @@ _HUMAN_DOOR = object()
 # Bound in register(): lets the handlers, the hook callback, and the module-level
 # list_trusted_decisions() resolve the single fleet ledger through ctx config.
 _CTX = None
+
+# Bounded retry for transient SQLite write contention. WAL + the driver's default
+# busy timeout usually absorb it; this belt covers a lock that outlasts the timeout
+# so a legitimate write (notably an authenticated human verdict) is not dropped.
+_BUSY_RETRIES = 5
+_BUSY_SLEEP_S = 0.05
+
+
+def _is_locked_error(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in str(exc).lower() or "busy" in str(exc).lower()
+    )
+
+
+def _safe_handler(fn):
+    """Guarantee a tool handler returns a JSON string and never raises.
+
+    A raise both violates the tool contract and — on the human webhook path,
+    whose caller only inspects the returned status — would silently drop a
+    verdict; catch everything and surface it as a structured error instead.
+    """
+
+    @functools.wraps(fn)
+    def _wrapped(args, **kwargs):
+        try:
+            return fn(args, **kwargs)
+        except Exception:
+            logger.warning("approval-ledger handler %s failed", fn.__name__, exc_info=True)
+            return json.dumps({"status": "error", "reason": "ledger operation failed"})
+
+    return _wrapped
 
 
 def _now() -> str:
@@ -78,32 +112,67 @@ def _ledger_db(ctx):
     profile/process — and the webhook callback — resolve the identical file.
     """
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    from hermes_cli.profiles import get_profile_dir
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
     from plugins.plugin_storage import plugin_db
 
-    owner = ctx.get_config("ledger_profile", "default")
-    token = set_hermes_home_override(str(get_profile_dir(owner)))
-    try:
-        conn = plugin_db(PLUGIN_KEY)
-    finally:
-        reset_hermes_home_override(token)
-    _ensure_schema(conn)
-    return conn
+    # Fail closed on a malformed owner: get_profile_dir normalizes but does not
+    # validate, so a traversal/absolute ledger_profile would otherwise place the
+    # ledger outside the profile tree. validate_profile_name raises on those.
+    owner = normalize_profile_name(ctx.get_config("ledger_profile", "default"))
+    validate_profile_name(owner)
+    home = str(get_profile_dir(owner))
+
+    # Retry open and schema initialization because first-use contention can occur
+    # before the INSERT path and must not drop an authenticated verdict.
+    attempt = 0
+    while True:
+        conn = None
+        try:
+            token = set_hermes_home_override(home)
+            try:
+                conn = plugin_db(PLUGIN_KEY)
+            finally:
+                reset_hermes_home_override(token)
+            _ensure_schema(conn)
+            return conn
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                conn.close()
+            attempt += 1
+            if not _is_locked_error(exc) or attempt >= _BUSY_RETRIES:
+                raise
+            time.sleep(_BUSY_SLEEP_S * attempt)
+        except Exception:
+            if conn is not None:
+                conn.close()
+            raise
 
 
 def _insert_ignore(conn, *, repo, pr, commit_sha, decision, provenance, delivery_id, profile, detail) -> int:
     """INSERT OR IGNORE one row; return rowcount (1 inserted, 0 suppressed).
 
     Never UPDATE/DELETE — a suppressed insert leaves the existing row byte-for-byte.
+    Retries a bounded number of times on transient lock/busy so contention does
+    not drop the write; a non-lock error (e.g. an out-of-range bind) is re-raised
+    at once for the caller's handler to surface as a structured error.
     """
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO approval_decisions "
-        "(repo, pr, commit_sha, decision, provenance, delivery_id, profile, detail, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (repo, pr, commit_sha, decision, provenance, delivery_id, profile, detail, _now()),
-    )
-    conn.commit()
-    return cur.rowcount
+    params = (repo, pr, commit_sha, decision, provenance, delivery_id, profile, detail, _now())
+    attempt = 0
+    while True:
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO approval_decisions "
+                "(repo, pr, commit_sha, decision, provenance, delivery_id, profile, detail, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount
+        except sqlite3.OperationalError as exc:
+            attempt += 1
+            if not _is_locked_error(exc) or attempt >= _BUSY_RETRIES:
+                raise
+            time.sleep(_BUSY_SLEEP_S * attempt)
 
 
 def _writers(ctx):
@@ -131,6 +200,7 @@ def _human_check() -> bool:
     return False
 
 
+@_safe_handler
 def _record_decision(args, **kwargs) -> str:
     """Writer-gated agent decision (provenance always agent_verified)."""
     ctx = _CTX
@@ -178,6 +248,7 @@ def _record_decision(args, **kwargs) -> str:
         conn.close()
 
 
+@_safe_handler
 def _record_human_verdict(args, **kwargs) -> str:
     """Human PR-review verdict (provenance=human), guarded by the in-process door."""
     if kwargs.get("_human_door") is not _HUMAN_DOOR:
@@ -299,7 +370,7 @@ def _on_gateway_dispatch(event=None, **kwargs):
         if not (repo and pr is not None and commit_sha and decision):
             return None
 
-        ctx.dispatch_tool(
+        result = ctx.dispatch_tool(
             "record_human_verdict",
             {
                 "repo": repo,
@@ -311,6 +382,22 @@ def _on_gateway_dispatch(event=None, **kwargs):
             },
             _human_door=_HUMAN_DOOR,
         )
+        # The adapter has already returned HTTP 202 and will not redeliver, so a
+        # write that neither recorded nor was intentionally refused (a conflict
+        # refuse is itself already logged by the handler) is a lost verdict —
+        # make that terminal drop diagnosable rather than silent.
+        status = None
+        if isinstance(result, str):
+            try:
+                status = json.loads(result).get("status")
+            except (TypeError, ValueError):
+                status = None
+        if status not in ("recorded", "already_recorded", "refused"):
+            logger.warning(
+                "approval-ledger human verdict NOT durably recorded (status=%s) "
+                "repo=%s pr=%s sha=%s delivery_id=%s — dropped after webhook 202, no redelivery",
+                status, repo, pr, commit_sha, delivery_id,
+            )
     except Exception:  # noqa: BLE001 - the dispatch seam must never raise into the gateway
         logger.warning("nv-approval-ledger pre_gateway_dispatch callback failed", exc_info=True)
     return None
@@ -345,6 +432,7 @@ def list_trusted_decisions(repo=None, pr=None):
         conn.close()
 
 
+@_safe_handler
 def _list_trusted_decisions_tool(args, **kwargs) -> str:
     # Enforce the reader gate in the handler too: registry.dispatch bypasses
     # check_fn, so schema-hiding alone would let a non-reader force-read.

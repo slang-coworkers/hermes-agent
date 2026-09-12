@@ -274,3 +274,100 @@ def test_ac_gov_f24_7(ledger, caplog):
     assert _human_full(ledger.root, 31, "beef07") == original
     assert _human_full(ledger.root, 31, "beef08") == other
     assert any(rec.levelno >= logging.WARNING and "D3" in rec.getMessage() for rec in caplog.records)
+
+
+class _LockOnceConn:
+    """Test double: raise 'database is locked' on the first N executes whose SQL
+    starts with ``prefix`` (counter shared across reopened connections so the
+    _ledger_db open/retry is exercised, not just the INSERT), then delegate."""
+
+    def __init__(self, real, prefix, fail_state):
+        self._real = real
+        self._prefix = prefix
+        self._fail_state = fail_state
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.lstrip().upper().startswith(self._prefix) and self._fail_state["n"] > 0:
+            self._fail_state["n"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def commit(self):
+        return self._real.commit()
+
+    def close(self):
+        return self._real.close()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _install_lock(monkeypatch, prefix, count):
+    import plugins.plugin_storage as ps
+
+    real = ps.plugin_db
+    fail_state = {"n": count}  # shared across reopens: a re-opened connection sees the decremented counter
+    monkeypatch.setattr(
+        ps, "plugin_db", lambda name, filename="data.db": _LockOnceConn(real(name, filename), prefix, fail_state)
+    )
+
+
+def test_mc1_record_decision_oversized_pr_returns_error_not_raise(ledger):
+    """An out-of-range pr makes the writer handler return a JSON error, never raise, and write no row."""
+    out = _dispatch(
+        "record_decision",
+        {"repo": "o/r", "pr": 2**100, "commit_sha": "big", "decision": "BLOCK"},
+    )
+    assert out["status"] in ("error", "refused")
+    assert _rows(ledger.root, repo="o/r", commit_sha="big") == []
+
+
+def test_mc1_human_verdict_retries_past_transient_insert_lock(ledger, monkeypatch):
+    """A transient lock on the INSERT is retried, not dropped — one human row lands."""
+    _install_lock(monkeypatch, "INSERT", 1)
+    ledger.manager.invoke_hook(
+        "pre_gateway_dispatch", event=_review_event("R1", pr=51, sha="ab51"), gateway=None, session_store=None
+    )
+    assert _rows(ledger.root, repo="o/r", pr=51, commit_sha="ab51", provenance="human") == [
+        ("o/r", 51, "ab51", "approved", "human")
+    ]
+
+
+def test_mc1_human_verdict_retries_past_schema_open_lock(ledger, monkeypatch):
+    """A first-use lock at schema init (CREATE) is retried by _ledger_db, not dropped — one human row lands."""
+    _install_lock(monkeypatch, "CREATE", 1)
+    ledger.manager.invoke_hook(
+        "pre_gateway_dispatch", event=_review_event("R3", pr=53, sha="ab53"), gateway=None, session_store=None
+    )
+    assert _rows(ledger.root, repo="o/r", pr=53, commit_sha="ab53", provenance="human") == [
+        ("o/r", 53, "ab53", "approved", "human")
+    ]
+
+
+def test_mc1_human_verdict_write_failure_is_logged_not_silently_dropped(ledger, monkeypatch, caplog):
+    """A hard human-write failure writes no row, logs a terminal drop WARNING, and never returns skip/rewrite."""
+    _install_lock(monkeypatch, "INSERT", 999)  # every INSERT fails → retries exhaust
+    with caplog.at_level(logging.WARNING):
+        results = ledger.manager.invoke_hook(
+            "pre_gateway_dispatch", event=_review_event("R2", pr=52, sha="ab52"), gateway=None, session_store=None
+        )
+    assert all(not (isinstance(r, dict) and r.get("action") in {"skip", "rewrite"}) for r in results)
+    assert _rows(ledger.root, repo="o/r", pr=52, commit_sha="ab52", provenance="human") == []
+    assert any(
+        rec.levelno >= logging.WARNING and "R2" in rec.getMessage() and "not durably recorded" in rec.getMessage().lower()
+        for rec in caplog.records
+    )
+
+
+def test_sc1_traversal_ledger_profile_fails_closed(ledger, monkeypatch):
+    """A traversal/absolute ledger_profile is rejected: the write fails closed with no row (no ledger outside the profile tree)."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"plugins": {"entries": {PLUGIN_KEY: {"settings": {"writers": ["reviewer"], "ledger_profile": "../evil"}}}}},
+    )
+    out = _dispatch(
+        "record_decision",
+        {"repo": "o/r", "pr": 61, "commit_sha": "trav", "decision": "BLOCK"},
+    )
+    assert out["status"] in ("error", "refused")
+    assert _rows(ledger.root, repo="o/r", pr=61, commit_sha="trav") == []
