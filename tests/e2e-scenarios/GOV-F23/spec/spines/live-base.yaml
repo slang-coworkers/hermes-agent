@@ -1,0 +1,34 @@
+# GOV-F23 AC-6 compose-input spine (live). Carries the self-contained on-disk
+# live provider block so the `hermes chat -q` subprocess — whose env is sanitized
+# of provider secrets — still resolves a provider: base_url is the LITERAL remote
+# (a loopback base_url bypasses credential substitution and 403s for a non-default
+# model), api_key is a dummy literal (NEVER a real key). The OneCLI egress proxy
+# substitutes the real credential at the upstream hop.
+#
+# terminal.backend: docker with the workspace host-mounted
+# (docker_mount_cwd_to_workspace: true) — the fleet's per-profile container
+# sandbox (topology rule 3 forbids a `local` terminal environment anywhere). The
+# host-mounted workspace makes host access true, so _should_skip_container_guards
+# returns False (tools/approval.py:4075-4086, ISO-F13) and the dangerous-command
+# guard stays ACTIVE; a docker backend WITHOUT host mounts, or an isolated
+# singularity/modal/daytona/vercel_sandbox backend, would SKIP the guard.
+identity: "GOV-F23-BASE-IDENTITY"
+skills: ["worker-skill"]
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: false}
+  terminal:
+    backend: "docker"
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+  agent:
+    disabled_toolsets: []
+  model:
+    provider: gov-f23-live
+    default: aws/anthropic/bedrock-claude-opus-4-8
+  providers:
+    gov-f23-live:
+      base_url: https://inference-api.nvidia.com
+      api_mode: anthropic_messages
+      api_key: dummy-gov-f23-not-a-real-key
+      default_model: aws/anthropic/bedrock-claude-opus-4-8

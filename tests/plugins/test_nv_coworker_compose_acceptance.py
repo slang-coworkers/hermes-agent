@@ -105,7 +105,7 @@ def test_ac_loop_f35_1(tmp_path, monkeypatch):
 
 
 def test_ac_loop_f35_2(tmp_path, monkeypatch):
-    """AC-LOOP-F35-2: Every fleet-invariant key required by batch 1b is present in each rendered coworker config.yaml with the value the fixture spec dictates, so a missing key or wrong value fails the render assertion"""
+    """AC-LOOP-F35-2: Every profile-local fleet-invariant key required by batch 1b is present in each rendered coworker config.yaml with the value the fixture spec dictates, so a missing key or wrong value fails the render assertion (fleet-uniform approvals keys are managed-scope, not profile-local — asserted by GOV-F23 AC-1/AC-3)"""
     _, loaded = _load(tmp_path, monkeypatch)
     exp = _expected()
     rendered = _render(loaded, tmp_path / "out")

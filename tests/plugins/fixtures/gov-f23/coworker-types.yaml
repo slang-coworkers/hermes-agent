@@ -1,0 +1,68 @@
+# GOV-F23 compose input — the lego spec nv-coworker-compose renders from (UNSAFE).
+# Governance fixture: per-role command_allowlist / approvals.deny declared via
+# each type's config: block (NOT traits), the six fleet-uniform approvals keys
+# set to UNSAFE values on the spine AND on default_config, and a NON-EMPTY
+# DEFAULT top-level command_allowlist — the unsafe values keep this a valid
+# compose input while exercising the render's override and strip behavior.
+project: demo
+default_profile: default
+orchestrator_profile: reviewer
+worker_profile: builder
+
+# Shared spine (parent in the extends chain). Its source body is a sibling file.
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# Coworker types. Both extend base; per-role governance is declared via config:
+# (the deep-merge channel), never via traits (which would clobber the config leaf).
+types:
+  builder:
+    extends: [base]
+    identity: "BUILDER-IDENTITY"
+    skills: ["fix-skill"]                     # appended to base's shared-skill
+    config:
+      command_allowlist: ["rm -rf build", "git reset --hard*"]
+      approvals:
+        deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
+    ui_meta: {title: "Builder", description: "Implementer", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"             # leaf-wins over BASE-IDENTITY
+    invariants: ["INV-SHARED", "INV-REVIEWER"]  # INV-SHARED also in base → dedup
+    context: ["CTX-SHARED", "CTX-REVIEWER"]     # CTX-SHARED also in base → dedup
+    skills: ["review-skill"]                  # appended to base's shared-skill
+    overlays: ["critique-gate"]               # applies-to reviewer only
+    config:
+      command_allowlist: ["git clean -fdx"]
+      approvals:
+        deny: ["git push --force*", "git tag *", "gh release *"]
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+
+# Standing rooms — inert metadata (compose does not render them into any file).
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [builder, reviewer]
+
+# DEFAULT (multiplexer) profile — multiplex config + the fleet-uniform approvals
+# floor. UNSAFE: the six fleet-uniform approvals keys are set WRONG here too, and
+# a NON-EMPTY top-level command_allowlist proves the render force-empties it.
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: ["builder", "reviewer"]
+  command_allowlist: ["rm -rf /etc"]
+  approvals:
+    mode: "off"
+    timeout: 30
+    cron_mode: "approve"
+    single_query_mode: "approve"
+    unattended_mode: "approve"
+    denial_breaker_threshold: 0
+    deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
+  sessions: {auto_prune: false}

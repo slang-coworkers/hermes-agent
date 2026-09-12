@@ -1,0 +1,52 @@
+# GOV-F23 compose input — shared spine parent for every coworker type (UNSAFE).
+# The six fleet-uniform approvals keys are set to UNSAFE values here so the
+# GOV-F23 render must STRIP them from every rendered profile config and pin the
+# fleet-safe values only in the machine-wide managed fragment (out_root/managed/
+# config.yaml) — the disjoint immutability split. Per-role command_allowlist /
+# approvals.deny are declared in
+# each type's config: block (the deep-merge channel), NEVER via a traits: entry —
+# so this spine carries NO traits block. A trait binding would clobber the
+# config leaf at the end of _resolve_type (trait application), overwriting the
+# per-role config.command_allowlist we set intentionally.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+config:
+  timezone: "Asia/Kolkata"
+  # Retention keys are NOT the GOV-F23 toggle; they are present and identical in
+  # both spine variants so the only difference is the six approvals keys.
+  sessions: {auto_prune: true, auto_archive: false}
+  compression: {in_place: false}
+  checkpoints: {auto_prune: true}
+  memory: {memory_char_limit: 4000, user_char_limit: 2000}
+  skills: {external_dirs: ["/data/shared-skills"]}
+  terminal:
+    backend: "docker"
+    docker_env: {}
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+    docker_volumes: []
+  # The six fleet-uniform approvals keys, UNSAFE. Both coworkers inherit these
+  # via extends: [base], so they appear in each resolved config.
+  approvals:
+    mode: "off"
+    timeout: 30
+    cron_mode: "approve"
+    single_query_mode: "approve"
+    unattended_mode: "approve"
+    denial_breaker_threshold: 0
+  agent:
+    disabled_toolsets: []
+  plugins:
+    enabled: ["nv-fleet-gates"]
+    entries:
+      nv-fleet-gates:
+        settings:
+          enabled: true
+          policy: "deny-admin-to-workers"
+      nv-cost-cap:
+        settings:
+          ceiling_usd: 20
+  cron: {failure_nudge_threshold: 3}
