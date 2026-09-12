@@ -1,15 +1,11 @@
-"""Focused unit tests for the GOV-F23 render guards (builder-added, beside the
-architect-owned acceptance test).
-
-Covers the two fail-closed guards the ADR §Design step 3 requires and that no
-acceptance criterion exercises directly:
+"""Focused unit tests for the GOV-F23 render guards.
 
 * a coworker type literally named ``managed`` is REJECTED (it would collide with
   the machine-wide managed-scope fragment directory ``out_root/managed``), rather
   than silently overwriting the fragment;
-* a malformed per-role ``command_allowlist`` / ``approvals.deny`` (non-list, or a
-  blank/whitespace member) is REJECTED with ``CompositionError``, not a raw
-  ``TypeError`` and not a silently-inert rule.
+* a malformed per-role ``command_allowlist`` / ``approvals.deny`` (non-list, a
+  blank/whitespace member, or a non-mapping ``approvals`` block) is REJECTED with
+  ``CompositionError``, never a raw ``TypeError`` and never a silently-inert rule.
 
 The plugin is loaded through the real discovery path from a tmp_path HERMES_HOME
 with an EMPTY bundled dir, then the render is invoked as a module function on a
@@ -123,6 +119,22 @@ def test_approvals_deny_blank_member_rejected(tmp_path, monkeypatch):
     with pytest.raises(loaded.module.CompositionError) as exc:
         loaded.module.compose(str(spec), str(tmp_path / "out"))
     assert "approvals.deny" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad_value", ["malformed", ["a", "b"], 123])
+def test_non_mapping_approvals_rejected(tmp_path, monkeypatch, bad_value):
+    """A present non-mapping approvals block is a spec error — the strip would
+    skip it, it would be written raw, and the managed overlay would then replace
+    it. Reject it fail-closed rather than pass it through."""
+    loaded = _load(tmp_path, monkeypatch)
+
+    def _bad(data):
+        data["types"]["builder"]["config"]["approvals"] = bad_value
+
+    spec = _mutated_spec(tmp_path, _bad)
+    with pytest.raises(loaded.module.CompositionError) as exc:
+        loaded.module.compose(str(spec), str(tmp_path / "out"))
+    assert "approvals must be a mapping" in str(exc.value)
 
 
 def test_valid_spec_still_composes(tmp_path, monkeypatch):

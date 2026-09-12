@@ -226,6 +226,13 @@ def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool)
     if include_allowlist and "command_allowlist" in config:
         to_check.append(("command_allowlist", config["command_allowlist"]))
     approvals = config.get("approvals")
+    # A present non-mapping approvals block is a spec error: the strip below
+    # skips a non-dict value and it would be written raw, then the managed
+    # overlay would silently replace it — so reject it here rather than fail open.
+    if "approvals" in config and not isinstance(approvals, dict):
+        raise CompositionError(
+            f"approvals must be a mapping, got {type(approvals).__name__}"
+        )
     if isinstance(approvals, dict) and "deny" in approvals:
         to_check.append(("approvals.deny", approvals["deny"]))
     for label, value in to_check:

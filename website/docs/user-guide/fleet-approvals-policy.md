@@ -97,22 +97,47 @@ hermes coworker compose coworker-types.yaml --out ./fleet-out
 
 Install the fragment to the managed directory. `get_managed_dir()`
 (`hermes_cli/managed_scope.py:52-71`) resolves `$HERMES_MANAGED_DIR` first
-(`:65-68`), else `/etc/hermes` (`:33,:71`):
+(`:65-68`), else `/etc/hermes` (`:33,:71`).
+
+**Deploy it merge-preserving and atomically — never blind-overwrite.** The managed
+`config.yaml` is a single machine-wide file that may already carry unrelated
+managed policy from other fleet rows, so replacing the whole file would drop that
+policy. Merge only the rendered `approvals.*` block over whatever is already
+present, then rename atomically so a concurrent reader never sees a truncated
+file:
 
 ```bash
-# machine-wide default:
-sudo install -o root -g root -m 0644 ./fleet-out/managed/config.yaml /etc/hermes/config.yaml
-# or, when $HERMES_MANAGED_DIR is set for this deployment:
-install -m 0644 ./fleet-out/managed/config.yaml "$HERMES_MANAGED_DIR/config.yaml"
+# MANAGED=/etc/hermes (default) or "$HERMES_MANAGED_DIR" when set.
+python3 - "$MANAGED/config.yaml" ./fleet-out/managed/config.yaml <<'PY'
+import os, sys, tempfile, yaml
+target, fragment = sys.argv[1], sys.argv[2]
+existing = {}
+if os.path.exists(target):
+    with open(target, encoding="utf-8") as fh:
+        existing = yaml.safe_load(fh) or {}
+frag = yaml.safe_load(open(fragment, encoding="utf-8")) or {}
+# recursive deep-merge: the fragment's approvals.* keys win per leaf; every
+# unrelated managed key already in the file is preserved.
+def merge(base, over):
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = merge(out.get(k), v) if k in out else v
+        return out
+    return over
+merged = merge(existing, frag)
+d = os.path.dirname(target) or "."
+os.makedirs(d, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".config.", suffix=".yaml")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(merged, fh, sort_keys=False)
+os.replace(tmp, target)      # atomic on every OS
+PY
+# then root-own it so a coworker cannot edit it (see below):
+sudo chown root:root "$MANAGED/config.yaml" && sudo chmod 0644 "$MANAGED/config.yaml"
 ```
 
-**Deploy it merge-preserving and atomically.** The managed `config.yaml` is a
-single machine-wide file that may already carry unrelated managed policy from
-other fleet rows. Do **not** blind-overwrite it: merge the six `approvals.*` keys
-into the existing file (e.g. read it, deep-merge the rendered fragment on top,
-write to a same-directory tempfile, then `os.replace` / `mv` into place) so a
-concurrent reader never sees a truncated file and no unrelated managed key is
-dropped. After installing, `hermes` invalidates its managed cache on the next
+After installing, `hermes` invalidates its managed cache on the next
 config read (`invalidate_managed_cache`, `hermes_cli/managed_scope.py:74-78`;
 `_load_config_impl` folds the managed file's mtime/size into the cache signature
 and applies the overlay, `hermes_cli/config.py:3936-4053`, deep-merge managed-wins
@@ -121,6 +146,20 @@ at `apply_managed_overlay` `:137-176`).
 Root-own the file (`0644`, owned by `root`) so a coworker cannot edit it — the
 same immutability the ISO-F13 invariant relies on (no profile mounts
 `$HERMES_HOME`).
+
+### The DEFAULT (launch) profile config is a separate deploy step
+
+`hermes onboard coworker` renders in a `TemporaryDirectory` and installs only the
+coworker TYPE profiles, so neither the managed fragment (above) NOR the rendered
+DEFAULT profile config is deployed by onboarding. The DEFAULT profile's
+`command_allowlist: []` is the in-gateway fail-safe floor (next section), so it
+must reach the gateway's launch profile: render with `hermes coworker compose`
+and apply `./fleet-out/default/config.yaml` to the launch profile (the gateway
+root, profile name `default`) — then restart the gateway so the process reloads
+`_permanent_approved` from the empty allowlist at import. Verify with
+`hermes -p default approvals test` (or a `python3 -c` over the merged config) that
+the launch profile's `command_allowlist` is `[]` before trusting the in-gateway
+floor.
 
 ## The native process-global allowlist boundary (why DEFAULT is empty)
 
