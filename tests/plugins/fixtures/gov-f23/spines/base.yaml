@@ -1,7 +1,9 @@
 # GOV-F23 compose input — shared spine parent for every coworker type (UNSAFE).
 # The six fleet-uniform approvals keys are set to UNSAFE values here so the
-# GOV-F23 render must OVERRIDE each to its fleet-safe value on every profile via
-# the extends chain. Per-role command_allowlist / approvals.deny are declared in
+# GOV-F23 render must STRIP them from every rendered profile config and pin the
+# fleet-safe values only in the machine-wide managed fragment (out_root/managed/
+# config.yaml) — the disjoint immutability split. Per-role command_allowlist /
+# approvals.deny are declared in
 # each type's config: block (the deep-merge channel), NEVER via a traits: entry —
 # so this spine carries NO traits block. A trait binding would clobber the
 # config leaf at the end of _resolve_type (trait application), overwriting the

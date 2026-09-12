@@ -21,11 +21,12 @@ coworker_config:
   terminal.docker_mount_cwd_to_workspace: true
   terminal.docker_image: "hermes-sandbox:pinned"
   terminal.docker_volumes: []
-  approvals.mode: "smart"
-  approvals.timeout: 300
-  approvals.cron_mode: "deny"
-  approvals.unattended_mode: "deny"
-  approvals.single_query_mode: "deny"
+  # The six fleet-uniform approvals keys (mode/timeout/cron_mode/unattended_mode/
+  # single_query_mode/denial_breaker_threshold) are NO LONGER profile-local: GOV-F23
+  # relocated them to the machine-wide managed-scope fragment and STRIPS them from
+  # every rendered profile config (the disjoint immutability split). Their placement
+  # is now proven by GOV-F23 AC-1 (managed fragment carries them) and AC-3 (absent
+  # from every profile config). Per-role approvals.deny stays profile-local.
   agent.disabled_toolsets: []
   plugins.enabled: ["nv-fleet-gates", "nv-coworker-compose"]
   plugins.entries.nv-fleet-gates.settings.policy: "deny-admin-to-workers"
