@@ -1,0 +1,58 @@
+# GOV-F23 compose input — omitted variant. Same roster and per-role config as
+# coworker-types.yaml, but the input OMITS every fleet-uniform approvals key
+# (spine base-omitted.yaml + this default_config) AND omits the DEFAULT top-level
+# command_allowlist — so the GOV-F23 render must INSERT the approvals invariants
+# and leave the DEFAULT allowlist empty. Only a VALID compose INPUT is required.
+project: demo
+default_profile: default
+orchestrator_profile: reviewer
+worker_profile: builder
+
+spines:
+  base:
+    source: spines/base-omitted.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# Types are IDENTICAL to coworker-types.yaml — only the spine source and the
+# default_config differ between the two variants.
+types:
+  builder:
+    extends: [base]
+    identity: "BUILDER-IDENTITY"
+    skills: ["fix-skill"]
+    config:
+      command_allowlist: ["rm -rf build", "git reset --hard*"]
+      approvals:
+        deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
+    ui_meta: {title: "Builder", description: "Implementer", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"
+    invariants: ["INV-SHARED", "INV-REVIEWER"]
+    context: ["CTX-SHARED", "CTX-REVIEWER"]
+    skills: ["review-skill"]
+    overlays: ["critique-gate"]
+    config:
+      command_allowlist: ["git clean -fdx"]
+      approvals:
+        deny: ["git push --force*", "git tag *", "gh release *"]
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [builder, reviewer]
+
+# DEFAULT (multiplexer) profile — OMITS the six fleet-uniform approvals keys and
+# the top-level command_allowlist; keeps only the multiplex config, the
+# approvals.deny floor, and sessions.auto_prune:false.
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: ["builder", "reviewer"]
+  approvals:
+    deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
+  sessions: {auto_prune: false}

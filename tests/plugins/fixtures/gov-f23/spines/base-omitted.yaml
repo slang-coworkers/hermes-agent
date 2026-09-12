@@ -1,0 +1,37 @@
+# GOV-F23 compose input — omitted variant of the shared spine (OMITTED).
+# This spine OMITS all six fleet-uniform approvals keys (the approvals block is
+# absent entirely) so the GOV-F23 render must INSERT each at its fleet-safe
+# value. As in base.yaml there is NO traits block (per-role allowlist/deny live
+# in each type's config: block). Every OTHER config key matches base.yaml so the
+# two spine variants differ ONLY on the six approvals keys.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: true, auto_archive: false}
+  compression: {in_place: false}
+  checkpoints: {auto_prune: true}
+  memory: {memory_char_limit: 4000, user_char_limit: 2000}
+  skills: {external_dirs: ["/data/shared-skills"]}
+  terminal:
+    backend: "docker"
+    docker_env: {}
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+    docker_volumes: []
+  agent:
+    disabled_toolsets: []
+  plugins:
+    enabled: ["nv-fleet-gates"]
+    entries:
+      nv-fleet-gates:
+        settings:
+          enabled: true
+          policy: "deny-admin-to-workers"
+      nv-cost-cap:
+        settings:
+          ceiling_usd: 20
+  cron: {failure_nudge_threshold: 3}
