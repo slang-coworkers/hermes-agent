@@ -50,12 +50,13 @@ coworker enabling any port-binding platform.
 ## The canonical O1 route set
 
 The fleet authors these five routes into the DEFAULT profile's
-`default_config.platforms.webhook.extra.routes`. The **executable source of
-truth** for this contract is the acceptance fixture
-`tests/plugins/fixtures/ch-f52/coworker-types.yaml` (the `CANONICAL_ROUTES`
-constant in `tests/plugins/test_ch_f52_github_routing_acceptance.py` pins it and
-the test asserts the *rendered* config against it, so this table can never drift
-from what actually renders):
+`default_config.platforms.webhook.extra.routes`. The machine-checked source of
+truth for this contract is the `CANONICAL_ROUTES` constant in
+`tests/plugins/test_ch_f52_github_routing_acceptance.py`; the acceptance fixture
+`tests/plugins/fixtures/ch-f52/coworker-types.yaml` is the runnable configuration,
+and the test asserts the fixture's *rendered* output against that constant. The
+table below is explanatory only — it is not what the test inspects, so keep it in
+sync with `CANONICAL_ROUTES` during review:
 
 | route name | `profile` | `events` | `action` filter admits | mention filter |
 |---|---|---|---|---|
@@ -67,10 +68,16 @@ from what actually renders):
 
 Each route additionally carries:
 
-- **Its own `secret`** — a per-route HMAC secret, **pairwise distinct** across
-  routes. In production these are env-references resolved from the DEFAULT
-  profile's `.env`; never a shared or global secret (the compose renderer refuses
-  a route without its own non-empty secret).
+- **Its own `secret`** — a per-route, **pairwise-distinct** HMAC secret; never a
+  shared or global secret (the compose renderer refuses a route without its own
+  non-empty secret). In production, use `${env:NAME}` references and provision
+  every variable in the DEFAULT profile's `.env` **before** gateway startup. Note
+  the fail-open trap: an **unset** `${env:NAME}` reference is kept as the literal
+  placeholder string (config expansion does not blank it), so the route's secret
+  becomes that non-empty literal and the missing-secret `403` guard does **not**
+  fire. Treat any unresolved reference as a deployment failure — verify every
+  secret variable resolves at startup; never rely on the missing-secret guard to
+  catch an unprovisioned one.
 - **A `prompt` template** over the payload, referencing fields such as
   `{repository.full_name}`, `{issue.number}`, or `{pull_request.title}`. Payload
   fields are dot-addressable; `{__raw__}` dumps the whole payload.
@@ -101,6 +108,11 @@ drop or reshape a payload but cannot bind a profile). A multi-profile, filtered
 GitHub ingress therefore **must** be static rendered config. Static routes
 override same-name dynamic ones on merge, so the rendered contract is
 authoritative.
+
+Static routes are loaded from the DEFAULT profile's `config.yaml` when the gateway
+starts; only *dynamic* subscriptions hot-reload per request. So a change to the
+rendered route set (re-running the compose render, or editing `config.yaml`) takes
+effect only on the next DEFAULT-gateway restart/redeploy.
 
 ## Endpoints
 
@@ -161,10 +173,17 @@ comment in a thread.
 A related **ownership exemption** — a bot that already owns a PR responds to a
 comment event *even without* a mention — depends on querying the GOV-F25
 ownership card, which the exemption's positive path needs. Until that card ships,
-the fleet ingress ships the **mention gate only**. The exemption is implemented as
-a route-script seam: a `filters`/`script` hook under `~/.hermes/scripts/` that
-consults the ownership card and admits an owned-PR comment. This runbook documents
-the seam and defers the positive path to GOV-F25.
+the fleet ingress ships the **mention gate only**.
+
+Mind the evaluation order when GOV-F25 lands: declarative `filters` run **before**
+a route `script` (the adapter drops a filtered event before it ever invokes the
+script). So the exemption cannot be added as an *additional* filter alongside the
+mention filter — a standalone mention filter would reject an unmentioned owned-PR
+comment before any script could admit it. The future implementation must **replace**
+the standalone mention filter with a single route-level `script:` (under
+`~/.hermes/scripts/`) that consults the ownership card and admits the comment when
+it is mentioned **or** owned. This runbook documents that seam and defers the
+positive path to GOV-F25.
 
 ## Post-backs: use the owning bot's own identity, not `github_comment`
 
@@ -173,8 +192,9 @@ host** to post a comment. Do **not** use it for attributable fleet post-backs: a
 comment posted from the gateway host is attributed to the gateway's principal, not
 to the coworker that did the work. Attributable post-backs are the owning bot's
 **own** `gh` call, made inside that bot's sandbox under its own identity.
-`github_comment` is reserved for **unattributed** notices (a plain status ping to
-a chat), and none of the five canonical O1 routes uses it.
+`github_comment` is reserved for **unattributed** notices — a post for which
+gateway-host attribution is acceptable — and none of the five canonical O1 routes
+uses it.
 
 ## See also
 

@@ -1,11 +1,6 @@
-# CH-F52 acceptance fixture — the compose spec nv-coworker-compose renders from.
-# This is the CONFIGURE deliverable under test: the render must emit exactly the
-# five canonical GitHub ingress routes (CANONICAL_ROUTES in
-# tests/plugins/test_ch_f52_github_routing_acceptance.py) into the DEFAULT
-# (multiplexer) profile's platforms.webhook.extra.routes, and no coworker profile
-# may carry a webhook route or enable the webhook platform. Test secrets are
-# literal + pairwise-distinct so the behaviour half can compute a valid HMAC;
-# production fleets carry env-referenced secrets and their real bot handles.
+# Compose spec for the CH-F52 acceptance test. Test secrets are literal and
+# pairwise-distinct so the test can compute a valid per-route HMAC; production
+# fleets use env-referenced secrets and their real bot handles.
 project: slang-github-ingress
 default_profile: default
 orchestrator_profile: orchestrator
@@ -15,7 +10,7 @@ spines:
     source: spines/base.yaml
 
 # Coworker types. No skills/workflows/overlays are declared, so the render needs
-# no skill files — CH-F52 exercises only the DEFAULT-profile ingress routing.
+# no skill files.
 types:
   orchestrator:
     extends: [base]
@@ -27,10 +22,8 @@ types:
     extends: [base]
     identity: "Slang fleet fixer — addresses review feedback and CI failures."
 
-# DEFAULT (multiplexer) profile only — the canonical O1 GitHub ingress route set.
-# Each route: its own distinct HMAC secret, an explicit profile: binding, an
-# X-GitHub-Event filter, a declarative action (and, for comments, mention) filter,
-# a prompt templated over the payload ({repository.full_name}), and injected skills.
+# Webhook routes live only on the DEFAULT (multiplexer) profile; a coworker
+# profile that enables a port-binding platform is skipped at gateway startup.
 default_config:
   gateway:
     multiplex_profiles: true
