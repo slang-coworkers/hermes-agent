@@ -54,6 +54,28 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Fleet session-mode policy (RT-F03). A session mode is a FLEET-WIDE property:
+# under gateway.multiplex_profiles the gateway builds ONE SessionStore from the
+# single DEFAULT-profile config (gateway/run.py:7474) and hands that same store
+# to every profile's adapter (gateway/run.py:16823), so the isolation flags are
+# gateway-global, never per-profile. The two flags below are the store-lane keys
+# SessionStore reads (gateway/config.py:1220-1221 -> gateway/session.py:2010-2017).
+_SESSION_FLAG_KEYS: Tuple[str, str] = ("group_sessions_per_user", "thread_sessions_per_user")
+
+# Accepted session modes -> the (group, thread) sessions-per-user flags each
+# renders. per-thread is the native default (group split per user, thread shared).
+_SESSION_MODE_FLAGS: Dict[str, Dict[str, bool]] = {
+    "shared": {"group_sessions_per_user": False, "thread_sessions_per_user": False},
+    "per-thread": {"group_sessions_per_user": True, "thread_sessions_per_user": False},
+}
+_DEFAULT_SESSION_MODE = "per-thread"
+
+# agent-shared is the always-on native Bot Chat lane (one conversation per
+# coworker, resolved by exact title, hermes_state.py:10061-10066), NOT a
+# session-isolation flag mode; declaring it as a session_mode is rejected so a
+# spec cannot silently encode it as flags.
+_AGENT_SHARED_MODE = "agent-shared"
+
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
 # (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
 _DIST_OWNED: List[str] = [
@@ -143,6 +165,19 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = copy.deepcopy(value)
 
 
+def _is_platform_key(key: Any) -> bool:
+    """True iff ``key`` names a platform (including dynamically-registered plugin
+    platforms), tested with the ``Platform(key)`` constructor rather than by
+    iterating the enum."""
+    if not isinstance(key, str):
+        return False
+    try:
+        Platform(key)
+        return True
+    except ValueError:
+        return False
+
+
 def _enforce_retention(config: Dict[str, Any]) -> None:
     """Force the fleet-safe retention values onto ``config``, overriding a
     declared value and inserting an omitted one alike — the requirement's
@@ -214,6 +249,174 @@ def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> Non
     _set_dotted(default_config, "gateway.multiplex_profile_allowlist", roster)
 
 
+def _resolve_session_mode(
+    default_config: Dict[str, Any], resolved_by_type: Dict[str, Dict[str, Any]]
+) -> Dict[str, bool]:
+    """Resolve the single fleet-wide session mode from every EXPLICIT declaration.
+
+    Phase A of the two-phase session-mode render: a session mode is a
+    gateway-wide property (one shared SessionStore under multiplex), so it is
+    resolved ONCE before any profile is rendered — a per-coworker loop could not
+    detect coworker-vs-coworker divergence or propagate a late declaration.
+
+    Collects ``session_mode`` from ``default_config`` (the gateway-level field)
+    and from each resolved coworker ``config``. An OMITTED declaration
+    contributes no opinion, so a lone coworker declaration sets the gateway-wide
+    mode and an omit-vs-explicit pair is not a conflict. Two genuinely divergent
+    EXPLICIT declarations (any pair), an unknown value, or ``agent-shared`` (the
+    native Bot Chat lane, not a flag mode) each fail closed pre-startup. Returns
+    the store-lane flags for the resolved mode.
+    """
+    declarations: List[Tuple[str, Any]] = []
+    if "session_mode" in default_config:
+        declarations.append(("default_config.session_mode", default_config["session_mode"]))
+    for tname, resolved in resolved_by_type.items():
+        cfg = resolved.get("config") or {}
+        if "session_mode" in cfg:
+            declarations.append((f"coworker {tname!r} config.session_mode", cfg["session_mode"]))
+
+    modes: Set[str] = set()
+    for where, mode in declarations:
+        # isinstance BEFORE membership: an unhashable value (e.g. a YAML list)
+        # would raise a raw TypeError from ``in``, failing OPEN.
+        if not isinstance(mode, str) or mode not in _SESSION_MODE_FLAGS:
+            if mode == _AGENT_SHARED_MODE:
+                raise CompositionError(
+                    f"{where}: 'agent-shared' is not a session-isolation mode — it is the "
+                    f"always-on native Bot Chat lane (one conversation per coworker, resolved "
+                    f"by exact title). Remove session_mode; the Bot Chat lane is always on."
+                )
+            raise CompositionError(
+                f"{where}: unknown session_mode {mode!r} — expected one of "
+                f"{sorted(_SESSION_MODE_FLAGS)}"
+            )
+        modes.add(mode)
+
+    if len(modes) > 1:
+        raise CompositionError(
+            f"conflicting session_mode declarations {sorted(modes)}: the multiplex gateway "
+            f"keys every profile through ONE gateway-wide SessionStore, so the fleet has a "
+            f"single session mode. Declare one mode ("
+            f"{', '.join(f'{w}={m!r}' for w, m in declarations)}). Per-(profile, platform) "
+            f"session modes are the open upstream ask UA-5, not configurable here."
+        )
+    mode = modes.pop() if modes else _DEFAULT_SESSION_MODE
+    return dict(_SESSION_MODE_FLAGS[mode])
+
+
+def _strip_session_flags(block: Any) -> None:
+    """Remove the two controlled flags from a platform block (bare on the block
+    or under its ``extra``), pruning an ``extra`` the strip emptied. Any
+    unrelated content is left in place so ``_require_canonical_platform_layout``
+    still rejects a genuinely malformed block."""
+    if not isinstance(block, dict):
+        return
+    extra = block.get("extra")
+    if isinstance(extra, dict):
+        for key in _SESSION_FLAG_KEYS:
+            extra.pop(key, None)
+        if not extra:
+            block.pop("extra", None)
+    for key in _SESSION_FLAG_KEYS:
+        block.pop(key, None)
+
+
+def _prune_empty(container: Dict[str, Any], key: str) -> None:
+    """Remove ``key`` from ``container`` iff it now maps to an empty dict."""
+    value = container.get(key)
+    if isinstance(value, dict) and not value:
+        container.pop(key, None)
+
+
+def _mirror_and_strip_platform_flags(config: Dict[str, Any], flags: Dict[str, bool]) -> None:
+    """Mirror the resolved flags into every canonical ``platforms.<p>.extra`` and
+    strip them from every alias location the loader would merge, so the store
+    lane and the EFFECTIVE merged adapter lane cannot diverge.
+
+    The loader merges ``gateway.platforms.<p>`` then ``platforms.<p>`` then
+    ``gateway.<p>`` into one ``PlatformConfig.extra`` with ``gateway.<p>`` winning
+    last (gateway/config.py:1599-1637), so a divergent value at any alias would
+    otherwise override the canonical one; stripping all aliases leaves the
+    canonical ``platforms.<p>.extra`` as the sole surviving source.
+    """
+    canon = dict(flags)
+
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        for block in platforms.values():
+            if not isinstance(block, dict):
+                continue
+            # Clear any stale flag spelling on the canonical block first (bare on
+            # the block or under .extra) so the mirror below is the sole surviving
+            # source of both flags.
+            _strip_session_flags(block)
+            if "extra" in block:
+                # A present but non-mapping 'extra' (including None) is malformed;
+                # leave it untouched so _require_canonical_platform_layout rejects it.
+                if not isinstance(block["extra"], dict):
+                    continue
+                extra = block["extra"]
+            else:
+                extra = {}
+                block["extra"] = extra
+            extra.update(canon)
+
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        gw_platforms = gateway.get("platforms")
+        if isinstance(gw_platforms, dict):
+            for pname in list(gw_platforms):
+                _strip_session_flags(gw_platforms[pname])
+                _prune_empty(gw_platforms, pname)
+            _prune_empty(gateway, "platforms")
+        for key in list(gateway):
+            if key != "platforms" and _is_platform_key(key):
+                _strip_session_flags(gateway[key])
+                _prune_empty(gateway, key)
+
+    for key in list(config):
+        if key != "platforms" and _is_platform_key(key):
+            _strip_session_flags(config[key])
+            _prune_empty(config, key)
+
+    _prune_empty(config, "gateway")
+
+
+def _apply_session_mode(config: Dict[str, Any], flags: Dict[str, bool], is_default: bool) -> None:
+    """Serialize the resolved fleet session mode onto one rendered profile.
+
+    Phase B, called per profile after ``_enforce_retention`` and before
+    ``_require_canonical_platform_layout``. DEFAULT is the serialization owner: it
+    carries the store-lane flags at the top level, the exact config the multiplex
+    SessionStore reads (gateway/config.py:1220-1221 -> gateway/session.py:2010-2017).
+    A non-default profile carries NO gateway-global copy (the store never reads a
+    secondary profile's config), so any it declared is stripped. Every profile
+    that wires a platform gets the flags mirrored into its canonical
+    ``platforms.<p>.extra`` and every alias spelling stripped. The
+    ``session_mode`` pseudo-key (a plugin-own input with no core reader) is
+    removed from every profile.
+    """
+    config.pop("session_mode", None)
+    nested_default = config.get("default_config")
+    if isinstance(nested_default, dict):
+        nested_default.pop("session_mode", None)
+
+    # Strip any raw/aliased store-flag spelling everywhere first — the store
+    # reads only the DEFAULT profile's TOP-LEVEL flags, so a top-level or
+    # gateway.* copy is either inert-but-hostile (a coworker) or not the store
+    # lane (gateway.* on DEFAULT). DEFAULT then re-writes the canonical top-level.
+    gateway = config.get("gateway")
+    for key in _SESSION_FLAG_KEYS:
+        config.pop(key, None)
+        if isinstance(gateway, dict):
+            gateway.pop(key, None)
+    if is_default:
+        for key, value in flags.items():
+            _set_dotted(config, key, value)
+
+    _mirror_and_strip_platform_flags(config, flags)
+
+
 def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[str, str]]:
     """Yield ``(location, platform)`` for every platform-named key spelled outside
     the canonical ``platforms.<x>`` map: a top-level key, a ``gateway.<x>`` key,
@@ -225,27 +428,18 @@ def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[s
     recognizing WHERE a platform is declared is a separate concern from deciding
     WHETHER it binds a port, and the two checks must not share a predicate.
     """
-    def _is_platform(key: Any) -> bool:
-        if not isinstance(key, str):
-            return False
-        try:
-            Platform(key)
-            return True
-        except ValueError:
-            return False
-
     for key in config:
-        if _is_platform(key):
+        if _is_platform_key(key):
             yield "top-level", key
     gateway = config.get("gateway")
     if isinstance(gateway, dict):
         for key in gateway:
-            if _is_platform(key):
+            if _is_platform_key(key):
                 yield "gateway", key
         gw_platforms = gateway.get("platforms")
         if isinstance(gw_platforms, dict):
             for key in gw_platforms:
-                if _is_platform(key):
+                if _is_platform_key(key):
                     yield "gateway.platforms", key
 
 
@@ -585,12 +779,22 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     roster = list(types)
     served: Set[str] = {"default", *roster}
 
-    rendered: Dict[str, str] = {}
+    # Phase A: resolve every coworker type and the DEFAULT config, then resolve
+    # the single fleet-wide session mode ONCE — before rendering any profile.
+    resolved_by_type: Dict[str, Dict[str, Any]] = {}
     for tname, tinfo in types.items():
         tname = _safe_name("type", tname)
-        resolved = _resolve_type(tname, tinfo or {}, spines)
+        resolved_by_type[tname] = _resolve_type(tname, tinfo or {}, spines)
+    default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
+    session_flags = _resolve_session_mode(default_config, resolved_by_type)
+
+    # Phase B: render each profile, applying the fleet session mode after
+    # retention and before the canonical-layout / port / route checks.
+    rendered: Dict[str, str] = {}
+    for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        _apply_session_mode(resolved["config"], session_flags, is_default=False)
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
         _forbid_coworker_webhook_routes(resolved["config"], tname)
@@ -598,8 +802,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
 
-    default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     _enforce_retention(default_config)
+    _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
     _validate_webhook_routes(default_config, served)
