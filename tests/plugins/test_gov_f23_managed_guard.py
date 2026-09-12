@@ -75,7 +75,6 @@ def test_managed_type_name_rejected(tmp_path, monkeypatch):
     with pytest.raises(loaded.module.CompositionError) as exc:
         loaded.module.compose(str(spec), str(tmp_path / "out"))
     assert "managed" in str(exc.value).lower()
-    # the reserved dir must not have been written for a rejected spec
     assert not (tmp_path / "out" / "managed" / "config.yaml").exists()
 
 
