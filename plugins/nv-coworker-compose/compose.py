@@ -54,6 +54,31 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Fleet-uniform approval policy (GOV-F23). These six keys are pinned ONCE,
+# machine-wide, in the managed-scope fragment (out_root/managed/config.yaml) that
+# native _load_config_impl deep-merges (managed-wins) onto every profile
+# (hermes_cli/managed_scope.py:137-176), and are STRIPPED from every per-profile
+# config so the immutability split is disjoint — fleet policy is root-owned (a
+# /approvals mode change refuses under managed policy, hermes_cli/approval_mode.py:63)
+# while the per-role command_allowlist / approvals.deny stay in the profile config.
+# Every value equals the stock default (hermes_cli/config_defaults.py:2558-2576), so
+# the fleet fails safe if the fragment is not yet installed: stock Hermes already
+# denies unattended dangerous commands. Pinned EXPLICITLY (the MEM-F44 "never by
+# assumption" standard) so a re-pin or an upstream default flip cannot silently
+# loosen them. Every key has a real reader (readers cited in the GOV-F23 runbook).
+_GOV_APPROVALS_MANAGED: Dict[str, Any] = {
+    "approvals.mode": "smart",
+    "approvals.timeout": 300,
+    "approvals.cron_mode": "deny",
+    "approvals.single_query_mode": "deny",
+    "approvals.unattended_mode": "deny",
+    "approvals.denial_breaker_threshold": 3,
+}
+
+# Reserved sibling directory under out_root for the managed fragment. A coworker
+# type named 'managed' is rejected so its profile dir cannot collide with it.
+_MANAGED_FRAGMENT_DIR = "managed"
+
 # Fleet session-mode policy (RT-F03). A session mode is a FLEET-WIDE property:
 # under gateway.multiplex_profiles the gateway builds ONE SessionStore from the
 # single DEFAULT-profile config (gateway/run.py:7474) and hands that same store
@@ -187,6 +212,70 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
+def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool) -> None:
+    """Fail closed on a malformed per-role approval list.
+
+    A present top-level ``command_allowlist`` (coworker profiles only — DEFAULT's
+    is force-emptied, so its submitted value is not trusted) and a present
+    ``approvals.deny`` must each be a list of non-empty, non-whitespace strings: a
+    blank member is a silently-inert deny rule or an over-broad allowlist entry,
+    and a non-list is a spec error. Type-checked before any iteration so a hostile
+    value raises ``CompositionError``, never a raw ``TypeError``.
+    """
+    to_check: List[Tuple[str, Any]] = []
+    if include_allowlist and "command_allowlist" in config:
+        to_check.append(("command_allowlist", config["command_allowlist"]))
+    approvals = config.get("approvals")
+    if isinstance(approvals, dict) and "deny" in approvals:
+        to_check.append(("approvals.deny", approvals["deny"]))
+    for label, value in to_check:
+        if not isinstance(value, list):
+            raise CompositionError(f"{label} must be a list, got {type(value).__name__}")
+        for member in value:
+            if not isinstance(member, str) or not member.strip():
+                raise CompositionError(
+                    f"{label} entries must be non-empty strings, got {member!r}"
+                )
+
+
+def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
+    """Remove the six fleet-uniform approval keys from a per-profile config so the
+    immutability split is disjoint — they live ONLY in the managed fragment. The
+    per-role ``approvals.deny`` floor is LEFT in place (it is read fresh-config
+    per-profile, so it is honored in-gateway too). A now-empty ``approvals`` block
+    is pruned so no empty dict is written."""
+    approvals = config.get("approvals")
+    if not isinstance(approvals, dict):
+        return
+    for dotted in _GOV_APPROVALS_MANAGED:
+        approvals.pop(dotted.split(".", 1)[1], None)
+    _prune_empty(config, "approvals")
+
+
+def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
+    """Force the DEFAULT/multiplexer profile's top-level ``command_allowlist`` to
+    ``[]`` — the in-gateway fail-safe floor. The gateway process loads its
+    process-global permanent allowlist ONCE at import from the launch (DEFAULT)
+    profile (tools/approval.py:5970-5971) and never re-scopes it per profile, so
+    an empty list means in-gateway multiplex cron/webhook/api find nothing to
+    bypass at the allowlist short-circuit (tools/approval.py:4784) and fall through
+    to the deny resolvers. Written explicitly and never by assumption: a declared
+    non-empty allowlist is overwritten rather than trusted."""
+    config["command_allowlist"] = []
+
+
+def _build_managed_fragment() -> Dict[str, Any]:
+    """Build the machine-wide managed-scope approvals fragment (the six
+    fleet-uniform keys, override-or-insert via ``_set_dotted``). The operator
+    installs this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
+    ``/etc/hermes/config.yaml``); native ``_load_config_impl`` deep-merges it
+    (managed-wins) onto every profile."""
+    fragment: Dict[str, Any] = {}
+    for dotted, value in _GOV_APPROVALS_MANAGED.items():
+        _set_dotted(fragment, dotted, value)
+    return fragment
+
+
 def _require_canonical_profile_names(
     types: Dict[str, Any], default_profile: str, orchestrator_profile: str
 ) -> None:
@@ -208,6 +297,11 @@ def _require_canonical_profile_names(
     if "default" in types:
         raise CompositionError(
             "a coworker type may not be named 'default' — it collides with the multiplexer root"
+        )
+    if _MANAGED_FRAGMENT_DIR in types:
+        raise CompositionError(
+            f"a coworker type may not be named {_MANAGED_FRAGMENT_DIR!r} — it collides "
+            f"with the machine-wide managed-scope fragment directory (out_root/{_MANAGED_FRAGMENT_DIR})"
         )
     if orchestrator_profile not in types:
         raise CompositionError(
@@ -794,6 +888,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        _validate_approval_lists(resolved["config"], include_allowlist=True)
+        _strip_fleet_uniform_approvals(resolved["config"])
         _apply_session_mode(resolved["config"], session_flags, is_default=False)
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
@@ -803,6 +899,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
+    _validate_approval_lists(default_config, include_allowlist=False)
+    _strip_fleet_uniform_approvals(default_config)
+    _force_default_allowlist_empty(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
@@ -810,5 +909,13 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
+
+    # Emit the machine-wide managed-scope fragment after every profile validated
+    # and rendered. It is NOT added to `rendered`: the mapping is profile-name ->
+    # distribution dir, and the fragment is a machine-wide config file, not a
+    # profile (onboarding installs only the coworker TYPE profiles).
+    managed_dir = out_root / _MANAGED_FRAGMENT_DIR
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    _write_yaml(managed_dir / "config.yaml", _build_managed_fragment())
 
     return rendered
