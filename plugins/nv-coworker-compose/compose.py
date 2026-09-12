@@ -440,15 +440,31 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
             stripped |= _strip_engage_key(config, platform, bkey)
             target[bkey] = copy.deepcopy(breset)
     else:
-        # sender_scope omitted: keep the operator's inherited bypass value, but still
-        # canonicalize it — a bypass key left at a noncanonical alias would trip
-        # RT-F01's _require_canonical_platform_layout — so strip every alias, then
-        # rewrite only the preserved canonical value at platforms.<p>.extra.
+        # sender_scope omitted: there is no declared scope to protect, so PRESERVE
+        # the operator's inherited bypass value rather than resetting it — but still
+        # canonicalize it (a value left at a noncanonical alias would trip RT-F01's
+        # _require_canonical_platform_layout). Prefer the canonical .extra value;
+        # otherwise take a consistent inherited value from the aliases (rejecting a
+        # conflicting one), strip every alias, and write it to platforms.<p>.extra.
         for bkey in bypasses:
+            values: List[Any] = []
+            for node in _engage_alias_nodes(config, platform):
+                if bkey in node:
+                    values.append(node[bkey])
+                extra = node.get("extra")
+                if isinstance(extra, dict) and bkey in extra:
+                    values.append(extra[bkey])
+            if not values:
+                continue
             if bkey in target:
                 preserved = copy.deepcopy(target[bkey])
-                stripped |= _strip_engage_key(config, platform, bkey)
-                target[bkey] = preserved
+            elif any(value != values[0] for value in values[1:]):
+                raise CompositionError(
+                    f"conflicting inherited {bkey!r} values for platform {platform!r}")
+            else:
+                preserved = copy.deepcopy(values[0])
+            stripped |= _strip_engage_key(config, platform, bkey)
+            target[bkey] = preserved
 
     _prune_vacuous_noncanonical(config, platform, stripped)
 

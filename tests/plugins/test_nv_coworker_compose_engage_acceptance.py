@@ -628,3 +628,31 @@ def test_render_engage_detaches_yaml_anchor_aliases(loaded, tmp_path):
     cfg_b = _worker_config(out_b)
     assert _extra(cfg_b, "slack") == _CAPS_EXPECTED[("slack", "mention")]
     assert _extra(cfg_b, "telegram") == _CAPS_EXPECTED[("telegram", "mention")]
+
+
+def test_render_engage_omitted_scope_canonicalizes_alias_only_bypass(loaded, tmp_path):
+    """With sender_scope omitted (no declared scope to protect), a scope-bypass key
+    (Telegram guest_mode, Slack reaction_trigger_target) present ONLY at a noncanonical
+    loader alias — never at canonical platforms.<p>.extra — is stripped from every
+    alias so it cannot trip RT-F01's canonical-layout check, and the operator's
+    inherited value is PRESERVED by relocating it to canonical platforms.<p>.extra
+    (never reset when no scope is declared); the noncanonical alias is pruned."""
+    module, _entry = loaded
+
+    # Telegram guest_mode only under gateway.telegram (a noncanonical alias)
+    out_t = _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("telegram", "mention"),
+                                      {"gateway": {"telegram": {"extra": {"guest_mode": True}}}}),
+                    "guest_alias_only")
+    cfg_t = _worker_config(out_t)
+    assert "telegram" not in (cfg_t.get("gateway") or {})
+    assert _extra(cfg_t, "telegram")["guest_mode"] is True
+
+    # Slack reaction_trigger_target only under the root slack: block (a noncanonical alias)
+    out_s = _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("slack", "mention"),
+                                      {"slack": {"extra": {"reaction_trigger_target": "C-elsewhere"}}}),
+                    "rtt_alias_only")
+    cfg_s = _worker_config(out_s)
+    assert "slack" not in cfg_s
+    assert _extra(cfg_s, "slack")["reaction_trigger_target"] == "C-elsewhere"

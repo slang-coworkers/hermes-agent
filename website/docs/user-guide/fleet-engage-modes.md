@@ -73,9 +73,12 @@ What each mode means:
 - **pattern** — the bot also wakes on a message matching one of the `patterns`
   wake-word regexes, in addition to explicit mentions.
 - **always-on** — the bot answers every message in the bounded `channels`
-  free-response list. Outside that list, always-on renders `strict_mention:false`
-  (a superset of `mention-sticky`), so it wakes on a mention **or** a native
-  sticky-thread / active-session — bounded, still requires prior engagement, never
+  free-response list. Outside that list each platform keeps its own native gate:
+  Slack renders `strict_mention:false` + `thread_require_mention:false`, so it also
+  wakes on a mention or a sticky-thread / active-session; Discord renders
+  `thread_require_mention:false`, so it also wakes on a mention or a bot-thread
+  follow-up; Telegram keeps `require_mention:true` and wakes on a mention or a reply
+  addressed to the bot. All bounded, still requiring prior engagement, never
   blanket. This is native breadth, not gateway fan-out; see the never-blanket-forward
   invariant below.
 
