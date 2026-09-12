@@ -411,9 +411,10 @@ def test_ac_rt_f02_6(loaded, tmp_path):
 
 def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     """Hardening for AC-RT-F02-4: a blank/whitespace channel or sender_scope member
-    (an empty adapter allowlist == unrestricted), a blank pattern (a match-everything
-    regex), and a non-string mode all fail closed with CompositionError, not just the
-    ``*`` wildcard the criterion enumerates."""
+    (an empty adapter allowlist == unrestricted), a blank OR syntactically-invalid
+    pattern (the adapter drops an un-compilable regex, degrading pattern→mention-only),
+    and a non-string mode all fail closed with CompositionError, not just the ``*``
+    wildcard the criterion enumerates."""
     module, _entry = loaded
 
     def _reject(engage: dict, tag: str):
@@ -430,14 +431,19 @@ def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     _reject({"slack": {"mode": "pattern", "patterns": [""]}}, "pat_blank")
     _reject({"slack": {"mode": "pattern", "patterns": ["  "]}}, "pat_ws")
     _reject({"telegram": {"mode": "pattern", "patterns": [""]}}, "tg_pat_blank")
+    # S2: an un-compilable regex is dropped by the adapter (pattern → mention-only)
+    _reject({"slack": {"mode": "pattern", "patterns": ["("]}}, "pat_invalid_regex")
+    _reject({"telegram": {"mode": "pattern", "patterns": ["ok", "a["]}}, "tg_pat_invalid_regex")
 
 
-def test_render_engage_alias_strip_all_platforms_preserves_sentinels(loaded, tmp_path):
-    """Hardening for AC-RT-F02-2/-3: every controlled key AND the scope key are
-    stripped from all eight loader-alias locations for slack, discord and telegram
-    (so nothing bridges over the rendered gate), the canonical set + declared scope
-    land only at platforms.<p>.extra, unrelated sentinel keys (enabled/token/custom
-    .extra) survive, the default and orchestrator profiles render canonical too, and
+def test_render_engage_alias_strip_prunes_noncanonical_preserves_canonical(loaded, tmp_path):
+    """Hardening for AC-RT-F02-2/-3 reconciled with RT-F01's canonical-layout check:
+    controlled + scope keys are stripped from all four alias locations for slack,
+    discord and telegram; a NONCANONICAL alias (root <p>, gateway.<p>,
+    gateway.platforms.<p>) the strip empties is PRUNED so it does not trip RT-F01's
+    _require_canonical_platform_layout, while unrelated fields under the canonical
+    platforms.<p> survive; the canonical set + declared scope land at
+    platforms.<p>.extra; default and orchestrator profiles render canonical too; and
     the inbound doc link is present in multi-profile-gateways.md."""
     module, _entry = loaded
 
@@ -448,20 +454,21 @@ def test_render_engage_alias_strip_all_platforms_preserves_sentinels(loaded, tmp
         controlled = set(expected)
         checkset = controlled | {scope_key}
 
-        # a distinct stale value for every controlled key + the scope key, planted
-        # at each of the eight plain/.extra alias locations, alongside sentinels
-        stale = {k: f"STALE-{k}" for k in controlled}
-        stale[scope_key] = ["C-STALE"]
-
-        def _leaf(tag):
-            return {**copy.deepcopy(stale), "enabled": True, "token": f"tok-{tag}",
-                    "extra": {**copy.deepcopy(stale), "custom_sentinel": f"keep-{tag}"}}
+        # Stale controlled + scope values at every alias. At the three NONCANONICAL
+        # aliases they are the ONLY content, so the strip empties the block and the
+        # render prunes it (RT-F01 rejects any surviving noncanonical platform key);
+        # unrelated sentinels live only at the canonical platforms.<p> and must survive.
+        def _stale():
+            s = {k: f"STALE-{k}" for k in controlled}
+            s[scope_key] = ["C-STALE"]
+            return s
 
         alias_block = {
-            platform: _leaf("root"),
-            "platforms": {platform: _leaf("p")},
-            "gateway": {platform: _leaf("gw"),
-                        "platforms": {platform: _leaf("gwp")}},
+            platform: _stale(),
+            "platforms": {platform: {**_stale(), "token": "tok-canon",
+                                     "extra": {**_stale(), "custom_sentinel": "keep"}}},
+            "gateway": {platform: {**_stale(), "extra": _stale()},
+                        "platforms": {platform: {**_stale(), "extra": _stale()}}},
         }
         out = _render(
             module, tmp_path,
@@ -469,35 +476,45 @@ def test_render_engage_alias_strip_all_platforms_preserves_sentinels(loaded, tmp
             f"alias_{platform}")
         cfg = _worker_config(out)
 
-        def _plain(node):
-            return set(node or {}) & checkset
-
-        def _in_extra(node):
-            return set((node or {}).get("extra", {})) & checkset
-
+        assert platform not in cfg
         gw = cfg.get("gateway") or {}
-        assert _plain(cfg.get(platform)) == set() and _in_extra(cfg.get(platform)) == set()
-        pnode = cfg.get("platforms", {}).get(platform)
-        assert _plain(pnode) == set()  # platforms.<p>.extra legitimately holds canonical
-        assert _plain(gw.get(platform)) == set() and _in_extra(gw.get(platform)) == set()
-        gwp = gw.get("platforms", {}).get(platform)
-        assert _plain(gwp) == set() and _in_extra(gwp) == set()
+        assert platform not in gw
+        assert platform not in (gw.get("platforms") or {})
 
         got = _extra(cfg, platform)
         for k, v in expected.items():
             assert got[k] == v, (platform, k, got.get(k))
         assert got[scope_key] == ["C-new"], (platform, got.get(scope_key))
 
-        # unrelated sentinels survive at platforms.<p> and its extra
-        assert pnode.get("enabled") is True
-        assert pnode.get("token") == "tok-p"
-        assert pnode.get("extra", {}).get("custom_sentinel") == "keep-p"
+        pnode = cfg.get("platforms", {}).get(platform)
+        assert pnode.get("token") == "tok-canon"
+        assert pnode.get("extra", {}).get("custom_sentinel") == "keep"
+        assert set(pnode) & checkset == set()
 
-        # default + orchestrator profiles render the canonical mode keys too
         for prof in ("default", "orchestrator"):
             pextra = _extra(_read_yaml(out / prof / "config.yaml"), platform)
             for k, v in expected.items():
                 assert pextra[k] == v, (prof, platform, k)
+
+    mpg = REPO_ROOT / "website" / "docs" / "user-guide" / "multi-profile-gateways.md"
+    assert mpg.is_file(), f"missing {mpg}"
+    assert "fleet-engage-modes.md" in mpg.read_text(encoding="utf-8"), "inbound doc link absent"
+
+
+def test_render_engage_noncanonical_alias_with_unrelated_field_raises(loaded, tmp_path):
+    """The prune does not weaken RT-F01: a noncanonical platform alias carrying an
+    unrelated (non-controlled) field is not emptied by the strip, survives, and trips
+    _require_canonical_platform_layout with CompositionError."""
+    module, _entry = loaded
+    for alias in (
+        {"slack": {"token": "t"}},
+        {"gateway": {"slack": {"token": "t"}}},
+        {"gateway": {"platforms": {"slack": {"token": "t"}}}},
+    ):
+        with pytest.raises(module.CompositionError):
+            _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("slack", "mention"), alias),
+                    "noncanon_unrelated")
 
     mpg = REPO_ROOT / "website" / "docs" / "user-guide" / "multi-profile-gateways.md"
     assert mpg.is_file(), f"missing {mpg}"

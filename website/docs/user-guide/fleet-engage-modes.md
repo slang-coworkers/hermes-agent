@@ -73,7 +73,11 @@ What each mode means:
 - **pattern** — the bot also wakes on a message matching one of the `patterns`
   wake-word regexes, in addition to explicit mentions.
 - **always-on** — the bot answers every message in the bounded `channels`
-  free-response list (and still on mention elsewhere).
+  free-response list. Outside that list, always-on renders `strict_mention:false`
+  (a superset of `mention-sticky`), so it wakes on a mention **or** a native
+  sticky-thread / active-session — bounded, still requires prior engagement, never
+  blanket. This is native breadth, not gateway fan-out; see the never-blanket-forward
+  invariant below.
 
 ### Scope key (`sender_scope`)
 

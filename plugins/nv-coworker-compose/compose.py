@@ -16,9 +16,12 @@ import copy
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List, Set, Tuple
 
 import yaml
+
+from gateway.config import Platform, platform_binds_port
+from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 
 # Spec-controlled names become directory/file components and profile names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -287,8 +290,9 @@ def _bounded_ids(values: Any, what: str) -> List[Any]:
 
 def _bounded_patterns(values: Any, platform: str) -> List[str]:
     """Validate the non-empty pattern list a ``pattern`` mode requires. A blank
-    pattern compiles to a match-everything regex, so every element must be a
-    non-empty string."""
+    pattern matches everything, and a syntactically-invalid one is silently dropped
+    by the adapter (degrading ``pattern`` → mention-only), so every element must be
+    a non-empty string that compiles as a regex."""
     if isinstance(values, str) or not isinstance(values, list) or not values:
         raise CompositionError(
             f"engage mode 'pattern' for platform {platform!r} requires a non-empty "
@@ -297,6 +301,14 @@ def _bounded_patterns(values: Any, platform: str) -> List[str]:
         raise CompositionError(
             f"engage mode 'pattern' for platform {platform!r} requires non-empty "
             "string patterns (a blank pattern matches everything)")
+    for p in values:
+        try:
+            re.compile(p)
+        except re.error as exc:
+            raise CompositionError(
+                f"engage mode 'pattern' for platform {platform!r}: invalid regex {p!r} "
+                f"({exc}) — the adapter would drop it, degrading pattern to mention-only"
+            ) from exc
     return list(values)
 
 
@@ -367,6 +379,256 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
         scope_key = caps["scope_key"]
         _strip_engage_key(config, platform, scope_key)
         _engage_extra_target(config, platform)[scope_key] = scope
+
+    # RT-F01 forbids a platform block at any noncanonical alias; the controlled-key
+    # strip can leave such a block empty, so drop the emptied ones. A noncanonical
+    # block that still carries unrelated config is left for
+    # _require_canonical_platform_layout to reject — pruning it would weaken that check.
+    _prune_vacuous_noncanonical(config, platform)
+
+
+def _is_vacuous_platform_block(block: Any) -> bool:
+    """A platform block the engage strip emptied: no keys, or only an empty
+    ``extra`` mapping."""
+    if not isinstance(block, dict):
+        return False
+    if not block:
+        return True
+    return set(block) == {"extra"} and isinstance(block.get("extra"), dict) and not block["extra"]
+
+
+def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str) -> None:
+    """Remove a NONCANONICAL platform alias (root ``<p>``, ``gateway.<p>``,
+    ``gateway.platforms.<p>``) left vacuous by the controlled-key strip so it does
+    not trip RT-F01's ``_require_canonical_platform_layout`` (which rejects any
+    platform-named key outside ``platforms.<p>``). The canonical ``platforms.<p>``
+    block is never pruned."""
+    def _prune(parent: Any) -> None:
+        if isinstance(parent, dict) and _is_vacuous_platform_block(parent.get(platform)):
+            parent.pop(platform, None)
+
+    _prune(config)
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        _prune(gateway)
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            _prune(gplatforms)
+
+
+def _require_canonical_profile_names(
+    types: Dict[str, Any], default_profile: str, orchestrator_profile: str
+) -> None:
+    """Refuse a spec whose profile names would desynchronize the multiplex joins.
+
+    A coworker type name is used byte-identically as its profile directory, its
+    ``multiplex_profile_allowlist`` entry, and any webhook ``profile:`` binding,
+    so all three must agree with what ``profiles_to_serve`` will serve: the root
+    is always served as the literal ``"default"`` and named profiles are stored
+    canonical (lowercase, validated). A ``default_profile`` other than
+    ``"default"``, a coworker type named ``default`` (whose dir would collide
+    with the multiplexer root), an ``orchestrator_profile`` absent from the
+    roster, or a non-canonical / reserved type name each breaks a join.
+    """
+    if default_profile != "default":
+        raise CompositionError(
+            f"default_profile must be 'default' (the multiplexer root), got {default_profile!r}"
+        )
+    if "default" in types:
+        raise CompositionError(
+            "a coworker type may not be named 'default' — it collides with the multiplexer root"
+        )
+    if orchestrator_profile not in types:
+        raise CompositionError(
+            f"orchestrator_profile {orchestrator_profile!r} is not one of the declared coworker types"
+        )
+    for tname in types:
+        if not isinstance(tname, str):
+            raise CompositionError(f"coworker type name is not a string: {tname!r}")
+        try:
+            canonical = normalize_profile_name(tname)
+            validate_profile_name(tname)
+        except ValueError as exc:
+            raise CompositionError(
+                f"coworker type {tname!r} is not a valid profile name: {exc}"
+            ) from exc
+        if canonical != tname:
+            raise CompositionError(
+                f"coworker type {tname!r} is not canonical (expected {canonical!r})"
+            )
+
+
+def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> None:
+    """Force the DEFAULT profile into multiplexer mode serving exactly ``roster``.
+
+    Written explicitly and never by assumption: a spec that omits the keys — or
+    sets a hostile root ``multiplex_profiles: false`` — must still render a
+    multiplexing default. Core reads the ROOT spelling with precedence over the
+    nested ``gateway.*`` one, so a surviving root value would win; POP both
+    spellings, then write only the canonical nested keys the effective parsed
+    config resolves to. (The ``GATEWAY_MULTIPLEX_PROFILES`` env override is the
+    operator's deployment box, outside a render's reach.)
+    """
+    nested = default_config.get("gateway")
+    for key in ("multiplex_profiles", "multiplex_profile_allowlist"):
+        default_config.pop(key, None)
+        if isinstance(nested, dict):
+            nested.pop(key, None)
+    _set_dotted(default_config, "gateway.multiplex_profiles", True)
+    _set_dotted(default_config, "gateway.multiplex_profile_allowlist", roster)
+
+
+def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[str, str]]:
+    """Yield ``(location, platform)`` for every platform-named key spelled outside
+    the canonical ``platforms.<x>`` map: a top-level key, a ``gateway.<x>`` key,
+    or a ``gateway.platforms.<x>`` key.
+
+    Platform membership is tested with the ``Platform(key)`` constructor (which
+    also resolves dynamically-registered plugin platforms), never by iterating the
+    enum. Layout detection is kept independent of ``platform_binds_port``:
+    recognizing WHERE a platform is declared is a separate concern from deciding
+    WHETHER it binds a port, and the two checks must not share a predicate.
+    """
+    def _is_platform(key: Any) -> bool:
+        if not isinstance(key, str):
+            return False
+        try:
+            Platform(key)
+            return True
+        except ValueError:
+            return False
+
+    for key in config:
+        if _is_platform(key):
+            yield "top-level", key
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        for key in gateway:
+            if _is_platform(key):
+                yield "gateway", key
+        gw_platforms = gateway.get("platforms")
+        if isinstance(gw_platforms, dict):
+            for key in gw_platforms:
+                if _is_platform(key):
+                    yield "gateway.platforms", key
+
+
+def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
+    """Refuse a platform block spelled non-canonically or carrying a non-mapping
+    ``extra``.
+
+    A platform can hide from the port-binding / route checks two ways: an alias
+    location (top-level ``<platform>``, ``gateway.<platform>``,
+    ``gateway.platforms.<platform>``), and a non-canonical spelling of the key
+    under ``platforms`` — core normalizes ``"Webhook"`` and ``" webhook "`` to
+    ``Platform.WEBHOOK`` and enables the listener, but the checks below match the
+    canonical value string. Both are refused, so exactly one canonical place
+    remains where a port binder or a route can live. A present ``extra`` that is
+    not a mapping is refused too: left in place it would be written to
+    ``config.yaml`` and break the runtime platform merge, discarding the
+    multiplex/allowlist enforcement the loader would otherwise apply.
+    """
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        for key, block in platforms.items():
+            if isinstance(key, str):
+                try:
+                    canonical = Platform(key).value
+                except ValueError:
+                    canonical = None
+                if canonical is not None and key != canonical:
+                    raise CompositionError(
+                        f"platform {key!r} under 'platforms' must use its canonical name {canonical!r}"
+                    )
+            if isinstance(block, dict) and "extra" in block and not isinstance(block["extra"], dict):
+                raise CompositionError(f"platforms.{key}: 'extra' must be a mapping")
+    for location, platform in _iter_noncanonical_platform_keys(config):
+        raise CompositionError(
+            f"platform {platform!r} must be declared under 'platforms.{platform}', "
+            f"not as {location}.{platform}"
+        )
+
+
+def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -> None:
+    """Every webhook route on the DEFAULT profile carries its OWN non-empty secret
+    and an EXPLICIT ``profile:`` binding to a served profile.
+
+    Stricter than native (which permits global-secret inheritance and treats an
+    omitted ``profile`` as ``default``) so a fleet route can never fall back to a
+    shared secret or an implicit binding.
+    """
+    platforms = default_config.get("platforms")
+    if not isinstance(platforms, dict):
+        return
+    webhook = platforms.get("webhook")
+    if not isinstance(webhook, dict):
+        return
+    extra = webhook.get("extra")
+    routes = extra.get("routes") if isinstance(extra, dict) else None
+    if not routes:
+        return
+    if not isinstance(routes, dict):
+        raise CompositionError(
+            "platforms.webhook.extra.routes must be a mapping of route name -> route"
+        )
+    for name, route in routes.items():
+        secret = route.get("secret") if isinstance(route, dict) else None
+        if not isinstance(secret, str) or not secret:
+            raise CompositionError(
+                f"webhook route {name!r}: 'secret' must be a non-empty string"
+            )
+        profile = route.get("profile") if isinstance(route, dict) else None
+        if not isinstance(profile, str) or profile not in served:
+            raise CompositionError(
+                f"webhook route {name!r}: 'profile' must explicitly bind a served profile "
+                f"(one of {sorted(served)})"
+            )
+
+
+def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
+    """No coworker profile may enable a port-binding platform.
+
+    In a multiplexer the DEFAULT profile owns the single shared listener and
+    serves every profile through ``/p/<profile>/``; a secondary profile that
+    binds a host port is always a misconfiguration. Uses core's own
+    ``platform_binds_port`` predicate — no vendored port set — so the policy
+    tracks core exactly.
+    """
+    platforms = config.get("platforms")
+    if not isinstance(platforms, dict):
+        return
+    for pname, block in platforms.items():
+        if not isinstance(block, dict) or not block.get("enabled"):
+            continue
+        extra = block.get("extra")
+        if platform_binds_port(pname, extra if isinstance(extra, dict) else None):
+            raise CompositionError(
+                f"coworker {tname!r} may not enable port-binding platform {pname!r} — "
+                f"only the DEFAULT multiplexer profile owns the shared listener"
+            )
+
+
+def _forbid_coworker_webhook_routes(config: Dict[str, Any], tname: str) -> None:
+    """Webhook routes belong only on the DEFAULT profile — refuse any on a
+    coworker even when the block is disabled.
+
+    ``_forbid_coworker_port_binding`` only fires on an *enabled* platform, so a
+    ``webhook`` block with ``enabled: false`` that still carries routes would
+    otherwise leak scope. A disabled-but-present route is still a route on the
+    wrong profile.
+    """
+    platforms = config.get("platforms")
+    if not isinstance(platforms, dict):
+        return
+    webhook = platforms.get("webhook")
+    if not isinstance(webhook, dict):
+        return
+    extra = webhook.get("extra")
+    if isinstance(extra, dict) and extra.get("routes"):
+        raise CompositionError(
+            f"coworker {tname!r} may not carry webhook routes — "
+            f"routes live only on the DEFAULT profile"
+        )
 
 
 def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> Dict[str, Any]:
@@ -580,22 +842,37 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         spines[sname] = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
 
     orchestrator_profile = _safe_name("profile", data.get("orchestrator_profile", "orchestrator"))
-    rendered: Dict[str, str] = {}
+    default_profile = _safe_name("profile", data.get("default_profile", "default"))
     types = data.get("types") or {}
+
+    _require_canonical_profile_names(types, default_profile, orchestrator_profile)
+    roster = list(types)
+    served: Set[str] = {"default", *roster}
+
+    rendered: Dict[str, str] = {}
     for tname, tinfo in types.items():
         tname = _safe_name("type", tname)
         resolved = _resolve_type(tname, tinfo or {}, spines)
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        # RT-F02 engage render runs BEFORE RT-F01's canonical-layout check: it
+        # normalizes engage keys into platforms.<p>.extra and prunes the
+        # noncanonical aliases it empties, so the config it hands on is already
+        # canonical for _require_canonical_platform_layout to validate.
         _render_engage(resolved["config"])
+        _require_canonical_platform_layout(resolved["config"])
+        _forbid_coworker_port_binding(resolved["config"], tname)
+        _forbid_coworker_webhook_routes(resolved["config"], tname)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
 
-    default_profile = _safe_name("profile", data.get("default_profile", "default"))
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     _enforce_retention(default_config)
     _render_engage(default_config)
+    _enforce_multiplex(default_config, roster)
+    _require_canonical_platform_layout(default_config)
+    _validate_webhook_routes(default_config, served)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
