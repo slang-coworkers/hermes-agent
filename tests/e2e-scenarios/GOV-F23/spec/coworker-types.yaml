@@ -11,8 +11,8 @@
 # so that command reaches the single_query_mode=deny branch and is BLOCKED.
 project: gov-f23-live
 default_profile: default
-orchestrator_profile: orchestrator
-worker_profile: worker
+orchestrator_profile: gov-f23-orchestrator
+worker_profile: gov-f23-worker
 
 spines:
   live-base:
@@ -21,7 +21,7 @@ spines:
 skills_root: skills
 
 types:
-  worker:
+  gov-f23-worker:
     extends: [live-base]
     identity: "You are a GOV-F23 single-query worker. When asked to run a shell command, use your terminal/shell tool to run exactly the command requested."
     config:
@@ -29,7 +29,7 @@ types:
       approvals:
         deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
     ui_meta: {title: "Worker", description: "GOV-F23 single-query worker", shape: "square"}
-  orchestrator:
+  gov-f23-orchestrator:
     extends: [live-base]
     identity: "GOV-F23 orchestrator profile."
     ui_meta: {title: "Orchestrator", description: "GOV-F23 orchestrator", shape: "hexagon"}
@@ -37,4 +37,4 @@ types:
 rooms:
   gov-f23-room:
     name: "GOV-F23 Live"
-    members: [worker, orchestrator]
+    members: [gov-f23-worker, gov-f23-orchestrator]

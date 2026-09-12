@@ -3,17 +3,24 @@
 # of provider secrets — still resolves a provider: base_url is the LITERAL remote
 # (a loopback base_url bypasses credential substitution and 403s for a non-default
 # model), api_key is a dummy literal (NEVER a real key). The OneCLI egress proxy
-# substitutes the real credential at the upstream hop. terminal.backend: local so
-# the dangerous-command guard stays ACTIVE (_should_skip_container_guards returns
-# False for a non-isolated backend, tools/approval.py:4075-4086) — an isolated
-# container backend would SKIP the guard and invalidate the probe.
+# substitutes the real credential at the upstream hop.
+#
+# terminal.backend: docker with the workspace host-mounted
+# (docker_mount_cwd_to_workspace: true) — the fleet's per-profile container
+# sandbox (topology rule 3 forbids a `local` terminal environment anywhere). The
+# host-mounted workspace makes host access true, so _should_skip_container_guards
+# returns False (tools/approval.py:4075-4086, ISO-F13) and the dangerous-command
+# guard stays ACTIVE; a docker backend WITHOUT host mounts, or an isolated
+# singularity/modal/daytona/vercel_sandbox backend, would SKIP the guard.
 identity: "GOV-F23-BASE-IDENTITY"
 skills: ["worker-skill"]
 config:
   timezone: "Asia/Kolkata"
   sessions: {auto_prune: false}
   terminal:
-    backend: "local"
+    backend: "docker"
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
   agent:
     disabled_toolsets: []
   model:
