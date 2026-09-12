@@ -66,8 +66,9 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `image_gen/xai` | image backend | xAI `grok-2-image` backend |
 | `hermes-achievements` | dashboard tab | Steam-style collectible badges generated from your real Hermes session history |
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |
+| `nv-approval-ledger` | standalone (hook + 3 tools) | Immutable fleet approval-decision ledger — writer-gated agent decisions and webhook-observed human PR-review verdicts, read via `list_trusted_decisions` |
 
-Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the two long-running hooks-based plugins follows.
+Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the hooks-based plugins follows.
 
 ### disk-cleanup
 
@@ -310,6 +311,40 @@ Adds a **Steam-style achievements tab to the dashboard** — 60+ collectible, ti
 **Enabling:** Nothing to enable — `hermes-achievements` is a dashboard-only plugin (no lifecycle hooks, no model-visible tools). It auto-registers as a tab in `hermes dashboard` on first launch. The `plugins.enabled` config only gates lifecycle/tool plugins; dashboard plugins are discovered purely via their `dashboard/manifest.json`.
 
 **Opting out:** Delete or rename `plugins/hermes-achievements/dashboard/manifest.json`, or override it with a user plugin of the same name in `~/.hermes/plugins/hermes-achievements/` that ships no dashboard. The plugin's state files under `$HERMES_HOME/plugins/hermes-achievements/` survive — reinstalling preserves your unlock history.
+
+### nv-approval-ledger
+
+A single immutable approval-decision ledger for a whole fleet of coworker profiles. It answers one governance question durably: *what did the reviewing agent decide at commit X, and what did the human reviewer decide at commit X?* — so the two can be compared instead of one silently overwriting the other.
+
+**Two write paths, one table.** Rows carry a `provenance` of either `agent_verified` or `human`, and the ledger key is `UNIQUE(repo, pr, commit_sha, provenance)` — an agent decision and a human verdict for the same commit coexist; neither displaces the other.
+
+| Tool / seam | Provenance | Who can call it |
+|---|---|---|
+| `record_decision` (tool) | `agent_verified` | Only profiles listed in `writers` — enforced in the handler, not just hidden from the schema |
+| `record_human_verdict` (internal) | `human` | No one directly — it is in **no** model schema and refuses any call without the in-process door token |
+| `pre_gateway_dispatch` (hook) | — | Core, once per inbound; observes the configured `pull_request_review` webhook route and drives the human write through the door |
+| `list_trusted_decisions` (tool + in-process API) | — | Read side, gated to `readers` profiles |
+
+**First-write-wins, both paths.** For a fixed `(repo, pr, commit_sha, provenance)` an identical decision is a no-op (`already_recorded`); a conflicting one is refused and logged, never overwritten. Human rows additionally carry the `X-GitHub-Delivery` id under a partial unique index, so replaying a delivery — even with a mutated commit SHA — can never mint a second human row.
+
+**Single fleet ledger.** The SQLite file is pinned to the `ledger_profile` owner's home (`<owner-home>/plugin-data/nv-approval-ledger/data.db`) regardless of which profile or process writes, so every coworker sees one authoritative ledger.
+
+**Trust boundary.** The plugin observes only webhook deliveries that Hermes has already HMAC-validated (`X-Hub-Signature-256`) before building the event — it performs no signature check of its own, and an agent can never forge a `human` row.
+
+**Config** — under `plugins.entries.nv-approval-ledger.settings`:
+
+| Key | Meaning |
+|---|---|
+| `writers` | Profiles allowed to call `record_decision` (fail-closed: unset ⇒ nobody) |
+| `review_route` | The webhook route name whose `pull_request_review` deliveries become `human` rows |
+| `ledger_profile` | Owner profile whose home holds the single ledger DB (default `default`) |
+| `readers` | Profiles allowed to call `list_trusted_decisions` |
+
+The write tools reach the model only when a profile also enables the `approval_ledger` toolset; until that is rendered, the ledger still works end-to-end through the webhook door and in-process reads.
+
+**Enabling:** `hermes plugins enable nv-approval-ledger` (or check the box in `hermes plugins`).
+
+**Disabling again:** `hermes plugins disable nv-approval-ledger`.
 
 ## Adding a bundled plugin
 
