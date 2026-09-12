@@ -69,11 +69,14 @@ _CAPS_EXPECTED = {
     ("discord", "always-on"): {"require_mention": True, "thread_require_mention": False,
                                "free_response_channels": [_CHAN]},
     ("telegram", "mention"): {"require_mention": True, "mention_patterns": [],
-                              "free_response_chats": [], "observe_unmentioned_group_messages": False},
+                              "free_response_chats": [], "free_response_topics": [],
+                              "observe_unmentioned_group_messages": False},
     ("telegram", "pattern"): {"require_mention": True, "mention_patterns": [_PAT],
-                              "free_response_chats": [], "observe_unmentioned_group_messages": False},
+                              "free_response_chats": [], "free_response_topics": [],
+                              "observe_unmentioned_group_messages": False},
     ("telegram", "always-on"): {"require_mention": True, "mention_patterns": [],
-                                "free_response_chats": [_CHAN], "observe_unmentioned_group_messages": False},
+                                "free_response_chats": [_CHAN], "free_response_topics": [],
+                                "observe_unmentioned_group_messages": False},
 }
 _SCOPE_KEY = {"slack": "allowed_channels", "discord": "allowed_channels", "telegram": "allowed_chats"}
 
@@ -203,7 +206,7 @@ def test_ac_rt_f02_1(loaded, tmp_path):
         assert a._slack_thread_require_mention() is True
         assert a._slack_mention_patterns() == []
         ap = SlackAdapter(PlatformConfig(extra=_extra(_worker_config(outp), "slack")))
-        assert len(ap._slack_mention_patterns()) == 1  # one compiled wake-word pattern
+        assert len(ap._slack_mention_patterns()) == 1
 
 
 # ── AC-RT-F02-2 ──────────────────────────────────────────────────────────────────
@@ -252,7 +255,7 @@ def test_ac_rt_f02_2(loaded, tmp_path):
 
 # ── AC-RT-F02-3 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_3(loaded, tmp_path):
-    """AC-RT-F02-3: Engage mode `always-on` renders a bounded non-empty `free_response_channels` (Slack/Discord) / `free_response_chats` (Telegram); declared `sender_scope` renders `allowed_channels` (Slack/Discord) / `allowed_chats` (Telegram); Telegram uses its chat-scoped key names while Discord's spellings match Slack; and omitting `sender_scope` PRESERVES an inherited channel restriction while declaring it replaces it."""
+    """AC-RT-F02-3: Engage mode `always-on` renders a bounded non-empty `free_response_channels` (Slack/Discord) / `free_response_chats` (Telegram); Telegram also resets `free_response_topics` to `[]` in every mode so no inherited forum topic admits an unmentioned message; declared `sender_scope` renders `allowed_channels` (Slack/Discord) / `allowed_chats` (Telegram) AND neutralizes each per-platform scope bypass (Telegram `guest_mode=false`, Slack `reaction_trigger_target=""`) so the declared scope cannot be widened, while leaving Slack `reaction_triggers` unchanged; Telegram uses its chat-scoped key names while Discord's spellings match Slack; and omitting `sender_scope` PRESERVES an inherited channel restriction while declaring it replaces it."""
     module, _entry = loaded
 
     for (platform, mode), expected in _CAPS_EXPECTED.items():
@@ -278,6 +281,64 @@ def test_ac_rt_f02_3(loaded, tmp_path):
                                      inherited), "replacescope")
     assert _extra(_worker_config(out2), "slack")["allowed_channels"] == ["C-new"]
 
+    def _all_aliases(platform, key, value):
+        return {
+            platform: {key: copy.deepcopy(value), "extra": {key: copy.deepcopy(value)}},
+            "platforms": {platform: {key: copy.deepcopy(value),
+                                     "extra": {key: copy.deepcopy(value)}}},
+            "gateway": {platform: {key: copy.deepcopy(value),
+                                   "extra": {key: copy.deepcopy(value)}},
+                        "platforms": {platform: {key: copy.deepcopy(value),
+                                                 "extra": {key: copy.deepcopy(value)}}}},
+        }
+
+    def _assert_canonical_only(cfg, platform, key, expected):
+        platform_cfg = cfg.get("platforms", {}).get(platform, {})
+        assert key not in platform_cfg
+        assert platform_cfg.get("extra", {}).get(key) == expected
+        gw = cfg.get("gateway", {})
+        for alias in (cfg.get(platform), gw.get(platform), gw.get("platforms", {}).get(platform)):
+            assert key not in (alias or {})
+            assert key not in ((alias or {}).get("extra") or {})
+
+    # Inherited topic allowlists bypass require_mention unless reset at EVERY alias.
+    out_t = _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("telegram", "mention"),
+                                      _all_aliases("telegram", "free_response_topics", ["C1:2"])),
+                    "tg_topic")
+    _assert_canonical_only(_worker_config(out_t), "telegram", "free_response_topics", [])
+
+    # Without a declared sender_scope the inherited scope-bypass settings stay operator-owned;
+    # declaring one makes it authoritative over every alias (else the bypass widens the scope).
+    guest_aliases = _all_aliases("telegram", "guest_mode", True)
+    out_g_keep = _render(module, tmp_path,
+                         _spec_with_engage(_engage_for("telegram", "mention"), guest_aliases),
+                         "tg_guest_keep")
+    assert _extra(_worker_config(out_g_keep), "telegram")["guest_mode"] is True
+    out_g = _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("telegram", "mention", sender_scope=["chatA"]),
+                                      guest_aliases), "tg_guest")
+    guest_cfg = _worker_config(out_g)
+    _assert_canonical_only(guest_cfg, "telegram", "guest_mode", False)
+    tge = _extra(guest_cfg, "telegram")
+    assert tge["allowed_chats"] == ["chatA"]
+
+    reaction_aliases = _all_aliases("slack", "reaction_trigger_target", "C-elsewhere")
+    out_r_keep = _render(module, tmp_path,
+                         _spec_with_engage(_engage_for("slack", "mention"), reaction_aliases),
+                         "slack_rt_keep")
+    assert _extra(_worker_config(out_r_keep), "slack")["reaction_trigger_target"] == "C-elsewhere"
+    # the scope reset must neutralize the retarget bypass WITHOUT erasing the opt-in reaction feature
+    reaction_aliases["platforms"]["slack"]["extra"]["reaction_triggers"] = ["white_check_mark"]
+    out_r = _render(module, tmp_path,
+                    _spec_with_engage(_engage_for("slack", "mention", sender_scope=["C9"]),
+                                      reaction_aliases), "slack_rt")
+    reaction_cfg = _worker_config(out_r)
+    _assert_canonical_only(reaction_cfg, "slack", "reaction_trigger_target", "")
+    sre = _extra(reaction_cfg, "slack")
+    assert sre["allowed_channels"] == ["C9"]
+    assert sre["reaction_triggers"] == ["white_check_mark"]
+
     if _has_aiohttp():
         from gateway.config import PlatformConfig
         from plugins.platforms.slack.adapter import SlackAdapter
@@ -294,6 +355,10 @@ def test_ac_rt_f02_3(loaded, tmp_path):
         t = _render(module, tmp_path, _spec_with_engage(_engage_for("telegram", "mention")), "t_m")
         tstub = SimpleNamespace(config=PlatformConfig(extra=_extra(_worker_config(t), "telegram")))
         assert TelegramAdapter._telegram_require_mention(tstub) is True
+        assert TelegramAdapter._telegram_free_response_topics(tstub) == set()
+        gstub = SimpleNamespace(config=PlatformConfig(extra=tge))
+        assert TelegramAdapter._telegram_guest_mode(gstub) is False
+        assert SlackAdapter(PlatformConfig(extra=sre))._slack_reaction_trigger_target() == ("", "")
 
 
 # ── AC-RT-F02-4 ──────────────────────────────────────────────────────────────────
@@ -326,7 +391,7 @@ def test_ac_rt_f02_4(loaded, tmp_path):
 
 # ── AC-RT-F02-5 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_5(loaded):
-    """AC-RT-F02-5: The doc page `website/docs/user-guide/fleet-engage-modes.md` carries a mapping table with one row per supported `(platform, engage mode)` naming its exact rendered Hermes key set, lists the unsupported combinations, and records: `sender_scope` is channel/chat scope only (per-user admission is RT-F01/RT-F05), room deliberation is A2A-F18 (not gateway fan-out), the no-router/never-blanket-forward invariant, the Discord env-precedence caveat, and that Slack mention-sticky is the native equivalent (broader than remembered-mentions), not exact NanoClaw parity."""
+    """AC-RT-F02-5: The doc page `website/docs/user-guide/fleet-engage-modes.md` carries a mapping table with one row per supported `(platform, engage mode)` naming its exact rendered Hermes key set, lists the unsupported combinations, and records: `sender_scope` is channel/chat scope only (per-user admission is RT-F01/RT-F05), that a declared `sender_scope` resets Telegram `guest_mode` and Slack `reaction_trigger_target` while the Slack `reaction_triggers` emoji surface stays out of engage-mode scope, room deliberation is A2A-F18 (not gateway fan-out), the no-router/never-blanket-forward invariant, the Discord env-precedence caveat, and that Slack mention-sticky is the native equivalent (broader than remembered-mentions), not exact NanoClaw parity."""
     assert DOC_PAGE.is_file(), f"missing doc page {DOC_PAGE}"
     text = DOC_PAGE.read_text(encoding="utf-8")
     import re as _re
@@ -360,6 +425,12 @@ def test_ac_rt_f02_5(loaded):
     assert "only `allowed_channels` is env-first" in text
     assert "DISCORD_ALLOWED_CHANNELS" in text
     assert "read `.extra` first" in text
+    assert _line_has("sender_scope", "guest_mode", "reset", "false"), \
+        "Telegram guest_mode scope-declared reset not documented"
+    assert _line_has("sender_scope", "reaction_trigger_target", "reset"), \
+        "Slack reaction_trigger_target scope-declared reset not documented"
+    assert _line_has("reaction_triggers", "outside", "engage"), \
+        "Slack reaction_triggers engage-mode boundary not documented"
     assert "parity" in low or "broader" in low
 
 
@@ -431,7 +502,7 @@ def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     _reject({"slack": {"mode": "pattern", "patterns": [""]}}, "pat_blank")
     _reject({"slack": {"mode": "pattern", "patterns": ["  "]}}, "pat_ws")
     _reject({"telegram": {"mode": "pattern", "patterns": [""]}}, "tg_pat_blank")
-    # S2: an un-compilable regex is dropped by the adapter (pattern → mention-only)
+    # invalid regexes must fail here because the adapter silently drops them
     _reject({"slack": {"mode": "pattern", "patterns": ["("]}}, "pat_invalid_regex")
     _reject({"telegram": {"mode": "pattern", "patterns": ["ok", "a["]}}, "tg_pat_invalid_regex")
 
@@ -502,14 +573,23 @@ def test_render_engage_alias_strip_prunes_noncanonical_preserves_canonical(loade
 
 
 def test_render_engage_noncanonical_alias_with_unrelated_field_raises(loaded, tmp_path):
-    """The prune does not weaken RT-F01: a noncanonical platform alias carrying an
-    unrelated (non-controlled) field is not emptied by the strip, survives, and trips
-    _require_canonical_platform_layout with CompositionError."""
+    """The prune does not weaken RT-F01. The prune fires ONLY on a noncanonical block
+    the controlled-key strip itself emptied, so two kinds of block must survive it and
+    trip _require_canonical_platform_layout with CompositionError: a block carrying an
+    unrelated (non-controlled) field the strip never touches, and a pre-existing empty
+    ({} / {"extra": {}}) block the strip also never touches. Pruning either would let a
+    noncanonical platform key slip past RT-F01."""
     module, _entry = loaded
     for alias in (
+        # unrelated field present → block is non-vacuous, must survive
         {"slack": {"token": "t"}},
         {"gateway": {"slack": {"token": "t"}}},
         {"gateway": {"platforms": {"slack": {"token": "t"}}}},
+        # Pre-existing empty blocks were not emptied by the strip, so RT-F01 must reject them.
+        {"slack": {}},
+        {"slack": {"extra": {}}},
+        {"gateway": {"slack": {}}},
+        {"gateway": {"platforms": {"slack": {"extra": {}}}}},
     ):
         with pytest.raises(module.CompositionError):
             _render(module, tmp_path,
@@ -519,3 +599,32 @@ def test_render_engage_noncanonical_alias_with_unrelated_field_raises(loaded, tm
     mpg = REPO_ROOT / "website" / "docs" / "user-guide" / "multi-profile-gateways.md"
     assert mpg.is_file(), f"missing {mpg}"
     assert "fleet-engage-modes.md" in mpg.read_text(encoding="utf-8"), "inbound doc link absent"
+
+
+def test_render_engage_detaches_yaml_anchor_aliases(loaded, tmp_path):
+    """A spec that aliases two platform blocks to one object (a YAML anchor surviving
+    _deep_merge's subtree-insert path) renders each platform's own canonical set
+    independently — the in-place render of one platform does not pollute the other.
+    Covers both a shared whole platform block and a shared nested extra mapping."""
+    module, _entry = loaded
+    engage = {"slack": {"mode": "mention"}, "telegram": {"mode": "mention"}}
+
+    # (a) two platforms reference one whole block object (platforms.slack IS platforms.telegram)
+    shared_block: dict = {}
+    out_a = _render(module, tmp_path,
+                    _spec_with_engage(engage, {"platforms": {"slack": shared_block,
+                                                             "telegram": shared_block}}),
+                    "anchor_block")
+    cfg_a = _worker_config(out_a)
+    assert _extra(cfg_a, "slack") == _CAPS_EXPECTED[("slack", "mention")]
+    assert _extra(cfg_a, "telegram") == _CAPS_EXPECTED[("telegram", "mention")]
+
+    # (b) two platforms reference one nested extra mapping (blocks distinct, .extra aliased)
+    shared_extra: dict = {}
+    out_b = _render(module, tmp_path,
+                    _spec_with_engage(engage, {"platforms": {"slack": {"extra": shared_extra},
+                                                             "telegram": {"extra": shared_extra}}}),
+                    "anchor_extra")
+    cfg_b = _worker_config(out_b)
+    assert _extra(cfg_b, "slack") == _CAPS_EXPECTED[("slack", "mention")]
+    assert _extra(cfg_b, "telegram") == _CAPS_EXPECTED[("telegram", "mention")]

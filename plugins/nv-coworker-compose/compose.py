@@ -72,6 +72,11 @@ _ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
     "slack": {
         "scope_key": "allowed_channels",
         "free_response_key": "free_response_channels",
+        # keys that override the scope allowlist (not mode keys): neutralized only
+        # when sender_scope is declared, so a declared scope stays authoritative.
+        # reaction_trigger_target rewrites a reaction turn's channel and can route a
+        # reaction from outside the scope into an allowlisted target (adapter.py:5703).
+        "scope_bypass": {"reaction_trigger_target": ""},
         "modes": {
             "mention": {"require_mention": True, "strict_mention": True,
                         "thread_require_mention": True, "mention_patterns": [],
@@ -90,6 +95,7 @@ _ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
     "discord": {
         "scope_key": "allowed_channels",
         "free_response_key": "free_response_channels",
+        "scope_bypass": {},  # no config-key allowlist bypass exists (voice-linked free-response is runtime state)
         "modes": {
             "mention": {"require_mention": True, "thread_require_mention": True,
                         "free_response_channels": []},
@@ -102,13 +108,22 @@ _ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
     "telegram": {
         "scope_key": "allowed_chats",
         "free_response_key": "free_response_chats",
+        # guest_mode:true admits an @mention from a chat OUTSIDE allowed_chats
+        # (adapter.py:9853-9855), so it bypasses a declared sender_scope.
+        "scope_bypass": {"guest_mode": False},
+        # free_response_topics is the topic-granularity twin of free_response_chats:
+        # both admit an unmentioned message before the require_mention gate
+        # (adapter.py:9861 before :9863), so it is a mode key reset in every mode.
         "modes": {
             "mention": {"require_mention": True, "mention_patterns": [],
-                        "free_response_chats": [], "observe_unmentioned_group_messages": False},
+                        "free_response_chats": [], "free_response_topics": [],
+                        "observe_unmentioned_group_messages": False},
             "pattern": {"require_mention": True, "mention_patterns": [],
-                        "free_response_chats": [], "observe_unmentioned_group_messages": False},
+                        "free_response_chats": [], "free_response_topics": [],
+                        "observe_unmentioned_group_messages": False},
             "always-on": {"require_mention": True, "mention_patterns": [],
-                          "free_response_chats": [], "observe_unmentioned_group_messages": False},
+                          "free_response_chats": [], "free_response_topics": [],
+                          "observe_unmentioned_group_messages": False},
         },
     },
 }
@@ -237,13 +252,24 @@ def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str,
     return nodes
 
 
-def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> None:
-    """Pop ``key`` from every alias location and its nested ``extra`` block."""
+def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> Set[int]:
+    """Pop ``key`` from every alias location and its nested ``extra`` block. Return
+    the ``id()``s of alias nodes a value was actually removed from, so only a block
+    the strip itself emptied is later pruned — a pre-existing empty noncanonical
+    block must survive for RT-F01's canonical-layout check to reject it."""
+    removed: Set[int] = set()
     for node in _engage_alias_nodes(config, platform):
-        node.pop(key, None)
+        hit = False
+        if key in node:
+            del node[key]
+            hit = True
         extra = node.get("extra")
-        if isinstance(extra, dict):
-            extra.pop(key, None)
+        if isinstance(extra, dict) and key in extra:
+            del extra[key]
+            hit = True
+        if hit:
+            removed.add(id(node))
+    return removed
 
 
 def _engage_extra_target(config: Dict[str, Any], platform: str) -> Dict[str, Any]:
@@ -325,8 +351,33 @@ def _render_engage(config: Dict[str, Any]) -> None:
     if not isinstance(engage, dict):
         raise CompositionError(
             f"engage must be a mapping of platform -> spec, got {type(engage).__name__}")
+    _detach_shared_engage_blocks(config, [str(p) for p in engage])
     for platform, block in engage.items():
         _render_engage_platform(config, str(platform), block)
+
+
+def _detach_shared_engage_blocks(config: Dict[str, Any], platform_names: List[str]) -> None:
+    """Give every engage platform block its own dict identity at each loader-alias
+    location, so an in-place render of one platform cannot pollute another that
+    shares the same object via a YAML anchor (``platforms: {slack: &a {...},
+    telegram: *a}`` survives ``_deep_merge``'s subtree-insert path). A deep copy of
+    an already-unique block is value-equal, so a spec without cross-referenced blocks
+    renders identically; copying each block also detaches a shared nested ``extra``."""
+    parents: List[Dict[str, Any]] = [config]
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        parents.append(platforms)
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        parents.append(gateway)
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            parents.append(gplatforms)
+    for parent in parents:
+        for platform in platform_names:
+            block = parent.get(platform)
+            if isinstance(block, dict):
+                parent[platform] = copy.deepcopy(block)
 
 
 def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -> None:
@@ -365,26 +416,41 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
     # ALL aliases, then write the canonical set to platforms.<p>.extra so nothing
     # bridges over it at load time. update() preserves unrelated keys in that extra.
     controlled = {key for md in modes.values() for key in md}
+    stripped: Set[int] = set()
     for key in controlled:
-        _strip_engage_key(config, platform, key)
-    _engage_extra_target(config, platform).update(canonical)
+        stripped |= _strip_engage_key(config, platform, key)
+    target = _engage_extra_target(config, platform)
+    target.update(canonical)
 
-    # Scope is handled apart from the mode keys: written only when the coworker
-    # declares sender_scope (else an inherited channel/chat restriction is PRESERVED,
-    # never reset — resetting it would widen access).
+    # Scope + scope-bypass keys are handled apart from the mode keys. The scope key
+    # (allowed_channels/allowed_chats) and each per-platform bypass key (a key that
+    # overrides the scope allowlist — Telegram guest_mode, Slack reaction_trigger_target)
+    # are written to their neutral value ONLY when the coworker declares sender_scope,
+    # making the declared scope authoritative. When sender_scope is omitted the scope
+    # is PRESERVED (never reset, which would widen access).
+    bypasses = caps.get("scope_bypass", {})
     if "sender_scope" in block:
         scope = _bounded_ids(
             block.get("sender_scope"),
             f"engage sender_scope for platform {platform!r}")
         scope_key = caps["scope_key"]
-        _strip_engage_key(config, platform, scope_key)
-        _engage_extra_target(config, platform)[scope_key] = scope
+        stripped |= _strip_engage_key(config, platform, scope_key)
+        target[scope_key] = scope
+        for bkey, breset in bypasses.items():
+            stripped |= _strip_engage_key(config, platform, bkey)
+            target[bkey] = copy.deepcopy(breset)
+    else:
+        # sender_scope omitted: keep the operator's inherited bypass value, but still
+        # canonicalize it — a bypass key left at a noncanonical alias would trip
+        # RT-F01's _require_canonical_platform_layout — so strip every alias, then
+        # rewrite only the preserved canonical value at platforms.<p>.extra.
+        for bkey in bypasses:
+            if bkey in target:
+                preserved = copy.deepcopy(target[bkey])
+                stripped |= _strip_engage_key(config, platform, bkey)
+                target[bkey] = preserved
 
-    # RT-F01 forbids a platform block at any noncanonical alias; the controlled-key
-    # strip can leave such a block empty, so drop the emptied ones. A noncanonical
-    # block that still carries unrelated config is left for
-    # _require_canonical_platform_layout to reject — pruning it would weaken that check.
-    _prune_vacuous_noncanonical(config, platform)
+    _prune_vacuous_noncanonical(config, platform, stripped)
 
 
 def _is_vacuous_platform_block(block: Any) -> bool:
@@ -397,14 +463,19 @@ def _is_vacuous_platform_block(block: Any) -> bool:
     return set(block) == {"extra"} and isinstance(block.get("extra"), dict) and not block["extra"]
 
 
-def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str) -> None:
+def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str, stripped_ids: Set[int]) -> None:
     """Remove a NONCANONICAL platform alias (root ``<p>``, ``gateway.<p>``,
-    ``gateway.platforms.<p>``) left vacuous by the controlled-key strip so it does
-    not trip RT-F01's ``_require_canonical_platform_layout`` (which rejects any
-    platform-named key outside ``platforms.<p>``). The canonical ``platforms.<p>``
-    block is never pruned."""
+    ``gateway.platforms.<p>``) ONLY when the controlled-key strip is what emptied it
+    (its ``id()`` is in ``stripped_ids``), so it does not trip RT-F01's
+    ``_require_canonical_platform_layout``. A pre-existing empty block, a block still
+    carrying unrelated config, and the canonical ``platforms.<p>`` are all left for
+    RT-F01 to reject — pruning any of them would weaken that check."""
     def _prune(parent: Any) -> None:
-        if isinstance(parent, dict) and _is_vacuous_platform_block(parent.get(platform)):
+        if not isinstance(parent, dict):
+            return
+        block = parent.get(platform)
+        if (isinstance(block, dict) and id(block) in stripped_ids
+                and _is_vacuous_platform_block(block)):
             parent.pop(platform, None)
 
     _prune(config)
@@ -855,10 +926,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         resolved = _resolve_type(tname, tinfo or {}, spines)
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
-        # RT-F02 engage render runs BEFORE RT-F01's canonical-layout check: it
-        # normalizes engage keys into platforms.<p>.extra and prunes the
-        # noncanonical aliases it empties, so the config it hands on is already
-        # canonical for _require_canonical_platform_layout to validate.
         _render_engage(resolved["config"])
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)

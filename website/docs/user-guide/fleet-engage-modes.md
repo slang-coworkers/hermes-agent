@@ -57,9 +57,9 @@ free-response key from your `channels`. The scope key (`allowed_channels` /
 | discord | mention | `require_mention`, `thread_require_mention`, `free_response_channels` |
 | discord | mention-sticky | `require_mention`, `thread_require_mention`, `free_response_channels` |
 | discord | always-on | `require_mention`, `thread_require_mention`, `free_response_channels` |
-| telegram | mention | `require_mention`, `mention_patterns`, `free_response_chats`, `observe_unmentioned_group_messages` |
-| telegram | pattern | `require_mention`, `mention_patterns`, `free_response_chats`, `observe_unmentioned_group_messages` |
-| telegram | always-on | `require_mention`, `mention_patterns`, `free_response_chats`, `observe_unmentioned_group_messages` |
+| telegram | mention | `require_mention`, `mention_patterns`, `free_response_chats`, `free_response_topics`, `observe_unmentioned_group_messages` |
+| telegram | pattern | `require_mention`, `mention_patterns`, `free_response_chats`, `free_response_topics`, `observe_unmentioned_group_messages` |
+| telegram | always-on | `require_mention`, `mention_patterns`, `free_response_chats`, `free_response_topics`, `observe_unmentioned_group_messages` |
 
 What each mode means:
 
@@ -112,6 +112,31 @@ unrestricting gate.
   Per-**user** admission (`allow_from` / pairing) is owned by RT-F01 / RT-F05, not
   this row, so `allowed_channels` / `allowed_chats` here should never be read as
   user authz.
+- A declared sender_scope resets Telegram guest_mode to false so the declared scope stays authoritative.
+  An inherited `guest_mode: true` otherwise admits an explicit @mention from a chat OUTSIDE `allowed_chats`,
+  bypassing the declared scope; the reset is applied only when `sender_scope` is declared, and an omitted
+  `sender_scope` preserves the inherited value.
+- A declared sender_scope resets Slack reaction_trigger_target to "" so a reaction is not rewritten past the declared source-channel scope.
+  A non-empty `reaction_trigger_target` rewrites a reaction turn's channel, so a reaction from a chat outside
+  the scope could be routed into an allowlisted target; after the reset a non-DM reaction is checked against its
+  source channel, while a 1:1 DM stays outside `allowed_channels` by existing adapter design.
+- The Slack reaction_triggers emoji surface stays outside engage-mode scope.
+  It is a distinct, opt-in emoji-handoff feature, not one of the four engage modes, so the renderer documents
+  it and leaves it unchanged; clear `reaction_triggers` manually for no reaction wake (a follow-up row may fold
+  reaction control into engage modes).
+- **Telegram `free_response_topics` is reset in every mode.** It is the
+  topic-granularity twin of `free_response_chats` — it admits an unmentioned message
+  in a forum topic before the `require_mention` gate — so every mode resets it to
+  `[]` (which is why it appears in the Telegram table cells above); an inherited or
+  env value can no longer defeat `mention`/`pattern`.
+- **Telegram inert keys.** `ingest_unmentioned_group_messages` is shadowed by the
+  canonical `observe_unmentioned_group_messages: false` (the reader consults that
+  alias only when the primary is unset), and `group_allowed_chats` gates only the
+  observe path, which every mode disables — so neither can widen engagement.
+- **Discord voice-linked native breadth.** A Discord text channel linked to an
+  active voice channel is free-response while voice is active, via runtime state (not
+  a config key), so Discord `mention` is not an absolute admission guarantee — native
+  breadth, in the same class as Slack's sticky-thread wake below.
 - **Room deliberation is A2A-F18.** Several coworkers deliberating on one message
   (@mentions scoping a round) is a Bot-Mode room concern (A2A-F18), not gateway
   fan-out; this row is strictly per-profile engagement.
