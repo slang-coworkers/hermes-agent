@@ -340,7 +340,7 @@ A single immutable approval-decision ledger for a whole fleet of coworker profil
 | `ledger_profile` | Owner profile whose home holds the single ledger DB (default `default`) |
 | `readers` | Profiles allowed to call `list_trusted_decisions` |
 
-The write tools reach the model only when a profile also enables the `approval_ledger` toolset; until that is rendered, the ledger still works end-to-end through the webhook door and in-process reads.
+`record_decision` reaches the model only when a profile also enables the `approval_ledger` toolset (`record_human_verdict` is never model-facing); until that toolset is rendered, the ledger still works end-to-end through the webhook door and in-process reads.
 
 **Enabling:** `hermes plugins enable nv-approval-ledger` (or check the box in `hermes plugins`).
 
