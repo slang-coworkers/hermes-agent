@@ -2065,7 +2065,12 @@ class AIAgent:
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
             self._save_session_log(messages)
-            self._flush_messages_to_session_db(messages, conversation_history)
+            committed = self._flush_messages_to_session_db(messages, conversation_history)
+            # Record whether this turn's messages actually committed to the
+            # session DB. A chat-completions 200 is emitted even when this flush
+            # returns False, so a wake caller that must know the turn is durable
+            # (X-Hermes-Turn-Persisted) reads this instead of trusting the 200.
+            self._last_turn_persisted = bool(committed)
             # Drain async token-accounting deltas at every persist point (turn
             # finalize + error exits) so a crash after this line loses at most
             # the in-flight API call's delta. Cheap no-op when nothing queued.

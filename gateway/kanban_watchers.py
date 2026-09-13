@@ -208,6 +208,18 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
     return None
 
 
+# W2d — generic durable-retry sub policy (retry_policy='durable'): a failing
+# delivery is retried with exponential capped backoff and NEVER dropped; on
+# sustained failure an operator alert is logged. Values are deliberately small
+# at the low end (a transient blip retries within seconds) and capped so a dead
+# owner does not hot-loop the notifier.
+_DURABLE_BACKOFF_BASE_SECONDS = 2.0
+_DURABLE_BACKOFF_CAP_SECONDS = 300.0
+# Consecutive failures after which the durable sub earns a loud operator alert
+# (still never dropped).
+_DURABLE_ALERT_THRESHOLD = 5
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -263,7 +275,7 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "notification")
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
@@ -462,6 +474,35 @@ class GatewayKanbanWatchersMixin:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
                             for sub in subs:
                                 try:
+                                    if (sub.get("retry_policy") or "default").lower() == "durable":
+                                        # W2 durable notification path: PEEK (never
+                                        # pre-advance) and bypass the local-adapter
+                                        # owner skip below — a secondary api_server
+                                        # owner has no local adapter and is reached
+                                        # via the profile-scoped mirror at delivery.
+                                        _d_platform = (sub.get("platform") or "").lower()
+                                        if _d_platform not in active_platforms:
+                                            continue
+                                        _new_cursor, _d_events = _kb.unseen_events_for_sub(
+                                            conn,
+                                            task_id=sub["task_id"],
+                                            platform=sub["platform"],
+                                            chat_id=sub["chat_id"],
+                                            thread_id=sub.get("thread_id") or "",
+                                            kinds=TERMINAL_KINDS,
+                                        )
+                                        if not _d_events:
+                                            continue
+                                        deliveries.append({
+                                            "sub": sub,
+                                            "old_cursor": sub.get("last_event_id") or 0,
+                                            "cursor": _new_cursor,
+                                            "events": _d_events,
+                                            "task": _kb.get_task(conn, sub["task_id"]),
+                                            "board": slug,
+                                            "durable": True,
+                                        })
+                                        continue
                                     owner_profile = sub.get("notifier_profile") or None
                                     if owner_profile and owner_profile != notifier_profile:
                                         _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
@@ -518,6 +559,13 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    if d.get("durable"):
+                        # W2/W2c: crash-safe per-event peek-then-advance delivery
+                        # to a (possibly secondary-profile) owner via the
+                        # api_server profile-scoped mirror. Self-contained; does
+                        # not touch the default batch path below.
+                        await self._deliver_durable_notifications(d)
+                        continue
                     platform_str = (sub["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
@@ -571,6 +619,7 @@ class GatewayKanbanWatchersMixin:
                     # exists on the board.
                     wake_handoff = ""
                     wake_review_detail = ""
+                    wake_notification = ""
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -686,6 +735,20 @@ class GatewayKanbanWatchersMixin:
                             msg = (
                                 f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
                                 f" — needs a human decision{rc}{reason}"
+                            )
+                        elif kind == "notification":
+                            # Generic caller-supplied notification (publish_task_notification):
+                            # the payload's free-form message is the delivery body and,
+                            # for a wake subscription, is carried into the synthetic turn
+                            # below so the woken session sees the actual content.
+                            note = ""
+                            if ev.payload and ev.payload.get("message"):
+                                note = str(ev.payload["message"])[:500]
+                            wake_notification = note
+                            msg = (
+                                f"🔔 {board_tag}{tag}Kanban {sub['task_id']} — {note}"
+                                if note
+                                else f"🔔 {board_tag}{tag}Kanban {sub['task_id']} notification"
                             )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
@@ -842,7 +905,7 @@ class GatewayKanbanWatchersMixin:
                         _WAKE_KINDS = (
                             "completed", "gave_up", "crashed", "timed_out",
                             "blocked", "review_requested", "changes_requested",
-                            "block_loop_detected",
+                            "block_loop_detected", "notification",
                         )
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
@@ -907,6 +970,11 @@ class GatewayKanbanWatchersMixin:
                                     "gateway.kanban.wake.review_detail",
                                     reason=wake_review_detail,
                                 )
+                            # Carry a generic notification's free-form message into
+                            # the wake turn inline (no i18n key — the content is the
+                            # caller's, not a fixed status string).
+                            if wake_notification:
+                                _synth += "\n" + wake_notification
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
@@ -1102,6 +1170,139 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _render_durable_event(self, ev, task, sub, board_slug) -> Optional[str]:
+        """Render ONE durable event to its wake text.
+
+        A ``notification`` event carries the caller's free-form ``message`` in
+        its payload (no i18n key — the content is the caller's, mirroring the
+        batch-path W2a branch). Any other kind gets a concise per-event status
+        line. Returns None only for an event with no renderable content, which
+        the caller advances past without delivering.
+        """
+        board_tag = f"[{board_slug}] " if board_slug else ""
+        who = task.assignee if task and getattr(task, "assignee", None) else None
+        tag = f"@{who} " if who else ""
+        if ev.kind == "notification":
+            note = ""
+            if isinstance(ev.payload, dict):
+                note = str(ev.payload.get("message") or "")
+            return f"🔔 {board_tag}{tag}Kanban {sub['task_id']} — {note}".rstrip()
+        return f"{board_tag}{tag}Kanban {sub['task_id']}: {ev.kind}"
+
+    def _note_durable_failure(self, sub_key, cause) -> None:
+        """Record a durable-sub delivery failure: bump the fail count, schedule
+        an exponential capped backoff, and — on sustained failure — emit a loud
+        operator alert. NEVER drops the sub (W2d)."""
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+        fails = fail_counts.get(sub_key, 0) + 1
+        fail_counts[sub_key] = fails
+        delay = min(
+            _DURABLE_BACKOFF_CAP_SECONDS,
+            _DURABLE_BACKOFF_BASE_SECONDS * (2 ** (fails - 1)),
+        )
+        backoff[sub_key] = {"next_attempt": time.monotonic() + delay, "fails": fails}
+        if fails >= _DURABLE_ALERT_THRESHOLD:
+            logger.error(
+                "kanban notifier: DURABLE sub %s sustained delivery failure "
+                "(%d attempts, backoff %.1fs) — NOT dropping; operator "
+                "attention required: %s",
+                sub_key, fails, delay, cause,
+            )
+        else:
+            logger.warning(
+                "kanban notifier: durable wake failed for %s "
+                "(attempt %d, backoff %.1fs): %s",
+                sub_key, fails, delay, cause,
+            )
+
+    async def _deliver_durable_notifications(self, d: dict) -> None:
+        """W2/W2c/W2d: crash-safe, per-event delivery of a durable notify sub.
+
+        Peek-then-advance: each event is delivered individually (its own
+        ``message`` and stable ``(repo#pr, delivery-id)`` Idempotency-Key) via
+        the api_server profile-scoped mirror (``owner_profile`` scopes the
+        self-post to a SECONDARY owner's session), and the cursor advances to
+        that event id ONLY after ``deliver_wake`` confirms 2xx AND the persist
+        ack (it raises otherwise). A failure stops at that event (cursor
+        contiguity — never advance past an undelivered event), applies capped
+        backoff, and never deletes the sub; the next tick retries from here.
+        """
+        from gateway.wake import deliver_wake
+
+        sub = d["sub"]
+        task = d.get("task")
+        board_slug = d.get("board")
+        events = d.get("events") or []
+        owner_profile = sub.get("notifier_profile") or None
+        sub_key = (
+            sub["task_id"], sub["platform"],
+            sub["chat_id"], sub.get("thread_id") or "",
+        )
+
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+
+        # Still inside the capped-backoff window from a prior failure — leave the
+        # cursor untouched and retry a later tick.
+        state = backoff.get(sub_key)
+        if state and state.get("next_attempt", 0.0) > time.monotonic():
+            return
+
+        from gateway.config import Platform as _Platform
+        try:
+            plat = _Platform((sub.get("platform") or "").lower())
+        except ValueError:
+            return
+        # The shared api_server adapter carries the bind host/port/key; the
+        # profile scoping is done by owner_profile on the self-post, so a
+        # secondary owner with no local adapter is still reachable.
+        adapter = self.adapters.get(plat) or self._authorization_adapter(plat, None)
+        if adapter is None:
+            self._note_durable_failure(sub_key, "no api_server adapter available")
+            return
+
+        for ev in events:
+            text = self._render_durable_event(ev, task, sub, board_slug)
+            if text is None:
+                # Nothing to deliver for this kind — advance past it so the
+                # cursor stays contiguous.
+                await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+                continue
+            key = None
+            if isinstance(ev.payload, dict):
+                key = ev.payload.get("idempotency_key")
+            key = key or f"{sub['task_id']}:{ev.id}"
+            try:
+                await deliver_wake(
+                    adapter,
+                    text=text,
+                    session_id=sub["chat_id"],
+                    owner_profile=owner_profile,
+                    idempotency_key=key,
+                )
+            except Exception as exc:
+                # No 2xx+persist-ack: leave the cursor unmoved (redelivered next
+                # tick), back off, and NEVER drop the durable sub.
+                self._note_durable_failure(sub_key, exc)
+                return
+            # Confirmed durable (deliver_wake raised otherwise) → mark SEEN.
+            await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+            fail_counts.pop(sub_key, None)
+            backoff.pop(sub_key, None)
+            logger.info(
+                "kanban notifier: durable wake delivered task=%s event=%s owner=%s",
+                sub["task_id"], ev.id, owner_profile or "default",
+            )
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,

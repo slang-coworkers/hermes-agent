@@ -1509,6 +1509,10 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     notifier_profile TEXT,
     delivery_mode TEXT NOT NULL DEFAULT 'notify',
     delivery_metadata TEXT,
+    -- Generic delivery-retry policy for the notifier: 'default' (stock
+    -- delete-on-repeated-failure) or 'durable' (never delete/advance past an
+    -- unseen event; capped backoff + operator alert on sustained failure).
+    retry_policy  TEXT NOT NULL DEFAULT 'default',
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
@@ -2774,6 +2778,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "delivery_metadata", "delivery_metadata TEXT"
             )
+        if "retry_policy" not in notify_cols:
+            # Additive: an existing DB gains the column with the 'default'
+            # value, so every pre-existing sub keeps stock delete-on-failure
+            # behavior. A sub opts into durable retention only by being
+            # (re-)added with retry_policy='durable'.
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "retry_policy",
+                "retry_policy TEXT NOT NULL DEFAULT 'default'",
+            )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -2899,7 +2914,9 @@ _REBUILD_SPECS = {
         " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT, user_id_alt TEXT,"
         " chat_type TEXT,"
         " notifier_profile TEXT, delivery_mode TEXT NOT NULL DEFAULT 'notify',"
-        " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
+        " delivery_metadata TEXT,"
+        " retry_policy TEXT NOT NULL DEFAULT 'default',"
+        " created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
@@ -3623,10 +3640,11 @@ def _inherit_notify_subs(
         INSERT OR IGNORE INTO kanban_notify_subs
             (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
              chat_type, notifier_profile, delivery_mode, delivery_metadata,
-             created_at, last_event_id)
+             retry_policy, created_at, last_event_id)
         SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
                COALESCE(chat_type, 'dm'), notifier_profile,
-               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
+               COALESCE(delivery_mode, 'notify'), delivery_metadata,
+               COALESCE(retry_policy, 'default'), ?, ?
           FROM kanban_notify_subs
          WHERE task_id IN ({placeholders})
         """,
@@ -4012,6 +4030,38 @@ def add_comment(
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
         return int(cur.lastrowid or 0)
+
+
+def publish_task_notification(
+    conn: sqlite3.Connection,
+    task_id: str,
+    message: str,
+    *,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Append a generic ``notification`` event carrying ``message`` for ``task_id``.
+
+    Public, plugin-facing writer for the gateway kanban-notifier: ``notification``
+    is claimed by both ``TERMINAL_KINDS`` (delivery) and ``_WAKE_KINDS`` (wake),
+    and the payload's ``message`` is rendered as the passive-delivery body and
+    carried into the synthetic wake turn. Unlike ``add_comment`` (which emits a
+    non-notifiable ``commented`` event), this lets any caller resume a task's
+    subscribers with arbitrary content through the existing claim/cursor/wake
+    machinery — no bespoke event kind, no new delivery mechanism.
+    """
+    if not message or not str(message).strip():
+        raise ValueError("notification message is required")
+    # Flatten metadata into the event payload alongside the message, so a
+    # consumer reads e.g. payload["idempotency_key"] directly (never nested).
+    payload: dict = {"message": str(message)}
+    if metadata:
+        payload.update(metadata)
+    with write_txn(conn, allow_nested=True):
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        _append_event(conn, task_id, "notification", payload)
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -11356,6 +11406,7 @@ def task_age(task: Task) -> dict:
 #   "notify+wake"  -> passive send AND wake the destination gateway agent
 #   "wake"         -> wake the agent only; no passive message is sent
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+_NOTIFY_RETRY_POLICIES = ("default", "durable")
 
 
 def _encode_notify_delivery_metadata(
@@ -11406,9 +11457,18 @@ def add_notify_sub(
     notifier_profile: Optional[str] = None,
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
+    retry_policy: Optional[str] = None,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
     for ``task_id``. Idempotent on (task, platform, chat, thread).
+
+    ``retry_policy`` (see ``_NOTIFY_RETRY_POLICIES``) selects the notifier's
+    delivery-failure handling: ``'default'`` keeps stock delete-on-repeated-
+    failure, ``'durable'`` never deletes the sub or advances past an unseen
+    event (capped backoff + operator alert instead). ``None`` leaves an
+    existing row's policy untouched (and inserts ``'default'`` for a fresh
+    row); an explicit value is last-write-wins. An unknown value falls back
+    to ``'default'``.
 
     ``user_id_alt`` records the originating source's platform-specific stable
     alt ID (Signal UUID, Feishu union_id, ...) alongside ``user_id``. Active-wake
@@ -11446,6 +11506,7 @@ def add_notify_sub(
         "notify+wake" if platform == "api_server" else "notify"
     )
     insert_chat_type = chat_type or "dm"
+    insert_retry = retry_policy if retry_policy in _NOTIFY_RETRY_POLICIES else "default"
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
@@ -11454,8 +11515,8 @@ def add_notify_sub(
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
                  chat_type, notifier_profile, delivery_mode, delivery_metadata,
-                 created_at, last_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 retry_policy, created_at, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
@@ -11469,6 +11530,7 @@ def add_notify_sub(
                 notifier_profile,
                 insert_mode,
                 metadata_json,
+                insert_retry,
                 now,
                 task_id,
             ),
@@ -11514,6 +11576,16 @@ def add_notify_sub(
                  WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
                 """,
                 (delivery_mode, task_id, platform, chat_id, thread_id or ""),
+            )
+        if retry_policy in _NOTIFY_RETRY_POLICIES:
+            # Explicit retry_policy is last-write-wins; None leaves it unchanged.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET retry_policy = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (retry_policy, task_id, platform, chat_id, thread_id or ""),
             )
         if metadata_json:
             # Refresh the routing anchor for duplicate subscriptions.

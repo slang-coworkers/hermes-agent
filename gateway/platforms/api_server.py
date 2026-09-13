@@ -1362,7 +1362,16 @@ class _IdempotencyCache:
         while len(self._store) > self._max:
             self._store.popitem(last=False)
 
-    async def get_or_set(self, key: str, fingerprint: str, compute_coro):
+    async def get_or_set(self, key: str, fingerprint: str, compute_coro, cache_if=None):
+        """Serialize + cache a keyed computation.
+
+        ``cache_if`` (defaulted): a predicate over the computed result; when it
+        returns False the result is NOT stored (only returned), so a same-key
+        retry re-runs instead of serving a cached failure. Callers that omit it
+        keep the prior behaviour of caching every completed result. The
+        in-flight de-dup (a pending same-key task is awaited) is unaffected —
+        it never caches a failure, it only shares one live execution.
+        """
         self._purge()
         item = self._store.get(key)
         if item and item["fp"] == fingerprint:
@@ -1373,9 +1382,18 @@ class _IdempotencyCache:
         if task is None:
             async def _compute_and_store():
                 resp = await compute_coro()
-                import time as _t
-                self._store[key] = {"resp": resp, "fp": fingerprint, "ts": _t.time()}
-                self._purge()
+                should_cache = True
+                if cache_if is not None:
+                    try:
+                        should_cache = bool(cache_if(resp))
+                    except Exception:
+                        # A predicate error must not poison the cache with a
+                        # possibly-bad result — fail toward re-running.
+                        should_cache = False
+                if should_cache:
+                    import time as _t
+                    self._store[key] = {"resp": resp, "fp": fingerprint, "ts": _t.time()}
+                    self._purge()
                 return resp
 
             task = asyncio.create_task(_compute_and_store())
@@ -5314,7 +5332,18 @@ class APIServerAdapter(BasePlatformAdapter):
             )
             try:
                 result, usage = await _idem_cache.get_or_set(
-                    idempotency_key, fp, _compute_completion
+                    idempotency_key, fp, _compute_completion,
+                    # Do not cache a turn whose persistence FAILED: a same-key
+                    # retry (e.g. a durable wake) must re-run rather than get
+                    # served a cached failure for the 300s TTL. Only an explicit
+                    # turn_persisted=False is treated as a failure; a missing key
+                    # (never set — e.g. an error path or a non-persisting caller)
+                    # keeps the prior always-cache behaviour.
+                    cache_if=lambda r: not (
+                        isinstance(r, tuple)
+                        and len(r) >= 1
+                        and (r[0] or {}).get("turn_persisted") is False
+                    ),
                 )
             except Exception as e:
                 logger.error(
@@ -5359,6 +5388,14 @@ class APIServerAdapter(BasePlatformAdapter):
 
         response_headers = {
             "X-Hermes-Session-Id": result.get("session_id", session_id),
+            # Server-generated persistence ack (never reflected from a request
+            # header): 'true' ONLY when this turn's messages actually committed
+            # to the session DB (result['turn_persisted'] is True). A bare 200
+            # is emitted even on a failed flush, so a wake caller gates its
+            # cursor advance on this header; missing/false = not durable.
+            "X-Hermes-Turn-Persisted": (
+                "true" if result.get("turn_persisted") is True else "false"
+            ),
         }
         if gateway_session_key:
             response_headers["X-Hermes-Session-Key"] = gateway_session_key
