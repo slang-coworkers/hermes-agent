@@ -488,9 +488,8 @@ def test_ac_iso_f10_1(tmp_path, monkeypatch):
 def test_ac_iso_f10_2(tmp_path, monkeypatch):
     """With enforce_sandbox true: a mismatched backend blocks; on the matching backend an
     allow-listed stdio mcp_* tool and a dangerous terminal are refused, a benign call passes,
-    and ensure_task_env is consulted. GOV-F27 re-homes the former blanket mcp_* sandbox deny
-    into _mcp_scope_block, so the stdio block here is produced by its transport-specific step
-    (allow-listed + stdio + enforce_sandbox), not the fail-closed unlisted deny."""
+    and ensure_task_env is consulted. The stdio block is the transport-specific sandbox denial
+    (allow-listed + stdio + enforce_sandbox), which is distinct from an absent-scope denial."""
     import tools.terminal_tool as tt
     calls = {"env": 0}
 
@@ -500,9 +499,8 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tt, "ensure_task_env", _ready_env, raising=False)
     # plan_gate off so a mutating terminal reaches the sandbox predicate, not the plan gate.
-    # The stdio sample is EXPLICITLY allow-listed (transport stdio) for this profile so its
-    # enforce_sandbox block is proven by the transport-specific deny, not the unlisted fail-safe
-    # (which would false-pass once the blanket mcp_* sandbox line is gone).
+    # The stdio sample is explicitly allow-listed (transport stdio) so this assertion exercises
+    # transport-specific sandbox denial rather than absent-scope denial.
     manager, _, _ = _load(
         tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False,
         mcp_scope={"worker-a": {"mcp__local_fs__read_file": "stdio"}},

@@ -258,6 +258,35 @@ def test_connection_fields_passthrough(tmp_path, monkeypatch):
     assert s["tools"]["include"] == ["read_file"]
 
 
+def test_model_name_collision_rejected(tmp_path, monkeypatch):
+    """Two distinct (server, tool) declarations that sanitize to the same mcp__server__tool are refused fleet-wide.
+
+    ``(a, b__c)`` and ``(a__b, c)`` both yield ``mcp__a__b__c``; the ``__`` delimiter is
+    ambiguous, so one profile's scope key would match another's registered tool.
+    """
+    module = _compose_module(tmp_path, monkeypatch)
+    spec = _write_spec(
+        tmp_path / "spec",
+        reviewer_mcp={"a": {"url": DOCS_RO_URL, "include": ["b__c"]}},
+        fixer_mcp={"a__b": {"url": DOCS_RO_URL, "include": ["c"]}},
+    )
+    with pytest.raises(_err(module), match=r"collision"):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_utility_native_collision_rejected(tmp_path, monkeypatch):
+    """A native tool that collides with a generated resource/prompt utility name is refused."""
+    module = _compose_module(tmp_path, monkeypatch)
+    spec = _write_spec(
+        tmp_path / "spec",
+        reviewer_mcp={
+            "srv": {"url": DOCS_RO_URL, "include": ["list_resources"], "resources": True}
+        },
+    )
+    with pytest.raises(_err(module), match=r"collision"):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
 def _dig(mapping: dict, dotted: str):
     node = mapping
     for part in dotted.split("."):

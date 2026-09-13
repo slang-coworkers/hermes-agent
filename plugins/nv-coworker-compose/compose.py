@@ -1522,13 +1522,13 @@ def _mcp_server_stanza(server: str, decl: Dict[str, Any]) -> Tuple[Dict[str, Any
     return stanza, transport, include, resources, prompts
 
 
-def _mcp_scope_names(server: str, include: List[str], resources: bool, prompts: bool) -> List[str]:
-    names = list(include)
+def _mcp_scope_entries(include: List[str], resources: bool, prompts: bool) -> List[Tuple[str, str]]:
+    entries: List[Tuple[str, str]] = [("native", tool) for tool in include]
     if resources:
-        names.extend(_MCP_UTILITY_TOOLS["resources"])
+        entries.extend(("utility", tool) for tool in _MCP_UTILITY_TOOLS["resources"])
     if prompts:
-        names.extend(_MCP_UTILITY_TOOLS["prompts"])
-    return names
+        entries.extend(("utility", tool) for tool in _MCP_UTILITY_TOOLS["prompts"])
+    return entries
 
 
 def _mcp_connection_identity(stanza: Dict[str, Any]) -> Dict[str, Any]:
@@ -1589,6 +1589,13 @@ def _render_mcp_scope(
     role_scope: Dict[str, Dict[str, str]] = {}
     union: Dict[str, Dict[str, Any]] = {}
     sanitized_servers: Dict[str, str] = {}
+    # Fleet-wide map from the full model-facing name to its (server, kind, tool)
+    # owner. The mcp__<server>__<tool> delimiter is ambiguous when a component
+    # contains "__" ((a, b__c) and (a__b, c) both yield mcp__a__b__c), and a
+    # native tool can clash with a generated resource/prompt utility; either
+    # would let one profile's scope key match another's registered tool, so a
+    # divergent owner for the same key is refused fleet-wide.
+    scope_owners: Dict[str, Tuple[str, str, str]] = {}
 
     for profile, resolved in resolved_by_type.items():
         mcp = resolved.get("mcp")
@@ -1616,8 +1623,16 @@ def _render_mcp_scope(
                 sanitized_servers[sanitized] = server
                 stanza, transport, include, resources, prompts = _mcp_server_stanza(server, decl)
                 servers_out[server] = stanza
-                for tool in _mcp_scope_names(server, include, resources, prompts):
+                for kind, tool in _mcp_scope_entries(include, resources, prompts):
                     key = _mcp_prefixed(server, tool)
+                    owner = (server, kind, tool)
+                    prior = scope_owners.get(key)
+                    if prior is not None and prior != owner:
+                        raise CompositionError(
+                            f"mcp model-name collision: {key!r} maps to both {prior!r} and {owner!r} "
+                            "(the mcp__server__tool delimiter is ambiguous across these declarations)"
+                        )
+                    scope_owners[key] = owner
                     if key in scope_out:
                         raise CompositionError(
                             f"mcp sanitized-name collision: {key!r} produced twice in profile {profile!r}"

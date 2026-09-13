@@ -7,6 +7,8 @@ predicate chain and returns the FIRST match:
       -> SANDBOX          (ISO-F10; inert unless enforce_sandbox)
       -> FLEET-ADMIN      (GOV-F26; orchestrator-only admin tools)
       -> WIRING unwired   (A2A-F18; wired-only peer messaging)
+      -> MCP-SCOPE        (GOV-F27; mcp_* absent from the profile's rendered
+                           allow-list denied, transport-aware, fail-closed)
       -> GATES            (host-writer path / plan gate / critique gate + PR
                            invitation — LOOP-F37/F38, ISO-F10 merged)
       -> WIRING approve   (A2A-F19; gated edge -> escalate to the human gate)
@@ -262,10 +264,6 @@ def register(ctx) -> None:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
             )
-        # The blanket mcp_* deny that lived here is re-homed into _mcp_scope_block
-        # (GOV-F27), which is transport-aware: an allow-listed REMOTE server's tool
-        # may proceed while stdio/unknown-transport MCP stays denied under
-        # enforcement (AC-ISO-F10's stdio-deny preserved, AC-GOV-F27-6).
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
