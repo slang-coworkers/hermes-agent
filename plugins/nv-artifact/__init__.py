@@ -689,24 +689,35 @@ def _cmd_pr_remap(args):
         _refuse({"status": "error", "reason": "no owning task to re-point"}, args)
         return 1
 
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    def _norm_or_none(value):
+        try:
+            normalized = normalize_profile_name(value) if value else None
+            if normalized is None:
+                return None
+            validate_profile_name(normalized)
+            return normalized
+        except (TypeError, ValueError):
+            return None
+
+    # Canonicalize the destination once and use it EVERYWHERE (comparison, wake
+    # sub, ownership row, emitted result), so a mixed-case/whitespace `--to` never
+    # persists a notifier_profile the notifier's exact-match filter won't select.
+    to_norm = _norm_or_none(to)
+    if to_norm is None:
+        _refuse({"status": "refused", "repo": repo, "pr": pr, "reason": "invalid --to profile"}, args)
+        return 1
+    cur_profile_norm = _norm_or_none(cur_profile)
+
     # A cross-profile remap MUST target a DISTINCT task bound to the new owner:
     # its own fresh wake route can then be installed before ownership changes,
     # without mutating the current owner's route (which a mid-remap ledger commit
     # failure would otherwise strand — new route paired with the old owner row).
-    if cur_profile is not None and to != cur_profile and new_task == cur_task:
+    if cur_profile is not None and to_norm != cur_profile_norm and new_task == cur_task:
         _refuse({"status": "refused", "repo": repo, "pr": pr,
                  "reason": "cross-profile remap requires a distinct --task bound to the new owner"}, args)
         return 1
-
-    from hermes_cli.profiles import normalize_profile_name
-
-    to_norm = normalize_profile_name(to)
-
-    def _norm_or_none(p):
-        try:
-            return normalize_profile_name(p) if p else None
-        except Exception:
-            return None
 
     with _kb_connect(ctx) as kconn:
         srow = kconn.execute(
@@ -735,7 +746,7 @@ def _cmd_pr_remap(args):
 
     # Route BEFORE ownership: install the (distinct) target task's own durable
     # wake sub; refuse and leave ownership unchanged if it cannot be installed.
-    if not _register_wake_sub(ctx, new_task, new_sess, to):
+    if not _register_wake_sub(ctx, new_task, new_sess, to_norm):
         _refuse({"status": "error", "repo": repo, "pr": pr,
                  "reason": "wake subscription registration failed; ownership unchanged"}, args)
         return 1
@@ -745,12 +756,12 @@ def _cmd_pr_remap(args):
         conn.execute(
             "INSERT INTO ownership (repo, pr, task_id, profile) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(repo, pr) DO UPDATE SET task_id = excluded.task_id, profile = excluded.profile",
-            (repo, pr, new_task, to),
+            (repo, pr, new_task, to_norm),
         )
         conn.commit()
     finally:
         conn.close()
-    _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}, args)
+    _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to_norm}, args)
     return 0
 
 

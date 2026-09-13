@@ -887,14 +887,15 @@ async def test_durable_push_absent_owner_adapter_never_uses_default(monkeypatch)
 # W2 — REAL cross-profile persisted-resume proof (GOV-F25 mandatory core test,
 # ADR §"Core test — the cross-profile persisted-resume proof").
 #
-# The full production chain runs for real: the profile-prefix middleware resolves
+# The production chain runs for real: the profile-prefix middleware resolves
 # /p/<owner>/, _handle_chat_completions → _run_agent enters the REAL profile
 # runtime scope, the turn persists to profiles/<owner>/state.db, the server emits
 # the REAL X-Hermes-Turn-Persisted header, deliver_wake's persist-ack gate reads
-# it, and the durable notifier advances its cursor only on that ack. The ONLY
-# stub is _create_agent → a fake whose run_conversation persists a real message
-# row via SessionDB (a live model turn cannot run hermetically); it writes under
-# the middleware-set profile scope, so WHICH state.db it lands in is decided by
+# it, and the durable notifier advances its cursor only on that ack. The test
+# doubles are the model agent (_create_agent → a fake whose run_conversation
+# persists a real message row via SessionDB, since a live model cannot run
+# hermetically), secret lookup, and adapter lookup; the fake writes under the
+# middleware-set profile scope, so WHICH state.db it lands in is decided by
 # production code, not the stub. Assertions (i)-(v) map to the ADR's core-test
 # clause. Reuses the ephemeral-loopback-server pattern from test_wake_delivery.
 # ---------------------------------------------------------------------------
@@ -977,7 +978,7 @@ def _build_wake_adapter(tmp_path, monkeypatch, state):
         _ss, "get_secret",
         lambda name, default="": _WAKE_KEY if name == "API_SERVER_KEY" else default,
     )
-    # Only the model turn is stubbed; the persist + scope are the production path.
+    # The model agent is a double; the persist + profile scope are production code.
     monkeypatch.setattr(
         adapter, "_create_agent",
         lambda **kw: _RealPersistAgent(kw.get("session_id"), state),

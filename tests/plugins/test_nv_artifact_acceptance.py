@@ -674,3 +674,42 @@ def test_remap_unassigned_task_is_refused(artifact, monkeypatch, capsys):
     assert (rc or 0) != 0
     assert json.loads(capsys.readouterr().out)["status"] == "refused"
     assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
+
+
+def test_remap_mixed_case_to_is_normalized_everywhere(artifact, monkeypatch, capsys):
+    """A mixed-case `--to` is canonicalized: it matches a normally-cased task
+    assignee, and the normalized profile is what lands in BOTH the ownership row
+    and the wake sub's notifier_profile (so the notifier's exact-match filter
+    selects it)."""
+    import hermes_cli.kanban_db as kb
+
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    target = _bare_card("new-owner", "gh-pr-o-r-7-mc")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-mc", target))
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="New-Owner", task=target, json=True))
+    assert (rc or 0) == 0
+    assert json.loads(capsys.readouterr().out)["profile"] == "new-owner"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, target, "new-owner")]
+    assert _wake_subs(target) == [("api_server", "new-owner", "wake", "durable")]
+
+
+def test_remap_invalid_to_profile_is_refused(artifact, monkeypatch, capsys):
+    """A malformed `--to` profile is refused with no mutation (never silently
+    stored as an unroutable notifier_profile)."""
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="bad/name", task=None, json=True))
+    assert (rc or 0) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
