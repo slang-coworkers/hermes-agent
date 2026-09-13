@@ -306,14 +306,19 @@ managed keys, and the best-effort in-surface `approvals.deny` floor — and it
 stay open, both owned by the dedicated core-enforcement row **`GOV-ENF`** (with the
 allied `P8` core ask), and GOV-F23 takes **no safety-completion credit**:
 
-1. **Detector-evading / shell-wrapped spellings** (AC-GOV-F23-7). The core
-   dangerous-command detector's force-push patterns match only `--forc*` and a
-   standalone `-f` (`tools/approval.py:1227-1228`) and have **no `git tag` /
-   `gh release` / `+refspec` entry anywhere** (`:945-1271`); the anchored `fnmatch`
-   deny floor closes the direct, combined-flag and global-option forms but not a verb
-   split by a shell wrapper / chain / var-prefix (`cd repo && git tag v1`,
-   `command git push origin +main:main`, a global option splitting `git push`). The
-   robust fix is a segment/argv-aware pre-execution matcher plus detector coverage
+1. **Direct 4+-char clusters and detector-evading / shell-wrapped spellings**
+   (AC-GOV-F23-7). The core dangerous-command detector's force-push patterns match
+   only `--forc*` and a standalone `-f` (`tools/approval.py:1227-1228`) and have
+   **no `git tag` / `gh release` / `+refspec` entry anywhere** (`:945-1271`); the
+   anchored `fnmatch` deny floor closes only the common direct, combined-flag (force
+   `f` at cluster positions 1-3) and global-option spellings. It does **NOT** close
+   (a) a **direct** combined cluster with `f` at position 4+
+   (`git push -qvuf origin main` — an anchored `fnmatch` floor cannot bound an
+   arbitrary-length cluster, so this direct form needs no wrapper to slip), nor
+   (b) a verb split by a shell wrapper / chain / var-prefix (`cd repo && git tag v1`,
+   `command git push origin +main:main`, a global option splitting `git push`). Both
+   open classes are recorded present-and-labelled in AC-GOV-F23-7's `FAILOPEN_PROBES`.
+   The robust fix is a segment/argv-aware pre-execution matcher plus detector coverage
    for tag/release/+refspec — both **core changes**, `GOV-ENF`.
 2. **Cross-profile `command_allowlist` union leak** for in-gateway multiplex sessions
    (AC-GOV-F23-4b) — see the process-global boundary section; the `P8` core ask.

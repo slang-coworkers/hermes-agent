@@ -117,7 +117,7 @@ _MANAGED_FRAGMENT_DIR = "managed"
 # (not-dash, not-space) class to keep the force 'f' inside a single-dash short
 # cluster so '*' cannot cross a space into a branch name: a naive 'git *push* -*f*'
 # would over-block a normal 'git push -u origin fix' (the '*' crosses ' -u' into the
-# 'f' of 'fix'), verified firsthand. One [!- ] per flag letter before 'f' covers 'f'
+# 'f' of 'fix'). One [!- ] per flag letter before 'f' covers 'f'
 # at cluster positions 1-3 (-f, -uf, -uqf). The 'git push* *+*' / 'git -*push* *+*'
 # pair catches the unquoted and shell-quoted +refspec, contiguous and behind a git
 # global option.
@@ -440,7 +440,10 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     passthrough: the render SETS ``approvals.deny`` to ``_GOV_APPROVALS_DENY_FLOOR``
     on EVERY profile (builder, reviewer, DEFAULT), OVERWRITING whatever the coworker
     type or spine declared — so a spec that declares a weak or absent deny still
-    ships the full floor. Runs AFTER the fleet-uniform strip so it operates on — and,
+    ships the full floor. Despite the name, this is a centrally-enforced UNIFORM deny
+    policy, NOT a union-minimum: a STRONGER per-profile deny an operator declared is
+    intentionally replaced too (uniform fleet policy under central governance), which
+    AC-GOV-F23-2 asserts. Runs AFTER the fleet-uniform strip so it operates on — and,
     when the strip pruned an emptied ``approvals`` block, re-creates — the per-profile
     approvals dict."""
     approvals = config.get("approvals")

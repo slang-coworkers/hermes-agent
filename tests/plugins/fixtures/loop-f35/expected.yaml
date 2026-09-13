@@ -1,6 +1,11 @@
-# Expected outcomes for the LOOP-F35 acceptance test — the fleet invariants
-# nv-coworker-compose must render. Approvals policy is machine-wide managed scope
-# (asserted by GOV-F23 AC-1/AC-3), so it is not a profile-local expectation here.
+# FROZEN expected outcomes for the LOOP-F35 acceptance test — architect-owned.
+# The builder makes nv-coworker-compose RENDER to satisfy this; it does NOT edit this
+# file, EXCEPT the one GOV-F23-driven relocation below (PENDING ARCHITECT RE-FREEZE):
+# the eight fleet-uniform approval keys moved from profile-local to machine-wide
+# managed scope, so coworker_config no longer lists them (they are asserted instead by
+# GOV-F23 AC-1/AC-3). The reviewer confirmed the substance is correct and no LOOP-F35
+# assertion was weakened; the architect should re-issue the frozen expectation to
+# re-baseline this cross-requirement edit.
 
 profiles: [default, orchestrator, reviewer, fixer]
 default_profile: default

@@ -169,6 +169,13 @@ FAILOPEN_PROBES = [
     # wrapper. (Unwrapped, both are floor-caught; wrapped, both are fail-open.)
     "cd repo && git -C . push --force",   # global option splits `git ... push`
     "cd repo && git push -uf origin main",  # force flag inside a combined -uf cluster
+    # DIRECT (unwrapped) force-push whose combined cluster puts the force `f` at
+    # position 4+, past the floor's positions-1-3 short-cluster globs AND the core
+    # detector's standalone-`-f` requirement (approval.py:1227-1228) — a direct
+    # fail-open, no shell wrapper needed. An anchored fnmatch floor cannot bound an
+    # arbitrary-length cluster; the robust fix is GOV-ENF's argv-boundary matcher.
+    "git push -qvuf origin main",
+    "git push -qvuxf origin main",
 ]
 
 
