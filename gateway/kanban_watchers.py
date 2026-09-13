@@ -884,9 +884,9 @@ class GatewayKanbanWatchersMixin:
                         # self-post below). Whether the cursor may advance now
                         # depends on the adapter class:
                         #
-                        # * push-capable: the text send WAS the delivery, so
-                        #   advance immediately (pre-existing behavior); the
-                        #   wake injection below stays best-effort.
+                        # * push-capable: the text send IS the delivery, so
+                        #   advance immediately; the wake injection below stays
+                        #   best-effort.
                         # * non-push (api_server): the wake self-post IS the
                         #   delivery. Advancing first would let a failed /
                         #   retry-exhausted self-post (swallowed by the
@@ -1194,7 +1194,7 @@ class GatewayKanbanWatchersMixin:
     def _note_durable_failure(self, sub_key, cause) -> None:
         """Record a durable-sub delivery failure: bump the fail count, schedule
         an exponential capped backoff, and — on sustained failure — emit a loud
-        operator alert. NEVER drops the sub (W2d)."""
+        operator alert. Never drops the sub."""
         fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
         if fail_counts is None:
             fail_counts = self._kanban_sub_fail_counts = {}

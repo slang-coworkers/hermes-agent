@@ -516,31 +516,26 @@ def _on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwa
 # ---------------------------------------------------------------------------
 
 def _upsert_outcome(artifact, *, terminal_outcome=None, cost_usd=None, profile=None) -> None:
-    """Idempotent UNIQUE(artifact) upsert. Only the provided fields change;
-    ``cost_usd`` is SET (never accumulated), so a repeated on_session_end does
-    not double-count and a later read reflects the newest total."""
+    """Idempotent UNIQUE(artifact) upsert changing ONLY the supplied fields, as a
+    single atomic statement so a concurrent merge-derivation and session-end
+    cannot clobber one another's field (a read-modify-write would). ``cost_usd``
+    is SET (never accumulated), so a repeated on_session_end does not
+    double-count and a later read reflects the newest total."""
     ctx = _CTX
     if ctx is None:
         return
     conn = _db(ctx)
     try:
-        row = conn.execute(
-            "SELECT terminal_outcome, cost_usd, profile FROM outcomes WHERE artifact = ?",
-            (artifact,),
-        ).fetchone()
-        if row is None:
-            conn.execute(
-                "INSERT INTO outcomes (artifact, terminal_outcome, cost_usd, profile) VALUES (?, ?, ?, ?)",
-                (artifact, terminal_outcome, float(cost_usd or 0.0), profile),
-            )
-        else:
-            new_outcome = terminal_outcome if terminal_outcome is not None else row[0]
-            new_cost = float(cost_usd) if cost_usd is not None else row[1]
-            new_profile = profile if profile is not None else row[2]
-            conn.execute(
-                "UPDATE outcomes SET terminal_outcome = ?, cost_usd = ?, profile = ? WHERE artifact = ?",
-                (new_outcome, new_cost, new_profile, artifact),
-            )
+        conn.execute(
+            "INSERT INTO outcomes (artifact, terminal_outcome, cost_usd, profile) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(artifact) DO UPDATE SET "
+            "  terminal_outcome = COALESCE(excluded.terminal_outcome, outcomes.terminal_outcome), "
+            "  cost_usd = CASE WHEN ? IS NOT NULL THEN excluded.cost_usd ELSE outcomes.cost_usd END, "
+            "  profile = COALESCE(excluded.profile, outcomes.profile)",
+            (artifact, terminal_outcome, float(cost_usd or 0.0), profile,
+             (1 if cost_usd is not None else None)),
+        )
         conn.commit()
     finally:
         conn.close()

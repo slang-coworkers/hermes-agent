@@ -5,7 +5,7 @@ Two delivery strategies, selected by the target adapter's
 
 * Push-capable adapters (telegram, discord, plugin platforms, ...): inject a
   synthetic ``MessageEvent(internal=True)`` through ``adapter.handle_message``
-  — the pre-existing wake path, preserved exactly.
+  — the push wake path.
 
 * Stateless request/response adapters (the API server,
   ``supports_async_delivery = False``): ``handle_message`` would run the wake
@@ -75,14 +75,13 @@ async def deliver_wake(
     ``POST /p/<owner_profile>/v1/chat/completions`` so the wake resumes a
     SECONDARY-profile session (whose store the middleware scopes to
     ``profiles/<owner>/state.db``); when ``None`` the unprefixed same-profile
-    ``/v1/chat/completions`` is used — every existing caller omits it and is
-    unchanged. ``idempotency_key`` (keyword-only, defaulted): when set, sent as
-    the ``Idempotency-Key`` request header so a same-key retry is deduped by the
-    api_server's in-flight/completed cache. ``require_persist_ack`` (keyword-only,
-    defaulted False): when True the non-push self-post treats a 2xx as success
-    ONLY if the response also carries ``X-Hermes-Turn-Persisted: true`` — a
-    durable caller opts in; every existing caller omits it and keeps the prior
-    2xx-is-success behaviour.
+    ``/v1/chat/completions`` is used. ``idempotency_key`` (keyword-only,
+    defaulted): when set, sent as the ``Idempotency-Key`` request header so a
+    same-key retry is deduped by the api_server's in-flight/completed cache.
+    ``require_persist_ack`` (keyword-only, defaulted False): when True the
+    non-push self-post treats a 2xx as success ONLY if the response also carries
+    ``X-Hermes-Turn-Persisted: true`` (a durable caller opts in); when False a
+    2xx alone is success.
 
     Raises on failure (bad arguments, exhausted retries, HTTP error, or — only
     when ``require_persist_ack`` — a response that does not confirm persistence)
@@ -109,9 +108,8 @@ async def deliver_wake(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
             "requires the raw session id to self-post the wake turn"
         )
-    # Forward the newer options ONLY when set, so a caller that invokes
-    # _self_post_chat_completion with the original (text, session_id) signature
-    # is not broken by unexpected keywords.
+    # Forward the optional args only when set, so a self-post that passes just
+    # (text, session_id) receives no unexpected keywords.
     _extra: dict = {}
     if owner_profile is not None:
         _extra["owner_profile"] = owner_profile
@@ -172,8 +170,8 @@ async def _self_post_chat_completion(
 
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # bare IPv6 literal
-    # Profile-scoped mirror resumes a secondary-profile session; the unprefixed
-    # path (owner_profile=None) is the pre-existing same-profile behaviour.
+    # Profile-scoped mirror resumes a secondary-profile session; owner_profile
+    # None targets the unprefixed same-profile endpoint.
     path = "/v1/chat/completions"
     if owner_profile:
         path = f"/p/{owner_profile}{path}"
