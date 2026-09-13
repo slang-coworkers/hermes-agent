@@ -1166,11 +1166,17 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
     overlays: List[Any] = []
     traits: Dict[str, Any] = {}
     config: Dict[str, Any] = {}
+    mcp: Any = None
 
     def _apply(layer: Dict[str, Any]) -> None:
-        nonlocal identity, traits, config
+        nonlocal identity, traits, config, mcp
         if layer.get("identity") is not None:
             identity = layer["identity"]
+        # The mcp block is a whole-declaration leaf-wins layer (like identity),
+        # not an append/merge domain: a coworker's own server set replaces a
+        # spine's rather than silently unioning across the extends chain.
+        if layer.get("mcp") is not None:
+            mcp = layer["mcp"]
         invariants.extend(layer.get("invariants") or [])
         context.extend(layer.get("context") or [])
         skills.extend(layer.get("skills") or [])
@@ -1200,6 +1206,7 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
         "workflows": _dedup(workflows),
         "overlays": _dedup(overlays),
         "config": config,
+        "mcp": mcp,
         "ui_meta": tinfo.get("ui_meta") or {},
     }
 
@@ -1341,6 +1348,302 @@ def _merged_spine_config(spines: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+# --- GOV-F27: per-role MCP allow-list / server registry --------------------
+# A role declares its MCP servers under ``types.<role>.mcp`` (a structured block,
+# not a scalar trait). The render emits, per profile, a scoped ``mcp_servers``
+# block (only that role's servers) with a fail-safe ``trust``/utility policy, a
+# validated UNION on the DEFAULT/launch profile (the process-global multiplex
+# registry the shared gateway discovers once at startup), and — into EVERY
+# profile — the full profile-keyed ``mcp_scope`` the single nv-fleet-gates
+# pre_tool_call predicate enforces at call time.
+
+# ``${...}`` refs core resolves WITHOUT an env read (tools/mcp_tool.py:710-728
+# _context_var_value). Exempt from the env-ref refusal because they never trigger
+# the unscoped-secret read that zeroes all MCP at multiplex startup.
+_MCP_CONTEXT_REFS = frozenset(
+    {"userHome", "workspaceFolder", "workspaceFolderBasename", "pathSeparator", "/"}
+)
+_MCP_ENV_REF_RE = re.compile(r"\$\{([^}]*)\}")
+_MCP_GLOB_CHARS = ("*", "?", "[", "]")
+# Transport strings by connection class: tools/mcp_tool.py:3656 selects SSE for a
+# url server; a url server otherwise speaks Streamable HTTP; a command server is
+# stdio. Only a declared transport whose class CONTRADICTS the connection is a
+# render error — an unknown/future value is preserved verbatim, not rejected.
+_MCP_REMOTE_TRANSPORTS = frozenset(
+    {"sse", "http", "https", "streamable-http", "streamable_http", "streamable", "ws", "websocket"}
+)
+_MCP_STDIO_TRANSPORTS = frozenset({"stdio"})
+# Utility tool names core grants when resources/prompts are enabled
+# (tools/mcp_tool.py:6905-6963); listed in a role's scope ONLY when that role
+# grants the capability (else rendered false, closing the utility bypass).
+_MCP_UTILITY_TOOLS: Dict[str, Tuple[str, ...]] = {
+    "resources": ("list_resources", "read_resource"),
+    "prompts": ("list_prompts", "get_prompt"),
+}
+# Declaration keys the render OWNS (translated into tools.*/trust); every other
+# key is a connection field copied into the stanza verbatim (url/headers/command/
+# args/env/transport/ssl_verify/…), so SSE/auth/TLS/lifecycle survive unchanged.
+_MCP_MANAGED_KEYS = frozenset({"include", "resources", "prompts", "trust"})
+_MCP_SCOPE_SETTINGS = "plugins.entries.nv-fleet-gates.settings"
+
+
+def _mcp_sanitize(value: Any) -> str:
+    # Verbatim replica of core sanitize_mcp_name_component (tools/mcp_tool.py:6841-6849)
+    # so a rendered scope key equals the model-facing name the gateway registers.
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
+
+
+def _mcp_prefixed(server: str, tool: str) -> str:
+    return f"mcp__{_mcp_sanitize(server)}__{_mcp_sanitize(tool)}"
+
+
+def _mcp_iter_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for sub in value.values():
+            yield from _mcp_iter_strings(sub)
+    elif isinstance(value, (list, tuple)):
+        for sub in value:
+            yield from _mcp_iter_strings(sub)
+
+
+def _mcp_reject_env_refs(server: str, connection: Dict[str, Any]) -> None:
+    from agent.secret_scope import _is_global_env
+
+    for text in _mcp_iter_strings(connection):
+        for match in _MCP_ENV_REF_RE.finditer(text):
+            ref = match.group(1).strip()
+            if ref in _MCP_CONTEXT_REFS:
+                continue
+            if ref.startswith("env:"):
+                var = ref[len("env:"):].strip()
+                if _is_global_env(var):
+                    continue
+                raise CompositionError(
+                    f"mcp server {server!r}: non-global env-ref '${{env:{var}}}' in a connection "
+                    "value; authenticated remote MCP uses an OneCLI-proxied URL (credential injected "
+                    "at egress), not a startup secret read"
+                )
+            if _is_global_env(ref):
+                continue
+            raise CompositionError(
+                f"mcp server {server!r}: non-global env-ref '${{{ref}}}' in a connection value; a "
+                "non-global secret read raises at unscoped multiplex startup and zeroes ALL MCP"
+            )
+
+
+def _mcp_transport(server: str, decl: Dict[str, Any]) -> str:
+    """Policy transport ('remote'|'stdio'); fail-closed on an ambiguous connection."""
+    def _present(key: str) -> bool:
+        if key not in decl or decl[key] is None:
+            return False
+        value = decl[key]
+        if not isinstance(value, str) or not value.strip():
+            raise CompositionError(f"mcp server {server!r}: {key!r} must be a non-empty string")
+        return True
+
+    has_url = _present("url")
+    has_cmd = _present("command")
+    if has_url and has_cmd:
+        raise CompositionError(
+            f"mcp server {server!r}: both 'url' and 'command' set — exactly one transport "
+            "connection (url|command) is required"
+        )
+    if not has_url and not has_cmd:
+        raise CompositionError(
+            f"mcp server {server!r}: neither 'url' nor 'command' set — exactly one transport "
+            "connection (url|command) is required"
+        )
+    policy = "remote" if has_url else "stdio"
+    declared = decl.get("transport")
+    if declared is not None:
+        text = str(declared).strip().lower()
+        if policy == "remote" and text in _MCP_STDIO_TRANSPORTS:
+            raise CompositionError(
+                f"mcp server {server!r}: declared transport {declared!r} disagrees with a url "
+                "connection (remote)"
+            )
+        if policy == "stdio" and text in _MCP_REMOTE_TRANSPORTS:
+            raise CompositionError(
+                f"mcp server {server!r}: declared transport {declared!r} disagrees with a command "
+                "connection (stdio)"
+            )
+    return policy
+
+
+def _mcp_validate_include(profile: str, server: str, include_raw: Any) -> List[str]:
+    # Missing/non-list include is refused, never forwarded: core treats an
+    # inactive include filter as "register ALL tools" (tools/mcp_tool.py:7194),
+    # a fail-open the exact-set contract cannot allow. include: [] is kept (core
+    # registers nothing). isinstance is checked before any membership test so an
+    # unhashable YAML value raises CompositionError, not a raw TypeError.
+    if not isinstance(include_raw, list):
+        raise CompositionError(
+            f"{profile}: mcp server {server!r} 'include' must be a list of exact tool names "
+            f"(present, list-valued), got {type(include_raw).__name__}"
+        )
+    out: List[str] = []
+    for entry in include_raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"{profile}: mcp server {server!r} include entry must be a non-empty string, got {entry!r}"
+            )
+        if any(ch in entry for ch in _MCP_GLOB_CHARS):
+            raise CompositionError(
+                f"{profile}: mcp server {server!r} include entry {entry!r} contains glob metacharacters; "
+                "an exact tool name is required (the veto's exact-name map cannot represent a glob)"
+            )
+        out.append(entry)
+    return out
+
+
+def _mcp_trust(value: Any) -> str:
+    # Fail-safe: only an explicit trust: full survives as "full"; anything else
+    # (absent, "trusted", misspelled) becomes "untrusted". Core defaults an ABSENT
+    # trust to permissive "full" (_normalize_server_trust tools/mcp_tool.py:4615),
+    # so writing untrusted explicitly is the non-vacuous enforcement.
+    if isinstance(value, str) and value.strip().lower() == "full":
+        return "full"
+    return "untrusted"
+
+
+def _mcp_server_stanza(server: str, decl: Dict[str, Any]) -> Tuple[Dict[str, Any], str, List[str], bool, bool]:
+    transport = _mcp_transport(server, decl)
+    connection = {k: v for k, v in decl.items() if k not in _MCP_MANAGED_KEYS}
+    _mcp_reject_env_refs(server, connection)
+    include = _mcp_validate_include(server, server, decl.get("include"))
+    resources = decl.get("resources") is True
+    prompts = decl.get("prompts") is True
+    trust = _mcp_trust(decl.get("trust"))
+    stanza = dict(connection)
+    stanza["tools"] = {"include": include, "resources": resources, "prompts": prompts}
+    stanza["trust"] = trust
+    return stanza, transport, include, resources, prompts
+
+
+def _mcp_scope_names(server: str, include: List[str], resources: bool, prompts: bool) -> List[str]:
+    names = list(include)
+    if resources:
+        names.extend(_MCP_UTILITY_TOOLS["resources"])
+    if prompts:
+        names.extend(_MCP_UTILITY_TOOLS["prompts"])
+    return names
+
+
+def _mcp_connection_identity(stanza: Dict[str, Any]) -> Dict[str, Any]:
+    # Identity = every emitted field except the four merged policy fields. Two
+    # roles declaring the same server id must agree on it, else they must use
+    # distinct ids (a shared registry key cannot hold two connections).
+    return {k: v for k, v in stanza.items() if k not in ("tools", "trust")}
+
+
+def _mcp_merge_into_union(union: Dict[str, Dict[str, Any]], server: str, stanza: Dict[str, Any]) -> None:
+    identity = _mcp_connection_identity(stanza)
+    if server not in union:
+        union[server] = copy.deepcopy(stanza)
+        return
+    if _mcp_connection_identity(union[server]) != identity:
+        raise CompositionError(
+            f"mcp server {server!r}: divergent connection identity across roles (same server id, "
+            "different connection) — use distinct server ids or align the connection"
+        )
+    merged = union[server]["tools"]
+    for tool in stanza["tools"]["include"]:
+        if tool not in merged["include"]:
+            merged["include"].append(tool)
+    merged["resources"] = merged["resources"] or stanza["tools"]["resources"]
+    merged["prompts"] = merged["prompts"] or stanza["tools"]["prompts"]
+    # trust: full only if EVERY declaration is full (any non-full → untrusted).
+    if stanza["trust"] != "full":
+        union[server]["trust"] = "untrusted"
+
+
+def _mcp_write_scope(config: Dict[str, Any], full_scope: Dict[str, Dict[str, str]]) -> None:
+    # Deep-navigate to the fleet-gates settings and REPLACE only mcp_scope (a
+    # stale/inherited map is overwritten, never merged into — a leftover entry
+    # would silently widen the boundary), preserving sibling settings.
+    settings = config
+    for part in _MCP_SCOPE_SETTINGS.split("."):
+        settings = settings.setdefault(part, {})
+        if not isinstance(settings, dict):
+            raise CompositionError(
+                f"cannot render mcp_scope: {_MCP_SCOPE_SETTINGS} is not a mapping in this profile"
+            )
+    settings["mcp_scope"] = copy.deepcopy(full_scope)
+
+
+def _render_mcp_scope(
+    resolved_by_type: Dict[str, Dict[str, Any]],
+    default_config: Dict[str, Any],
+    default_profile: str,
+) -> None:
+    """Emit per-role mcp_servers + the DEFAULT union + the profile-keyed mcp_scope."""
+    # Strip any inherited/pre-existing mcp_servers so a no-MCP profile carries
+    # ONLY its role's servers (atomic replace, matching mcp_scope below).
+    default_config.pop("mcp_servers", None)
+    for resolved in resolved_by_type.values():
+        resolved["config"].pop("mcp_servers", None)
+
+    role_servers: Dict[str, Dict[str, Any]] = {}
+    role_scope: Dict[str, Dict[str, str]] = {}
+    union: Dict[str, Dict[str, Any]] = {}
+    sanitized_servers: Dict[str, str] = {}
+
+    for profile, resolved in resolved_by_type.items():
+        mcp = resolved.get("mcp")
+        servers_out: Dict[str, Any] = {}
+        scope_out: Dict[str, str] = {}
+        if mcp is not None:
+            if not isinstance(mcp, dict):
+                raise CompositionError(f"{profile}: 'mcp' must be a mapping of server-id -> stanza")
+            for server, decl in mcp.items():
+                if not isinstance(server, str) or not server.strip():
+                    raise CompositionError(
+                        f"{profile}: mcp server id must be a non-empty string, got {server!r}"
+                    )
+                if not isinstance(decl, dict):
+                    raise CompositionError(
+                        f"{profile}: mcp server {server!r} declaration must be a mapping"
+                    )
+                sanitized = _mcp_sanitize(server)
+                prior = sanitized_servers.get(sanitized)
+                if prior is not None and prior != server:
+                    raise CompositionError(
+                        f"mcp server sanitized-name collision: {prior!r} and {server!r} both sanitize "
+                        f"to {sanitized!r}"
+                    )
+                sanitized_servers[sanitized] = server
+                stanza, transport, include, resources, prompts = _mcp_server_stanza(server, decl)
+                servers_out[server] = stanza
+                for tool in _mcp_scope_names(server, include, resources, prompts):
+                    key = _mcp_prefixed(server, tool)
+                    if key in scope_out:
+                        raise CompositionError(
+                            f"mcp sanitized-name collision: {key!r} produced twice in profile {profile!r}"
+                        )
+                    scope_out[key] = transport
+                _mcp_merge_into_union(union, server, stanza)
+        role_servers[profile] = servers_out
+        role_scope[profile] = scope_out
+
+    # The full profile-keyed map, written into EVERY profile (ctx.get_config
+    # resolves against the active profile home, so each profile must carry the
+    # whole map; the predicate selects mcp_scope[_current_profile()]). The
+    # DEFAULT/multiplexer profile is the registrar, not a caller → empty scope.
+    full_scope: Dict[str, Dict[str, str]] = {p: role_scope.get(p, {}) for p in resolved_by_type}
+    full_scope[default_profile] = {}
+
+    for profile, resolved in resolved_by_type.items():
+        cfg = resolved["config"]
+        if role_servers.get(profile):
+            cfg["mcp_servers"] = role_servers[profile]
+        _mcp_write_scope(cfg, full_scope)
+    if union:
+        default_config["mcp_servers"] = union
+    _mcp_write_scope(default_config, full_scope)
+
+
 def compose(spec: str, out: str) -> Dict[str, str]:
     """Render each coworker type + the DEFAULT profile into ``out``.
 
@@ -1382,6 +1685,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         resolved_by_type[tname] = _resolve_type(tname, tinfo or {}, spines)
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
     session_flags = _resolve_session_mode(default_config, resolved_by_type)
+    # Per-role MCP scope needs the whole fleet's declarations (per-role subsets,
+    # the DEFAULT union, and the profile-keyed veto policy in every profile), so
+    # it runs ONCE here — after Phase A resolve, before the per-profile writes.
+    _render_mcp_scope(resolved_by_type, default_config, default_profile)
 
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.

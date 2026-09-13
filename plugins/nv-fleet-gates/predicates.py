@@ -211,6 +211,27 @@ def within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
 
 
+def mcp_scope_reason(tool_name: str, profile_scope, enforce_sandbox: bool):
+    """Block-reason for an ``mcp_*`` call, or None to proceed (GOV-F27).
+
+    ``profile_scope`` is the calling profile's rendered ``{sanitized_name:
+    transport}`` allow-list, or None when the profile is absent from the map. The
+    isinstance guard runs before any membership test so a malformed scope value
+    fails closed (block) rather than raising a TypeError the gate would swallow.
+    """
+    if not isinstance(profile_scope, dict):
+        return f"mcp scope: no rendered MCP allow-list for this profile — {tool_name} denied (fail-closed)"
+    if tool_name not in profile_scope:
+        return f"mcp scope: {tool_name} is not in this profile's rendered allow-list"
+    transport = profile_scope[tool_name]
+    if enforce_sandbox and transport != "remote":
+        return (
+            f"mcp scope: {tool_name} transport {transport!r} denied under sandbox enforcement — "
+            "only remote (OneCLI-proxied) MCP may proceed"
+        )
+    return None
+
+
 def is_dangerous_command(command: str) -> bool:
     # No inner except: a detector fault must reach the gate's try/except
     # BaseException and fail closed, not be swallowed into "not dangerous".
