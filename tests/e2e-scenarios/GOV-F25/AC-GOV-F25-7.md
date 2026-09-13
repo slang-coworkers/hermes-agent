@@ -86,6 +86,14 @@ route and the api_server (with `API_SERVER_KEY` set — the wake self-post is
    PY
    )
    ```
+5. Capture the pre-delivery owner session view (the `step-1.png` evidence
+   baseline) from the dashboard, with `gov-f25-owner` still selected:
+   ```bash
+   ( source $TB/harness.env
+     mkdir -p $ART/scenario-AC-GOV-F25-7
+     agent-browser screenshot $ART/scenario-AC-GOV-F25-7/step-1.png --full )
+   ```
+   → expect: a screenshot of the owner session BEFORE the second delivery.
 
 ## Steps
 

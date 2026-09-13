@@ -1160,3 +1160,58 @@ def test_real_ambiguous_ack_retry_deduped_to_one_owner_turn(tmp_path, monkeypatc
     # once, so exactly one owner turn persisted.
     assert state["calls"] == [REAL_OWNER_SESS]
     assert _message_count(owner_home, REAL_OWNER_SESS) == 1
+
+
+# ---------------------------------------------------------------------------
+# The persist-ack chain feeding the header the wake gate reads: the commit bool
+# from _flush_messages_to_session_db must reach the run_conversation result as
+# `turn_persisted` (run_agent._persist_and_drain sets agent._last_turn_persisted;
+# agent/turn_finalizer.finalize_turn copies it into the result), which
+# api_server then emits as X-Hermes-Turn-Persisted. The real cross-profile tests
+# above exercise the header/gate with a persistence-controllable stub; this
+# exercises the REAL production propagation with a genuine AIAgent turn.
+# ---------------------------------------------------------------------------
+
+def _persist_probe_agent():
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        return agent
+
+
+@pytest.mark.parametrize("committed, expected", [(True, True), (False, False)])
+def test_turn_persisted_propagates_from_flush_to_result(committed, expected):
+    """A real finish_reason=stop turn: the session-db commit bool propagates to
+    the run_conversation result's turn_persisted (this is what api_server reads to
+    emit X-Hermes-Turn-Persisted, and what the durable wake gate depends on)."""
+    from tests.run_agent.test_run_agent import _mock_response
+
+    agent = _persist_probe_agent()
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content="2 + 2 is 4.", finish_reason="stop"),
+    ]
+    with (
+        patch.object(agent, "_flush_messages_to_session_db", return_value=committed),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("what is 2 + 2?")
+
+    assert result["turn_persisted"] is expected

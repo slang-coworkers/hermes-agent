@@ -483,8 +483,8 @@ def test_ac_obs_f48_2(artifact, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Regression coverage for CODE_REVIEW round-2 findings (not new acceptance
-# criteria — the ADR ids are fixed and minted only by the architect).
+# Additional regression coverage (not new acceptance criteria — the ADR ids
+# are fixed and minted only by the architect).
 # ---------------------------------------------------------------------------
 
 def _fail_wake_sub_until(monkeypatch, mod):
@@ -504,7 +504,7 @@ def _fail_wake_sub_until(monkeypatch, mod):
 
 
 def test_claim_registration_atomic(artifact, monkeypatch):
-    """R1-2: a claim whose durable-wake-route registration fails commits NO
+    """A claim whose durable-wake-route registration fails commits NO
     ownership row (no route-less claim is ever visible) and installs no sub; a
     webhook for the still-unclaimed PR routes normally with no orphan enqueue; a
     retry with a working route claims, installs exactly one sub, and the next
@@ -515,8 +515,8 @@ def test_claim_registration_atomic(artifact, monkeypatch):
     out = _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                           "session_id": "S1", "profile": OWNER_PROFILE})
     assert out["status"] == "error"
-    assert _ownership(artifact.root, repo="o/r", pr=7) == []   # nothing claimed
-    assert _wake_subs(card) == []                              # no route installed
+    assert _ownership(artifact.root, repo="o/r", pr=7) == []
+    assert _wake_subs(card) == []
     # The PR is still UNCLAIMED, so its webhook routes normally (returns None) and
     # enqueues nothing — there is no stranded, undeliverable event.
     assert artifact.manager.invoke_hook(
@@ -534,7 +534,7 @@ def test_claim_registration_atomic(artifact, monkeypatch):
 
 
 def test_refresh_registration_atomic(artifact, monkeypatch):
-    """R1-2: a same-holder refresh whose route registration fails does NOT change
+    """A same-holder refresh whose route registration fails does NOT change
     the visible task_id (the prior route/ownership stay intact); a working retry
     refreshes."""
     card_a = _bare_card(OWNER_PROFILE, "gh-pr-o-r-9")
@@ -546,7 +546,7 @@ def test_refresh_registration_atomic(artifact, monkeypatch):
     out = _dispatch("report_pr_created", {"repo": "o/r", "pr": 9, "task_id": card_b,
                                           "session_id": "S9", "profile": OWNER_PROFILE})
     assert out["status"] == "error"
-    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_a, OWNER_PROFILE)]  # unchanged
+    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_a, OWNER_PROFILE)]
 
     state["fail"] = False
     assert _dispatch("report_pr_created", {"repo": "o/r", "pr": 9, "task_id": card_b,
@@ -555,7 +555,7 @@ def test_refresh_registration_atomic(artifact, monkeypatch):
 
 
 def test_remap_registration_atomic(artifact, monkeypatch):
-    """R1-2: a remap to an owner WITH a bound session whose route registration
+    """A remap to an owner WITH a bound session whose route registration
     fails leaves ownership unchanged; a working retry re-points."""
     import hermes_cli.kanban_db as kb
 
@@ -573,7 +573,7 @@ def test_remap_registration_atomic(artifact, monkeypatch):
 
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
     assert (rc or 0) != 0
-    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]  # unchanged
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
 
     state["fail"] = False
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
@@ -582,7 +582,7 @@ def test_remap_registration_atomic(artifact, monkeypatch):
 
 
 def test_session_end_gateway_session_attributes_cost(artifact):
-    """R2-1: a gateway/API turn's on_session_end passes the SESSION id as task_id
+    """A gateway/API turn's on_session_end passes the SESSION id as task_id
     (not the owning card, which is what ``api_server._run_agent`` does with
     ``effective_task_id``); cost must still reach the artifact via the
     session→card fallback, not silently drop."""
@@ -604,7 +604,7 @@ def test_session_end_gateway_session_attributes_cost(artifact):
 
 
 def test_remap_without_bound_session_is_refused(artifact, monkeypatch, capsys):
-    """R1-2 (round 3): a remap to a task with no bound session is refused with no
+    """A remap to a task with no bound session is refused with no
     mutation — re-pointing to an undeliverable owner would strand a webhook that
     arrives before that owner binds a session."""
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
@@ -621,7 +621,7 @@ def test_remap_without_bound_session_is_refused(artifact, monkeypatch, capsys):
 
 
 def test_same_task_cross_profile_remap_is_refused(artifact, monkeypatch, capsys):
-    """R1-2 (round 3): a cross-profile remap that keeps the SAME task is refused —
+    """A cross-profile remap that keeps the SAME task is refused —
     honouring it would mutate the current owner's own route, which a mid-remap
     ledger commit failure could strand (new route paired with the old owner)."""
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
@@ -632,6 +632,30 @@ def test_same_task_cross_profile_remap_is_refused(artifact, monkeypatch, capsys)
 
     # task=None keeps the current task; a different `to` profile → refused.
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=None, json=True))
+    assert (rc or 0) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
+
+
+def test_remap_task_not_owned_by_target_profile_is_refused(artifact, monkeypatch, capsys):
+    """A remap whose target task is owned by a DIFFERENT profile than `--to` is
+    refused: the task's bound session lives in the owner's state.db, so recording
+    `to` while routing to another profile's task would misroute the wake to a
+    session that does not exist under `to`'s scope."""
+    import hermes_cli.kanban_db as kb
+
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    # A session-bound task assigned to someone OTHER than the --to profile.
+    other = _bare_card("someone-else", "gh-pr-o-r-7-other")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-other", other))
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=other, json=True))
     assert (rc or 0) != 0
     assert json.loads(capsys.readouterr().out)["status"] == "refused"
     assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]

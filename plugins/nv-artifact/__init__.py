@@ -699,11 +699,14 @@ def _cmd_pr_remap(args):
                  "reason": "cross-profile remap requires a distinct --task bound to the new owner"}, args)
         return 1
 
+    from hermes_cli.profiles import normalize_profile_name
+
     with _kb_connect(ctx) as kconn:
         srow = kconn.execute(
-            "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
+            "SELECT session_id, assignee FROM tasks WHERE id = ?", (new_task,)
         ).fetchone()
     new_sess = srow[0] if srow else None
+    new_assignee = srow[1] if srow else None
     # A remap must land a WORKING route: the target task must exist and carry a
     # bound session. Re-pointing to a session-less task would leave the claimed
     # PR undeliverable (a webhook arriving before the owner binds a session is
@@ -712,6 +715,14 @@ def _cmd_pr_remap(args):
     if not new_sess:
         _refuse({"status": "refused", "repo": repo, "pr": pr,
                  "reason": "target task is unknown or has no bound session; refusing to re-point to an undeliverable owner"}, args)
+        return 1
+    # The target task must BELONG to the new owner: its bound session lives in
+    # that profile's state.db, so recording `to` while routing to a task owned by
+    # a different profile would self-post the wake to /p/<to>/ with a session id
+    # that does not exist under <to>'s scope — a misroute / cross-profile orphan.
+    if normalize_profile_name(new_assignee or "") != normalize_profile_name(to):
+        _refuse({"status": "refused", "repo": repo, "pr": pr,
+                 "reason": "target task is not owned by the --to profile; refusing a cross-owner task/profile mismatch"}, args)
         return 1
 
     # Route BEFORE ownership: install the (distinct) target task's own durable
