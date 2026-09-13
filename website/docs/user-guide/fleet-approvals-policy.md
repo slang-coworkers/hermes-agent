@@ -19,6 +19,31 @@ non-allowlisted flagged-dangerous command is refused instantly — denied, not h
 for a human — and nothing is set to `approve`.** The interactive orchestrator Bot
 Chat keeps a working human gate because the fleet mode stays `smart`.
 
+:::warning Scope — this is a CONFIG row, not the full unattended-command guarantee
+GOV-F23 pins the fleet-safe approvals **config** and a **best-effort in-surface
+`approvals.deny` floor** for the common, combined-flag and global-option
+force-push / tag / release spellings. It does **NOT** by itself meet the
+unattended-*dangerous-command* invariant. Two gaps remain open and are owned by the
+dedicated core-enforcement row **`GOV-ENF`** (with an allied `P8` core ask), taking
+**no safety-completion credit** here:
+
+- **Detector-evading / shell-wrapped spellings** slip the anchored `fnmatch`
+  block-list (`cd repo && git tag v1`, `env gh release …`, `command git push origin
+  +main:main`, a global option splitting `git push`, a combined `-f` cluster of 4+
+  chars) and are also missed by the core dangerous-command detector — so they are
+  **permitted past the native guard** when the Tirith layer allows or is absent
+  (recorded honestly by **AC-GOV-F23-7**, a present-and-labelled fail-open, asserting
+  the authorization DECISION only against a hermetic fixture — never an actual
+  outbound).
+- The **cross-profile `command_allowlist` union leak** for in-gateway multiplex
+  sessions (see the process-global boundary section) — recorded by **AC-GOV-F23-4b**.
+
+Until `GOV-ENF` lands, the compensating control is a **runtime/deployment ACL** that
+contains each unattended identity's credential at the remote (force-update / tag /
+release denied server-side regardless of the local guard). See *Scope and limits*
+below.
+:::
+
 ## What the render pins, and where
 
 Hermes' approval keys are all **top-level `approvals.*`** (plus the top-level
@@ -29,7 +54,7 @@ The render splits them into two immutable scopes.
 ### 1. The machine-wide managed fragment — the fleet-uniform policy
 
 `nv-coworker-compose` emits one file, `<out_root>/managed/config.yaml`, carrying
-the six fleet-uniform keys, written **explicitly and never by assumption** so a
+the eight fleet-uniform keys, written **explicitly and never by assumption** so a
 re-pin or an upstream default flip cannot silently loosen them:
 
 | key | rendered value | reader (release tree) |
@@ -40,34 +65,76 @@ re-pin or an upstream default flip cannot silently loosen them:
 | `approvals.single_query_mode` | `deny` | `tools/approval.py:3552` |
 | `approvals.unattended_mode` | `deny` | `tools/approval.py:3571` |
 | `approvals.denial_breaker_threshold` | `3` | `tools/approval.py:2760` |
+| `security.approval.transport` | `builtin` | `tools/approval.py:4303-4316` (human-approval / gateway path only) |
+| `security.approval.transport_fallback` | `deny` | `tools/approval.py:4303-4316` (human-approval / gateway path only) |
 
-Every value equals the stock default (`hermes_cli/config_defaults.py:2558-2576`),
-so **the fleet fails safe if the fragment is not yet installed**: stock Hermes
-already denies unattended dangerous commands. The fragment's value is (a) a single
-machine-wide source of truth (DRY across N profiles) and (b) root-owned
-immutability — placing `approvals.mode` in managed scope makes an interactive
-`/approvals` mode change refuse with *"Approval mode is managed and cannot be
-changed."* (`hermes_cli/approval_mode.py:54-66`, the `set_config_value` raise at
-`:63`). These six keys live **only** in the managed fragment; they are stripped
-from every rendered profile config (the disjoint split).
+The two `security.approval.*` keys are **presentation-path fail-closed hardening**,
+NOT part of the unattended fail-safe: the transport is read only on the
+human-approval / gateway path (`tools/approval.py:4303-4316`, called from
+`:5138/:5631`, both *after* the non-interactive block), never on the unattended deny
+path. Pinning them immutable denies flipping `transport_fallback` to `builtin`
+(which would re-route a failed plugin transport to a built-in surface instead of
+denying), so the human-approval path stays fail-closed.
 
-### 2. Per-role `command_allowlist` + `approvals.deny` — in each profile config
+Every value equals the stock default (the six `approvals.*` at
+`hermes_cli/config_defaults.py:2558-2576`, the two `security.approval.*` at
+`:2671-2674`), so **the fleet is no more permissive if the fragment is not yet
+installed**: stock Hermes already denies **recognized** unattended dangerous
+commands (deny-if-detected) and fails the transport closed — fragment-absence safety
+only, not a claim every dangerous spelling is blocked (the AC-7 fail-open class is
+unchanged either way). The fragment's value is (a) a single machine-wide source of
+truth (DRY across N profiles) and (b) root-owned immutability — placing
+`approvals.mode` in managed scope makes an interactive `/approvals` mode change
+refuse with *"Approval mode is managed and cannot be changed."*
+(`hermes_cli/approval_mode.py:54-66`, the `set_config_value` raise at `:63`). These
+eight keys live **only** in the managed fragment; they are stripped from every
+rendered profile config (the disjoint split), emptied `approvals` /
+`security.approval` / `security` mappings pruned so no empty dict is written and an
+unrelated `security.*` sibling survives.
 
-Each coworker type declares, in its `config:` block:
+### 2. `command_allowlist` (per-role passthrough) + `approvals.deny` (render-enforced floor)
 
-- a top-level **`command_allowlist`** — the exact flagged-dangerous verbs that role
-  legitimately runs (the fixer's build/test verbs, `git reset --hard*`, …). It is
-  read TOP-LEVEL (`config.get("command_allowlist")`, `tools/approval.py:3188`); a
-  nested `agent.command_allowlist` has **no reader** and would be silently inert.
-  It is the approval-bypass list, checked *before* dangerous-command detection
-  (short-circuit at `tools/approval.py:4784`, ahead of every
-  `detect_dangerous_command` call).
-- an **`approvals.deny`** floor — verbs that must never run unattended
-  (`git push --force*`, `git push -f*`, `git tag *`, `gh release *`). It is a
-  fresh-config, per-profile-correct read (`_match_user_deny_rule`,
-  `tools/approval.py:809`, blocked at `:826-838`, wired *before* the yolo/off
-  bypass at `:4772`) and outranks the allowlist, so a floor verb can never be
-  allowlisted.
+Each profile config carries two per-profile keys — one a spec passthrough, one a
+render-enforced fleet floor:
+
+- a top-level **`command_allowlist`** — a **per-role spec passthrough**: the exact
+  flagged-dangerous verbs that role legitimately runs (the fixer's build/test verbs,
+  `git reset --hard*`, …), declared in the coworker type's `config:` block and passed
+  through unchanged (except the DEFAULT profile's, forced to `[]`). It is read
+  TOP-LEVEL (`config.get("command_allowlist")`, `tools/approval.py:3188`); a nested
+  `agent.command_allowlist` has **no reader** and would be silently inert. It is the
+  approval-bypass list, checked *before* dangerous-command detection (short-circuit
+  at `tools/approval.py:4784`, ahead of every `detect_dangerous_command` call).
+- an **`approvals.deny`** floor — **render-ENFORCED, not a per-role declaration.**
+  The render **OVERWRITES** `approvals.deny` on *every* rendered profile (builder,
+  reviewer, DEFAULT) with exactly the fixed 12-glob `_GOV_APPROVALS_DENY_FLOOR`,
+  discarding whatever the coworker type or spine declared — so a spec that declares a
+  weak or absent deny still ships the full floor (a fleet-safety property the render
+  guarantees rather than one each type must remember to repeat identically). The 12
+  globs (order-tolerant `fnmatch`, matched by `_match_user_deny_rule`,
+  `tools/approval.py:809`/`:821`, blocked at `:826-838`, wired *before* the yolo/off
+  bypass at `:4772`, so a floor verb can never be allowlisted):
+
+  ```
+  git *push* --forc*         # --force / --force-with-lease, any argument order
+  git *push* -f              # standalone -f at command end
+  git *push* -f *            # standalone -f mid-command
+  git *push* -f[!- ]*        # force cluster, f-first (-fu, -fq, -fuq…)
+  git *push* -[!- ]f*        # force cluster, f-second (-uf, -qf, -ufq…)
+  git *push* -[!- ][!- ]f*   # force cluster, f-third (-uqf)
+  git push* *+*              # +refspec force-push, unquoted or shell-quoted
+  git -*push* *+*            # +refspec force-push behind a git global option
+  git tag *                  # tag create / delete / move
+  git -* tag *               # tag verb behind a git global option
+  gh release *               # gh release create / delete / edit
+  gh -* release *            # gh release verb behind a gh global option
+  ```
+
+  Each cluster glob uses the `[!- ]` (not-dash, not-space) class so `*` cannot cross
+  a space into a branch name — a naive `git *push* -*f*` would over-block a normal
+  `git push -u origin fix`. This is a **best-effort in-surface backstop**, not an
+  exhaustive detector: a shell-wrapped or chained spelling still slips this anchored
+  block-list (AC-7 / `GOV-ENF`, above).
 
 Guard order (`check_all_command_guards`, `tools/approval.py:4730`): hardline
 `:4753` → sudo `:4763` → `approvals.deny` `:4772` → yolo/off `:4780` →
@@ -78,8 +145,10 @@ the hardline / sudo / deny floors.
 ### 3. The DEFAULT/multiplexer profile — `command_allowlist: []`, the in-gateway floor
 
 The render forces the DEFAULT profile's top-level `command_allowlist` to `[]`
-(explicit empty), overriding any declared value. This is the in-gateway fail-safe
-floor — see the process-global boundary below.
+(explicit empty), overriding any declared value, and writes the same enforced
+12-glob `approvals.deny` floor there as on every other profile. The empty allowlist
+is the in-gateway **launch baseline** (not steady-state isolation) — see the
+process-global boundary below.
 
 ## Deploying the managed fragment
 
@@ -187,24 +256,29 @@ has two consequences:
   correct in-gateway — but it does **not** re-scope the module-global
   `_permanent_approved`.
 
-The render answers this **without a core change**: rendering the DEFAULT
-(launch/multiplexer) profile's `command_allowlist` empty means the gateway
-process's `_permanent_approved` is empty at start, so in-gateway multiplex
-cron/webhook/api sessions find nothing to bypass at the allowlist short-circuit
-(`tools/approval.py:4784`) and fall through to the deny resolvers (fresh/managed =
-`deny`) → **denied (fail safe)**. Non-empty per-role allowlists live only on the
-separate-process worker profiles, where they are honored with no cross-profile
-leak.
+The DEFAULT-empty render sets only the **in-gateway LAUNCH BASELINE**, without a
+core change: rendering the DEFAULT (launch/multiplexer) profile's
+`command_allowlist` empty means the gateway process's `_permanent_approved` is empty
+**at start**, so at launch in-gateway multiplex cron/webhook/api sessions find
+nothing to bypass at the allowlist short-circuit (`tools/approval.py:4784`) and fall
+through to the deny resolvers (fresh/managed = `deny`). Separate-process
+`hermes chat -q` workers keep their own `_permanent_approved` at import, so their
+per-role allowlists are honored with no cross-profile leak.
 
-**Residual (a filed P8 core ask, not yet built).** Because `_permanent_approved`
-is process-global, a human choosing *"always"* in one interactive profile
-(`approve_permanent` + `save_permanent_allowlist`, `tools/approval.py:5300-5303`)
-widens the in-gateway bypass set until the gateway restarts, and a per-profile
-bypass allowlist is still not honored for in-gateway sessions. The DEFAULT-empty
-render makes this **fail safe** today; the per-profile-honoring fix (key
-`_permanent_approved` by `hermes_home_key()`, `hermes_constants.py:142`, lazy-load
-per active home, make `load_permanent_allowlist()` REPLACE that home's bucket even
-when empty) is a generic core widening filed for a future release.
+**This is a launch baseline, NOT steady-state isolation — the cross-profile union
+leak stays open (AC-4b, no isolation credit).** `load_permanent_allowlist()`
+**UNIONs** each profile's allowlist into the ONE shared process-global set and never
+replaces it (`tools/approval.py:3056-3065`), and the allowlist short-circuit
+(`:4784`) precedes the cron deny (`:4876`). So once *any* in-gateway profile's
+session init unions its allowlist in — or a human chooses *"always"* in one
+interactive profile (`approve_permanent` + `save_permanent_allowlist`, `:5300-5303`)
+— that entry is visible to every other in-gateway session and is **approved before
+the cron/unattended deny even runs**, until the gateway restarts. The empty DEFAULT
+does not close this; it is a **core behavior GOV-F23 cannot fix**, owned by
+`GOV-ENF` / the `P8` core ask (key `_permanent_approved` by `hermes_home_key()`,
+`hermes_constants.py:142`, lazy-load per active home, make
+`load_permanent_allowlist()` REPLACE that home's bucket even when empty). GOV-F23
+takes **no isolation credit** for the in-gateway multiplex path.
 
 ## NanoClaw approvals primitive → native term map
 
@@ -224,6 +298,48 @@ its card* and *hands to the orchestrator's Bot Chat* halves are realized by othe
 surfaces (the kanban dispatcher; the interactive orchestrator profile + rooms),
 not by this rendered config.
 
+## Scope and limits
+
+GOV-F23 is a **CONFIG row**. It pins the fleet-safe approvals config, the eight
+managed keys, and the best-effort in-surface `approvals.deny` floor — and it
+**does not** by itself meet the unattended-*dangerous-command* invariant. Two gaps
+stay open, both owned by the dedicated core-enforcement row **`GOV-ENF`** (with the
+allied `P8` core ask), and GOV-F23 takes **no safety-completion credit**:
+
+1. **Detector-evading / shell-wrapped spellings** (AC-GOV-F23-7). The core
+   dangerous-command detector's force-push patterns match only `--forc*` and a
+   standalone `-f` (`tools/approval.py:1227-1228`) and have **no `git tag` /
+   `gh release` / `+refspec` entry anywhere** (`:945-1271`); the anchored `fnmatch`
+   deny floor closes the direct, combined-flag and global-option forms but not a verb
+   split by a shell wrapper / chain / var-prefix (`cd repo && git tag v1`,
+   `command git push origin +main:main`, a global option splitting `git push`). The
+   robust fix is a segment/argv-aware pre-execution matcher plus detector coverage
+   for tag/release/+refspec — both **core changes**, `GOV-ENF`.
+2. **Cross-profile `command_allowlist` union leak** for in-gateway multiplex sessions
+   (AC-GOV-F23-4b) — see the process-global boundary section; the `P8` core ask.
+
+**Runtime/deployment compensating control (Ship gate B — a deploy precondition, not
+a merge blocker).** Before any fleet identity makes a real-credential **unattended**
+run against a target repo, contain that identity's credential at the remote via a
+deployment ACL, so the irreversible-outbound operations AC-7 can let slip locally are
+still **denied server-side**:
+
+- **Identities:** every non-orchestrator profile that runs unattended (the coworker
+  roles — `builder`, `reviewer`, and any `hermes chat -q` worker the board
+  dispatches), each under the exact credential it runs with. The elevated
+  orchestrator profile is the human-gated escalation target (topology rule 4), out of
+  scope.
+- **Negative operations, each expected DENIED at the remote regardless of the local
+  guard:** create/update/delete a release; create/update/delete a tag (incl. force
+  `-f`); force-update or delete a protected ref (`+refspec`, `--force`, delete);
+  bypass a repo ruleset / required review; modify branch- or tag-protection settings
+  (each failing with HTTP 403 / protected-ref rejection). If ordinary repo-write
+  inherently retains release/tag capability for an identity, run that identity under a
+  narrower brokered token instead.
+- **`GOV-ENF` is the lifter:** the parsed, fail-closed pre-execution matcher is what
+  lets this runtime containment be relaxed; until it lands, the containment stays in
+  force.
+
 ## Escape hatch (documented, not shipped)
 
 A future release wanting unattended approval holds delivered out-of-band (e.g.
@@ -233,11 +349,14 @@ DM'd) can register an approval transport via
 **presentation-only** — it "cannot detect, suppress, or auto-approve commands
 outside a correlated human response" (`hermes_cli/config_defaults.py:2665-2670`),
 so it structurally cannot implement "deny when unattended" (that is the native
-resolvers' job). **No transport plugin ships for O1–O8.**
+resolvers' job). **No transport plugin ships for O1–O8.** Because GOV-F23 pins
+`security.approval.transport: builtin` / `transport_fallback: deny` in the managed
+fragment (§1), adopting such a transport is a deliberate managed-scope change (edit
+the machine-wide fragment), not a per-profile config edit a coworker could make.
 
 ## Checklist across a re-pin / migrate
 
-- **Re-pin:** re-render and re-deploy the managed fragment; the six values are
+- **Re-pin:** re-render and re-deploy the managed fragment; the eight values are
   pinned explicitly, so a default flip in the new tree does not change them, but a
   new key would only take effect once re-deployed.
 - **`hermes config migrate`:** the per-role `command_allowlist` and

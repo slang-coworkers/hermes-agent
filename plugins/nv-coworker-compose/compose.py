@@ -54,18 +54,22 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
-# Fleet-uniform approval policy (GOV-F23). These six keys are pinned ONCE,
+# Fleet-uniform approval policy (GOV-F23). These eight keys are pinned ONCE,
 # machine-wide, in the managed-scope fragment (out_root/managed/config.yaml) that
 # native _load_config_impl deep-merges (managed-wins) onto every profile
 # (hermes_cli/managed_scope.py:137-176), and are STRIPPED from every per-profile
 # config so the immutability split is disjoint — fleet policy is root-owned (a
 # /approvals mode change refuses under managed policy, hermes_cli/approval_mode.py:63)
-# while the per-role command_allowlist / approvals.deny stay in the profile config.
-# Every value equals the stock default (hermes_cli/config_defaults.py:2558-2576), so
-# the fleet fails safe if the fragment is not yet installed: stock Hermes already
-# denies unattended dangerous commands. Pinned EXPLICITLY (the MEM-F44 "never by
-# assumption" standard) so a re-pin or an upstream default flip cannot silently
-# loosen them. Every key has a real reader (readers cited in the GOV-F23 runbook).
+# while the per-role command_allowlist and the render-enforced approvals.deny floor
+# stay in the profile config. Every value equals the stock default (the six
+# approvals.* at hermes_cli/config_defaults.py:2558-2576, the two security.approval.*
+# at :2671-2674), so if the fragment is not yet installed the fleet is no more
+# permissive: stock Hermes already denies RECOGNIZED unattended dangerous commands
+# (deny-if-detected) and fails the transport closed — fragment-absence safety only,
+# NOT a claim every dangerous spelling is blocked (AC-7 is unchanged either way).
+# Pinned EXPLICITLY (the MEM-F44 "never by assumption" standard) so a re-pin or an
+# upstream default flip cannot silently loosen them. Every key has a real reader
+# (readers cited in the GOV-F23 runbook).
 _GOV_APPROVALS_MANAGED: Dict[str, Any] = {
     "approvals.mode": "smart",
     "approvals.timeout": 300,
@@ -73,42 +77,63 @@ _GOV_APPROVALS_MANAGED: Dict[str, Any] = {
     "approvals.single_query_mode": "deny",
     "approvals.unattended_mode": "deny",
     "approvals.denial_breaker_threshold": 3,
+    # Presentation-path fail-closed hardening. NOT part of the unattended fail-safe:
+    # the transport is read only on the human-approval / gateway path
+    # (approval.py:4303-4316, from :5138/:5631, both AFTER the non-interactive
+    # block), never on the unattended deny path. Pinning them denies flipping
+    # transport_fallback to "builtin" (which would re-route a failed plugin
+    # transport to a built-in surface instead of denying), so the human-approval
+    # path stays fail-closed.
+    "security.approval.transport": "builtin",
+    "security.approval.transport_fallback": "deny",
 }
 
 # Reserved sibling directory under out_root for the managed fragment. A coworker
 # type named 'managed' is rejected so its profile dir cannot collide with it.
 _MANAGED_FRAGMENT_DIR = "managed"
 
-# Minimum force-push / tag / release deny floor (GOV-F23). These verbs must never
-# run unattended, so the render ENFORCES this floor on EVERY rendered profile —
-# per-role, DEFAULT and orchestrator — inserting it when the spec omits it and
-# unioning it with any role-declared deny rules. approvals.deny is the one guard
-# layer that fires PRE-detection and even under --yolo (tools/approval.py:4772,
-# BEFORE the yolo / mode=off bypass at :4781), so a profile with no floor has no
-# force-push backstop at all.
+# Force-push / tag / release deny floor (GOV-F23). These verbs must never run
+# unattended, so the render ENFORCES this floor by OVERWRITING approvals.deny on
+# EVERY rendered profile (per-role, DEFAULT and orchestrator) with exactly this
+# fixed 12-glob list — whatever the coworker type or spine declared. Enforcing
+# (not passing through) makes the floor a render-GUARANTEED fleet-safety property:
+# a spec that declares a weak or absent deny still ships the full floor.
+# approvals.deny is the one guard layer that fires PRE-detection and even under
+# --yolo (tools/approval.py:4772, BEFORE the yolo / mode=off bypass at :4781), so a
+# profile with no floor has no force-push backstop at all.
 #
 # approvals.deny rules are matched with fnmatch.fnmatchcase against the WHOLE
-# normalized command (tools/approval.py:818-822), so each pattern spans the entire
-# command with leading/trailing '*' and is ORDER-TOLERANT: it matches --force / -f
-# / +refspec force-push in ANY argument order. This complements the core
-# dangerous-command detector (tools/approval.py:1227-1228), which covers only
-# --forc* and -f and MISSES a leading-'+' refspec push (`git push origin
-# +main:main`) — so that form is not is_dangerous and slips past the
-# single_query_mode=deny branch, while this floor blocks it pre-detection.
+# normalized command (tools/approval.py:818-822), anchored whole-string with
+# leading/trailing '*', and are ORDER-TOLERANT: they match --force / -f / +refspec
+# in ANY argument order. This is a best-effort in-surface backstop for the common,
+# combined-flag and global-option force-push/tag/release spellings — NOT an
+# exhaustive detector. It complements the core dangerous-command detector
+# (tools/approval.py:1227-1228), which covers only --forc*/-f and MISSES +refspec
+# and combined -f clusters and has NO tag/release rule at all; a shell-wrapped or
+# chained spelling still slips this anchored block-list — the fail-open class is
+# recorded honestly by AC-7 and owned by GOV-ENF, NOT closed here.
 #
-# fnmatch has NO word boundary, so every force-push token is pinned as a SEPARATE
-# argument via a leading space in the pattern (' --forc', ' -f', ' [+]'). A bare
-# substring form ('--forc*', '-f*', '[+]*') would over-match a benign branch name
-# that merely CONTAINS the token — `git push origin feature--forceful`,
-# `git push origin my-feature`, `git push origin feature+perf` — none of which is a
-# force push. The leading space requires the token to stand alone as its own arg.
-_FORCE_PUSH_DENY_FLOOR: List[str] = [
-    "git *push* --forc*",   # --force / --force-with-lease / --force-if-includes, any order
-    "git *push* -f",        # -f short flag as the final token
-    "git *push* -f *",      # -f short flag as a non-final token
-    "git *push* [+]*",      # +refspec force-push (git push origin +main:main)
-    "git tag *",            # tag create / delete / move
-    "gh release *",         # gh release create / delete / edit
+# fnmatch has NO word boundary, so each force short-flag cluster uses the [!- ]
+# (not-dash, not-space) class to keep the force 'f' inside a single-dash short
+# cluster so '*' cannot cross a space into a branch name: a naive 'git *push* -*f*'
+# would over-block a normal 'git push -u origin fix' (the '*' crosses ' -u' into the
+# 'f' of 'fix'), verified firsthand. One [!- ] per flag letter before 'f' covers 'f'
+# at cluster positions 1-3 (-f, -uf, -uqf). The 'git push* *+*' / 'git -*push* *+*'
+# pair catches the unquoted and shell-quoted +refspec, contiguous and behind a git
+# global option.
+_GOV_APPROVALS_DENY_FLOOR: List[str] = [
+    "git *push* --forc*",       # --force / --force-with-lease, any argument order
+    "git *push* -f",            # standalone -f at command end
+    "git *push* -f *",          # standalone -f mid-command
+    "git *push* -f[!- ]*",      # force cluster, f-first (-fu, -fq, -fuq…)
+    "git *push* -[!- ]f*",      # force cluster, f-second (-uf, -qf, -ufq…)
+    "git *push* -[!- ][!- ]f*", # force cluster, f-third (-uqf)
+    "git push* *+*",            # +refspec force-push, unquoted or shell-quoted
+    "git -*push* *+*",          # +refspec force-push behind a git global option
+    "git tag *",                # tag create / delete / move
+    "git -* tag *",             # tag verb behind a git global option
+    "gh release *",             # gh release create / delete / edit
+    "gh -* release *",          # gh release verb behind a gh global option
 ]
 
 # Fleet session-mode policy (RT-F03). A session mode is a FLEET-WIDE property:
@@ -222,6 +247,29 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = copy.deepcopy(value)
 
 
+def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
+    """Remove the leaf named by a dotted path, then prune each now-empty mapping
+    along the path bottom-up. A sibling key that is still populated stops the
+    prune, so an unrelated ``security.*`` value survives while ``security.approval``
+    is emptied. A path that is absent or blocked by a non-mapping node is a no-op."""
+    parts = dotted.split(".")
+    chain: List[Tuple[Dict[str, Any], str]] = []
+    node: Any = mapping
+    for key in parts[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            return
+        chain.append((node, key))
+        node = child
+    node.pop(parts[-1], None)
+    for container, key in reversed(chain):
+        branch = container.get(key)
+        if isinstance(branch, dict) and not branch:
+            container.pop(key, None)
+        else:
+            break
+
+
 def _is_platform_key(key: Any) -> bool:
     """True iff ``key`` names a platform (including dynamically-registered plugin
     platforms), tested with the ``Platform(key)`` constructor rather than by
@@ -278,17 +326,16 @@ def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool)
 
 
 def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
-    """Remove the six fleet-uniform approval keys from a per-profile config so the
-    immutability split is disjoint — they live ONLY in the managed fragment. The
-    per-role ``approvals.deny`` floor is LEFT in place (it is read fresh-config
-    per-profile, so it is honored in-gateway too). A now-empty ``approvals`` block
-    is pruned so no empty dict is written."""
-    approvals = config.get("approvals")
-    if not isinstance(approvals, dict):
-        return
+    """Remove the eight fleet-uniform keys (six ``approvals.*`` plus
+    ``security.approval.transport`` / ``security.approval.transport_fallback``) from
+    a per-profile config so the immutability split is disjoint — they live ONLY in
+    the managed fragment (AC-3). The per-role ``approvals.deny`` floor is LEFT in
+    place (it is read fresh-config per profile, so it is honored in-gateway too).
+    Emptied ``approvals`` / ``security.approval`` / ``security`` mappings are pruned
+    bottom-up so no empty dict is written and an unrelated ``security.*`` sibling is
+    untouched."""
     for dotted in _GOV_APPROVALS_MANAGED:
-        approvals.pop(dotted.split(".", 1)[1], None)
-    _prune_empty(config, "approvals")
+        _pop_dotted(config, dotted)
 
 
 def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
@@ -304,34 +351,27 @@ def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
 
 
 def _enforce_deny_floor(config: Dict[str, Any]) -> None:
-    """Guarantee the force-push/tag/release deny floor on a rendered profile config,
-    unioned with any role-declared ``approvals.deny`` rules.
+    """OVERWRITE ``approvals.deny`` with exactly the fixed force-push/tag/release
+    deny floor on a rendered profile config.
 
     The floor is the never-bypassable backstop (it fires before the yolo / mode=off
-    bypass), so it is written on EVERY profile — INSERTING an ``approvals.deny``
-    block when the spec omits it — rather than passed through only when a profile
-    happens to declare one. Role-declared extra rules are preserved (union, not
-    replace): the floor patterns come first, then any declared rule that is not
-    already a floor pattern, de-duplicated. Runs AFTER the fleet-uniform strip so it
-    operates on — and, when the strip pruned an emptied ``approvals`` block,
-    re-creates — the per-profile approvals dict."""
+    bypass), so it is a render-GUARANTEED fleet-safety property, not a per-role
+    passthrough: the render SETS ``approvals.deny`` to ``_GOV_APPROVALS_DENY_FLOOR``
+    on EVERY profile (builder, reviewer, DEFAULT), OVERWRITING whatever the coworker
+    type or spine declared — so a spec that declares a weak or absent deny still
+    ships the full floor, and a future compliant-looking fixture cannot false-green
+    a passthrough render (AC-2 asserts the input differs from the floor). Runs AFTER
+    the fleet-uniform strip so it operates on — and, when the strip pruned an emptied
+    ``approvals`` block, re-creates — the per-profile approvals dict."""
     approvals = config.get("approvals")
     if not isinstance(approvals, dict):
         approvals = {}
         config["approvals"] = approvals
-    declared = approvals.get("deny")
-    extras = [d for d in declared if d not in _FORCE_PUSH_DENY_FLOOR] if isinstance(declared, list) else []
-    merged: List[str] = []
-    seen: Set[str] = set()
-    for pattern in (*_FORCE_PUSH_DENY_FLOOR, *extras):
-        if pattern not in seen:
-            seen.add(pattern)
-            merged.append(pattern)
-    approvals["deny"] = merged
+    approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
 
 
 def _build_managed_fragment() -> Dict[str, Any]:
-    """Build the machine-wide managed-scope approvals fragment (the six
+    """Build the machine-wide managed-scope approvals fragment (the eight
     fleet-uniform keys, override-or-insert via ``_set_dotted``). The operator
     installs this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
     ``/etc/hermes/config.yaml``); native ``_load_config_impl`` deep-merges it
