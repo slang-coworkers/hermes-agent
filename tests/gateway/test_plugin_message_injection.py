@@ -560,3 +560,242 @@ def test_install_and_clear_gateway_injector_preserves_newer_owner():
     assert manager.has_gateway_message_injector is True
     assert manager.inject_gateway_message(value="kept") is True
     newer_injector.assert_called_once_with(value="kept")
+
+
+# ---------------------------------------------------------------------------
+# W2 — durable cross-profile notification delivery (GOV-F25 mandatory core proof)
+#
+# The nv-artifact delivery path durably enqueues a `notification` on the owning
+# card and relies on the kanban notifier's durable-retry wake to resume the
+# OWNING (possibly SECONDARY-profile) session via the api_server profile-scoped
+# mirror, with the cursor advancing only on a persist-confirmed ack. These tests
+# drive the real notifier method _deliver_durable_notifications against a real
+# temp kanban.db, with deliver_wake mocked to simulate the ack outcomes.
+# ---------------------------------------------------------------------------
+
+OWNER_SESS = "gov-f25-owner-sess-0"
+OWNER_PROFILE = "gov-f25-owner"
+
+
+def _mk_task_and_durable_sub():
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        task = kb.create_task(
+            conn, title="gov-f25/repo#41", assignee=OWNER_PROFILE,
+            idempotency_key="gh-pr-gov-f25-41",
+        )
+        task_id = task if isinstance(task, str) else getattr(task, "id", task)
+        kb.add_notify_sub(
+            conn, task_id=task_id, platform="api_server", chat_id=OWNER_SESS,
+            notifier_profile=OWNER_PROFILE, delivery_mode="wake", retry_policy="durable",
+        )
+    finally:
+        conn.close()
+    return task_id
+
+
+def _publish(task_id, message, key):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        kb.publish_task_notification(conn, task_id, message, metadata={"idempotency_key": key})
+    finally:
+        conn.close()
+
+
+def _peek_delivery(task_id, board=None):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect(board=board)
+    try:
+        sub = kb.list_notify_subs(conn, task_id=task_id)[0]
+        _cur, events = kb.unseen_events_for_sub(
+            conn, task_id=sub["task_id"], platform=sub["platform"],
+            chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "", kinds=None,
+        )
+        task = kb.get_task(conn, task_id)
+    finally:
+        conn.close()
+    return {"sub": sub, "events": events, "task": task, "board": board, "durable": True}
+
+
+def _cursor(task_id):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        sub = kb.list_notify_subs(conn, task_id=task_id)[0]
+        return int(sub.get("last_event_id") or 0)
+    finally:
+        conn.close()
+
+
+def _sub_exists(task_id):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        return bool(kb.list_notify_subs(conn, task_id=task_id))
+    finally:
+        conn.close()
+
+
+def _durable_runner():
+    runner = object.__new__(GatewayRunner)
+    # The shared api_server adapter carries the bind coords; the profile scoping
+    # is done by owner_profile on the self-post, so the adapter itself is opaque.
+    runner.adapters = {Platform.API_SERVER: SimpleNamespace(
+        _host="127.0.0.1", _port=8642, _api_key="k", _model_name="hermes-agent",
+    )}
+    runner._authorization_adapter = MagicMock(return_value=None)
+    runner._kanban_sub_fail_counts = {}
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_durable_wake_targets_secondary_owner_and_advances_on_persist_ack(monkeypatch):
+    """A persist-confirmed durable wake resumes the SECONDARY owner's session
+    (never the default profile) and advances the cursor exactly once."""
+    task_id = _mk_task_and_durable_sub()
+    _publish(task_id, "review submitted on o/r#41 @beefcafe", "o/r#41:D1")
+
+    calls = []
+
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        calls.append({"session_id": session_id, "owner_profile": owner_profile,
+                      "idempotency_key": idempotency_key, "text": text})
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
+
+    runner = _durable_runner()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+
+    assert len(calls) == 1
+    # (i) resumes the OWNER's session via the profile-scoped mirror.
+    assert calls[0]["session_id"] == OWNER_SESS
+    assert calls[0]["owner_profile"] == OWNER_PROFILE
+    # (ii) never routed to the default profile (owner_profile is explicit).
+    assert calls[0]["owner_profile"] not in (None, "", "default")
+    assert calls[0]["idempotency_key"] == "o/r#41:D1"
+    assert "review submitted on o/r#41 @beefcafe" in calls[0]["text"]
+    # (iii) persist-ack confirmed (mock returned) → event consumed (SEEN), so a
+    # re-peek returns nothing.
+    assert _peek_delivery(task_id)["events"] == []
+
+
+@pytest.mark.asyncio
+async def test_durable_wake_no_persist_ack_leaves_cursor_unmoved(monkeypatch):
+    """A wake whose response did NOT confirm persistence (deliver_wake raises)
+    must NOT advance the cursor and must NOT drop the sub."""
+    task_id = _mk_task_and_durable_sub()
+    _publish(task_id, "review submitted", "o/r#41:D1")
+
+    async def _no_ack(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        raise RuntimeError("X-Hermes-Turn-Persisted not true")
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _no_ack)
+    runner = _durable_runner()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+
+    # (iii) the poison event was NOT consumed — still unseen for redelivery.
+    assert len(_peek_delivery(task_id)["events"]) == 1
+    assert _sub_exists(task_id)           # (W2d) never dropped
+
+
+@pytest.mark.asyncio
+async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
+    """(iv) A crash before the ack leaves the cursor unmoved → the event is
+    RE-DELIVERED on the next tick; after a true ack the cursor has advanced, so
+    a later tick does NOT re-run the delivered turn. (v) The retry reuses the
+    SAME idempotency key so the server can dedup."""
+    task_id = _mk_task_and_durable_sub()
+    _publish(task_id, "review submitted", "o/r#41:D1")
+
+    keys = []
+
+    async def _first_fails(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        keys.append(idempotency_key)
+        raise RuntimeError("crash before persist ack")
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _first_fails)
+    runner = _durable_runner()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+    # Crash before the ack → event still unseen (will be re-delivered).
+    assert len(_peek_delivery(task_id)["events"]) == 1
+
+    # Next tick: clear the backoff window and let the wake persist this time.
+    runner._kanban_durable_backoff.clear()
+
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        keys.append(idempotency_key)
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+    # Now persisted → consumed.
+    assert _peek_delivery(task_id)["events"] == []
+    # (v) the ambiguous retry reused the stable per-event key.
+    assert keys == ["o/r#41:D1", "o/r#41:D1"]
+
+    # A later tick with no new events must not re-run the delivered turn.
+    later_calls = []
+
+    async def _spy(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        later_calls.append(idempotency_key)
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _spy)
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+    assert later_calls == []
+    assert _peek_delivery(task_id)["events"] == []
+
+
+@pytest.mark.asyncio
+async def test_durable_delivers_events_in_cursor_order(monkeypatch):
+    """Cursor-contiguity: multiple notification events are delivered in ascending
+    id order and the cursor advances past all of them."""
+    task_id = _mk_task_and_durable_sub()
+    _publish(task_id, "first", "o/r#41:D1")
+    _publish(task_id, "second", "o/r#41:D2")
+
+    seen = []
+
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        seen.append(idempotency_key)
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
+    runner = _durable_runner()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+
+    assert seen == ["o/r#41:D1", "o/r#41:D2"]
+    # Both delivered → cursor past the last, so a re-peek is empty.
+    assert _peek_delivery(task_id)["events"] == []
+
+
+@pytest.mark.asyncio
+async def test_durable_never_dropped_and_alerts_on_sustained_failure(monkeypatch, caplog):
+    """(W2d) A poison delivery is retried with backoff, NEVER drops the sub, never
+    advances the cursor, and earns a loud operator alert on sustained failure."""
+    import logging
+
+    task_id = _mk_task_and_durable_sub()
+    _publish(task_id, "review submitted", "o/r#41:D1")
+
+    async def _always_fail(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+        raise RuntimeError("kanban owner unreachable")
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _always_fail)
+    runner = _durable_runner()
+
+    caplog.set_level(logging.ERROR, logger="gateway.kanban_watchers")
+    # Drive enough attempts to cross the alert threshold, bypassing the backoff
+    # window between attempts (a real deployment waits it out across ticks).
+    for _ in range(6):
+        await runner._deliver_durable_notifications(_peek_delivery(task_id))
+        runner._kanban_durable_backoff.clear()
+
+    # never advanced past the poison event → still unseen for redelivery.
+    assert len(_peek_delivery(task_id)["events"]) == 1
+    assert _sub_exists(task_id)           # never dropped
+    assert any("sustained delivery failure" in r.message for r in caplog.records)

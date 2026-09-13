@@ -18,15 +18,20 @@ import pytest
 import yaml
 
 from gateway.config import Platform
-from hermes_cli.plugins import PluginContext, PluginManager
+from hermes_cli.plugins import PluginManager
 from tools.registry import registry, invalidate_check_fn_cache
 
 PLUGIN_KEY = "nv-artifact"
 PLUGIN_SRC = Path(__file__).parents[2] / "plugins" / PLUGIN_KEY
 
-OWNER_PROFILE = "gov-f25-worker"
+OWNER_PROFILE = "gov-f25-owner"
 ORCH_PROFILE = "gov-f25-orch"
 NOTIFY_ROUTE = "gh-pr"
+
+# The rendered webhook summary the observer forwards verbatim as the notification
+# message (ADR §Design: message = event.text). A literal lets the test assert the
+# enqueued payload is the exact event, not merely "some notification".
+EVENT_DIGEST = "review submitted on o/r#7 @beefcafe"
 
 
 def _set_profile(monkeypatch, name):
@@ -97,7 +102,7 @@ def _terminal_result(url: str) -> str:
 def _webhook_event(delivery, *, route=NOTIFY_ROUTE, pr=7, repo="o/r",
                    platform=Platform.WEBHOOK, chat_type="webhook"):
     return SimpleNamespace(
-        text="",
+        text=EVENT_DIGEST,
         source=SimpleNamespace(platform=platform, chat_type=chat_type,
                                chat_id=f"webhook:{route}:{delivery}"),
         raw_message={
@@ -118,27 +123,55 @@ def _bare_card(profile: str, idem: str) -> str:
         return task if isinstance(task, str) else getattr(task, "id", task)
 
 
-def _wake_card(home: Path, profile: str, idem: str, *, session_id: str, session_key: str) -> str:
-    # The card (tasks.*) lives in kanban.db; the session row (sessions.session_key)
-    # lives in the OWNER profile's state.db — distinct DBs. The fallback resolves
-    # tasks.session_id -> <owner>/state.db.sessions.session_key, so seed each side
-    # in its own store.
+def _notifications(task_id: str) -> list:
+    """Raw payload text of every `notification` event on the owning task (kanban task_events).
+
+    `_notification_payloads` JSON-decodes these; the plugin's cross-profile WAKE of the
+    events is proven in the core test, not here.
+    """
     import hermes_cli.kanban_db as kb
     with kb.connect() as conn:
-        task = kb.create_task(conn, title=idem, assignee=profile, idempotency_key=idem)
-        task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        conn.execute("UPDATE tasks SET session_id=? WHERE id=?", (session_id, task_id))
-        kb.add_notify_sub(conn, task_id=task_id, platform="api_server",
-                          chat_id=session_id, delivery_mode="wake", notifier_profile=profile)
-    state = sqlite3.connect(home / "state.db")
+        try:
+            rows = list(conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind='notification' ORDER BY id",
+                (task_id,)))
+        except sqlite3.OperationalError:
+            return []
+    return [(r[0] or "") for r in rows]
+
+
+def _notification_payloads(task_id: str) -> list[dict]:
+    """The JSON-decoded payload dict of every `notification` event (message + idempotency_key)."""
+    return [json.loads(p) for p in _notifications(task_id)]
+
+
+def _seen(base: Path, repo: str, pr: int, delivery_id: str) -> bool:
+    """True iff the plugin recorded a seen_deliveries dedup row for this delivery."""
+    db = _plugin_db(base)
+    if not db.exists():
+        return False
+    conn = sqlite3.connect(db)
     try:
-        state.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, source TEXT, session_key TEXT)")
-        state.execute("INSERT OR REPLACE INTO sessions (id, source, session_key) VALUES (?,?,?)",
-                      (session_id, "api_server", session_key))
-        state.commit()
+        row = conn.execute(
+            "SELECT 1 FROM seen_deliveries WHERE repo=? AND pr=? AND delivery_id=?",
+            (repo, pr, delivery_id)).fetchone()
+    except sqlite3.OperationalError:
+        return False
     finally:
-        state.close()
-    return task_id
+        conn.close()
+    return row is not None
+
+
+def _wake_subs(task_id: str) -> list[tuple]:
+    """Every notify sub on the owning task as (platform, notifier_profile, delivery_mode, retry_policy)."""
+    import hermes_cli.kanban_db as kb
+    with kb.connect() as conn:
+        # kb.connect() sets row_factory=sqlite3.Row; coerce to plain tuples so the
+        # equality against the expected tuple compares by value, not object.
+        return [tuple(r) for r in conn.execute(
+            "SELECT platform, notifier_profile, delivery_mode, retry_policy "
+            "FROM kanban_notify_subs WHERE task_id=? ORDER BY rowid",
+            (task_id,))]
 
 
 def _seed_session_usage(home: Path, session_id: str, rows: list[dict]) -> None:
@@ -178,8 +211,6 @@ def artifact(tmp_path, monkeypatch):
                 "enabled": [PLUGIN_KEY],
                 "entries": {
                     PLUGIN_KEY: {
-                        # SIBLING of settings: core reads plugins.entries.<id>.allow_gateway_injection.
-                        "allow_gateway_injection": True,
                         "settings": {"ledger_profile": "default",
                                      "orchestrator_profile": ORCH_PROFILE,
                                      "notify_route": NOTIFY_ROUTE},
@@ -206,6 +237,10 @@ def artifact(tmp_path, monkeypatch):
     for hook in ("post_tool_call", "pre_gateway_dispatch", "on_session_end", "kanban_task_completed"):
         assert hook in loaded.hooks_registered
     assert {"report_pr_created", "resolve_pr_owner"} <= set(loaded.tools_registered)
+    # report_pr_created is a mutation tool the observer dispatches internally; its
+    # check_fn=lambda: False must keep it OUT of the model-visible tool schema.
+    invalidate_check_fn_cache()
+    assert registry.get_definitions({"report_pr_created"}, quiet=True) == []
     # register_cli_command verbs land in manager._cli_commands (kind "cli_command"),
     # NOT loaded.commands_registered (which is register_command slash commands only).
     cli_verbs = {name for name, e in manager._cli_commands.items() if e.get("plugin_key") == PLUGIN_KEY}
@@ -216,33 +251,37 @@ def artifact(tmp_path, monkeypatch):
 
 def test_ac_gov_f25_1(artifact):
     """A first claim of (repo, pr) inserts one ownership row into the single fleet ledger and the resolver returns that owner."""
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     out = _dispatch("report_pr_created",
-                    {"repo": "o/r", "pr": 7, "task_id": "T1", "session_id": "S1", "profile": OWNER_PROFILE})
+                    {"repo": "o/r", "pr": 7, "task_id": card, "session_id": "S1", "profile": OWNER_PROFILE})
     assert out["status"] == "claimed"
 
-    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, "T1", OWNER_PROFILE)]
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
     assert not _plugin_db(artifact.home).exists()  # pinned to the ledger owner, not the caller
     assert _ownership_columns(artifact.root) == ["repo", "pr", "task_id", "profile"]
 
     owner = artifact.loaded.module.resolve_pr_owner("o/r", 7)
-    assert owner["task_id"] == "T1" and owner["profile"] == OWNER_PROFILE
+    assert owner["task_id"] == card and owner["profile"] == OWNER_PROFILE
 
 
 def test_ac_gov_f25_2(artifact):
     """A foreign-profile claim is refused naming the holder without overwrite; a same-holder claim is an idempotent refresh."""
+    card_a = _bare_card(OWNER_PROFILE, "gh-pr-o-r-9")
     assert _dispatch("report_pr_created",
-                     {"repo": "o/r", "pr": 9, "task_id": "T9", "session_id": "S9", "profile": OWNER_PROFILE})["status"] == "claimed"
+                     {"repo": "o/r", "pr": 9, "task_id": card_a, "session_id": "S9", "profile": OWNER_PROFILE})["status"] == "claimed"
 
+    card_x = _bare_card("other-worker", "gh-pr-o-r-9-x")
     refused = _dispatch("report_pr_created",
-                        {"repo": "o/r", "pr": 9, "task_id": "TX", "session_id": "SX", "profile": "other-worker"})
+                        {"repo": "o/r", "pr": 9, "task_id": card_x, "session_id": "SX", "profile": "other-worker"})
     assert refused["status"] == "refused"
     assert refused["holder"] == OWNER_PROFILE
-    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, "T9", OWNER_PROFILE)]
+    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_a, OWNER_PROFILE)]
 
+    card_b = _bare_card(OWNER_PROFILE, "gh-pr-o-r-9-b")
     refreshed = _dispatch("report_pr_created",
-                          {"repo": "o/r", "pr": 9, "task_id": "T9b", "session_id": "S9", "profile": OWNER_PROFILE})
+                          {"repo": "o/r", "pr": 9, "task_id": card_b, "session_id": "S9", "profile": OWNER_PROFILE})
     assert refreshed["status"] == "refreshed"
-    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, "T9b", OWNER_PROFILE)]
+    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_b, OWNER_PROFILE)]
 
 
 def test_ac_gov_f25_3(artifact):
@@ -286,49 +325,73 @@ def test_ac_gov_f25_4(artifact):
 
 
 def test_ac_gov_f25_5(artifact, monkeypatch):
-    """A claimed-PR webhook delivers to the owner (native notify+wake, else inject_message on failure) and returns None; unclaimed/off-route/non-webhook -> no delivery; re-delivery is idempotent."""
-    import hermes_cli.kanban_db as kb
-    task_id = _wake_card(artifact.home, OWNER_PROFILE, "gh-pr-o-r-7", session_id="S1", session_key="owner-session-key")
-    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": task_id,
-                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    """A claimed-PR webhook durably enqueues exactly one `notification` on the owning task carrying the verbatim event digest and a stable (repo#pr, delivery-id) idempotency key onto a durable-retry wake sub, and the observer returns skip; an unclaimed / off-route / non-webhook event returns None with no enqueue; a re-delivered delivery-id does not double-enqueue; and a claimed enqueue-failure is fail-closed (skip, never None, nothing committed) then recovers on retry."""
+    # Claim (o/r, 7) via the real post_tool_call path: ensures the owning card,
+    # binds S1, and registers the durable wake sub.
+    artifact.manager.invoke_hook("post_tool_call", tool_name="terminal",
+                                 args={"command": "gh pr create --title x --body y"},
+                                 result=_terminal_result("https://github.com/o/r/pull/7"),
+                                 status="ok", task_id="", session_id="S1")
+    card = _task_id_for(artifact.root, "o/r", 7)
+    assert card and _card_session_id(card) == "S1"
 
-    def _events():
-        with kb.connect() as conn:
-            _o, _c, evs = kb.claim_unseen_events_for_sub(
-                conn, task_id=task_id, platform="api_server", chat_id="S1", thread_id="",
-                kinds=("notification",))
-        return [e for e in evs if e.kind == "notification"]
+    # The claim registered exactly one durable-retry wake sub, scoped to the owner profile.
+    assert _wake_subs(card) == [("api_server", OWNER_PROFILE, "wake", "durable")]
 
-    calls = []
-    monkeypatch.setattr(PluginContext, "inject_message",
-                        lambda self, content, role="user", *, session_key=None: calls.append(session_key) or True,
-                        raising=False)
+    def _dispatch_hook(delivery, **kw):
+        return artifact.manager.invoke_hook(
+            "pre_gateway_dispatch", event=_webhook_event(delivery, **kw), gateway=None, session_store=None)
 
-    assert artifact.manager.invoke_hook("pre_gateway_dispatch", event=_webhook_event("D1", pr=7),
-                                        gateway=None, session_store=None) == []
-    assert len(_events()) == 1 and calls == []
+    # CLAIMED -> skip + exactly one notification carrying the verbatim digest and the exact key.
+    assert _dispatch_hook("D1", pr=7) == [{"action": "skip"}]
+    payloads = _notification_payloads(card)
+    assert len(payloads) == 1
+    assert payloads[0]["message"] == EVENT_DIGEST
+    assert payloads[0]["idempotency_key"] == "o/r#7:D1"
+    assert _seen(artifact.root, "o/r", 7, "D1")
 
-    # Native publication fails -> fallback resolves the owner key via tasks.session_id -> sessions.session_key.
-    monkeypatch.setattr(artifact.loaded.module, "publish_task_notification",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("notify down")), raising=False)
-    assert artifact.manager.invoke_hook("pre_gateway_dispatch", event=_webhook_event("D2", pr=7),
-                                        gateway=None, session_store=None) == []
-    assert calls == ["owner-session-key"]
+    # UNCLAIMED / off-route / non-webhook -> None (empty invoke_hook result), no new notification.
+    assert _dispatch_hook("D2", pr=999) == []
+    assert _dispatch_hook("D3", pr=7, route="other") == []
+    assert _dispatch_hook("D4", pr=7, platform=Platform.SLACK, chat_type="slack") == []
+    assert len(_notification_payloads(card)) == 1
 
-    inj, ev = len(calls), len(_events())
-    for e in (_webhook_event("D3", pr=999), _webhook_event("D4", route="other", pr=7),
-              _webhook_event("D5", pr=7, platform=Platform.SLACK, chat_type="slack")):
-        assert artifact.manager.invoke_hook("pre_gateway_dispatch", event=e, gateway=None, session_store=None) == []
-    assert len(calls) == inj and len(_events()) == ev
+    # Re-delivery of the same X-GitHub-Delivery id -> no second enqueue (seen_deliveries dedup).
+    assert _dispatch_hook("D1", pr=7) == [{"action": "skip"}]
+    assert len(_notification_payloads(card)) == 1
 
-    assert artifact.manager.invoke_hook("pre_gateway_dispatch", event=_webhook_event("D2", pr=7),
-                                        gateway=None, session_store=None) == []
-    assert len(calls) == inj  # a seen delivery id delivers at most once
+    # Claimed enqueue-failure -> FAIL CLOSED: skip (never None) with NOTHING committed, so a
+    # claimed PR never re-opens the default orphan even when the durable enqueue cannot commit.
+    # (The plugin references publish_task_notification as a module-level name, so patching the
+    # symbol on the plugin module reaches the observer's call site.)
+    real = artifact.loaded.module.publish_task_notification
+    state = {"fail": True, "calls": 0}
+
+    def _maybe_boom(*a, **k):
+        state["calls"] += 1
+        if state["fail"]:
+            raise RuntimeError("kanban down")
+        return real(*a, **k)
+
+    monkeypatch.setattr(artifact.loaded.module, "publish_task_notification", _maybe_boom, raising=True)
+    assert _dispatch_hook("D5", pr=7) == [{"action": "skip"}]
+    assert state["calls"] >= 1
+    assert len(_notification_payloads(card)) == 1
+    assert not _seen(artifact.root, "o/r", 7, "D5")
+
+    # kanban recovers -> the same delivery now enqueues durably (publish-then-seen).
+    state["fail"] = False
+    assert _dispatch_hook("D5", pr=7) == [{"action": "skip"}]
+    payloads = _notification_payloads(card)
+    assert len(payloads) == 2
+    assert payloads[1]["idempotency_key"] == "o/r#7:D5"
+    assert _seen(artifact.root, "o/r", 7, "D5")
 
 
 def test_ac_gov_f25_6(artifact, monkeypatch, capsys):
     """`hermes pr remap` re-points ownership as the orchestrator profile and refuses (no mutation) as a worker profile."""
-    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": "T1",
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     remap = artifact.manager._cli_commands["pr"]["handler_fn"]
 
@@ -336,38 +399,54 @@ def test_ac_gov_f25_6(artifact, monkeypatch, capsys):
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=None, json=True))
     assert (rc or 0) != 0
     assert json.loads(capsys.readouterr().out or "{}").get("status") == "refused"
-    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, "T1", OWNER_PROFILE)]
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
 
+    card2 = _bare_card("new-owner", "gh-pr-o-r-7-remap")
     _set_profile(monkeypatch, ORCH_PROFILE)
-    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task="T2", json=True))
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
     assert (rc or 0) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "remapped"
-    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, "T2", "new-owner")]
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card2, "new-owner")]
 
 
 def test_ac_obs_f48_1(artifact):
-    """kanban terminal + on_session_end append one outcomes row per artifact with cost summed from session_model_usage (actual-else-estimated, aux included), idempotent across repeated on_session_end, reflecting late usage."""
-    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": "T1",
+    """kanban terminal + on_session_end append one outcomes row per artifact with cost summed from session_model_usage (actual-else-estimated, aux included), idempotent across repeated on_session_end, reflecting late usage; and a claimed pull_request closed+merged webhook derives terminal_outcome='merged' (retaining cost/profile) — the signal winrate/cost-per-merge depend on."""
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     _seed_session_usage(artifact.home, "S1", [
         {"model": "opus", "actual_cost_usd": 2.00, "cost_status": "actual"},
         {"model": "haiku", "task": "aux", "estimated_cost_usd": 0.50, "cost_status": "estimated"},
     ])
 
-    artifact.manager.invoke_hook("kanban_task_completed", task_id="T1")
+    artifact.manager.invoke_hook("kanban_task_completed", task_id=card)
     assert _outcomes(artifact.root, "o/r#7")[0][1] == "completed"
 
-    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id="T1", completed=True)
-    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id="T1", completed=True)
+    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id=card, completed=True)
+    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id=card, completed=True)
     rows = _outcomes(artifact.root, "o/r#7")
     assert len(rows) == 1
-    assert rows[0][2] == pytest.approx(2.50)  # actual+estimated, no double-count on re-fire
+    assert rows[0][2] == pytest.approx(2.50)
     assert rows[0][3] == OWNER_PROFILE
 
     _seed_session_usage(artifact.home, "S1", [
         {"model": "review", "task": "background-review", "actual_cost_usd": 1.00, "cost_status": "actual"}])
-    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id="T1", completed=True)
-    assert _outcomes(artifact.root, "o/r#7")[0][2] == pytest.approx(3.50)  # late usage folded in
+    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id=card, completed=True)
+    assert _outcomes(artifact.root, "o/r#7")[0][2] == pytest.approx(3.50)
+
+    merged_event = SimpleNamespace(
+        text="pr merged",
+        source=SimpleNamespace(platform=Platform.WEBHOOK, chat_type="webhook",
+                               chat_id=f"webhook:{NOTIFY_ROUTE}:M1"),
+        raw_message={"action": "closed",
+                     "repository": {"full_name": "o/r"},
+                     "pull_request": {"number": 7, "merged": True, "head": {"sha": "beefcafe"}}},
+        message_id="M1")
+    artifact.manager.invoke_hook("pre_gateway_dispatch", event=merged_event,
+                                 gateway=None, session_store=None)
+    row = _outcomes(artifact.root, "o/r#7")[0]
+    assert row[1] == "merged"
+    assert row[2] == pytest.approx(3.50) and row[3] == OWNER_PROFILE
 
 
 def test_ac_obs_f48_2(artifact, monkeypatch, capsys):
@@ -387,11 +466,11 @@ def test_ac_obs_f48_2(artifact, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["winrate"] == pytest.approx(3 / 5)
 
     outcomes(SimpleNamespace(outcomes_command="cost-per-merge", json=True))
-    # cost-per-merge divides over MERGED artifacts only, excluding closed/abandoned spend.
     assert json.loads(capsys.readouterr().out)["cost_per_merge"] == pytest.approx((1.00 + 2.00 + 3.00) / 3)
 
     _set_profile(monkeypatch, OWNER_PROFILE)
-    outcomes(SimpleNamespace(outcomes_command="funnel", json=True))
+    rc = outcomes(SimpleNamespace(outcomes_command="funnel", json=True))
+    assert (rc or 0) != 0
     refused = json.loads(capsys.readouterr().out or "{}")
     assert refused.get("status") == "refused"
     assert not ({"merged", "closed", "abandoned"} & set(refused))
