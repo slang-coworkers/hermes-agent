@@ -249,13 +249,10 @@ def _report_pr_created(args, **kwargs) -> str:
     try:
         # Route BEFORE ownership: install the durable wake sub first, so an
         # ownership row is never visible — even transiently — without a working
-        # delivery route. The alternative (claim, then register, then roll back
-        # on failure) makes a route-less claim briefly observable: a concurrent
-        # webhook could enqueue an event on it that the owner can never be woken
-        # for, and a concurrent claimant would be refused against a claim that
-        # then vanishes. Registration is idempotent on the sub PK, so a lost
-        # first-claim race just leaves an inert sub on our own (non-owning) card
-        # that never receives events.
+        # delivery route (a concurrent webhook must never enqueue an event on a
+        # claim the owner cannot be woken for). Registration is idempotent on the
+        # sub PK, so a lost first-claim race just leaves a sub on our own
+        # non-owning card, onto which the observer never publishes PR events.
         if not _register_wake_sub(ctx, task_id, session_id, profile):
             return json.dumps({"status": "error", "repo": repo, "pr": pr,
                                "reason": "wake subscription registration failed; nothing claimed"})
@@ -678,52 +675,51 @@ def _cmd_pr_remap(args):
     to = str(args.to)
     task = getattr(args, "task", None)
 
-    # Resolve the target task (read-only) and its bound session, if any.
+    # Resolve the current owner (task + profile), read-only.
     conn = _db(ctx)
     try:
         row = conn.execute(
-            "SELECT task_id FROM ownership WHERE repo = ? AND pr = ?", (repo, pr)
+            "SELECT task_id, profile FROM ownership WHERE repo = ? AND pr = ?", (repo, pr)
         ).fetchone()
     finally:
         conn.close()
-    new_task = str(task) if task else (row[0] if row else None)
+    cur_task = row[0] if row else None
+    cur_profile = row[1] if row else None
+    new_task = str(task) if task else cur_task
     if new_task is None:
         _refuse({"status": "error", "reason": "no owning task to re-point"}, args)
         return 1
 
-    import hermes_cli.kanban_db as kb
+    # A cross-profile remap MUST target a DISTINCT task bound to the new owner:
+    # its own fresh wake route can then be installed before ownership changes,
+    # without mutating the current owner's route (which a mid-remap ledger commit
+    # failure would otherwise strand — new route paired with the old owner row).
+    if cur_profile is not None and to != cur_profile and new_task == cur_task:
+        _refuse({"status": "refused", "repo": repo, "pr": pr,
+                 "reason": "cross-profile remap requires a distinct --task bound to the new owner"}, args)
+        return 1
 
     with _kb_connect(ctx) as kconn:
         srow = kconn.execute(
             "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
         ).fetchone()
     new_sess = srow[0] if srow else None
+    # A remap must land a WORKING route: the target task must exist and carry a
+    # bound session. Re-pointing to a session-less task would leave the claimed
+    # PR undeliverable (a webhook arriving before the owner binds a session is
+    # enqueued on the owning card, but the eventual sub starts caught up past it),
+    # which is exactly the orphan this index exists to prevent.
+    if not new_sess:
+        _refuse({"status": "refused", "repo": repo, "pr": pr,
+                 "reason": "target task is unknown or has no bound session; refusing to re-point to an undeliverable owner"}, args)
+        return 1
 
-    # Route BEFORE ownership (same rule as a claim): when the new owner's session
-    # is known, install its durable wake sub and force the routing owner to `to`
-    # (add_notify_sub only backfills a blank notifier_profile) BEFORE committing
-    # the re-point. If the route cannot be installed, refuse and leave ownership
-    # unchanged rather than re-point to an un-deliverable owner. When no session
-    # is bound yet, the route is deferred to the new owner's next claim/refresh —
-    # reported explicitly so the caller knows delivery is not yet wired.
-    if new_sess:
-        if not _register_wake_sub(ctx, new_task, new_sess, to):
-            _refuse({"status": "error", "repo": repo, "pr": pr,
-                     "reason": "wake subscription registration failed; ownership unchanged"}, args)
-            return 1
-        try:
-            with _kb_connect(ctx) as uconn:
-                with kb.write_txn(uconn):
-                    uconn.execute(
-                        "UPDATE kanban_notify_subs SET notifier_profile = ? "
-                        "WHERE task_id = ? AND platform = 'api_server' AND chat_id = ?",
-                        (to, new_task, new_sess),
-                    )
-        except Exception:
-            logger.error("nv-artifact remap: notifier_profile re-point failed", exc_info=True)
-            _refuse({"status": "error", "repo": repo, "pr": pr,
-                     "reason": "wake routing update failed; ownership unchanged"}, args)
-            return 1
+    # Route BEFORE ownership: install the (distinct) target task's own durable
+    # wake sub; refuse and leave ownership unchanged if it cannot be installed.
+    if not _register_wake_sub(ctx, new_task, new_sess, to):
+        _refuse({"status": "error", "repo": repo, "pr": pr,
+                 "reason": "wake subscription registration failed; ownership unchanged"}, args)
+        return 1
 
     conn = _db(ctx)
     try:
@@ -735,10 +731,7 @@ def _cmd_pr_remap(args):
         conn.commit()
     finally:
         conn.close()
-    payload = {"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}
-    if not new_sess:
-        payload["wake"] = "deferred until the new owner's next claim (no session bound)"
-    _emit(payload, args)
+    _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}, args)
     return 0
 
 

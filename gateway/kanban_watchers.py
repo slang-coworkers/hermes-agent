@@ -1294,9 +1294,7 @@ class GatewayKanbanWatchersMixin:
             # fails. Durable delivery is confirmable only for api_server
             # (self-post + X-Hermes-Turn-Persisted ack); a durable sub on a push
             # transport is therefore retained (never advanced, never dropped) and
-            # surfaces as a sustained-failure alert. The nv-artifact plugin only
-            # ever registers api_server durable subs, so this is a defensive
-            # branch, not a live delivery path.
+            # surfaces as a sustained-failure alert rather than being delivered.
             self._note_durable_failure(
                 sub_key,
                 f"durable delivery is unconfirmable on push transport {plat.value}",

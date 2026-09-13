@@ -401,7 +401,13 @@ def test_ac_gov_f25_6(artifact, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out or "{}").get("status") == "refused"
     assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
 
+    # A cross-profile remap targets a DISTINCT task bound to the new owner's
+    # session, so its own deliverable route can be installed before the re-point.
+    import hermes_cli.kanban_db as kb
     card2 = _bare_card("new-owner", "gh-pr-o-r-7-remap")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-new", card2))
     _set_profile(monkeypatch, ORCH_PROFILE)
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
     assert (rc or 0) == 0
@@ -595,3 +601,37 @@ def test_session_end_gateway_session_attributes_cost(artifact):
     assert len(rows) == 1
     assert rows[0][2] == pytest.approx(4.00)
     assert rows[0][3] == OWNER_PROFILE
+
+
+def test_remap_without_bound_session_is_refused(artifact, monkeypatch, capsys):
+    """R1-2 (round 3): a remap to a task with no bound session is refused with no
+    mutation — re-pointing to an undeliverable owner would strand a webhook that
+    arrives before that owner binds a session."""
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    sessionless = _bare_card("new-owner", "gh-pr-o-r-7-nosession")  # distinct, no bound session
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=sessionless, json=True))
+    assert (rc or 0) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
+
+
+def test_same_task_cross_profile_remap_is_refused(artifact, monkeypatch, capsys):
+    """R1-2 (round 3): a cross-profile remap that keeps the SAME task is refused —
+    honouring it would mutate the current owner's own route, which a mid-remap
+    ledger commit failure could strand (new route paired with the old owner)."""
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    # task=None keeps the current task; a different `to` profile → refused.
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=None, json=True))
+    assert (rc or 0) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
