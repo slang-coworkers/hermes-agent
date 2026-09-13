@@ -1,6 +1,7 @@
-# FROZEN expected outcomes for the LOOP-F35 acceptance test — architect-owned.
-# The builder makes nv-coworker-compose RENDER to satisfy this; it does NOT edit this file.
-# The reviewer confirms this file is byte-identical to the ADR's shipped fixture.
+# Architect-owned expected outcomes for the LOOP-F35 acceptance test — the builder
+# makes nv-coworker-compose RENDER to satisfy this. Fleet-uniform approval keys are
+# managed-scope invariants (asserted by GOV-F23 AC-1/AC-3), not part of this
+# profile-local mapping.
 
 profiles: [default, orchestrator, reviewer, fixer]
 default_profile: default
@@ -21,11 +22,10 @@ coworker_config:
   terminal.docker_mount_cwd_to_workspace: true
   terminal.docker_image: "hermes-sandbox:pinned"
   terminal.docker_volumes: []
-  approvals.mode: "smart"
-  approvals.timeout: 300
-  approvals.cron_mode: "deny"
-  approvals.unattended_mode: "deny"
-  approvals.single_query_mode: "deny"
+  # The eight fleet-uniform approval keys (six approvals.* + two
+  # security.approval.*) are machine-wide managed scope, not profile-local; their
+  # placement is asserted by GOV-F23 AC-1 (managed fragment) and AC-3 (absent from
+  # every profile config). The render-enforced approvals.deny floor is profile-local.
   agent.disabled_toolsets: []
   plugins.enabled: ["nv-fleet-gates", "nv-coworker-compose"]
   plugins.entries.nv-fleet-gates.settings.policy: "deny-admin-to-workers"

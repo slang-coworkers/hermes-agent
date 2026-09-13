@@ -54,6 +54,88 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Fleet-uniform approval policy (GOV-F23). These eight keys are pinned ONCE,
+# machine-wide, in the managed-scope fragment (out_root/managed/config.yaml) that
+# native _load_config_impl deep-merges (managed-wins) onto every profile
+# (hermes_cli/managed_scope.py:137-176), and are STRIPPED from every per-profile
+# config so the immutability split is disjoint — fleet policy is root-owned (a
+# /approvals mode change refuses under managed policy, hermes_cli/approval_mode.py:63)
+# while the per-role command_allowlist and the render-enforced approvals.deny floor
+# stay in the profile config. Every value equals the stock default (the six
+# approvals.* at hermes_cli/config_defaults.py:2558-2576, the two security.approval.*
+# at :2671-2674), so if the fragment is not yet installed the fleet is no more
+# permissive: stock Hermes already denies RECOGNIZED unattended dangerous commands
+# (deny-if-detected) and fails the transport closed — fragment-absence safety only,
+# NOT a claim every dangerous spelling is blocked (AC-7 is unchanged either way).
+# Pinned EXPLICITLY (the MEM-F44 "never by assumption" standard) so a re-pin or an
+# upstream default flip cannot silently loosen them. Every key has a real reader
+# (readers cited in the GOV-F23 runbook).
+_GOV_APPROVALS_MANAGED: Dict[str, Any] = {
+    "approvals.mode": "smart",
+    "approvals.timeout": 300,
+    "approvals.cron_mode": "deny",
+    "approvals.single_query_mode": "deny",
+    "approvals.unattended_mode": "deny",
+    "approvals.denial_breaker_threshold": 3,
+    # Presentation-path fail-closed hardening. NOT part of the unattended fail-safe:
+    # the transport is read only on the human-approval / gateway path
+    # (approval.py:4303-4316, from :5138/:5631, both AFTER the non-interactive
+    # block), never on the unattended deny path. Pinning them denies flipping
+    # transport_fallback to "builtin" (which would re-route a failed plugin
+    # transport to a built-in surface instead of denying), so the human-approval
+    # path stays fail-closed.
+    "security.approval.transport": "builtin",
+    "security.approval.transport_fallback": "deny",
+}
+
+# Reserved sibling directory under out_root for the managed fragment. A coworker
+# type named 'managed' is rejected so its profile dir cannot collide with it.
+_MANAGED_FRAGMENT_DIR = "managed"
+
+# Force-push / tag / release deny floor (GOV-F23). These verbs must never run
+# unattended, so the render ENFORCES this floor by OVERWRITING approvals.deny on
+# EVERY rendered profile (per-role, DEFAULT and orchestrator) with exactly this
+# fixed 12-glob list — whatever the coworker type or spine declared. Enforcing
+# (not passing through) makes the floor a render-GUARANTEED fleet-safety property:
+# a spec that declares a weak or absent deny still ships the full floor.
+# approvals.deny is the one guard layer that fires PRE-detection and even under
+# --yolo (tools/approval.py:4772, BEFORE the yolo / mode=off bypass at :4781), so a
+# profile with no floor has no force-push backstop at all.
+#
+# approvals.deny rules are matched with fnmatch.fnmatchcase against the WHOLE
+# normalized command (tools/approval.py:818-822), anchored whole-string with
+# leading/trailing '*', and are ORDER-TOLERANT: they match --force / -f / +refspec
+# in ANY argument order. This is a best-effort in-surface backstop for the common,
+# combined-flag and global-option force-push/tag/release spellings — NOT an
+# exhaustive detector. It complements the core dangerous-command detector
+# (tools/approval.py:1227-1228), which covers only --forc*/-f and MISSES +refspec
+# and combined -f clusters and has NO tag/release rule at all; a shell-wrapped or
+# chained spelling still slips this anchored block-list — the fail-open class is
+# recorded honestly by AC-7 and owned by GOV-ENF, NOT closed here.
+#
+# fnmatch has NO word boundary, so each force short-flag cluster uses the [!- ]
+# (not-dash, not-space) class to keep the force 'f' inside a single-dash short
+# cluster so '*' cannot cross a space into a branch name: a naive 'git *push* -*f*'
+# would over-block a normal 'git push -u origin fix' (the '*' crosses ' -u' into the
+# 'f' of 'fix'). One [!- ] per flag letter before 'f' covers 'f'
+# at cluster positions 1-3 (-f, -uf, -uqf). The 'git push* *+*' / 'git -*push* *+*'
+# pair catches the unquoted and shell-quoted +refspec, contiguous and behind a git
+# global option.
+_GOV_APPROVALS_DENY_FLOOR: List[str] = [
+    "git *push* --forc*",       # --force / --force-with-lease, any argument order
+    "git *push* -f",            # standalone -f at command end
+    "git *push* -f *",          # standalone -f mid-command
+    "git *push* -f[!- ]*",      # force cluster, f-first (-fu, -fq, -fuq…)
+    "git *push* -[!- ]f*",      # force cluster, f-second (-uf, -qf, -ufq…)
+    "git *push* -[!- ][!- ]f*", # force cluster, f-third (-uqf)
+    "git push* *+*",            # +refspec force-push, unquoted or shell-quoted
+    "git -*push* *+*",          # +refspec force-push behind a git global option
+    "git tag *",                # tag create / delete / move
+    "git -* tag *",             # tag verb behind a git global option
+    "gh release *",             # gh release create / delete / edit
+    "gh -* release *",          # gh release verb behind a gh global option
+]
+
 # Engage-mode → per-platform gate keys (RT-F02). ``config.engage`` is the plugin's
 # OWN spec vocabulary — a pseudo-key with no core reader — so _render_engage
 # translates it into the concrete keys each platform adapter reads under
@@ -239,6 +321,32 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = copy.deepcopy(value)
 
 
+def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
+    """Remove the leaf named by a dotted path, then prune each now-empty mapping
+    along the path bottom-up. A sibling key that is still populated stops the
+    prune, so an unrelated ``security.*`` value survives while ``security.approval``
+    is emptied. A path that is absent or blocked by a non-mapping node is a no-op."""
+    parts = dotted.split(".")
+    chain: List[Tuple[Dict[str, Any], str]] = []
+    node: Any = mapping
+    for key in parts[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            return
+        chain.append((node, key))
+        node = child
+    leaf = parts[-1]
+    if leaf not in node:
+        return
+    node.pop(leaf)
+    for container, key in reversed(chain):
+        branch = container.get(key)
+        if isinstance(branch, dict) and not branch:
+            container.pop(key, None)
+        else:
+            break
+
+
 def _is_platform_key(key: Any) -> bool:
     """True iff ``key`` names a platform (including dynamically-registered plugin
     platforms), tested with the ``Platform(key)`` constructor rather than by
@@ -261,6 +369,100 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
+def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool) -> None:
+    """Fail closed on a malformed per-role approval list.
+
+    A present top-level ``command_allowlist`` (coworker profiles only — DEFAULT's
+    is force-emptied, so its submitted value is not trusted) and a present
+    ``approvals.deny`` must each be a list of non-empty, non-whitespace strings: a
+    blank member is a silently-inert deny rule or an over-broad allowlist entry,
+    and a non-list is a spec error. Type-checked before any iteration so a hostile
+    value raises ``CompositionError``, never a raw ``TypeError``.
+    """
+    to_check: List[Tuple[str, Any]] = []
+    if include_allowlist and "command_allowlist" in config:
+        to_check.append(("command_allowlist", config["command_allowlist"]))
+    approvals = config.get("approvals")
+    # A present non-mapping approvals block is a spec error: the strip below
+    # skips a non-dict value and it would be written raw, then the managed
+    # overlay would silently replace it — so reject it here rather than fail open.
+    if "approvals" in config and not isinstance(approvals, dict):
+        raise CompositionError(
+            f"approvals must be a mapping, got {type(approvals).__name__}"
+        )
+    if isinstance(approvals, dict) and "deny" in approvals:
+        to_check.append(("approvals.deny", approvals["deny"]))
+    for label, value in to_check:
+        if not isinstance(value, list):
+            raise CompositionError(f"{label} must be a list, got {type(value).__name__}")
+        for member in value:
+            if not isinstance(member, str) or not member.strip():
+                raise CompositionError(
+                    f"{label} entries must be non-empty strings, got {member!r}"
+                )
+
+
+def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
+    """Remove the eight fleet-uniform keys (six ``approvals.*`` plus
+    ``security.approval.transport`` / ``security.approval.transport_fallback``) from
+    a per-profile config so the immutability split is disjoint — they live ONLY in
+    the managed fragment (AC-3). The per-role ``approvals.deny`` floor is LEFT in
+    place (it is read fresh-config per profile, so it is honored in-gateway too).
+    Emptied ``approvals`` / ``security.approval`` / ``security`` mappings are pruned
+    bottom-up so no empty dict is written and an unrelated ``security.*`` sibling is
+    untouched."""
+    for dotted in _GOV_APPROVALS_MANAGED:
+        _pop_dotted(config, dotted)
+
+
+def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
+    """Force the DEFAULT/multiplexer profile's top-level ``command_allowlist`` to
+    ``[]`` — the in-gateway LAUNCH BASELINE, not steady-state isolation. The gateway
+    process loads its process-global permanent allowlist ONCE at import from the
+    launch (DEFAULT) profile (tools/approval.py:5970-5971), so an empty list means at
+    launch in-gateway multiplex cron/webhook/api find nothing to bypass at the
+    allowlist short-circuit (tools/approval.py:4784) and fall through to the deny
+    resolvers. It does NOT close the cross-profile allowlist union leak:
+    load_permanent_allowlist UNIONs each profile's allowlist into the one shared set
+    (tools/approval.py:3056-3065), so a later in-gateway session init widens the
+    bypass — a core gap owned by GOV-ENF/P8 (AC-4b), no isolation credit. Written
+    explicitly and never by assumption: a declared non-empty allowlist is overwritten
+    rather than trusted."""
+    config["command_allowlist"] = []
+
+
+def _enforce_deny_floor(config: Dict[str, Any]) -> None:
+    """OVERWRITE ``approvals.deny`` with exactly the fixed force-push/tag/release
+    deny floor on a rendered profile config.
+
+    The floor is the never-bypassable backstop (it fires before the yolo / mode=off
+    bypass), so it is a render-GUARANTEED fleet-safety property, not a per-role
+    passthrough: the render SETS ``approvals.deny`` to ``_GOV_APPROVALS_DENY_FLOOR``
+    on EVERY profile (builder, reviewer, DEFAULT), OVERWRITING whatever the coworker
+    type or spine declared — so a spec that declares a weak or absent deny still
+    ships the full floor. Despite the name, this is a centrally-enforced UNIFORM deny
+    policy, NOT a union-minimum: a STRONGER per-profile deny an operator declared is
+    intentionally replaced too (uniform fleet policy under central governance), which
+    AC-GOV-F23-2 asserts. Runs AFTER the fleet-uniform strip so it operates on — and,
+    when the strip pruned an emptied ``approvals`` block, re-creates — the per-profile
+    approvals dict."""
+    approvals = config.get("approvals")
+    if not isinstance(approvals, dict):
+        approvals = {}
+        config["approvals"] = approvals
+    approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
+
+
+def _build_managed_fragment() -> Dict[str, Any]:
+    """Build the machine-wide managed-scope approvals fragment (the eight
+    fleet-uniform keys, override-or-insert via ``_set_dotted``). The operator
+    installs this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
+    ``/etc/hermes/config.yaml``); native ``_load_config_impl`` deep-merges it
+    (managed-wins) onto every profile."""
+    fragment: Dict[str, Any] = {}
+    for dotted, value in _GOV_APPROVALS_MANAGED.items():
+        _set_dotted(fragment, dotted, value)
+    return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
     root ``<p>``, ``platforms.<p>``, ``gateway.<p>``, ``gateway.platforms.<p>``.
@@ -552,6 +754,11 @@ def _require_canonical_profile_names(
     if "default" in types:
         raise CompositionError(
             "a coworker type may not be named 'default' — it collides with the multiplexer root"
+        )
+    if _MANAGED_FRAGMENT_DIR in types:
+        raise CompositionError(
+            f"a coworker type may not be named {_MANAGED_FRAGMENT_DIR!r} — it collides "
+            f"with the machine-wide managed-scope fragment directory (out_root/{_MANAGED_FRAGMENT_DIR})"
         )
     if orchestrator_profile not in types:
         raise CompositionError(
@@ -1138,6 +1345,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        _validate_approval_lists(resolved["config"], include_allowlist=True)
+        _strip_fleet_uniform_approvals(resolved["config"])
+        _enforce_deny_floor(resolved["config"])
         _render_engage(resolved["config"])
         _apply_session_mode(resolved["config"], session_flags, is_default=False)
         _require_canonical_platform_layout(resolved["config"])
@@ -1148,6 +1358,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
+    _validate_approval_lists(default_config, include_allowlist=False)
+    _strip_fleet_uniform_approvals(default_config)
+    _force_default_allowlist_empty(default_config)
+    _enforce_deny_floor(default_config)
     _render_engage(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
@@ -1156,5 +1370,13 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
+
+    # Emit the machine-wide managed-scope fragment after every profile validated
+    # and rendered. It is NOT added to `rendered`: the mapping is profile-name ->
+    # distribution dir, and the fragment is a machine-wide config file, not a
+    # profile (onboarding installs only the coworker TYPE profiles).
+    managed_dir = out_root / _MANAGED_FRAGMENT_DIR
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    _write_yaml(managed_dir / "config.yaml", _build_managed_fragment())
 
     return rendered
