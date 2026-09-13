@@ -486,7 +486,11 @@ def test_ac_iso_f10_1(tmp_path, monkeypatch):
 
 
 def test_ac_iso_f10_2(tmp_path, monkeypatch):
-    """With enforce_sandbox true: a mismatched backend blocks; on the matching backend stdio mcp_* and dangerous terminal are refused, a benign call passes, and ensure_task_env is consulted."""
+    """With enforce_sandbox true: a mismatched backend blocks; on the matching backend an
+    allow-listed stdio mcp_* tool and a dangerous terminal are refused, a benign call passes,
+    and ensure_task_env is consulted. GOV-F27 re-homes the former blanket mcp_* sandbox deny
+    into _mcp_scope_block, so the stdio block here is produced by its transport-specific step
+    (allow-listed + stdio + enforce_sandbox), not the fail-closed unlisted deny."""
     import tools.terminal_tool as tt
     calls = {"env": 0}
 
@@ -495,8 +499,14 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
         return object()                                  # non-None: sandbox env is ready
 
     monkeypatch.setattr(tt, "ensure_task_env", _ready_env, raising=False)
-    # plan_gate off so a mutating terminal reaches the sandbox predicate, not the plan gate
-    manager, _, _ = _load(tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False)
+    # plan_gate off so a mutating terminal reaches the sandbox predicate, not the plan gate.
+    # The stdio sample is EXPLICITLY allow-listed (transport stdio) for this profile so its
+    # enforce_sandbox block is proven by the transport-specific deny, not the unlisted fail-safe
+    # (which would false-pass once the blanket mcp_* sandbox line is gone).
+    manager, _, _ = _load(
+        tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False,
+        mcp_scope={"worker-a": {"mcp__local_fs__read_file": "stdio"}},
+    )
     _loaded(manager)
     _run_critique(monkeypatch, "sess-1")
 
@@ -504,7 +514,7 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
     assert _act(_gate(manager, "terminal", {"command": "ls"})) == "block"
 
     monkeypatch.setenv("TERMINAL_ENV", "docker")
-    assert _act(_gate(manager, "mcp_some_stdio_tool", {})) == "block"
+    assert _act(_gate(manager, "mcp__local_fs__read_file", {})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "rm -rf /"})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "ls"})) != "block"
     assert calls["env"] >= 1

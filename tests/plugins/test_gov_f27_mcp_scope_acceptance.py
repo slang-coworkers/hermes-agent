@@ -13,6 +13,18 @@ the profile name (``_current_profile()`` is ``Path(get_hermes_home()).name``).
 Expected values are hardcoded here, never read from the plugin. Compose input
 specs are generated in-test into a copy of the shipped composable supporting tree
 (spines/skills/workflows/overlays).
+
+Regression obligation (ADR §Regression obligations; Orchestrator binding condition):
+GOV-F27 removes the blanket ``mcp_*`` deny from nv-fleet-gates' ``_sandbox_block``
+and re-homes the stdio-deny into ``_mcp_scope_block``. The merged LOOP-F37 tests
+``tests/plugins/test_nv_fleet_gates_acceptance.py::test_ac_iso_f10_1`` and
+``::test_ac_iso_f10_2`` must stay GREEN at the judged head. ``test_ac_iso_f10_2``
+must be updated so its stdio MCP sample is EXPLICITLY allow-listed (transport
+``stdio``) in the profile's ``mcp_scope``, so its ``enforce_sandbox`` block is
+produced by ``_mcp_scope_block`` step 3 (transport-specific deny), not by the
+fail-closed unlisted deny that would false-pass once the blanket line is gone.
+``test_ac_gov_f27_6`` below proves the same transport-specific deny for GOV-F27's
+own scope; the P5 merge gate joins these three node ids at the judged head.
 """
 
 from __future__ import annotations
