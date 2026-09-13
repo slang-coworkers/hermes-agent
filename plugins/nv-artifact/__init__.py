@@ -633,6 +633,20 @@ def _cmd_pr_remap(args):
         conn.commit()
     finally:
         conn.close()
+    # Re-point delivery too: later events resolve the NEW owner, so the new
+    # owning card needs a durable wake sub (chat_id = that card's bound session)
+    # or the notifier has nothing to wake. Best-effort; the owner is re-subbed on
+    # its next claim/refresh regardless.
+    try:
+        with _kb_connect(ctx) as kconn:
+            srow = kconn.execute(
+                "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
+            ).fetchone()
+        new_sess = srow[0] if srow else None
+        if new_sess:
+            _register_wake_sub(ctx, new_task, new_sess, to)
+    except Exception:
+        logger.warning("nv-artifact remap: wake-sub re-point failed", exc_info=True)
     _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}, args)
     return 0
 

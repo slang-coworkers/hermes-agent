@@ -18,8 +18,16 @@ except ImportError:  # pragma: no cover - lets local unit tests import without c
     import os as _os
 
     def get_hermes_home() -> Path:  # type: ignore[misc]
+        # Never hard-code ~/.hermes (profile-safety invariant): honour only an
+        # explicit HERMES_HOME here; the real dashboard always has core's
+        # get_hermes_home(), so this branch is import-shim only.
         val = (_os.environ.get("HERMES_HOME") or "").strip()
-        return Path(val) if val else Path.home() / ".hermes"
+        if not val:
+            raise RuntimeError(
+                "nv-artifact dashboard requires hermes_constants.get_hermes_home() "
+                "or an explicit HERMES_HOME"
+            )
+        return Path(val)
 
 try:
     from fastapi import APIRouter

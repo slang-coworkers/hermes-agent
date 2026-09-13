@@ -474,13 +474,20 @@ class GatewayKanbanWatchersMixin:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
                             for sub in subs:
                                 try:
-                                    if (sub.get("retry_policy") or "default").lower() == "durable":
+                                    _d_platform = (sub.get("platform") or "").lower()
+                                    if (
+                                        (sub.get("retry_policy") or "default").lower() == "durable"
+                                        and _d_platform == "api_server"
+                                    ):
                                         # W2 durable notification path: PEEK (never
                                         # pre-advance) and bypass the local-adapter
                                         # owner skip below — a secondary api_server
                                         # owner has no local adapter and is reached
                                         # via the profile-scoped mirror at delivery.
-                                        _d_platform = (sub.get("platform") or "").lower()
+                                        # Restricted to api_server (non-push): the
+                                        # profile-scoped self-post wake is api_server-
+                                        # specific; a durable sub on any other
+                                        # transport falls through to the default path.
                                         if _d_platform not in active_platforms:
                                             continue
                                         _new_cursor, _d_events = _kb.unseen_events_for_sub(
@@ -1174,21 +1181,20 @@ class GatewayKanbanWatchersMixin:
     def _render_durable_event(self, ev, task, sub, board_slug) -> Optional[str]:
         """Render ONE durable event to its wake text.
 
-        A ``notification`` event carries the caller's free-form ``message`` in
-        its payload (no i18n key — the content is the caller's, mirroring the
-        batch-path W2a branch). Any other kind gets a concise per-event status
-        line. Returns None only for an event with no renderable content, which
-        the caller advances past without delivering.
+        The body is built ONLY from the event's own immutable payload / kind and
+        the sub's task id — never from mutable task fields (assignee, title) —
+        because the wake carries a stable ``Idempotency-Key`` and the api_server
+        fingerprint hashes the body: a body that changed between a persisted-
+        but-unacked attempt and its retry would defeat the dedup and double-run.
+        A ``notification`` event carries the caller's free-form ``message``
+        (already the rendered event); other kinds get a concise per-event line.
         """
-        board_tag = f"[{board_slug}] " if board_slug else ""
-        who = task.assignee if task and getattr(task, "assignee", None) else None
-        tag = f"@{who} " if who else ""
         if ev.kind == "notification":
             note = ""
             if isinstance(ev.payload, dict):
                 note = str(ev.payload.get("message") or "")
-            return f"🔔 {board_tag}{tag}Kanban {sub['task_id']} — {note}".rstrip()
-        return f"{board_tag}{tag}Kanban {sub['task_id']}: {ev.kind}"
+            return note or f"Kanban {sub['task_id']} notification"
+        return f"Kanban {sub['task_id']}: {ev.kind}"
 
     def _note_durable_failure(self, sub_key, cause) -> None:
         """Record a durable-sub delivery failure: bump the fail count, schedule
@@ -1204,7 +1210,9 @@ class GatewayKanbanWatchersMixin:
         fail_counts[sub_key] = fails
         delay = min(
             _DURABLE_BACKOFF_CAP_SECONDS,
-            _DURABLE_BACKOFF_BASE_SECONDS * (2 ** (fails - 1)),
+            # Cap the exponent before computing it — an unbounded shift on a
+            # long-poisoned sub is pointless work (the cap dominates anyway).
+            _DURABLE_BACKOFF_BASE_SECONDS * (2 ** min(fails - 1, 20)),
         )
         backoff[sub_key] = {"next_attempt": time.monotonic() + delay, "fails": fails}
         if fails >= _DURABLE_ALERT_THRESHOLD:
@@ -1289,6 +1297,7 @@ class GatewayKanbanWatchersMixin:
                     session_id=sub["chat_id"],
                     owner_profile=owner_profile,
                     idempotency_key=key,
+                    require_persist_ack=True,
                 )
             except Exception as exc:
                 # No 2xx+persist-ack: leave the cursor unmoved (redelivered next

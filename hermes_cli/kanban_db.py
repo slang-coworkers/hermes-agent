@@ -11784,7 +11784,7 @@ def purge_stale_done_notify_subs(
     cutoff = int(time.time()) - days * 86400
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM kanban_notify_subs WHERE task_id IN ("
+            "DELETE FROM kanban_notify_subs WHERE retry_policy != 'durable' AND task_id IN ("
             " SELECT t.id FROM tasks t"
             " WHERE t.status = 'done'"
             " AND COALESCE("

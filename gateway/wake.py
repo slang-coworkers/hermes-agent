@@ -61,6 +61,7 @@ async def deliver_wake(
     source: Any = None,
     owner_profile: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    require_persist_ack: bool = False,
 ) -> None:
     """Deliver a wake turn to the session behind ``adapter``.
 
@@ -77,10 +78,14 @@ async def deliver_wake(
     ``/v1/chat/completions`` is used — every existing caller omits it and is
     unchanged. ``idempotency_key`` (keyword-only, defaulted): when set, sent as
     the ``Idempotency-Key`` request header so a same-key retry is deduped by the
-    api_server's in-flight/completed cache.
+    api_server's in-flight/completed cache. ``require_persist_ack`` (keyword-only,
+    defaulted False): when True the non-push self-post treats a 2xx as success
+    ONLY if the response also carries ``X-Hermes-Turn-Persisted: true`` — a
+    durable caller opts in; every existing caller omits it and keeps the prior
+    2xx-is-success behaviour.
 
-    Raises on failure (bad arguments, exhausted retries, HTTP error, or a
-    response that does not confirm persistence via ``X-Hermes-Turn-Persisted``)
+    Raises on failure (bad arguments, exhausted retries, HTTP error, or — only
+    when ``require_persist_ack`` — a response that does not confirm persistence)
     so the caller can rewind/retry instead of treating the wake as delivered.
     """
     if adapter_supports_push(adapter):
@@ -104,12 +109,21 @@ async def deliver_wake(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
             "requires the raw session id to self-post the wake turn"
         )
+    # Forward the newer options ONLY when set, so a caller (or a test double)
+    # that patched _self_post_chat_completion with the original
+    # (text, session_id) signature is not broken by unexpected keywords.
+    _extra: dict = {}
+    if owner_profile is not None:
+        _extra["owner_profile"] = owner_profile
+    if idempotency_key is not None:
+        _extra["idempotency_key"] = idempotency_key
+    if require_persist_ack:
+        _extra["require_persist_ack"] = require_persist_ack
     await _self_post_chat_completion(
         adapter,
         text=text,
         session_id=session_id,
-        owner_profile=owner_profile,
-        idempotency_key=idempotency_key,
+        **_extra,
     )
 
 
@@ -120,6 +134,7 @@ async def _self_post_chat_completion(
     session_id: str,
     owner_profile: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    require_persist_ack: bool = False,
 ) -> None:
     """POST the wake text to the in-pod API server as a normal session turn.
 
@@ -133,10 +148,12 @@ async def _self_post_chat_completion(
     ``/p/<owner_profile>/v1/chat/completions`` (the middleware scopes the
     session store to that profile's ``state.db``), so a wake can resume a
     SECONDARY-profile session; otherwise the unprefixed same-profile endpoint
-    is used. A 2xx alone is NOT success — the response must carry
-    ``X-Hermes-Turn-Persisted: true`` (a server-generated ack that the target
-    profile's final turn actually committed); a missing / malformed / ``false``
-    ack RAISES so the caller does not treat an unpersisted turn as delivered.
+    is used. When ``require_persist_ack`` is set, a 2xx alone is NOT success —
+    the response must also carry ``X-Hermes-Turn-Persisted: true`` (a
+    server-generated ack that the target profile's final turn actually
+    committed); a missing / malformed / ``false`` ack RAISES so a durable
+    caller does not treat an unpersisted turn as delivered. When it is unset
+    (the default), a 2xx is success as before.
     """
     import aiohttp
 
@@ -202,21 +219,25 @@ async def _self_post_chat_completion(
                         )
                     await resp.read()
                     # A 2xx does not prove the turn committed: the handler 200s
-                    # even when the session-db write failed. Require the
-                    # server-generated persist ack; a missing / malformed /
-                    # false value is a delivery failure (the caller must not
-                    # advance its cursor). This is NOT retried inline — the turn
-                    # already ran; the durable notifier re-delivers later under
-                    # the same Idempotency-Key so the api_server dedups it.
-                    persisted = str(
-                        resp.headers.get("X-Hermes-Turn-Persisted", "")
-                    ).strip().lower()
-                    if persisted != "true":
-                        raise RuntimeError(
-                            f"wake self-post for session {session_id} did not "
-                            f"confirm persistence (X-Hermes-Turn-Persisted="
-                            f"{persisted!r}); treating as undelivered"
-                        )
+                    # even when the session-db write failed. A durable caller
+                    # (require_persist_ack) requires the server-generated persist
+                    # ack; a missing / malformed / false value is a delivery
+                    # failure (the caller must not advance its cursor). This is
+                    # NOT retried inline — the turn already ran; the durable
+                    # notifier re-delivers later under the same Idempotency-Key
+                    # so the api_server dedups it. Non-durable callers keep the
+                    # prior 2xx-is-success behaviour.
+                    if require_persist_ack:
+                        persisted = str(
+                            resp.headers.get("X-Hermes-Turn-Persisted", "")
+                        ).strip().lower()
+                        if persisted != "true":
+                            raise RuntimeError(
+                                f"wake self-post for session {session_id} did "
+                                f"not confirm persistence (X-Hermes-Turn-"
+                                f"Persisted={persisted!r}); treating as "
+                                f"undelivered"
+                            )
                     logger.info(
                         "wake self-post delivered for session %s (attempt %d)",
                         session_id,

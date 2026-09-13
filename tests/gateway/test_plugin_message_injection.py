@@ -664,7 +664,7 @@ async def test_durable_wake_targets_secondary_owner_and_advances_on_persist_ack(
 
     calls = []
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         calls.append({"session_id": session_id, "owner_profile": owner_profile,
                       "idempotency_key": idempotency_key, "text": text})
 
@@ -693,7 +693,7 @@ async def test_durable_wake_no_persist_ack_leaves_cursor_unmoved(monkeypatch):
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted", "o/r#41:D1")
 
-    async def _no_ack(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _no_ack(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         raise RuntimeError("X-Hermes-Turn-Persisted not true")
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _no_ack)
@@ -716,7 +716,7 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
 
     keys = []
 
-    async def _first_fails(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _first_fails(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         keys.append(idempotency_key)
         raise RuntimeError("crash before persist ack")
 
@@ -729,7 +729,7 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
     # Next tick: clear the backoff window and let the wake persist this time.
     runner._kanban_durable_backoff.clear()
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         keys.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
@@ -742,7 +742,7 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
     # A later tick with no new events must not re-run the delivered turn.
     later_calls = []
 
-    async def _spy(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _spy(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         later_calls.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _spy)
@@ -761,7 +761,7 @@ async def test_durable_delivers_events_in_cursor_order(monkeypatch):
 
     seen = []
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         seen.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
@@ -782,7 +782,7 @@ async def test_durable_never_dropped_and_alerts_on_sustained_failure(monkeypatch
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted", "o/r#41:D1")
 
-    async def _always_fail(adapter, *, text, session_id, owner_profile=None, idempotency_key=None):
+    async def _always_fail(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
         raise RuntimeError("kanban owner unreachable")
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _always_fail)
