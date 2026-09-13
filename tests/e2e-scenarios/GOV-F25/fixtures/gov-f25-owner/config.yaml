@@ -1,0 +1,34 @@
+# gov-f25-owner — the worker profile for AC-GOV-F25-7 (live).
+#
+# Its session runs a `gh pr create` that the nv-artifact post_tool_call observer
+# turns into the first claim of (repo, pr): it establishes the owning card, binds
+# tasks.session_id, and registers the ONE durable-retry wake sub. When a later PR
+# delivery arrives at the default profile, the notifier wakes THIS profile's
+# owning session via the api_server profile-scoped mirror.
+#
+# The live provider block is self-contained on disk (the delivery subprocess
+# strips ANTHROPIC_* — the LOOP-F35 fixture lesson): the operator-pinned
+# canonical live tier, real key injected at the egress-proxy hop. The api_key
+# literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-gov-f25-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
+plugins:
+  enabled:
+    - nv-artifact
+  entries:
+    nv-artifact:
+      settings:
+        # Same single fleet ledger as gov-f25-default (pinned to the shared root).
+        ledger_profile: default
+        orchestrator_profile: gov-f25-default
+        notify_route: gh-pr

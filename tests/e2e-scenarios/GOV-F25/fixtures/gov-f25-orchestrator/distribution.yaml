@@ -1,0 +1,8 @@
+name: gov-f25-orchestrator
+version: 0.1.0
+description: "GOV-F25 / OBS-F48 AC-OBS-F48-3 ui scenario — the orchestrator profile that serves the nv-artifact dashboard outcomes page and is authorized to read the fleet ledger."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

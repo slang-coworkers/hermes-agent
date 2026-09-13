@@ -1,0 +1,47 @@
+# gov-f25-default — the DEFAULT (multiplexer) profile for AC-GOV-F25-7 (live).
+#
+# It owns the signed GitHub webhook route `gh-pr`. A later PR delivery for a
+# CLAIMED artifact reaches THIS profile's pre_gateway_dispatch observer, which
+# durably enqueues the notification onto the owning card and returns
+# {"action":"skip"} — so this profile spawns NO disposable session for it. The
+# provider block is a placeholder so the profile loads (the observer path drives
+# no model here); the api_key literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-gov-f25-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      # CH-F52 route shape: config.yaml → platforms.webhook.extra.routes.<name>.
+      # `secret` is the per-route HMAC key the tester signs each delivery with
+      # (X-Hub-Signature-256). It is a fixture-only test secret — it guards
+      # nothing real and is not a credential to any service.
+      routes:
+        gh-pr:
+          secret: gov-f25-gh-pr-test-hmac-secret
+          events:
+            - pull_request
+            - issue_comment
+            - pull_request_review
+plugins:
+  enabled:
+    - nv-artifact
+  entries:
+    nv-artifact:
+      settings:
+        # The single fleet ledger is pinned to the fleet-root home (ledger_profile
+        # 'default' → get_profile_dir('default') → the shared root), so the
+        # worker's claim and this profile's observer read the identical DB.
+        ledger_profile: default
+        orchestrator_profile: gov-f25-default
+        notify_route: gh-pr
