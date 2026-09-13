@@ -881,3 +881,282 @@ async def test_durable_push_absent_owner_adapter_never_uses_default(monkeypatch)
     assert calls == []                                    # default adapter never used
     assert len(_peek_delivery(task_id)["events"]) == 1    # retained
     assert _sub_exists(task_id)                           # never dropped
+
+
+# ---------------------------------------------------------------------------
+# W2 — REAL cross-profile persisted-resume proof (GOV-F25 mandatory core test,
+# ADR §"Core test — the cross-profile persisted-resume proof").
+#
+# The full production chain runs for real: the profile-prefix middleware resolves
+# /p/<owner>/, _handle_chat_completions → _run_agent enters the REAL profile
+# runtime scope, the turn persists to profiles/<owner>/state.db, the server emits
+# the REAL X-Hermes-Turn-Persisted header, deliver_wake's persist-ack gate reads
+# it, and the durable notifier advances its cursor only on that ack. The ONLY
+# stub is _create_agent → a fake whose run_conversation persists a real message
+# row via SessionDB (a live model turn cannot run hermetically); it writes under
+# the middleware-set profile scope, so WHICH state.db it lands in is decided by
+# production code, not the stub. Assertions (i)-(v) map to the ADR's core-test
+# clause. Reuses the ephemeral-loopback-server pattern from test_wake_delivery.
+# ---------------------------------------------------------------------------
+
+REAL_OWNER = "gov-f25-owner"
+REAL_OWNER_SESS = "gov-f25-owner-sess-real"
+# A strong, profile-scoped API_SERVER_KEY (>=16 chars, high entropy) — a named
+# /p/<profile>/ request fails closed without one (api_server._expected_api_key).
+_WAKE_KEY = "b7e2c9a14f6803d5e9c2f8a1b4d70e6392c5a8f1d0e3b6c9"
+
+
+class _RealPersistAgent:
+    """Stand-in for the model turn: persists ONE real assistant message to the
+    profile-scoped state.db (resolved under the live profile runtime scope), and
+    reports turn_persisted from a shared knob so a test can force a non-persisted
+    turn (bare 200, no ack)."""
+
+    def __init__(self, session_id, state):
+        self.session_id = session_id
+        self._state = state
+        self.session_prompt_tokens = 1
+        self.session_completion_tokens = 1
+        self.session_total_tokens = 2
+
+    def run_conversation(self, user_message, conversation_history=None, task_id=None, **kw):
+        from pathlib import Path as _P
+
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+
+        self._state["calls"].append(self.session_id)
+        persisted = bool(self._state["persist"])
+        if persisted:
+            db = SessionDB(_P(get_hermes_home()) / "state.db")
+            try:
+                db.create_session(self.session_id, source="api_server")
+            except Exception:
+                pass  # already exists on a redelivery
+            db.append_message(self.session_id, role="assistant", content="ack: " + user_message)
+        return {"final_response": "ack", "session_id": self.session_id,
+                "turn_persisted": persisted}
+
+    def interrupt(self):  # pragma: no cover - control hook the server may call
+        pass
+
+
+def _message_count(home, session_id) -> int:
+    from hermes_state import SessionDB
+
+    db_path = home / "state.db"
+    if not db_path.exists():
+        return 0
+    return len(SessionDB(db_path).get_messages_as_conversation(session_id))
+
+
+def _build_wake_adapter(tmp_path, monkeypatch, state):
+    """Wire a REAL APIServerAdapter (multiplex on) + its real app + a persisting
+    stub agent, in an isolated HERMES_HOME. Returns (adapter, app, owner_home,
+    default_home)."""
+    from aiohttp import web
+
+    import agent.secret_scope as _ss
+    from gateway.platforms.api_server import APIServerAdapter
+    from hermes_cli.profiles import get_profile_dir
+
+    home = tmp_path / "hhome"
+    (home / "profiles" / REAL_OWNER).mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    runner_stub = SimpleNamespace(config=GatewayConfig(multiplex_profiles=True))
+    adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    adapter._api_key = _WAKE_KEY
+    adapter.gateway_runner = runner_stub
+    adapter._host = "127.0.0.1"
+    adapter._model_name = "hermes-agent"
+
+    # The named /p/<owner>/ request resolves its API key from the profile secret
+    # scope; return the same strong key deliver_wake authenticates with.
+    monkeypatch.setattr(
+        _ss, "get_secret",
+        lambda name, default="": _WAKE_KEY if name == "API_SERVER_KEY" else default,
+    )
+    # Only the model turn is stubbed; the persist + scope are the production path.
+    monkeypatch.setattr(
+        adapter, "_create_agent",
+        lambda **kw: _RealPersistAgent(kw.get("session_id"), state),
+    )
+
+    app = web.Application(middlewares=[adapter._make_profile_prefix_middleware()])
+    for method, path, handler in adapter._http_route_table():
+        app.router.add_route(method, path, handler)
+        app.router.add_route(method, f"/p/{{profile}}{path}", handler)
+    app["api_server_adapter"] = adapter
+    app["gateway_runner"] = runner_stub
+
+    owner_home = get_profile_dir(REAL_OWNER)
+    default_home = get_profile_dir("default")
+    return adapter, app, owner_home, default_home
+
+
+async def _serve_app(app):
+    from aiohttp import web
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+def _mk_real_durable_sub(session_id=REAL_OWNER_SESS, *, idem="gh-pr-gov-f25-77"):
+    """A durable api_server wake sub bound to the owner session, plus its card."""
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        task = kb.create_task(conn, title="gov-f25/repo#77", assignee=REAL_OWNER,
+                              idempotency_key=idem)
+        task_id = task if isinstance(task, str) else getattr(task, "id", task)
+        kb.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id=session_id,
+                          notifier_profile=REAL_OWNER, delivery_mode="wake", retry_policy="durable")
+    finally:
+        conn.close()
+    return task_id
+
+
+def _real_durable_runner(adapter):
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {Platform.API_SERVER: adapter}
+    # A secondary owner has no adapter of its own → api_server falls back to the
+    # shared adapter, scoping by owner_profile on the self-post (never push).
+    runner._authorization_adapter = MagicMock(return_value=None)
+    runner._kanban_sub_fail_counts = {}
+    return runner
+
+
+def test_real_cross_profile_wake_lands_on_owner_not_default_and_gates_on_ack(tmp_path, monkeypatch):
+    """(i) A persist-confirmed durable wake lands a real turn on the SECONDARY
+    owner's session in profiles/<owner>/state.db; (ii) the DEFAULT profile's
+    state.db receives nothing; (iii) a turn that did NOT persist (bare 200, no
+    X-Hermes-Turn-Persisted ack) makes the durable caller RAISE, so its cursor
+    would not advance."""
+    from gateway.wake import deliver_wake
+
+    state = {"persist": True, "calls": []}
+    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+
+    async def run():
+        srv, port = await _serve_app(app)
+        adapter._port = port
+        try:
+            # (i) persist-confirmed → resumes the owner session.
+            await deliver_wake(adapter, text="review on o/r#77 [A]", session_id=REAL_OWNER_SESS,
+                               owner_profile=REAL_OWNER, idempotency_key="o/r#77:A1",
+                               require_persist_ack=True)
+            # (iii) a non-persisted turn: bare 200, no ack → durable caller raises.
+            state["persist"] = False
+            with pytest.raises(RuntimeError, match="persist"):
+                await deliver_wake(adapter, text="review on o/r#77 [A2]", session_id=REAL_OWNER_SESS,
+                                   owner_profile=REAL_OWNER, idempotency_key="o/r#77:A2",
+                                   require_persist_ack=True)
+        finally:
+            await srv.cleanup()
+
+    asyncio.run(run())
+
+    # (i) exactly one real message landed on the owner session.
+    assert _message_count(owner_home, REAL_OWNER_SESS) == 1
+    # (ii) the default profile's store never received the owner's turn.
+    assert _message_count(default_home, REAL_OWNER_SESS) == 0
+    # (iii) the non-persisted turn ran but persisted nothing → still one message.
+    assert state["calls"] == [REAL_OWNER_SESS, REAL_OWNER_SESS]
+
+
+def test_real_notifier_advances_cursor_only_on_persist_ack(tmp_path, monkeypatch):
+    """(iii) via the REAL durable notifier: a non-persisted turn leaves the cursor
+    unmoved (event redelivered); a persist-confirmed turn advances it. Exactly one
+    real owner turn persists across the two attempts."""
+    from gateway.wake import deliver_wake  # noqa: F401 - ensure real (unmocked)
+
+    state = {"persist": False, "calls": []}
+    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+    task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-B")
+    _publish(task_id, "review submitted on o/r#77 [B]", "o/r#77:B1")
+    runner = _real_durable_runner(adapter)
+
+    async def run():
+        srv, port = await _serve_app(app)
+        adapter._port = port
+        try:
+            # Non-persisted turn → no ack → cursor NOT advanced (event still unseen).
+            await runner._deliver_durable_notifications(_peek_delivery(task_id))
+            assert len(_peek_delivery(task_id)["events"]) == 1
+            # Clear the backoff window, let the turn persist → cursor advances.
+            runner._kanban_durable_backoff.clear()
+            state["persist"] = True
+            await runner._deliver_durable_notifications(_peek_delivery(task_id))
+            assert _peek_delivery(task_id)["events"] == []
+        finally:
+            await srv.cleanup()
+
+    asyncio.run(run())
+
+    # Only the persist-confirmed attempt wrote a message to the owner store.
+    assert _message_count(owner_home, REAL_OWNER_SESS) == 1
+    assert _message_count(default_home, REAL_OWNER_SESS) == 0
+
+
+def test_real_crash_before_ack_redelivers_then_no_rerun(tmp_path, monkeypatch):
+    """(iv) A crash before the ack leaves the cursor unmoved so the notifier
+    RE-DELIVERS; after a true ack the cursor has advanced, so a later tick does
+    NOT re-run the already-delivered owner turn."""
+    state = {"persist": False, "calls": []}
+    adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state)
+    task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-C")
+    _publish(task_id, "review submitted on o/r#77 [C]", "o/r#77:C1")
+    runner = _real_durable_runner(adapter)
+
+    async def run():
+        srv, port = await _serve_app(app)
+        adapter._port = port
+        try:
+            await runner._deliver_durable_notifications(_peek_delivery(task_id))  # crash-before-ack
+            assert len(_peek_delivery(task_id)["events"]) == 1                    # redelivered
+            runner._kanban_durable_backoff.clear()
+            state["persist"] = True
+            await runner._deliver_durable_notifications(_peek_delivery(task_id))  # true ack
+            assert _peek_delivery(task_id)["events"] == []
+            # A later tick with no new events must NOT re-run the delivered turn.
+            calls_before = len(state["calls"])
+            await runner._deliver_durable_notifications(_peek_delivery(task_id))
+            assert len(state["calls"]) == calls_before
+        finally:
+            await srv.cleanup()
+
+    asyncio.run(run())
+    assert _message_count(owner_home, REAL_OWNER_SESS) == 1  # exactly one persisted turn
+
+
+def test_real_ambiguous_ack_retry_deduped_to_one_owner_turn(tmp_path, monkeypatch):
+    """(v) An ambiguous same-key retry (the turn persisted but the ack was lost
+    in transit, so the caller retries under the SAME Idempotency-Key) is deduped
+    by the api_server idempotency cache to AT MOST ONE owning turn."""
+    from gateway.wake import deliver_wake
+
+    state = {"persist": True, "calls": []}
+    adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state)
+
+    async def run():
+        srv, port = await _serve_app(app)
+        adapter._port = port
+        try:
+            # Two deliveries of the SAME event: same body + same Idempotency-Key.
+            for _ in range(2):
+                await deliver_wake(adapter, text="review on o/r#77 [D]", session_id=REAL_OWNER_SESS,
+                                   owner_profile=REAL_OWNER, idempotency_key="o/r#77:D1",
+                                   require_persist_ack=True)
+        finally:
+            await srv.cleanup()
+
+    asyncio.run(run())
+    # The second call hit the completed-result idempotency cache → the agent ran
+    # once, so exactly one owner turn persisted.
+    assert state["calls"] == [REAL_OWNER_SESS]
+    assert _message_count(owner_home, REAL_OWNER_SESS) == 1
