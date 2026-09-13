@@ -366,10 +366,9 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     passthrough: the render SETS ``approvals.deny`` to ``_GOV_APPROVALS_DENY_FLOOR``
     on EVERY profile (builder, reviewer, DEFAULT), OVERWRITING whatever the coworker
     type or spine declared — so a spec that declares a weak or absent deny still
-    ships the full floor, and a future compliant-looking fixture cannot false-green
-    a passthrough render (AC-2 asserts the input differs from the floor). Runs AFTER
-    the fleet-uniform strip so it operates on — and, when the strip pruned an emptied
-    ``approvals`` block, re-creates — the per-profile approvals dict."""
+    ships the full floor. Runs AFTER the fleet-uniform strip so it operates on — and,
+    when the strip pruned an emptied ``approvals`` block, re-creates — the per-profile
+    approvals dict."""
     approvals = config.get("approvals")
     if not isinstance(approvals, dict):
         approvals = {}
