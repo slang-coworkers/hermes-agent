@@ -54,7 +54,6 @@ const sidebars: SidebarsConfig = {
         'user-guide/profiles',
         'user-guide/profile-distributions',
         'user-guide/multi-profile-gateways',
-        'user-guide/fleet-mcp-scope',
         'user-guide/multi-connection-desktop',
         'user-guide/git-worktrees',
         'user-guide/docker',

@@ -89,3 +89,9 @@ in two places:
 
 `message_agent` is the one documented exclusion from the presence scan — it is
 injected, not registry-registered, so it is matched by constant in the gate.
+
+## See also
+
+- [Fleet MCP scope](../../user-guide/fleet-mcp-scope.md) — how the compose plugin
+  renders each role's `mcp_servers` and the profile-keyed `mcp_scope` the
+  MCP-SCOPE predicate enforces.
