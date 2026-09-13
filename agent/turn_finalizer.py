@@ -741,9 +741,9 @@ def finalize_turn(
         ).get("service_tier"),
         "session_id": agent.session_id,
         # Whether this turn's messages committed to the session DB (set by the
-        # persist funnel just above at :464). A wake caller gates its cursor
-        # advance on this (surfaced as the X-Hermes-Turn-Persisted response
-        # header); None means no flush ran this turn.
+        # persist funnel run just above). A wake caller gates its cursor advance
+        # on this (surfaced as the X-Hermes-Turn-Persisted response header);
+        # None means no flush ran this turn.
         "turn_persisted": getattr(agent, "_last_turn_persisted", None),
     }
     if agent._tool_guardrail_halt_decision is not None:

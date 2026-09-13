@@ -649,6 +649,7 @@ def _durable_runner():
     # is done by owner_profile on the self-post, so the adapter itself is opaque.
     runner.adapters = {Platform.API_SERVER: SimpleNamespace(
         _host="127.0.0.1", _port=8642, _api_key="k", _model_name="hermes-agent",
+        supports_async_delivery=False,  # api_server is non-push → self-post branch
     )}
     runner._authorization_adapter = MagicMock(return_value=None)
     runner._kanban_sub_fail_counts = {}
@@ -799,3 +800,68 @@ async def test_durable_never_dropped_and_alerts_on_sustained_failure(monkeypatch
     assert len(_peek_delivery(task_id)["events"]) == 1
     assert _sub_exists(task_id)           # never dropped
     assert any("sustained delivery failure" in r.message for r in caplog.records)
+
+
+def _mk_task_and_durable_push_sub():
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        task = kb.create_task(
+            conn, title="push-durable", assignee="p", idempotency_key="push-durable-1",
+        )
+        task_id = task if isinstance(task, str) else getattr(task, "id", task)
+        kb.add_notify_sub(
+            conn, task_id=task_id, platform="telegram", chat_id="tg-chat-1",
+            notifier_profile="p", chat_type="group",
+            delivery_mode="wake", retry_policy="durable",
+        )
+    finally:
+        conn.close()
+    return task_id
+
+
+def _durable_push_runner():
+    runner = object.__new__(GatewayRunner)
+    push_adapter = SimpleNamespace()  # no supports_async_delivery → push-capable
+    runner.adapters = {Platform.TELEGRAM: push_adapter}
+    runner._authorization_adapter = MagicMock(return_value=push_adapter)
+    runner._kanban_sub_fail_counts = {}
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_durable_push_sub_delivers_via_source_and_never_drops(monkeypatch):
+    """The durable policy is GENERIC (keyed on retry_policy, not the platform): a
+    PUSH durable sub delivers via the synthetic-event wake (source, no
+    persist-ack), advances on success, and is never dropped on failure."""
+    task_id = _mk_task_and_durable_push_sub()
+    _publish(task_id, "push note", "push:1")
+
+    got = []
+
+    async def _ok(adapter, *, text, source=None, session_id="",
+                  owner_profile=None, idempotency_key=None, require_persist_ack=None):
+        got.append({"source_passed": source is not None, "require_persist_ack": require_persist_ack})
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
+    runner = _durable_push_runner()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+
+    assert len(got) == 1
+    assert got[0]["source_passed"] is True             # push branch uses source
+    assert got[0]["require_persist_ack"] in (None, False)  # persist-ack N/A on push
+    assert _peek_delivery(task_id)["events"] == []     # advanced on success
+
+    # Failure path: retained + cursor unmoved (never-drop applies to push too).
+    _publish(task_id, "push note 2", "push:2")
+
+    async def _boom(adapter, *, text, source=None, session_id="",
+                    owner_profile=None, idempotency_key=None, require_persist_ack=None):
+        raise RuntimeError("push transport down")
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _boom)
+    runner._kanban_durable_backoff.clear()
+    await runner._deliver_durable_notifications(_peek_delivery(task_id))
+    assert len(_peek_delivery(task_id)["events"]) == 1  # unseen → redelivered
+    assert _sub_exists(task_id)                          # never dropped

@@ -109,9 +109,9 @@ async def deliver_wake(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
             "requires the raw session id to self-post the wake turn"
         )
-    # Forward the newer options ONLY when set, so a caller (or a test double)
-    # that patched _self_post_chat_completion with the original
-    # (text, session_id) signature is not broken by unexpected keywords.
+    # Forward the newer options ONLY when set, so a caller that invokes
+    # _self_post_chat_completion with the original (text, session_id) signature
+    # is not broken by unexpected keywords.
     _extra: dict = {}
     if owner_profile is not None:
         _extra["owner_profile"] = owner_profile

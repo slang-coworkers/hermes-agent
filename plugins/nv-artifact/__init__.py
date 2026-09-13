@@ -47,14 +47,11 @@ _TOOLSET = "nv_artifact"
 # resolver/outcome helpers resolve the single fleet ledger through ctx config.
 _CTX = None
 
-# Public core widening (W1). Imported as a module-level name so the observer's
-# call site resolves this symbol — AC-GOV-F25-5's fail-closed case patches
-# module.publish_task_notification. Guarded so the plugin still imports on a
-# tree that predates the widening.
-try:  # pragma: no cover - exercised on the widened fork tree
-    from hermes_cli.kanban_db import publish_task_notification
-except Exception:  # pragma: no cover
-    publish_task_notification = None
+# Module-level so the observer's call site resolves this symbol and a fault-
+# injection test can patch it. A hard import (not guarded): this plugin's
+# delivery path REQUIRES the durable task-notification API, so a runtime that
+# lacks it must fail plugin loading loudly rather than silently no-op delivery.
+from hermes_cli.kanban_db import publish_task_notification
 
 # gh pr create intent: the three tokens in order, tolerant of the argv-list form
 # execute_code uses (`['gh','pr','create']`) as well as a bare shell command. A
@@ -206,12 +203,17 @@ def _pr_key(repo: str, pr: int) -> str:
 # Ownership: claim + resolve
 # ---------------------------------------------------------------------------
 
-def _register_wake_sub(ctx, task_id, session_id, profile) -> None:
-    """Register the ONE durable-retry wake sub on the owning card (idempotent on
-    the sub PK, so a refresh does not duplicate it). This is the subscription the
-    kanban notifier later carries the PR event on."""
+def _register_wake_sub(ctx, task_id, session_id, profile) -> bool:
+    """Install the ONE durable-retry wake sub on the owning card (idempotent on
+    the sub PK). Returns True iff the sub is present after the call. A claim
+    without a working wake route is not a claim, so the caller rolls back on
+    False. All three identifiers are required — ``chat_id`` is the owner session
+    id the notifier self-posts to."""
     if not (task_id and session_id and profile):
-        return
+        logger.warning(
+            "nv-artifact wake-sub not registered: missing task_id/session_id/profile"
+        )
+        return False
     try:
         import hermes_cli.kanban_db as kb
 
@@ -220,8 +222,10 @@ def _register_wake_sub(ctx, task_id, session_id, profile) -> None:
                 conn, task_id=task_id, platform="api_server", chat_id=session_id,
                 notifier_profile=profile, delivery_mode="wake", retry_policy="durable",
             )
+        return True
     except Exception:
-        logger.warning("nv-artifact wake-sub registration failed", exc_info=True)
+        logger.error("nv-artifact wake-sub registration failed", exc_info=True)
+        return False
 
 
 @_safe_handler
@@ -252,7 +256,17 @@ def _report_pr_created(args, **kwargs) -> str:
         )
         conn.commit()
         if cur.rowcount == 1:
-            _register_wake_sub(ctx, task_id, session_id, profile)
+            # A claim implies a working delivery route: if the durable wake sub
+            # cannot be installed, roll the ownership row back so a claimed PR is
+            # never left un-deliverable.
+            if not _register_wake_sub(ctx, task_id, session_id, profile):
+                conn.execute(
+                    "DELETE FROM ownership WHERE repo = ? AND pr = ? AND task_id = ? AND profile = ?",
+                    (repo, pr, task_id, profile),
+                )
+                conn.commit()
+                return json.dumps({"status": "error", "repo": repo, "pr": pr,
+                                   "reason": "wake subscription registration failed; claim rolled back"})
             return json.dumps({"status": "claimed", "repo": repo, "pr": pr,
                                "task_id": task_id, "profile": profile})
         row = conn.execute(
@@ -260,12 +274,20 @@ def _report_pr_created(args, **kwargs) -> str:
         ).fetchone()
         holder = row[0] if row else None
         if holder == profile:
+            old_task = row[1]
             conn.execute(
                 "UPDATE ownership SET task_id = ? WHERE repo = ? AND pr = ?",
                 (task_id, repo, pr),
             )
             conn.commit()
-            _register_wake_sub(ctx, task_id, session_id, profile)
+            if not _register_wake_sub(ctx, task_id, session_id, profile):
+                conn.execute(
+                    "UPDATE ownership SET task_id = ? WHERE repo = ? AND pr = ?",
+                    (old_task, repo, pr),
+                )
+                conn.commit()
+                return json.dumps({"status": "error", "repo": repo, "pr": pr,
+                                   "reason": "wake subscription registration failed; refresh rolled back"})
             return json.dumps({"status": "refreshed", "repo": repo, "pr": pr,
                                "task_id": task_id, "profile": profile})
         return json.dumps({"status": "refused", "holder": holder, "repo": repo, "pr": pr})
@@ -320,13 +342,18 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, status=None,
             return None
         repo, pr = m.group(1), int(m.group(2))
 
-        # Ensure an owning card and bind the calling session onto it. A claim
-        # never lands without a resolvable owner (task_id is NOT NULL).
+        # Ensure a real owning card and bind the calling session onto it. The
+        # hook's `task_id` is a kanban card ONLY in a kanban-worker turn; a plain
+        # gateway/API turn passes the SESSION id here, which is not a card — so
+        # reuse it only when it resolves to an existing task, else mint the
+        # artifact card. This keeps the ownership row's task_id a resolvable card
+        # (delivery enqueue + cost attribution both dereference it).
         import hermes_cli.kanban_db as kb
 
-        card = str(task_id or "") or None
+        candidate = str(task_id or "") or None
         conn = _kb_connect(ctx)
         try:
+            card = candidate if (candidate and kb.get_task(conn, candidate) is not None) else None
             if card is None:
                 created = kb.create_task(
                     conn, title=f"{repo}#{pr}", assignee=_active_profile(),
@@ -363,8 +390,15 @@ def _extract_repo_pr(raw):
     if isinstance(pull, dict) and pull.get("number") is not None:
         pr = pull.get("number")
     else:
+        # issue_comment fires for BOTH issues and PRs; GitHub marks the PR case
+        # with an `issue.pull_request` sub-object. Require it, so a plain issue
+        # comment is not mistaken for a PR event.
         issue = raw.get("issue")
-        if isinstance(issue, dict) and issue.get("number") is not None:
+        if (
+            isinstance(issue, dict)
+            and issue.get("number") is not None
+            and issue.get("pull_request")
+        ):
             pr = issue.get("number")
     try:
         pr = int(pr) if pr is not None else None
@@ -438,14 +472,25 @@ def _on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwa
         repo, pr = _extract_repo_pr(raw)
         if not repo or pr is None:
             return None
-        owner = resolve_pr_owner(repo, pr)
-        if owner is None:
-            return None  # UNCLAIMED — legitimate default routing
     except Exception:
-        # Pre-resolution failure: ownership unknown, so the safe outcome is
-        # normal routing (None). Fail-closed applies only to a CLAIMED PR below.
-        logger.warning("nv-artifact pre_gateway_dispatch pre-resolve failed", exc_info=True)
+        # Filter failure: we cannot even confirm this is a routable gh-pr
+        # webhook, so normal routing (None) is the safe outcome.
+        logger.warning("nv-artifact pre_gateway_dispatch filter failed", exc_info=True)
         return None
+
+    # A gh-pr webhook has passed the filters. Resolve ownership in isolation: a
+    # transient lookup error must NOT fall through to a default-profile orphan
+    # for a PR that may be claimed — fail closed (skip), never None.
+    try:
+        owner = resolve_pr_owner(repo, pr)
+    except Exception:
+        logger.error(
+            "nv-artifact ownership resolve failed for %s#%s — fail-closed skip",
+            repo, pr, exc_info=True,
+        )
+        return {"action": "skip"}
+    if owner is None:
+        return None  # UNCLAIMED — legitimate default routing
 
     # CLAIMED from here — never return None (never re-open the default orphan).
     try:
@@ -638,6 +683,8 @@ def _cmd_pr_remap(args):
     # or the notifier has nothing to wake. Best-effort; the owner is re-subbed on
     # its next claim/refresh regardless.
     try:
+        import hermes_cli.kanban_db as kb
+
         with _kb_connect(ctx) as kconn:
             srow = kconn.execute(
                 "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
@@ -645,6 +692,16 @@ def _cmd_pr_remap(args):
         new_sess = srow[0] if srow else None
         if new_sess:
             _register_wake_sub(ctx, new_task, new_sess, to)
+            # add_notify_sub only backfills a blank notifier_profile, so a
+            # same-task remap that changes owner would keep routing the wake to
+            # the OLD profile. Force the routing owner to the new profile.
+            with _kb_connect(ctx) as uconn:
+                with kb.write_txn(uconn):
+                    uconn.execute(
+                        "UPDATE kanban_notify_subs SET notifier_profile = ? "
+                        "WHERE task_id = ? AND platform = 'api_server' AND chat_id = ?",
+                        (to, new_task, new_sess),
+                    )
     except Exception:
         logger.warning("nv-artifact remap: wake-sub re-point failed", exc_info=True)
     _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}, args)

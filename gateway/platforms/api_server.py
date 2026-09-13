@@ -5333,16 +5333,16 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, usage = await _idem_cache.get_or_set(
                     idempotency_key, fp, _compute_completion,
-                    # Do not cache a turn whose persistence FAILED: a same-key
-                    # retry (e.g. a durable wake) must re-run rather than get
-                    # served a cached failure for the 300s TTL. Only an explicit
-                    # turn_persisted=False is treated as a failure; a missing key
-                    # (never set — e.g. an error path or a non-persisting caller)
-                    # keeps the prior always-cache behaviour.
-                    cache_if=lambda r: not (
+                    # Cache ONLY a turn confirmed persisted: a real agent turn
+                    # always reports turn_persisted (True/False), so caching a
+                    # missing/None/False result would serve a same-key retry
+                    # (e.g. a durable wake) a non-durable answer for the 300s TTL
+                    # instead of re-running it.
+                    cache_if=lambda r: (
                         isinstance(r, tuple)
                         and len(r) >= 1
-                        and (r[0] or {}).get("turn_persisted") is False
+                        and isinstance(r[0], dict)
+                        and r[0].get("turn_persisted") is True
                     ),
                 )
             except Exception as e:

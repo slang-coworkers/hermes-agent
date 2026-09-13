@@ -54,28 +54,38 @@ route and the api_server (with `API_SERVER_KEY` set — the wake self-post is
 3. Send the owner a message that makes it run the create (PATH carries the stub
    from step 1): e.g. `Run this exactly and report the URL: gh pr create --title "feat: x" --body "y"`. → expect: the owner runs the `terminal` tool, the
    observer claims `gov-f25/repo#41`, and the ledger has one ownership row.
-4. Record the owning session id `S0` and the owner's pre-delivery turn count
-   `N0` from the owner's state.db (stdlib `sqlite3`; the coworker image has no
-   `sqlite3` CLI), and confirm the claim landed:
+4. Record the owning session id `S0`, the owner's pre-delivery message count `N0`
+   for `S0`, and the default profile's session-count baseline — and PERSIST them
+   to `$ART/ac7-baseline.json`, so step 2 asserts against the EXACT recorded
+   session, not "the latest session". `S0` is the card's `tasks.session_id`, and
+   the `tasks` table lives in the shared **kanban.db** (resolve it through
+   `hermes_cli.kanban_db.connect()`), NOT in a profile `state.db`; message counts
+   live in each profile's `state.db` (stdlib `sqlite3` — the coworker image has
+   no `sqlite3` CLI):
    ```bash
-   ( source $TB/harness.env
+   ( source $TB/harness.env && cd $WT
      python3 - <<'PY'
-   import os, sqlite3, pathlib
+   import os, json, sqlite3, pathlib
+   import hermes_cli.kanban_db as kb
    home = pathlib.Path(os.environ["HERMES_HOME"])
    ledger = home / "plugin-data" / "nv-artifact" / "data.db"   # ledger_profile=default → root home
-   lc = sqlite3.connect(str(ledger))
-   row = lc.execute("SELECT repo, pr, task_id, profile FROM ownership WHERE repo=? AND pr=?", ("gov-f25/repo", 41)).fetchone()
-   assert row and row[3] == "gov-f25-owner", ("claim missing/wrong owner", row)
-   task_id = row[2]
+   row = sqlite3.connect(str(ledger)).execute(
+       "SELECT task_id, profile FROM ownership WHERE repo=? AND pr=?", ("gov-f25/repo", 41)).fetchone()
+   assert row and row[1] == "gov-f25-owner", ("claim missing/wrong owner", row)
+   task_id = row[0]
+   with kb.connect() as kc:                       # tasks live in kanban.db, not state.db
+       s0 = kc.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+   assert s0, "owning card has no bound session_id"
    ow = sqlite3.connect(str(home / "profiles" / "gov-f25-owner" / "state.db"))
-   s0 = ow.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
-   # task session_id is stored in the shared kanban.db; resolve the owning session there if needed.
-   print("OWNER_TASK", task_id, "OWNER_ROW", row)
+   n0 = ow.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (s0,)).fetchone()[0]
+   df = sqlite3.connect(str(home / "profiles" / "gov-f25-default" / "state.db"))
+   d0 = df.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+   (pathlib.Path(os.environ["ART"]) / "ac7-baseline.json").write_text(
+       json.dumps({"task_id": task_id, "S0": s0, "N0": n0, "default_sessions": d0}))
+   print("BASELINE", task_id, s0, n0, d0)
    PY
    )
    ```
-   (`S0` is the card's `tasks.session_id`; `N0` = `SELECT COUNT(*) FROM messages
-   WHERE session_id=S0` over the owner's state.db.)
 
 ## Steps
 
@@ -100,16 +110,20 @@ route and the api_server (with `API_SERVER_KEY` set — the wake self-post is
    before the run starts, `gateway/platforms/webhook.py:969-987`). The PR is
    CLAIMED, so the observer skips (durable enqueue) and the default profile mints
    NO disposable session for this delivery.
-2. Wait (bounded by `timeout_s`) for the notifier to wake the owner, then read
-   the owner's turn count:
+2. Wait (bounded by `timeout_s`) for the notifier to wake the owner, polling the
+   EXACT recorded `S0` message count from `$ART/ac7-baseline.json` (not "the
+   latest session"):
    ```bash
    ( source $TB/harness.env
      timeout 600 bash -c '
-       until python3 -c "
-   import os,sqlite3,pathlib,sys
-   ow=sqlite3.connect(str(pathlib.Path(os.environ[\"HERMES_HOME\"])/\"profiles\"/\"gov-f25-owner\"/\"state.db\"))
-   n=ow.execute(\"SELECT COUNT(*) FROM messages WHERE session_id=(SELECT session_id FROM sessions ORDER BY updated_at DESC LIMIT 1)\").fetchone()[0]
-   sys.exit(0 if n>int(os.environ.get(\"N0\",\"0\")) else 1)"; do sleep 5; done'
+       until python3 - <<PY
+   import os, json, sqlite3, pathlib, sys
+   b = json.loads((pathlib.Path(os.environ["ART"]) / "ac7-baseline.json").read_text())
+   ow = sqlite3.connect(str(pathlib.Path(os.environ["HERMES_HOME"]) / "profiles" / "gov-f25-owner" / "state.db"))
+   n = ow.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (b["S0"],)).fetchone()[0]
+   sys.exit(0 if n > b["N0"] else 1)
+   PY
+       do sleep 5; done'
      agent-browser screenshot $ART/scenario-AC-GOV-F25-7/step-2.png --full )
    ```
    → expect: the owning session `S0` gains a NEW assistant turn whose content
@@ -127,21 +141,24 @@ fresh orphan — AND the default profile spawned no session for it.
 - `step-1.png` (dashboard owner session before) / `step-2.png` (owner session
   after, showing the new turn) from the dashboard session view.
 - The 202 response code in `$ART/webhook-code.txt`.
-- stdlib `sqlite3` queries (no CLI) proving both halves:
+- stdlib `sqlite3` queries (no CLI) asserting BOTH halves against the persisted
+  baseline — the EXACT recorded `S0`, not the latest session:
   ```bash
   ( source $TB/harness.env
     python3 - <<'PY'
-  import os, sqlite3, pathlib
+  import os, json, sqlite3, pathlib
   home = pathlib.Path(os.environ["HERMES_HOME"])
+  b = json.loads((pathlib.Path(os.environ["ART"]) / "ac7-baseline.json").read_text())
   ow = sqlite3.connect(str(home / "profiles" / "gov-f25-owner" / "state.db"))
-  s0 = ow.execute("SELECT session_id FROM sessions ORDER BY updated_at DESC LIMIT 1").fetchone()[0]
-  n = ow.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (s0,)).fetchone()[0]
-  print("owner S0", s0, "turns", n, "(must exceed N0)")
+  n = ow.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (b["S0"],)).fetchone()[0]
   df = sqlite3.connect(str(home / "profiles" / "gov-f25-default" / "state.db"))
-  # No default-profile session was minted for gov-f25/repo#41 (the observer skipped).
-  print("default sessions", df.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+  d = df.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+  assert n > b["N0"], ("owner S0 gained no turn", b["S0"], n, b["N0"])
+  assert d == b["default_sessions"], ("default profile minted a session", d, b["default_sessions"])
+  print("PASS owner S0", b["S0"], "turns", b["N0"], "->", n, "; default sessions unchanged at", d)
   PY
   )
   ```
-  → expect: (a) the owner's `S0` turn count exceeds `N0`; (b) the default
-  profile minted no session for this artifact. No plugin-minted session anywhere.
+  → expect: `PASS …` — (a) the recorded owner session `S0` gained a turn
+  (`n > N0`); (b) the default profile's session count is unchanged (the observer
+  skipped — no orphan minted for this artifact).
