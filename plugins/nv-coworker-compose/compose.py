@@ -261,7 +261,10 @@ def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
             return
         chain.append((node, key))
         node = child
-    node.pop(parts[-1], None)
+    leaf = parts[-1]
+    if leaf not in node:
+        return
+    node.pop(leaf)
     for container, key in reversed(chain):
         branch = container.get(key)
         if isinstance(branch, dict) and not branch:
@@ -340,13 +343,17 @@ def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
 
 def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
     """Force the DEFAULT/multiplexer profile's top-level ``command_allowlist`` to
-    ``[]`` — the in-gateway fail-safe floor. The gateway process loads its
-    process-global permanent allowlist ONCE at import from the launch (DEFAULT)
-    profile (tools/approval.py:5970-5971) and never re-scopes it per profile, so
-    an empty list means in-gateway multiplex cron/webhook/api find nothing to
-    bypass at the allowlist short-circuit (tools/approval.py:4784) and fall through
-    to the deny resolvers. Written explicitly and never by assumption: a declared
-    non-empty allowlist is overwritten rather than trusted."""
+    ``[]`` — the in-gateway LAUNCH BASELINE, not steady-state isolation. The gateway
+    process loads its process-global permanent allowlist ONCE at import from the
+    launch (DEFAULT) profile (tools/approval.py:5970-5971), so an empty list means at
+    launch in-gateway multiplex cron/webhook/api find nothing to bypass at the
+    allowlist short-circuit (tools/approval.py:4784) and fall through to the deny
+    resolvers. It does NOT close the cross-profile allowlist union leak:
+    load_permanent_allowlist UNIONs each profile's allowlist into the one shared set
+    (tools/approval.py:3056-3065), so a later in-gateway session init widens the
+    bypass — a core gap owned by GOV-ENF/P8 (AC-4b), no isolation credit. Written
+    explicitly and never by assumption: a declared non-empty allowlist is overwritten
+    rather than trusted."""
     config["command_allowlist"] = []
 
 

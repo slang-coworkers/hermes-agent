@@ -146,3 +146,26 @@ def test_valid_spec_still_composes(tmp_path, monkeypatch):
     assert set(rendered) == {"default", "builder", "reviewer"}
     assert (out / "managed" / "config.yaml").exists()
     assert "managed" not in rendered
+
+
+def test_pop_dotted_absent_leaf_is_a_no_op(tmp_path, monkeypatch):
+    """The 8-key strip removes a nested leaf and prunes only the maps IT empties.
+    When the leaf is already absent (a profile carries `security.approval` with no
+    `transport`), the strip must leave that mapping untouched — it must NOT collapse
+    a map it did not empty. Regression guard for _pop_dotted's absent-leaf branch."""
+    loaded = _load(tmp_path, monkeypatch)
+    # _pop_dotted is a private helper of the compose submodule (not re-exported on
+    # the package __init__); reach it via the compose function's module globals.
+    _pop_dotted = loaded.module.compose.__globals__["_pop_dotted"]
+    # leaf absent under a present parent, plus an unrelated sibling under `security`
+    cfg = {"security": {"approval": {}, "audit": {"enabled": True}}}
+    _pop_dotted(cfg, "security.approval.transport")
+    assert cfg == {"security": {"approval": {}, "audit": {"enabled": True}}}
+    # removing a present leaf empties `approval`, which is pruned; the sibling stays
+    cfg2 = {"security": {"approval": {"transport": "x"}, "audit": {"enabled": True}}}
+    _pop_dotted(cfg2, "security.approval.transport")
+    assert cfg2 == {"security": {"audit": {"enabled": True}}}
+    # a wholly-absent path is a no-op
+    cfg3 = {"approvals": {"deny": ["x"]}}
+    _pop_dotted(cfg3, "security.approval.transport")
+    assert cfg3 == {"approvals": {"deny": ["x"]}}

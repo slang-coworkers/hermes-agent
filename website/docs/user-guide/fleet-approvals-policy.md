@@ -1,7 +1,7 @@
 ---
 sidebar_position: 75
 title: "Fleet approvals policy (on-call runbook)"
-description: "How nv-coworker-compose pins the fleet-safe approvals policy — the machine-wide managed fragment, the per-role command_allowlist / approvals.deny floor, and the DEFAULT-empty in-gateway fail-safe floor — how to deploy the managed fragment, the native process-global allowlist boundary, and the NanoClaw approvals term map."
+description: "How nv-coworker-compose pins the fleet-safe approvals policy — the machine-wide managed fragment, the per-role command_allowlist / render-enforced approvals.deny floor, and the DEFAULT-empty in-gateway launch baseline — how to deploy the managed fragment, the native process-global allowlist boundary, and the NanoClaw approvals term map."
 ---
 
 # Fleet approvals policy (on-call runbook)
@@ -142,7 +142,7 @@ Guard order (`check_all_command_guards`, `tools/approval.py:4730`): hardline
 `:4808/:4809`, cron `:4876/:4878`). The allowlist precedes detection but *follows*
 the hardline / sudo / deny floors.
 
-### 3. The DEFAULT/multiplexer profile — `command_allowlist: []`, the in-gateway floor
+### 3. The DEFAULT/multiplexer profile — `command_allowlist: []`, the in-gateway launch baseline
 
 The render forces the DEFAULT profile's top-level `command_allowlist` to `[]`
 (explicit empty), overriding any declared value, and writes the same enforced
@@ -171,9 +171,9 @@ Install the fragment to the managed directory. `get_managed_dir()`
 **Deploy it merge-preserving and atomically — never blind-overwrite.** The managed
 `config.yaml` is a single machine-wide file that may already carry unrelated
 managed policy from other fleet rows, so replacing the whole file would drop that
-policy. Merge only the rendered `approvals.*` block over whatever is already
-present, then rename atomically so a concurrent reader never sees a truncated
-file:
+policy. Merge the full rendered eight-key fragment (both the `approvals.*` and the
+`security.approval.*` keys) over whatever is already present, then rename atomically
+so a concurrent reader never sees a truncated file:
 
 ```bash
 MANAGED="${HERMES_MANAGED_DIR:-/etc/hermes}"   # get_managed_dir() resolution
@@ -188,7 +188,7 @@ if os.path.exists(target):
     with open(target, encoding="utf-8") as fh:
         existing = yaml.safe_load(fh) or {}
 frag = yaml.safe_load(open(fragment, encoding="utf-8")) or {}
-# recursive deep-merge: the fragment's approvals.* keys win per leaf; every
+# recursive deep-merge: the fragment's eight keys win per leaf; every
 # unrelated managed key already in the file is preserved.
 def merge(base, over):
     if isinstance(base, dict) and isinstance(over, dict):
@@ -224,14 +224,14 @@ same immutability the ISO-F13 invariant relies on (no profile mounts
 `hermes onboard coworker` renders in a `TemporaryDirectory` and installs only the
 coworker TYPE profiles, so neither the managed fragment (above) NOR the rendered
 DEFAULT profile config is deployed by onboarding. The DEFAULT profile's
-`command_allowlist: []` is the in-gateway fail-safe floor (next section), so it
+`command_allowlist: []` is the in-gateway launch baseline (next section), so it
 must reach the gateway's launch profile: render with `hermes coworker compose`
 and apply `./fleet-out/default/config.yaml` to the launch profile (the gateway
 root, profile name `default`) — then restart the gateway so the process reloads
 `_permanent_approved` from the empty allowlist at import. Verify with
 `hermes -p default approvals test` (or a `python3 -c` over the merged config) that
 the launch profile's `command_allowlist` is `[]` before trusting the in-gateway
-floor.
+launch baseline.
 
 ## The native process-global allowlist boundary (why DEFAULT is empty)
 

@@ -1,8 +1,9 @@
 # GOV-F23 compose input — omitted variant of the shared spine (OMITTED).
 # This spine OMITS all eight fleet-uniform keys (no approvals or security.approval
 # block at all) so the GOV-F23 render must INSERT the managed fragment from its
-# fixed constant. As in base.yaml there is NO traits block (per-role allowlist/deny
-# live in each type's config: block). Every OTHER config key matches base.yaml so
+# fixed constant. As in base.yaml there is NO traits block (per-role
+# command_allowlist is type-local in each type's config: block; approvals.deny is
+# render-enforced, not declared here). Every OTHER config key matches base.yaml so
 # the two spine variants differ ONLY on the eight fleet-uniform keys.
 identity: "BASE-IDENTITY"
 invariants: ["INV-SHARED"]

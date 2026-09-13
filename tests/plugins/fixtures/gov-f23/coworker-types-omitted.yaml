@@ -17,8 +17,10 @@ skills_root: skills
 workflows_root: workflows
 overlays_root: overlays
 
-# Types are IDENTICAL to coworker-types.yaml — only the spine source and the
-# default_config differ between the two variants.
+# The roster and per-role command_allowlist match coworker-types.yaml; this variant
+# additionally OMITS every approvals.deny (per-type + default_config) so the render's
+# INSERT of the deny floor is genuinely proven. The spine source and default_config
+# also differ between the two variants.
 types:
   builder:
     extends: [base]
