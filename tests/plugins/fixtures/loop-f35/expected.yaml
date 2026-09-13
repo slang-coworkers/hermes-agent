@@ -1,11 +1,7 @@
-# FROZEN expected outcomes for the LOOP-F35 acceptance test — architect-owned.
-# The builder makes nv-coworker-compose RENDER to satisfy this; it does NOT edit this
-# file, EXCEPT the one GOV-F23-driven relocation below (PENDING ARCHITECT RE-FREEZE):
-# the eight fleet-uniform approval keys moved from profile-local to machine-wide
-# managed scope, so coworker_config no longer lists them (they are asserted instead by
-# GOV-F23 AC-1/AC-3). The reviewer confirmed the substance is correct and no LOOP-F35
-# assertion was weakened; the architect should re-issue the frozen expectation to
-# re-baseline this cross-requirement edit.
+# Architect-owned expected outcomes for the LOOP-F35 acceptance test — the builder
+# makes nv-coworker-compose RENDER to satisfy this. Fleet-uniform approval keys are
+# managed-scope invariants (asserted by GOV-F23 AC-1/AC-3), not part of this
+# profile-local mapping.
 
 profiles: [default, orchestrator, reviewer, fixer]
 default_profile: default
