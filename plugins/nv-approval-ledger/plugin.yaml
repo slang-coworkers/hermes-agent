@@ -1,0 +1,16 @@
+manifest_version: 1
+name: nv-approval-ledger
+version: 0.1.0
+kind: standalone
+description: >-
+  Immutable fleet approval-decision ledger. Writer-gated agent decisions
+  (provenance=agent_verified, first-write-wins per repo/pr/commit) and human
+  PR-review verdicts (provenance=human) recorded through exactly one door — the
+  pull_request_review webhook observed by pre_gateway_dispatch — read only via
+  list_trusted_decisions.
+provides_tools:
+  - record_decision
+  - record_human_verdict
+  - list_trusted_decisions
+provides_hooks:
+  - pre_gateway_dispatch
