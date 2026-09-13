@@ -70,8 +70,10 @@ There are no `fixtures:` to install. Everything below is the scenario's own setu
    test -f "$S/rendered/managed/config.yaml"          # the rendered fleet-uniform fragment
    ```
    → the worker `config.yaml` carries `command_allowlist: [git clean -fd*, git reset --hard*]`
-   and `approvals.deny: [...]`, carries NONE of the six fleet-uniform approvals
-   keys, and carries `terminal.backend: docker` with `docker_mount_cwd_to_workspace: true`;
+   and the render-ENFORCED 12-glob `approvals.deny` floor (the spec omits deny; the
+   render writes `_GOV_APPROVALS_DENY_FLOOR`), carries NONE of the eight fleet-uniform
+   keys (the six `approvals.*` plus the two `security.approval.*`), and carries
+   `terminal.backend: docker` with `docker_mount_cwd_to_workspace: true`;
    `rendered/managed/config.yaml` carries `approvals.single_query_mode: deny`.
 3. Install the rendered worker as `gov-f23-worker` (basename cannot collide with a
    T-suite bot) and install the rendered managed fragment into the testbed managed

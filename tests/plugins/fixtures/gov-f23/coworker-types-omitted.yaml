@@ -1,8 +1,9 @@
-# GOV-F23 compose input — omitted variant. Same roster and per-role config as
-# coworker-types.yaml, but the input OMITS every fleet-uniform approvals key
-# (spine base-omitted.yaml + this default_config) AND omits the DEFAULT top-level
-# command_allowlist — so the GOV-F23 render must INSERT the approvals invariants
-# and leave the DEFAULT allowlist empty. Only a VALID compose INPUT is required.
+# GOV-F23 compose input — omitted variant. Same roster and per-role
+# command_allowlist as coworker-types.yaml, but the input OMITS every fleet-uniform
+# key (spine base-omitted.yaml + this default_config), omits EVERY approvals.deny
+# (per-role + DEFAULT), and omits the DEFAULT top-level command_allowlist — so the
+# GOV-F23 render must INSERT the approvals invariants and the deny floor and leave
+# the DEFAULT allowlist empty. Only a VALID compose INPUT is required.
 project: demo
 default_profile: default
 orchestrator_profile: reviewer
@@ -24,8 +25,6 @@ types:
     identity: "BUILDER-IDENTITY"
     skills: ["fix-skill"]
     config:
-      # builder OMITS approvals.deny — the render must INSERT the force-push/tag/
-      # release floor (GOV-F23). AC-2 asserts the inserted floor.
       command_allowlist: ["rm -rf build", "git reset --hard*"]
     ui_meta: {title: "Builder", description: "Implementer", shape: "square"}
   reviewer:
@@ -37,10 +36,6 @@ types:
     overlays: ["critique-gate"]
     config:
       command_allowlist: ["git clean -fdx"]
-      # reviewer declares a role-specific EXTRA deny beyond the floor — the render
-      # UNIONs it AFTER the force-push/tag/release floor (preserved, not replaced).
-      approvals:
-        deny: ["docker system prune*"]
     ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
 
 rooms:
@@ -48,13 +43,12 @@ rooms:
     name: "Fleet"
     members: [builder, reviewer]
 
-# DEFAULT (multiplexer) profile — OMITS the six fleet-uniform approvals keys and
-# the top-level command_allowlist; keeps only the multiplex config, the
-# approvals.deny floor, and sessions.auto_prune:false.
+# DEFAULT (multiplexer) profile — OMITS the eight fleet-uniform keys, the top-level
+# command_allowlist AND approvals.deny; keeps only the multiplex config and
+# sessions.auto_prune:false. The render must INSERT the deny floor (AC-2) and force
+# the allowlist empty.
 default_config:
   gateway:
     multiplex_profiles: true
     multiplex_profile_allowlist: ["builder", "reviewer"]
-  # OMITS approvals.deny — the render must INSERT the force-push/tag/release floor
-  # on the DEFAULT profile too (the in-gateway fail-safe layer); AC-2 asserts it.
   sessions: {auto_prune: false}

@@ -1,9 +1,8 @@
 # GOV-F23 compose input — shared spine parent for every coworker type (UNSAFE).
-# The six fleet-uniform approvals keys are set to UNSAFE values here so the
-# GOV-F23 render must STRIP them from every rendered profile config and pin the
-# fleet-safe values only in the machine-wide managed fragment (out_root/managed/
-# config.yaml) — the disjoint immutability split. Per-role command_allowlist /
-# approvals.deny are declared in
+# The eight fleet-uniform keys (six approvals.* + two security.approval.*) are set
+# to UNSAFE values here so the GOV-F23 render must STRIP each (they live only in the
+# managed fragment) on every profile via the extends chain. Per-role
+# command_allowlist / approvals.deny are declared in
 # each type's config: block (the deep-merge channel), NEVER via a traits: entry —
 # so this spine carries NO traits block. A trait binding would clobber the
 # config leaf at the end of _resolve_type (trait application), overwriting the
@@ -16,7 +15,7 @@ workflows: ["hermes-verify"]
 config:
   timezone: "Asia/Kolkata"
   # Retention keys are NOT the GOV-F23 toggle; they are present and identical in
-  # both spine variants so the only difference is the six approvals keys.
+  # both spine variants so the only difference is the eight fleet-uniform keys.
   sessions: {auto_prune: true, auto_archive: false}
   compression: {in_place: false}
   checkpoints: {auto_prune: true}
@@ -28,8 +27,9 @@ config:
     docker_mount_cwd_to_workspace: true
     docker_image: "hermes-sandbox:pinned"
     docker_volumes: []
-  # The six fleet-uniform approvals keys, UNSAFE. Both coworkers inherit these
-  # via extends: [base], so they appear in each resolved config.
+  # The six approvals.* fleet-uniform keys, UNSAFE. Both coworkers inherit these
+  # via extends: [base], so they appear in each resolved config and the render must
+  # STRIP them (they live only in the managed fragment).
   approvals:
     mode: "off"
     timeout: 30
@@ -37,6 +37,13 @@ config:
     single_query_mode: "approve"
     unattended_mode: "approve"
     denial_breaker_threshold: 0
+  # The two security.approval.* fleet-uniform keys, UNSAFE (transport_fallback
+  # "builtin" is the fail-OPEN value the managed fragment pins to "deny"). Declared
+  # so the render's 8-key strip is non-vacuous for the inheriting coworkers (AC-3).
+  security:
+    approval:
+      transport: "fixture-unsafe"
+      transport_fallback: "builtin"
   agent:
     disabled_toolsets: []
   plugins:
