@@ -25,9 +25,12 @@ types:
     extends: [live-base]
     identity: "You are a GOV-F23 single-query worker. When asked to run a shell command, use your terminal/shell tool to run exactly the command requested."
     config:
+      # The worker OMITS approvals.deny — the render INSERTS the order-tolerant
+      # force-push/tag/release floor (GOV-F23) into the worker AND
+      # the orchestrator, so the delivered live worker carries a +refspec-safe
+      # force-push backstop. command_allowlist deliberately EXCLUDES the AC-6 probe
+      # `rm -rf gov-f23-victim` so it reaches the single_query_mode=deny branch.
       command_allowlist: ["git clean -fd*", "git reset --hard*"]
-      approvals:
-        deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
     ui_meta: {title: "Worker", description: "GOV-F23 single-query worker", shape: "square"}
   gov-f23-orchestrator:
     extends: [live-base]

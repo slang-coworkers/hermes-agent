@@ -24,9 +24,9 @@ types:
     identity: "BUILDER-IDENTITY"
     skills: ["fix-skill"]
     config:
+      # builder OMITS approvals.deny — the render must INSERT the force-push/tag/
+      # release floor (GOV-F23). AC-2 asserts the inserted floor.
       command_allowlist: ["rm -rf build", "git reset --hard*"]
-      approvals:
-        deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
     ui_meta: {title: "Builder", description: "Implementer", shape: "square"}
   reviewer:
     extends: [base]
@@ -37,8 +37,10 @@ types:
     overlays: ["critique-gate"]
     config:
       command_allowlist: ["git clean -fdx"]
+      # reviewer declares a role-specific EXTRA deny beyond the floor — the render
+      # UNIONs it AFTER the force-push/tag/release floor (preserved, not replaced).
       approvals:
-        deny: ["git push --force*", "git tag *", "gh release *"]
+        deny: ["docker system prune*"]
     ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
 
 rooms:
@@ -53,6 +55,6 @@ default_config:
   gateway:
     multiplex_profiles: true
     multiplex_profile_allowlist: ["builder", "reviewer"]
-  approvals:
-    deny: ["git push --force*", "git push -f*", "git tag *", "gh release *"]
+  # OMITS approvals.deny — the render must INSERT the force-push/tag/release floor
+  # on the DEFAULT profile too (the in-gateway fail-safe layer); AC-2 asserts it.
   sessions: {auto_prune: false}

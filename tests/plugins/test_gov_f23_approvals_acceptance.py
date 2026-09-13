@@ -17,6 +17,11 @@ skills/workflows/overlays tree), per the ADR §Acceptance test.
 from __future__ import annotations
 
 import copy
+import json
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -52,27 +57,57 @@ APPROVALS_MANAGED = {
 }
 _RESOLVER_KEYS = ("cron_mode", "single_query_mode", "unattended_mode")
 
-# Per-role values the fixture declares for its two coworker types (exact-equality
-# asserted in AC-2). TWO roles with DIFFERENT allowlists prove per-role binding —
-# a shared blanket or a permissive ["*"] would fail. Allowlist entries are commands
-# the dangerous-command detector flags (so the bypass is meaningful); the deny
-# floor is force-push / tag verbs that must never run unattended.
-# The deny floor covers force-push, tag AND release verbs (the row's
-# "git push --force*, release and tag verbs").
+# The order-tolerant force-push / tag / release deny floor the render ENFORCES on
+# EVERY rendered profile (GOV-F23). Hardcoded here, NOT imported from the plugin
+# (keeps the test non-circular). Rules are matched with fnmatch.fnmatchcase against
+# the WHOLE normalized command (approval.py:818-822), so each pattern is
+# order-tolerant. Every force-push token is pinned as a SEPARATE argument via a
+# leading space (' --forc', ' -f', ' [+]'), so a benign branch name that merely
+# contains the token is NOT denied (asserted in AC-4).
+FORCE_PUSH_DENY_FLOOR = [
+    "git *push* --forc*",
+    "git *push* -f",
+    "git *push* -f *",
+    "git *push* [+]*",
+    "git tag *",
+    "gh release *",
+]
+# Per-role values the fixture declares. TWO roles with DIFFERENT command_allowlists
+# prove per-role binding (a shared blanket / permissive ["*"] would fail). For the
+# deny floor: builder OMITS approvals.deny (the render INSERTS the floor); reviewer
+# declares a role-specific EXTRA the render UNIONs AFTER the floor (preserved).
 BUILDER_ALLOWLIST = ["rm -rf build", "git reset --hard*"]
-BUILDER_DENY = ["git push --force*", "git push -f*", "git tag *", "gh release *"]
 REVIEWER_ALLOWLIST = ["git clean -fdx"]
-REVIEWER_DENY = ["git push --force*", "git tag *", "gh release *"]
+REVIEWER_DENY_EXTRA = ["docker system prune*"]
 EXPECTED_COWORKERS = {
-    "builder": (BUILDER_ALLOWLIST, BUILDER_DENY),
-    "reviewer": (REVIEWER_ALLOWLIST, REVIEWER_DENY),
+    "builder": (BUILDER_ALLOWLIST, list(FORCE_PUSH_DENY_FLOOR)),
+    "reviewer": (REVIEWER_ALLOWLIST, [*FORCE_PUSH_DENY_FLOOR, *REVIEWER_DENY_EXTRA]),
 }
-DEFAULT_DENY = ["git push --force*", "git push -f*", "git tag *", "gh release *"]  # the floor rendered on DEFAULT
+DEFAULT_DENY = list(FORCE_PUSH_DENY_FLOOR)  # the floor the render inserts on DEFAULT
 
 # Behavioural probes for AC-4, run against the `builder` role.
 ALLOW_PROBE = "rm -rf build"                  # flagged-dangerous AND in builder's allowlist
 NONALLOW_PROBE = "git clean -fdx"             # flagged-dangerous, NOT in builder's allowlist
-DENY_PROBE = "git push --force origin main"   # matches builder's deny floor "git push --force*"
+DENY_PROBE = "git push --force origin main"   # matches the floor pattern "git *push* --forc*"
+# Force-push variant matrix: every direct force-push form — the +refspec the core
+# detector at approval.py:1227-1228 does not flag, and reordered --force/-f — is
+# user-deny BLOCKED, even under yolo. These whole-command globs are direct-command
+# scoped; a shell-wrapped or compound invocation falls outside them.
+FORCE_PUSH_VARIANTS = [
+    "git push origin +main:main",     # +refspec — not flagged is_dangerous by the core detector
+    "git push origin main --force",   # --force trailing (reordered)
+    "git push --force origin main",   # --force leading
+    "git push origin main -f",        # -f trailing token
+    "git push -f origin main",        # -f leading token
+]
+# Benign pushes whose BRANCH NAME merely CONTAINS a force-push token must NOT be
+# denied — proves every floor pattern pins its token as a separate arg (leading
+# space), not a bare fnmatch substring that would match inside a branch name.
+BENIGN_PUSHES = [
+    "git push origin my-feature",
+    "git push origin feature--forceful",
+    "git push origin feature+perf",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +208,11 @@ def test_ac_gov_f23_2(tmp_path, monkeypatch):
     """Each coworker profile carries its EXACT per-role top-level command_allowlist
     and approvals.deny; the DEFAULT/multiplexer profile carries an EXPLICIT EMPTY
     command_allowlist (the in-gateway floor) and the EXACT approvals.deny floor. Two
-    roles with different allowlists prove per-role binding (not a shared blanket)."""
+    roles with different allowlists prove per-role binding (not a shared blanket).
+    Omission-variant: builder + DEFAULT omit approvals.deny so the
+    render INSERTS the force-push/tag/release floor, reviewer's role-specific extra
+    is UNIONed after it, and EVERY rendered profile is asserted to carry the full
+    floor — run across both spec variants (declared-wrong and omitted)."""
     home = _write_home(tmp_path, monkeypatch)
     loaded = _load(home)
     for i, spec in enumerate(SPEC_VARIANTS):
@@ -212,6 +251,21 @@ def test_ac_gov_f23_2(tmp_path, monkeypatch):
         assert not _dig(default_cfg, "agent.command_allowlist")[0], (
             f"[{spec.name}] DEFAULT: command_allowlist under agent.* (a key with no reader)"
         )
+
+        # omission-variant / floor-presence: EVERY rendered profile
+        # carries an EXPLICIT approvals.deny that CONTAINS the whole force-push/tag/
+        # release floor — whether the spec declared deny (reviewer), omitted it
+        # (builder + DEFAULT), or set it wrong — so a profile can never be delivered
+        # with no force-push backstop.
+        for name, pdir in rendered.items():
+            found_floor, deny_list = _dig(_raw_config(pdir), "approvals.deny")
+            assert found_floor and isinstance(deny_list, list), (
+                f"[{spec.name}] {name}: no explicit approvals.deny floor rendered"
+            )
+            missing = [p for p in FORCE_PUSH_DENY_FLOOR if p not in deny_list]
+            assert not missing, (
+                f"[{spec.name}] {name}: approvals.deny missing floor patterns {missing}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +314,12 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
     the process-global allowlist loaded from the DEFAULT profile's EMPTY allowlist,
     a coworker's would-be-allowlisted verb run in an in-gateway cron context is
     DENIED by cron_mode=deny (and the managed cron_mode=deny overrides a
-    conflicting profile-local cron_mode=approve, proving the overlay wins)."""
+    conflicting profile-local cron_mode=approve, proving the overlay wins).
+    (c) Force-push floor completeness: every force-push form the
+    worker could reach — +refspec (missed by the core detector, approval.py:1227-1228),
+    reordered --force / -f — is user-deny BLOCKED even under yolo-at-launch, while a
+    benign push to a '-f'-containing branch name is NOT blocked (the floor pins -f as
+    a whole token, not the substring -f*)."""
     import tools.approval as ta
     from hermes_cli import managed_scope
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
@@ -321,6 +380,65 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         # deny floor: blocked unconditionally (user_deny), ahead of every bypass
         deny_res = ta.check_all_command_guards(DENY_PROBE, "local")
         assert deny_res["approved"] is False and deny_res.get("user_deny") is True
+        # Force-push variant matrix: every direct force-push form — incl. the
+        # +refspec the core detector MISSES (approval.py:1227-1228) and --force/-f in
+        # ANY argument order — is user-deny BLOCKED at the deny floor (approval.py:4772),
+        # ahead of the single-query detection that never flags +refspec as dangerous.
+        for probe in FORCE_PUSH_VARIANTS:
+            res = ta.check_all_command_guards(probe, "local")
+            assert res["approved"] is False and res.get("user_deny") is True, (
+                f"force-push variant not user-deny blocked: {probe!r} -> {res}"
+            )
+        # No false-positive: a benign push whose branch NAME merely contains a
+        # force-push token is NOT caught by the floor (each pattern pins its token as
+        # a separate arg, not a bare fnmatch substring).
+        for benign in BENIGN_PUSHES:
+            benign_res = ta.check_all_command_guards(benign, "local")
+            assert benign_res.get("user_deny") is not True, (
+                f"benign push wrongly user-deny blocked by the floor: {benign!r} -> {benign_res}"
+            )
+        # Yolo-at-launch: HERMES_YOLO_MODE is FROZEN at import (approval.py:37) and the
+        # autouse conftest scrubs it, so the only faithful test of launch-yolo is a
+        # CHILD process that has the var set BEFORE it imports tools.approval. The deny
+        # check (:4772) runs before the yolo bypass (:4781), so the floor must still
+        # block every force-push variant, while a NON-floor dangerous verb is approved
+        # (proving yolo is genuinely engaged from the launch env).
+        child = textwrap.dedent(
+            """
+            import json, os
+            import tools.approval as ta
+            assert ta._YOLO_MODE_FROZEN is True, "HERMES_YOLO_MODE not frozen from env at import"
+            out = {
+                "nonfloor_approved": ta.check_all_command_guards(os.environ["GOV_NONFLOOR"], "local")["approved"],
+                "fp": {},
+            }
+            for probe in json.loads(os.environ["GOV_FP_PROBES"]):
+                r = ta.check_all_command_guards(probe, "local")
+                out["fp"][probe] = [r["approved"], r.get("user_deny")]
+            print(json.dumps(out))
+            """
+        )
+        child_env = {
+            **os.environ,
+            "HERMES_HOME": str(builder_home),
+            "HERMES_MANAGED_DIR": str(builder_mgd),
+            "HERMES_YOLO_MODE": "1",
+            "HERMES_SINGLE_QUERY_SESSION": "1",
+            "GOV_NONFLOOR": NONALLOW_PROBE,
+            "GOV_FP_PROBES": json.dumps(FORCE_PUSH_VARIANTS),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-c", child], env=child_env, capture_output=True, text=True
+        )
+        assert proc.returncode == 0, f"launch-yolo child failed: {proc.stderr}"
+        ydata = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert ydata["nonfloor_approved"] is True, (
+            f"yolo not engaged at launch — a non-floor dangerous verb was not approved: {ydata}"
+        )
+        for probe, (approved, user_deny) in ydata["fp"].items():
+            assert approved is False and user_deny is True, (
+                f"force-push variant not blocked under launch-yolo: {probe} -> approved={approved}, user_deny={user_deny}"
+            )
         monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION", raising=False)
 
         # (b) in-gateway fail-safe floor: process-global allowlist = DEFAULT (empty);

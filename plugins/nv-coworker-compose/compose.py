@@ -79,6 +79,38 @@ _GOV_APPROVALS_MANAGED: Dict[str, Any] = {
 # type named 'managed' is rejected so its profile dir cannot collide with it.
 _MANAGED_FRAGMENT_DIR = "managed"
 
+# Minimum force-push / tag / release deny floor (GOV-F23). These verbs must never
+# run unattended, so the render ENFORCES this floor on EVERY rendered profile —
+# per-role, DEFAULT and orchestrator — inserting it when the spec omits it and
+# unioning it with any role-declared deny rules. approvals.deny is the one guard
+# layer that fires PRE-detection and even under --yolo (tools/approval.py:4772,
+# BEFORE the yolo / mode=off bypass at :4781), so a profile with no floor has no
+# force-push backstop at all.
+#
+# approvals.deny rules are matched with fnmatch.fnmatchcase against the WHOLE
+# normalized command (tools/approval.py:818-822), so each pattern spans the entire
+# command with leading/trailing '*' and is ORDER-TOLERANT: it matches --force / -f
+# / +refspec force-push in ANY argument order. This complements the core
+# dangerous-command detector (tools/approval.py:1227-1228), which covers only
+# --forc* and -f and MISSES a leading-'+' refspec push (`git push origin
+# +main:main`) — so that form is not is_dangerous and slips past the
+# single_query_mode=deny branch, while this floor blocks it pre-detection.
+#
+# fnmatch has NO word boundary, so every force-push token is pinned as a SEPARATE
+# argument via a leading space in the pattern (' --forc', ' -f', ' [+]'). A bare
+# substring form ('--forc*', '-f*', '[+]*') would over-match a benign branch name
+# that merely CONTAINS the token — `git push origin feature--forceful`,
+# `git push origin my-feature`, `git push origin feature+perf` — none of which is a
+# force push. The leading space requires the token to stand alone as its own arg.
+_FORCE_PUSH_DENY_FLOOR: List[str] = [
+    "git *push* --forc*",   # --force / --force-with-lease / --force-if-includes, any order
+    "git *push* -f",        # -f short flag as the final token
+    "git *push* -f *",      # -f short flag as a non-final token
+    "git *push* [+]*",      # +refspec force-push (git push origin +main:main)
+    "git tag *",            # tag create / delete / move
+    "gh release *",         # gh release create / delete / edit
+]
+
 # Fleet session-mode policy (RT-F03). A session mode is a FLEET-WIDE property:
 # under gateway.multiplex_profiles the gateway builds ONE SessionStore from the
 # single DEFAULT-profile config (gateway/run.py:7474) and hands that same store
@@ -269,6 +301,33 @@ def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
     to the deny resolvers. Written explicitly and never by assumption: a declared
     non-empty allowlist is overwritten rather than trusted."""
     config["command_allowlist"] = []
+
+
+def _enforce_deny_floor(config: Dict[str, Any]) -> None:
+    """Guarantee the force-push/tag/release deny floor on a rendered profile config,
+    unioned with any role-declared ``approvals.deny`` rules.
+
+    The floor is the never-bypassable backstop (it fires before the yolo / mode=off
+    bypass), so it is written on EVERY profile — INSERTING an ``approvals.deny``
+    block when the spec omits it — rather than passed through only when a profile
+    happens to declare one. Role-declared extra rules are preserved (union, not
+    replace): the floor patterns come first, then any declared rule that is not
+    already a floor pattern, de-duplicated. Runs AFTER the fleet-uniform strip so it
+    operates on — and, when the strip pruned an emptied ``approvals`` block,
+    re-creates — the per-profile approvals dict."""
+    approvals = config.get("approvals")
+    if not isinstance(approvals, dict):
+        approvals = {}
+        config["approvals"] = approvals
+    declared = approvals.get("deny")
+    extras = [d for d in declared if d not in _FORCE_PUSH_DENY_FLOOR] if isinstance(declared, list) else []
+    merged: List[str] = []
+    seen: Set[str] = set()
+    for pattern in (*_FORCE_PUSH_DENY_FLOOR, *extras):
+        if pattern not in seen:
+            seen.add(pattern)
+            merged.append(pattern)
+    approvals["deny"] = merged
 
 
 def _build_managed_fragment() -> Dict[str, Any]:
@@ -897,6 +956,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_retention(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
         _strip_fleet_uniform_approvals(resolved["config"])
+        _enforce_deny_floor(resolved["config"])
         _apply_session_mode(resolved["config"], session_flags, is_default=False)
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
@@ -909,6 +969,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_approval_lists(default_config, include_allowlist=False)
     _strip_fleet_uniform_approvals(default_config)
     _force_default_allowlist_empty(default_config)
+    _enforce_deny_floor(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
