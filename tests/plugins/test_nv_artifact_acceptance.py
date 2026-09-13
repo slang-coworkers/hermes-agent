@@ -482,11 +482,6 @@ def test_ac_obs_f48_2(artifact, monkeypatch, capsys):
     assert not ({"merged", "closed", "abandoned"} & set(refused))
 
 
-# ---------------------------------------------------------------------------
-# Additional regression coverage (not new acceptance criteria — the ADR ids
-# are fixed and minted only by the architect).
-# ---------------------------------------------------------------------------
-
 def _fail_wake_sub_until(monkeypatch, mod):
     """Patch the module-level ``_register_wake_sub`` so it fails while
     ``state['fail']`` is True, returning the real function otherwise. Returns the
@@ -647,7 +642,6 @@ def test_remap_task_not_owned_by_target_profile_is_refused(artifact, monkeypatch
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
-    # A session-bound task assigned to someone OTHER than the --to profile.
     other = _bare_card("someone-else", "gh-pr-o-r-7-other")
     with kb.connect() as conn:
         with kb.write_txn(conn):
@@ -656,6 +650,27 @@ def test_remap_task_not_owned_by_target_profile_is_refused(artifact, monkeypatch
     _set_profile(monkeypatch, ORCH_PROFILE)
 
     rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=other, json=True))
+    assert (rc or 0) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]
+
+
+def test_remap_unassigned_task_is_refused(artifact, monkeypatch, capsys):
+    """A session-bound target task with a null/blank assignee is not owned by
+    `--to`, so the remap is refused (never a crash) and ownership is unchanged."""
+    import hermes_cli.kanban_db as kb
+
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    unassigned = _bare_card("new-owner", "gh-pr-o-r-7-unassigned")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=?, assignee=NULL WHERE id=?", ("S-un", unassigned))
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=unassigned, json=True))
     assert (rc or 0) != 0
     assert json.loads(capsys.readouterr().out)["status"] == "refused"
     assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]

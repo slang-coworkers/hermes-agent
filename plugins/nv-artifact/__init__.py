@@ -675,7 +675,6 @@ def _cmd_pr_remap(args):
     to = str(args.to)
     task = getattr(args, "task", None)
 
-    # Resolve the current owner (task + profile), read-only.
     conn = _db(ctx)
     try:
         row = conn.execute(
@@ -701,6 +700,14 @@ def _cmd_pr_remap(args):
 
     from hermes_cli.profiles import normalize_profile_name
 
+    to_norm = normalize_profile_name(to)
+
+    def _norm_or_none(p):
+        try:
+            return normalize_profile_name(p) if p else None
+        except Exception:
+            return None
+
     with _kb_connect(ctx) as kconn:
         srow = kconn.execute(
             "SELECT session_id, assignee FROM tasks WHERE id = ?", (new_task,)
@@ -720,7 +727,8 @@ def _cmd_pr_remap(args):
     # that profile's state.db, so recording `to` while routing to a task owned by
     # a different profile would self-post the wake to /p/<to>/ with a session id
     # that does not exist under <to>'s scope — a misroute / cross-profile orphan.
-    if normalize_profile_name(new_assignee or "") != normalize_profile_name(to):
+    # A missing/blank/invalid assignee is treated as non-matching (never a crash).
+    if _norm_or_none(new_assignee) != to_norm:
         _refuse({"status": "refused", "repo": repo, "pr": pr,
                  "reason": "target task is not owned by the --to profile; refusing a cross-owner task/profile mismatch"}, args)
         return 1
