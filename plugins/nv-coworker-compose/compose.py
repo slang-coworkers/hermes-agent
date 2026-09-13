@@ -136,6 +136,80 @@ _GOV_APPROVALS_DENY_FLOOR: List[str] = [
     "gh -* release *",          # gh release verb behind a gh global option
 ]
 
+# Engage-mode → per-platform gate keys (RT-F02). ``config.engage`` is the plugin's
+# OWN spec vocabulary — a pseudo-key with no core reader — so _render_engage
+# translates it into the concrete keys each platform adapter reads under
+# ``platforms.<p>.extra`` and removes it. This table is fail-closed: a
+# (platform, mode) pair absent here raises CompositionError rather than rendering
+# an unrecognised or unrestricting gate. The key sets DIVERGE per platform because
+# the adapters diverge — Slack carries the full strict/thread/pattern set; Discord
+# has no strict_mention/mention_patterns resolver (so ``pattern`` is unsupported);
+# Telegram is chat-scoped (free_response_chats/allowed_chats) with no strict/thread
+# sticky model (so ``mention-sticky`` is unsupported). ``mention`` keeps sticky OFF
+# (strict + thread both true); ``mention-sticky`` turns it ON (both false), which is
+# what enables Slack's _register_mentioned_thread wake.
+_ALL_ENGAGE_MODES = ("mention", "mention-sticky", "pattern", "always-on")
+
+_ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
+    "slack": {
+        "scope_key": "allowed_channels",
+        "free_response_key": "free_response_channels",
+        # keys that override the scope allowlist (not mode keys): neutralized only
+        # when sender_scope is declared, so a declared scope stays authoritative.
+        # reaction_trigger_target rewrites a reaction turn's channel and can route a
+        # reaction from outside the scope into an allowlisted target (adapter.py:5703).
+        "scope_bypass": {"reaction_trigger_target": ""},
+        "modes": {
+            "mention": {"require_mention": True, "strict_mention": True,
+                        "thread_require_mention": True, "mention_patterns": [],
+                        "free_response_channels": [], "require_mention_channels": []},
+            "mention-sticky": {"require_mention": True, "strict_mention": False,
+                               "thread_require_mention": False, "mention_patterns": [],
+                               "free_response_channels": [], "require_mention_channels": []},
+            "pattern": {"require_mention": True, "strict_mention": True,
+                        "thread_require_mention": True, "mention_patterns": [],
+                        "free_response_channels": [], "require_mention_channels": []},
+            "always-on": {"require_mention": True, "strict_mention": False,
+                          "thread_require_mention": False, "mention_patterns": [],
+                          "free_response_channels": [], "require_mention_channels": []},
+        },
+    },
+    "discord": {
+        "scope_key": "allowed_channels",
+        "free_response_key": "free_response_channels",
+        "scope_bypass": {},  # no config-key allowlist bypass exists (voice-linked free-response is runtime state)
+        "modes": {
+            "mention": {"require_mention": True, "thread_require_mention": True,
+                        "free_response_channels": []},
+            "mention-sticky": {"require_mention": True, "thread_require_mention": False,
+                               "free_response_channels": []},
+            "always-on": {"require_mention": True, "thread_require_mention": False,
+                          "free_response_channels": []},
+        },
+    },
+    "telegram": {
+        "scope_key": "allowed_chats",
+        "free_response_key": "free_response_chats",
+        # guest_mode:true admits an @mention from a chat OUTSIDE allowed_chats
+        # (adapter.py:9853-9855), so it bypasses a declared sender_scope.
+        "scope_bypass": {"guest_mode": False},
+        # free_response_topics is the topic-granularity twin of free_response_chats:
+        # both admit an unmentioned message before the require_mention gate
+        # (adapter.py:9861 before :9863), so it is a mode key reset in every mode.
+        "modes": {
+            "mention": {"require_mention": True, "mention_patterns": [],
+                        "free_response_chats": [], "free_response_topics": [],
+                        "observe_unmentioned_group_messages": False},
+            "pattern": {"require_mention": True, "mention_patterns": [],
+                        "free_response_chats": [], "free_response_topics": [],
+                        "observe_unmentioned_group_messages": False},
+            "always-on": {"require_mention": True, "mention_patterns": [],
+                          "free_response_chats": [], "free_response_topics": [],
+                          "observe_unmentioned_group_messages": False},
+        },
+    },
+}
+
 # Fleet session-mode policy (RT-F03). A session mode is a FLEET-WIDE property:
 # under gateway.multiplex_profiles the gateway builds ONE SessionStore from the
 # single DEFAULT-profile config (gateway/run.py:7474) and hands that same store
@@ -386,6 +460,274 @@ def _build_managed_fragment() -> Dict[str, Any]:
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     return fragment
+def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
+    """Every loader-alias location a controlled key can occupy for ``platform``:
+    root ``<p>``, ``platforms.<p>``, ``gateway.<p>``, ``gateway.platforms.<p>``.
+    The loader bridges values from these locations over ``platforms.<p>.extra`` at
+    load time (gateway/config.py:1676-1809 lifts require_mention/mention_patterns/
+    free_response_channels), so a stale inherited value left in any of them would
+    override the rendered gate — which is why they are all stripped."""
+    nodes: List[Dict[str, Any]] = []
+
+    def _add(node: Any) -> None:
+        if isinstance(node, dict) and not any(node is seen for seen in nodes):
+            nodes.append(node)
+
+    _add(config.get(platform))
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        _add(platforms.get(platform))
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        _add(gateway.get(platform))
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            _add(gplatforms.get(platform))
+    return nodes
+
+
+def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> Set[int]:
+    """Pop ``key`` from every alias location and its nested ``extra`` block. Return
+    the ``id()``s of alias nodes a value was actually removed from, so only a block
+    the strip itself emptied is later pruned — a pre-existing empty noncanonical
+    block must survive for RT-F01's canonical-layout check to reject it."""
+    removed: Set[int] = set()
+    for node in _engage_alias_nodes(config, platform):
+        hit = False
+        if key in node:
+            del node[key]
+            hit = True
+        extra = node.get("extra")
+        if isinstance(extra, dict) and key in extra:
+            del extra[key]
+            hit = True
+        if hit:
+            removed.add(id(node))
+    return removed
+
+
+def _engage_extra_target(config: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    """The canonical write destination ``config["platforms"][<p>]["extra"]``,
+    created as needed. Never replaces an existing block, so unrelated keys (token,
+    enabled, a hand-set extra value, an inherited scope) are preserved."""
+    platforms = config.setdefault("platforms", {})
+    if not isinstance(platforms, dict):
+        raise CompositionError(
+            f"config 'platforms' must be a mapping to render engage keys, "
+            f"got {type(platforms).__name__}")
+    block = platforms.setdefault(platform, {})
+    if not isinstance(block, dict):
+        raise CompositionError(
+            f"config 'platforms.{platform}' must be a mapping, got {type(block).__name__}")
+    extra = block.setdefault("extra", {})
+    if not isinstance(extra, dict):
+        raise CompositionError(
+            f"config 'platforms.{platform}.extra' must be a mapping, got {type(extra).__name__}")
+    return extra
+
+
+def _is_blank_or_wildcard(value: Any) -> bool:
+    """A member meaning "no restriction" to an adapter: a blank/whitespace id or the
+    ``*`` wildcard. An empty allowlist is treated as unrestricted by the resolvers,
+    so such a member silently widens access — blanket-forward."""
+    return str(value).strip() in ("", "*")
+
+
+def _bounded_ids(values: Any, what: str) -> List[Any]:
+    """Validate a bounded, non-wildcard allowlist (always-on channels or
+    sender_scope). Missing/empty, a scalar, or any blank/``*`` member all mean "no
+    restriction" and are refused rather than rendered. Each member must be a string or
+    a non-boolean integer id (Telegram chat ids are numeric); None, a mapping, a float
+    or a bool is refused (bool is an int subclass, so it is excluded explicitly)."""
+    if isinstance(values, str) or not isinstance(values, list) or not values:
+        raise CompositionError(
+            f"{what} must be a non-empty list of ids; empty, missing or a bare "
+            "scalar would blanket-forward (an empty allowlist is unrestricted)")
+    for v in values:
+        if not (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool))):
+            raise CompositionError(
+                f"{what} member {v!r} must be a string or non-boolean integer id")
+    if any(_is_blank_or_wildcard(v) for v in values):
+        raise CompositionError(
+            f"{what} contains a blank or '*' wildcard member (blanket-forward); "
+            "list exact ids")
+    return list(values)
+
+
+def _bounded_patterns(values: Any, platform: str) -> List[str]:
+    """Validate the non-empty pattern list a ``pattern`` mode requires. A blank
+    pattern matches everything, and a syntactically-invalid one is silently dropped
+    by the adapter (degrading ``pattern`` → mention-only), so every element must be
+    a non-empty string that compiles as a regex."""
+    if isinstance(values, str) or not isinstance(values, list) or not values:
+        raise CompositionError(
+            f"engage mode 'pattern' for platform {platform!r} requires a non-empty "
+            "'patterns' list")
+    if any(not isinstance(p, str) or not p.strip() for p in values):
+        raise CompositionError(
+            f"engage mode 'pattern' for platform {platform!r} requires non-empty "
+            "string patterns (a blank pattern matches everything)")
+    for p in values:
+        try:
+            re.compile(p)
+        except re.error as exc:
+            raise CompositionError(
+                f"engage mode 'pattern' for platform {platform!r}: invalid regex {p!r} "
+                f"({exc}) — the adapter would drop it, degrading pattern to mention-only"
+            ) from exc
+    return list(values)
+
+
+def _render_engage(config: Dict[str, Any]) -> None:
+    """Translate the plugin's ``config.engage`` block into the concrete per-platform
+    gate keys the adapters read under ``platforms.<p>.extra``, then remove the inert
+    ``engage`` pseudo-key. Deterministic (canonical reset + alias strip), fail-closed
+    for unsupported platform/mode combinations, and never emits an unrestricting
+    (blanket-forward) gate. Registers no routing hook — engagement stays per-profile
+    adapter config. See website/docs/user-guide/fleet-engage-modes.md."""
+    engage = config.pop("engage", None)
+    if engage is None:
+        return
+    if not isinstance(engage, dict):
+        raise CompositionError(
+            f"engage must be a mapping of platform -> spec, got {type(engage).__name__}")
+    _detach_shared_engage_blocks(config, [str(p) for p in engage])
+    for platform, block in engage.items():
+        _render_engage_platform(config, str(platform), block)
+
+
+def _detach_shared_engage_blocks(config: Dict[str, Any], platform_names: List[str]) -> None:
+    """Give every engage platform block its own dict identity at each loader-alias
+    location, so an in-place render of one platform cannot pollute another that
+    shares the same object via a YAML anchor (``platforms: {slack: &a {...},
+    telegram: *a}`` survives ``_deep_merge``'s subtree-insert path). A deep copy of
+    an already-unique block is value-equal, so a spec without cross-referenced blocks
+    renders identically; copying each block also detaches a shared nested ``extra``."""
+    parents: List[Dict[str, Any]] = [config]
+    platforms = config.get("platforms")
+    if isinstance(platforms, dict):
+        parents.append(platforms)
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        parents.append(gateway)
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            parents.append(gplatforms)
+    for parent in parents:
+        for platform in platform_names:
+            block = parent.get(platform)
+            if isinstance(block, dict):
+                parent[platform] = copy.deepcopy(block)
+
+
+def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -> None:
+    caps = _ENGAGE_CAPS.get(platform)
+    if caps is None:
+        raise CompositionError(
+            f"engage-mode rendering not supported for platform {platform!r}; "
+            "supported: slack, discord, telegram")
+    if not isinstance(block, dict):
+        raise CompositionError(
+            f"engage spec for platform {platform!r} must be a mapping, "
+            f"got {type(block).__name__}")
+
+    # Reject any key outside the engage vocabulary BEFORE reading mode/rendering, so a
+    # misspelled control key (e.g. sender_scpoe) fails closed instead of being silently
+    # dropped — dropping an intended sender_scope would render an unrestricted profile.
+    unknown = set(block) - {"mode", "patterns", "channels", "sender_scope"}
+    if unknown:
+        raise CompositionError(
+            f"config.engage.{platform} has unknown key(s): "
+            f"{', '.join(sorted(repr(k) for k in unknown))}; "
+            "supported: mode, patterns, channels, sender_scope")
+
+    mode = block.get("mode")
+    modes = caps["modes"]
+    # isinstance guard first: a non-string mode (e.g. a YAML list) is unhashable
+    # and ``in`` would raise TypeError instead of failing closed.
+    if not isinstance(mode, str) or mode not in _ALL_ENGAGE_MODES:
+        raise CompositionError(
+            f"unknown engage mode {mode!r} for platform {platform!r}; "
+            f"supported modes: {', '.join(_ALL_ENGAGE_MODES)}")
+    if mode not in modes:
+        raise CompositionError(
+            f"engage mode {mode!r} not supported for platform {platform!r}; "
+            f"supported for {platform}: {', '.join(modes)}")
+
+    canonical = copy.deepcopy(modes[mode])
+    if mode == "pattern":
+        canonical["mention_patterns"] = _bounded_patterns(block.get("patterns"), platform)
+    elif mode == "always-on":
+        canonical[caps["free_response_key"]] = _bounded_ids(
+            block.get("channels"),
+            f"engage always-on channels for platform {platform!r}")
+
+    # Strip every controlled key (the union of the platform's mode-dict keys) from
+    # ALL aliases, then write the canonical set to platforms.<p>.extra so nothing
+    # bridges over it at load time. update() preserves unrelated keys in that extra.
+    controlled = {key for md in modes.values() for key in md}
+    stripped: Set[int] = set()
+    for key in controlled:
+        stripped |= _strip_engage_key(config, platform, key)
+    target = _engage_extra_target(config, platform)
+    target.update(canonical)
+
+    # Scope + scope-bypass keys are handled apart from the mode keys, and ONLY when the
+    # coworker declares sender_scope: the scope key (allowed_channels/allowed_chats) and
+    # each per-platform bypass key (a key that overrides the scope allowlist — Telegram
+    # guest_mode, Slack reaction_trigger_target) are stripped from every alias and written
+    # to their neutral value, making the declared scope authoritative. When sender_scope
+    # is OMITTED both are left ENTIRELY UNTOUCHED (ADR §Design §3.2): a canonical bypass
+    # value stays active (the operator's explicit choice, with no declared scope to widen),
+    # and a bypass left only at a noncanonical alias is NOT relocated — RT-F01's
+    # _require_canonical_platform_layout rejects the surviving noncanonical block
+    # (fail-closed), so it is never silently relocated to canonical and activated.
+    if "sender_scope" in block:
+        scope = _bounded_ids(
+            block.get("sender_scope"),
+            f"engage sender_scope for platform {platform!r}")
+        scope_key = caps["scope_key"]
+        stripped |= _strip_engage_key(config, platform, scope_key)
+        target[scope_key] = scope
+        for bkey, breset in caps.get("scope_bypass", {}).items():
+            stripped |= _strip_engage_key(config, platform, bkey)
+            target[bkey] = copy.deepcopy(breset)
+
+    _prune_vacuous_noncanonical(config, platform, stripped)
+
+
+def _is_vacuous_platform_block(block: Any) -> bool:
+    """A platform block the engage strip emptied: no keys, or only an empty
+    ``extra`` mapping."""
+    if not isinstance(block, dict):
+        return False
+    if not block:
+        return True
+    return set(block) == {"extra"} and isinstance(block.get("extra"), dict) and not block["extra"]
+
+
+def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str, stripped_ids: Set[int]) -> None:
+    """Remove a NONCANONICAL platform alias (root ``<p>``, ``gateway.<p>``,
+    ``gateway.platforms.<p>``) ONLY when the controlled-key strip is what emptied it
+    (its ``id()`` is in ``stripped_ids``), so it does not trip RT-F01's
+    ``_require_canonical_platform_layout``. A pre-existing empty block, a block still
+    carrying unrelated config, and the canonical ``platforms.<p>`` are all left for
+    RT-F01 to reject — pruning any of them would weaken that check."""
+    def _prune(parent: Any) -> None:
+        if not isinstance(parent, dict):
+            return
+        block = parent.get(platform)
+        if (isinstance(block, dict) and id(block) in stripped_ids
+                and _is_vacuous_platform_block(block)):
+            parent.pop(platform, None)
+
+    _prune(config)
+    gateway = config.get("gateway")
+    if isinstance(gateway, dict):
+        _prune(gateway)
+        gplatforms = gateway.get("platforms")
+        if isinstance(gplatforms, dict):
+            _prune(gplatforms)
 
 
 def _require_canonical_profile_names(
@@ -1003,6 +1345,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _validate_approval_lists(resolved["config"], include_allowlist=True)
         _strip_fleet_uniform_approvals(resolved["config"])
         _enforce_deny_floor(resolved["config"])
+        _render_engage(resolved["config"])
         _apply_session_mode(resolved["config"], session_flags, is_default=False)
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
@@ -1016,6 +1359,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _strip_fleet_uniform_approvals(default_config)
     _force_default_allowlist_empty(default_config)
     _enforce_deny_floor(default_config)
+    _render_engage(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
