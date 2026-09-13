@@ -388,7 +388,7 @@ def test_ac_rt_f02_3(loaded, tmp_path):
 
 # ── AC-RT-F02-4 ──────────────────────────────────────────────────────────────────
 def test_ac_rt_f02_4(loaded, tmp_path):
-    """AC-RT-F02-4: The plugin registers no `pre_gateway_dispatch` (routing) hook, and the render fails closed with `CompositionError` on: an `always-on` spec with no bounded channels (empty, missing, scalar `"*"`, or any list containing a `"*"` element — blanket-forward), a declared `sender_scope` that is empty / scalar `"*"` / any list containing a `"*"` element (silently widens access), `pattern` on Discord (no `mention_patterns`), `mention-sticky` on Telegram (no sticky model), `pattern` without `patterns`, an unknown mode, and any unsupported platform."""
+    """AC-RT-F02-4: The plugin registers no `pre_gateway_dispatch` (routing) hook, and the render fails closed with `CompositionError` on: an `always-on` spec with no bounded channels (empty, missing, scalar `"*"`, or any list containing a `"*"` element — blanket-forward), a declared `sender_scope` that is empty / scalar `"*"` / any list containing a `"*"` element (silently widens access), `pattern` on Discord (no `mention_patterns`), `mention-sticky` on Telegram (no sticky model), `pattern` without `patterns`, an unknown mode, an engage block carrying a key outside {`mode`, `patterns`, `channels`, `sender_scope`} (e.g. a misspelled `sender_scpoe` that would otherwise silently drop the intended `sender_scope`), and any unsupported platform."""
     module, entry = loaded
 
     assert "pre_gateway_dispatch" not in entry.hooks_registered
@@ -412,6 +412,13 @@ def test_ac_rt_f02_4(loaded, tmp_path):
     _reject({"slack": {"mode": "mention", "sender_scope": "*"}}, "scope_wildcard_scalar")
     _reject({"slack": {"mode": "mention", "sender_scope": ["*"]}}, "scope_wildcard")
     _reject({"slack": {"mode": "mention", "sender_scope": ["C9", "*"]}}, "scope_wildcard_member")
+
+    # an unknown/misspelled engage-block key is rejected, and the error names the offending
+    # key — a silently-ignored `sender_scpoe` would drop the intended scope with no error
+    with pytest.raises(module.CompositionError, match=r"sender_scpoe"):
+        _render(module, tmp_path,
+                _spec_with_engage({"slack": {"mode": "mention", "sender_scpoe": ["C9"]}}),
+                "unknown_engage_key")
 
 
 # ── AC-RT-F02-5 ──────────────────────────────────────────────────────────────────
@@ -510,7 +517,9 @@ def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     (an empty adapter allowlist == unrestricted), a blank OR syntactically-invalid
     pattern (the adapter drops an un-compilable regex, degrading pattern→mention-only),
     and a non-string mode all fail closed with CompositionError, not just the ``*``
-    wildcard the criterion enumerates."""
+    wildcard the criterion enumerates. A member that is not a string or non-boolean
+    integer (None, a mapping, a float, a bool) is refused; a non-boolean integer id
+    (a Telegram numeric chat id) is accepted and rendered."""
     module, _entry = loaded
 
     def _reject(engage: dict, tag: str):
@@ -530,6 +539,18 @@ def test_render_engage_rejects_blank_and_whitespace_members(loaded, tmp_path):
     # invalid regexes must fail here because the adapter silently drops them
     _reject({"slack": {"mode": "pattern", "patterns": ["("]}}, "pat_invalid_regex")
     _reject({"telegram": {"mode": "pattern", "patterns": ["ok", "a["]}}, "tg_pat_invalid_regex")
+
+    # bool is an int subclass, so cover it explicitly.
+    _reject({"slack": {"mode": "mention", "sender_scope": [None]}}, "scope_none")
+    _reject({"slack": {"mode": "mention", "sender_scope": [{}]}}, "scope_mapping")
+    _reject({"slack": {"mode": "mention", "sender_scope": [True]}}, "scope_bool")
+    _reject({"slack": {"mode": "always-on", "channels": [1.5]}}, "chan_float")
+
+    # a non-boolean integer id (a Telegram numeric chat id) is accepted and rendered
+    out = _render(module, tmp_path,
+                  _spec_with_engage({"telegram": {"mode": "always-on", "channels": [-1001234567890]}}),
+                  "numeric_id")
+    assert _extra(_worker_config(out), "telegram")["free_response_chats"] == [-1001234567890]
 
 
 def test_render_engage_alias_strip_prunes_noncanonical_preserves_canonical(loaded, tmp_path):
@@ -604,13 +625,11 @@ def test_render_engage_noncanonical_alias_with_unrelated_field_raises(loaded, tm
     and trip _require_canonical_platform_layout with CompositionError — pruning it would
     let a noncanonical platform key slip past RT-F01.
 
-    Pre-existing EMPTY noncanonical blocks ({} / {"extra": {}}) are no longer asserted
-    here: on the merged base RT-F03's session render (_mirror_and_strip_platform_flags ->
-    _prune_empty) removes an empty noncanonical block before RT-F01's
-    _require_canonical_platform_layout runs, so it never reaches RT-F01. That is a harmless
-    base behavior (an empty block carries no bypass value, no port, no route); the eroded
-    RT-F01 empty-block defense-in-depth is flagged to the Orchestrator as a candidate
-    future RT-F03 tidy-up, not fixed here (architect ruling R-6/B1)."""
+    This asserts only content-bearing noncanonical blocks: an empty noncanonical block
+    ({} / {"extra": {}}) is absorbed by the session render's _prune_empty before
+    _require_canonical_platform_layout, so it never reaches RT-F01. An empty block carries
+    no bypass value, no port and no route, so fail-closed for real bypass values is
+    unaffected."""
     module, _entry = loaded
     for alias in (
         # unrelated field present → block is non-vacuous, survives every prune, must raise

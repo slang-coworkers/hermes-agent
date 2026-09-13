@@ -337,11 +337,17 @@ def _is_blank_or_wildcard(value: Any) -> bool:
 def _bounded_ids(values: Any, what: str) -> List[Any]:
     """Validate a bounded, non-wildcard allowlist (always-on channels or
     sender_scope). Missing/empty, a scalar, or any blank/``*`` member all mean "no
-    restriction" and are refused rather than rendered."""
+    restriction" and are refused rather than rendered. Each member must be a string or
+    a non-boolean integer id (Telegram chat ids are numeric); None, a mapping, a float
+    or a bool is refused (bool is an int subclass, so it is excluded explicitly)."""
     if isinstance(values, str) or not isinstance(values, list) or not values:
         raise CompositionError(
             f"{what} must be a non-empty list of ids; empty, missing or a bare "
             "scalar would blanket-forward (an empty allowlist is unrestricted)")
+    for v in values:
+        if not (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool))):
+            raise CompositionError(
+                f"{what} member {v!r} must be a string or non-boolean integer id")
     if any(_is_blank_or_wildcard(v) for v in values):
         raise CompositionError(
             f"{what} contains a blank or '*' wildcard member (blanket-forward); "
@@ -425,6 +431,16 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
         raise CompositionError(
             f"engage spec for platform {platform!r} must be a mapping, "
             f"got {type(block).__name__}")
+
+    # Reject any key outside the engage vocabulary BEFORE reading mode/rendering, so a
+    # misspelled control key (e.g. sender_scpoe) fails closed instead of being silently
+    # dropped — dropping an intended sender_scope would render an unrestricted profile.
+    unknown = set(block) - {"mode", "patterns", "channels", "sender_scope"}
+    if unknown:
+        raise CompositionError(
+            f"config.engage.{platform} has unknown key(s): "
+            f"{', '.join(sorted(repr(k) for k in unknown))}; "
+            "supported: mode, patterns, channels, sender_scope")
 
     mode = block.get("mode")
     modes = caps["modes"]
