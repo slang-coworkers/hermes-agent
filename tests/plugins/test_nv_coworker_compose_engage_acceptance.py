@@ -174,10 +174,19 @@ def _worker_config(out: Path) -> dict:
     return _read_yaml(out / "worker" / "config.yaml")
 
 
+# RT-F03's session-mode render (compose.py `_mirror_and_strip_platform_flags`) injects these
+# two session-bucketing keys into EVERY canonical platforms.<p>.extra independent of engage
+# mode; RT-F02's engage criteria are about engage keys, so they are dropped from the compared
+# .extra to keep the exact-equality scoped to engage keys while still catching any OTHER
+# unexpected leak. Filtered by NAME because the injected values vary by session mode.
+_SESSION_FLAG_KEYS = frozenset({"group_sessions_per_user", "thread_sessions_per_user"})
+
+
 def _extra(cfg: dict, platform: str) -> dict:
     # the rendered PlatformConfig.extra via the REAL core parser (gateway/config.py:724)
     from gateway.config import PlatformConfig
-    return dict(PlatformConfig.from_dict(cfg.get("platforms", {}).get(platform, {})).extra)
+    e = dict(PlatformConfig.from_dict(cfg.get("platforms", {}).get(platform, {})).extra)
+    return {k: v for k, v in e.items() if k not in _SESSION_FLAG_KEYS}
 
 
 def _has_aiohttp() -> bool:
@@ -589,23 +598,25 @@ def test_render_engage_alias_strip_prunes_noncanonical_preserves_canonical(loade
 
 
 def test_render_engage_noncanonical_alias_with_unrelated_field_raises(loaded, tmp_path):
-    """The prune does not weaken RT-F01. The prune fires ONLY on a noncanonical block
-    the controlled-key strip itself emptied, so two kinds of block must survive it and
-    trip _require_canonical_platform_layout with CompositionError: a block carrying an
-    unrelated (non-controlled) field the strip never touches, and a pre-existing empty
-    ({} / {"extra": {}}) block the strip also never touches. Pruning either would let a
-    noncanonical platform key slip past RT-F01."""
+    """The prune does not weaken RT-F01. _render_engage's own prune fires ONLY on a
+    noncanonical block the controlled-key strip itself emptied, so a noncanonical block
+    carrying an unrelated (non-controlled) field the strip never touches must survive it
+    and trip _require_canonical_platform_layout with CompositionError — pruning it would
+    let a noncanonical platform key slip past RT-F01.
+
+    Pre-existing EMPTY noncanonical blocks ({} / {"extra": {}}) are no longer asserted
+    here: on the merged base RT-F03's session render (_mirror_and_strip_platform_flags ->
+    _prune_empty) removes an empty noncanonical block before RT-F01's
+    _require_canonical_platform_layout runs, so it never reaches RT-F01. That is a harmless
+    base behavior (an empty block carries no bypass value, no port, no route); the eroded
+    RT-F01 empty-block defense-in-depth is flagged to the Orchestrator as a candidate
+    future RT-F03 tidy-up, not fixed here (architect ruling R-6/B1)."""
     module, _entry = loaded
     for alias in (
-        # unrelated field present → block is non-vacuous, must survive
+        # unrelated field present → block is non-vacuous, survives every prune, must raise
         {"slack": {"token": "t"}},
         {"gateway": {"slack": {"token": "t"}}},
         {"gateway": {"platforms": {"slack": {"token": "t"}}}},
-        # Pre-existing empty blocks were not emptied by the strip, so RT-F01 must reject them.
-        {"slack": {}},
-        {"slack": {"extra": {}}},
-        {"gateway": {"slack": {}}},
-        {"gateway": {"platforms": {"slack": {"extra": {}}}}},
     ):
         with pytest.raises(module.CompositionError):
             _render(module, tmp_path,
