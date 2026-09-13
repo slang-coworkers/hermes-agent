@@ -474,3 +474,124 @@ def test_ac_obs_f48_2(artifact, monkeypatch, capsys):
     refused = json.loads(capsys.readouterr().out or "{}")
     assert refused.get("status") == "refused"
     assert not ({"merged", "closed", "abandoned"} & set(refused))
+
+
+# ---------------------------------------------------------------------------
+# Regression coverage for CODE_REVIEW round-2 findings (not new acceptance
+# criteria — the ADR ids are fixed and minted only by the architect).
+# ---------------------------------------------------------------------------
+
+def _fail_wake_sub_until(monkeypatch, mod):
+    """Patch the module-level ``_register_wake_sub`` so it fails while
+    ``state['fail']`` is True, returning the real function otherwise. Returns the
+    ``state`` dict (flip ``fail`` to False to let a retry succeed). Mirrors the
+    module-symbol patch in test_ac_gov_f25_5 (avoids monkeypatch.undo(), which
+    would also undo the fixture's HERMES_HOME setenv on the shared instance)."""
+    real = mod._register_wake_sub
+    state = {"fail": True}
+    monkeypatch.setattr(
+        mod, "_register_wake_sub",
+        lambda *a, **k: False if state["fail"] else real(*a, **k),
+        raising=True,
+    )
+    return state
+
+
+def test_claim_registration_atomic(artifact, monkeypatch):
+    """R1-2: a claim whose durable-wake-route registration fails commits NO
+    ownership row (no route-less claim is ever visible) and installs no sub; a
+    webhook for the still-unclaimed PR routes normally with no orphan enqueue; a
+    retry with a working route claims, installs exactly one sub, and the next
+    webhook is deliverable onto it."""
+    mod = artifact.loaded.module
+    state = _fail_wake_sub_until(monkeypatch, mod)
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    out = _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                          "session_id": "S1", "profile": OWNER_PROFILE})
+    assert out["status"] == "error"
+    assert _ownership(artifact.root, repo="o/r", pr=7) == []   # nothing claimed
+    assert _wake_subs(card) == []                              # no route installed
+    # The PR is still UNCLAIMED, so its webhook routes normally (returns None) and
+    # enqueues nothing — there is no stranded, undeliverable event.
+    assert artifact.manager.invoke_hook(
+        "pre_gateway_dispatch", event=_webhook_event("D1"), gateway=None, session_store=None) == []
+    assert _notification_payloads(card) == []
+
+    state["fail"] = False
+    assert _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                           "session_id": "S1", "profile": OWNER_PROFILE})["status"] == "claimed"
+    assert _wake_subs(card) == [("api_server", OWNER_PROFILE, "wake", "durable")]
+    # A webhook injected after the successful retry is deliverable onto the sub.
+    assert artifact.manager.invoke_hook(
+        "pre_gateway_dispatch", event=_webhook_event("D2"), gateway=None, session_store=None) == [{"action": "skip"}]
+    assert len(_notification_payloads(card)) == 1
+
+
+def test_refresh_registration_atomic(artifact, monkeypatch):
+    """R1-2: a same-holder refresh whose route registration fails does NOT change
+    the visible task_id (the prior route/ownership stay intact); a working retry
+    refreshes."""
+    card_a = _bare_card(OWNER_PROFILE, "gh-pr-o-r-9")
+    assert _dispatch("report_pr_created", {"repo": "o/r", "pr": 9, "task_id": card_a,
+                                           "session_id": "S9", "profile": OWNER_PROFILE})["status"] == "claimed"
+    mod = artifact.loaded.module
+    state = _fail_wake_sub_until(monkeypatch, mod)
+    card_b = _bare_card(OWNER_PROFILE, "gh-pr-o-r-9-b")
+    out = _dispatch("report_pr_created", {"repo": "o/r", "pr": 9, "task_id": card_b,
+                                          "session_id": "S9", "profile": OWNER_PROFILE})
+    assert out["status"] == "error"
+    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_a, OWNER_PROFILE)]  # unchanged
+
+    state["fail"] = False
+    assert _dispatch("report_pr_created", {"repo": "o/r", "pr": 9, "task_id": card_b,
+                                           "session_id": "S9", "profile": OWNER_PROFILE})["status"] == "refreshed"
+    assert _ownership(artifact.root, repo="o/r", pr=9) == [("o/r", 9, card_b, OWNER_PROFILE)]
+
+
+def test_remap_registration_atomic(artifact, monkeypatch):
+    """R1-2: a remap to an owner WITH a bound session whose route registration
+    fails leaves ownership unchanged; a working retry re-points."""
+    import hermes_cli.kanban_db as kb
+
+    card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
+    _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
+                                    "session_id": "S1", "profile": OWNER_PROFILE})
+    card2 = _bare_card("new-owner", "gh-pr-o-r-7-remap")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S2", card2))
+    remap = artifact.manager._cli_commands["pr"]["handler_fn"]
+    _set_profile(monkeypatch, ORCH_PROFILE)
+    mod = artifact.loaded.module
+    state = _fail_wake_sub_until(monkeypatch, mod)
+
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
+    assert (rc or 0) != 0
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card, OWNER_PROFILE)]  # unchanged
+
+    state["fail"] = False
+    rc = remap(SimpleNamespace(pr_command="remap", repo="o/r", pr=7, to="new-owner", task=card2, json=True))
+    assert (rc or 0) == 0
+    assert _ownership(artifact.root, repo="o/r", pr=7) == [("o/r", 7, card2, "new-owner")]
+
+
+def test_session_end_gateway_session_attributes_cost(artifact):
+    """R2-1: a gateway/API turn's on_session_end passes the SESSION id as task_id
+    (not the owning card, which is what ``api_server._run_agent`` does with
+    ``effective_task_id``); cost must still reach the artifact via the
+    session→card fallback, not silently drop."""
+    artifact.manager.invoke_hook("post_tool_call", tool_name="terminal",
+                                 args={"command": "gh pr create --title x --body y"},
+                                 result=_terminal_result("https://github.com/o/r/pull/7"),
+                                 status="ok", task_id="", session_id="S1")
+    card = _task_id_for(artifact.root, "o/r", 7)
+    assert card and _card_session_id(card) == "S1"
+    _seed_session_usage(artifact.home, "S1", [
+        {"model": "opus", "actual_cost_usd": 4.00, "cost_status": "actual"}])
+
+    # The API turn passes the session id — NOT the card — as task_id.
+    artifact.manager.invoke_hook("on_session_end", session_id="S1", task_id="S1", completed=True)
+    rows = _outcomes(artifact.root, "o/r#7")
+    assert len(rows) == 1
+    assert rows[0][2] == pytest.approx(4.00)
+    assert rows[0][3] == OWNER_PROFILE

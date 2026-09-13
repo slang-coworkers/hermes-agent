@@ -47,10 +47,7 @@ _TOOLSET = "nv_artifact"
 # resolver/outcome helpers resolve the single fleet ledger through ctx config.
 _CTX = None
 
-# Module-level so the observer's call site resolves this symbol and a fault-
-# injection test can patch it. A hard import (not guarded): this plugin's
-# delivery path REQUIRES the durable task-notification API, so a runtime that
-# lacks it must fail plugin loading loudly rather than silently no-op delivery.
+# Durable delivery requires this API; fail plugin loading if it is absent.
 from hermes_cli.kanban_db import publish_task_notification
 
 # gh pr create intent: the three tokens in order, tolerant of the argv-list form
@@ -250,23 +247,24 @@ def _report_pr_created(args, **kwargs) -> str:
 
     conn = _db(ctx)
     try:
+        # Route BEFORE ownership: install the durable wake sub first, so an
+        # ownership row is never visible — even transiently — without a working
+        # delivery route. The alternative (claim, then register, then roll back
+        # on failure) makes a route-less claim briefly observable: a concurrent
+        # webhook could enqueue an event on it that the owner can never be woken
+        # for, and a concurrent claimant would be refused against a claim that
+        # then vanishes. Registration is idempotent on the sub PK, so a lost
+        # first-claim race just leaves an inert sub on our own (non-owning) card
+        # that never receives events.
+        if not _register_wake_sub(ctx, task_id, session_id, profile):
+            return json.dumps({"status": "error", "repo": repo, "pr": pr,
+                               "reason": "wake subscription registration failed; nothing claimed"})
         cur = conn.execute(
             "INSERT OR IGNORE INTO ownership (repo, pr, task_id, profile) VALUES (?, ?, ?, ?)",
             (repo, pr, task_id, profile),
         )
         conn.commit()
         if cur.rowcount == 1:
-            # A claim implies a working delivery route: if the durable wake sub
-            # cannot be installed, roll the ownership row back so a claimed PR is
-            # never left un-deliverable.
-            if not _register_wake_sub(ctx, task_id, session_id, profile):
-                conn.execute(
-                    "DELETE FROM ownership WHERE repo = ? AND pr = ? AND task_id = ? AND profile = ?",
-                    (repo, pr, task_id, profile),
-                )
-                conn.commit()
-                return json.dumps({"status": "error", "repo": repo, "pr": pr,
-                                   "reason": "wake subscription registration failed; claim rolled back"})
             return json.dumps({"status": "claimed", "repo": repo, "pr": pr,
                                "task_id": task_id, "profile": profile})
         row = conn.execute(
@@ -274,20 +272,14 @@ def _report_pr_created(args, **kwargs) -> str:
         ).fetchone()
         holder = row[0] if row else None
         if holder == profile:
-            old_task = row[1]
+            # Same holder refreshing its own task in place: the new task's route
+            # is already installed above, so the visible task_id only changes
+            # once delivery to it is guaranteed.
             conn.execute(
                 "UPDATE ownership SET task_id = ? WHERE repo = ? AND pr = ?",
                 (task_id, repo, pr),
             )
             conn.commit()
-            if not _register_wake_sub(ctx, task_id, session_id, profile):
-                conn.execute(
-                    "UPDATE ownership SET task_id = ? WHERE repo = ? AND pr = ?",
-                    (old_task, repo, pr),
-                )
-                conn.commit()
-                return json.dumps({"status": "error", "repo": repo, "pr": pr,
-                                   "reason": "wake subscription registration failed; refresh rolled back"})
             return json.dumps({"status": "refreshed", "repo": repo, "pr": pr,
                                "task_id": task_id, "profile": profile})
         return json.dumps({"status": "refused", "holder": holder, "repo": repo, "pr": pr})
@@ -554,17 +546,46 @@ def _upsert_outcome(artifact, *, terminal_outcome=None, cost_usd=None, profile=N
         conn.close()
 
 
-def _artifact_for_task(ctx, task_id):
+def _artifacts_for_task(ctx, task_id):
+    """Every ``(artifact, profile)`` owned by kanban card ``task_id``. A card
+    normally owns one PR, but returning all rows keeps outcome/cost recording
+    correct when one card created several PRs."""
+    if not task_id:
+        return []
     conn = _db(ctx)
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT repo, pr, profile FROM ownership WHERE task_id = ?", (task_id,)
-        ).fetchone()
+        ).fetchall()
     finally:
         conn.close()
-    if row is None:
-        return None, None
-    return f"{row[0]}#{row[1]}", row[2]
+    return [(f"{r[0]}#{r[1]}", r[2]) for r in rows]
+
+
+def _artifacts_for_session(ctx, task_id, session_id):
+    """Every ``(artifact, profile)`` attributable to a finished session.
+
+    The hook's ``task_id`` is a kanban card only on a kanban-worker turn; a
+    gateway/API turn passes the SESSION id here (``effective_task_id`` in
+    ``api_server._run_agent``), which owns no ownership row directly — so also
+    resolve every kanban card bound to ``session_id`` and union their owners.
+    Deduplicated by artifact (first occurrence wins)."""
+    out = {}
+    for artifact, profile in _artifacts_for_task(ctx, task_id):
+        out.setdefault(artifact, profile)
+    if session_id:
+        try:
+            with _kb_connect(ctx) as kconn:
+                bound = [r[0] for r in kconn.execute(
+                    "SELECT id FROM tasks WHERE session_id = ?", (session_id,)
+                ).fetchall()]
+        except Exception:
+            logger.warning("nv-artifact: session→task resolve failed", exc_info=True)
+            bound = []
+        for tid in bound:
+            for artifact, profile in _artifacts_for_task(ctx, tid):
+                out.setdefault(artifact, profile)
+    return list(out.items())
 
 
 def _session_cost(session_id) -> float:
@@ -592,30 +613,30 @@ def _session_cost(session_id) -> float:
 
 
 def _on_kanban_task_completed(task_id=None, **kwargs):
-    """Record the terminal outcome for the artifact owned by ``task_id``."""
+    """Record the terminal outcome for every artifact owned by ``task_id``."""
     try:
         ctx = _CTX
         if ctx is None or not task_id:
             return None
-        artifact, profile = _artifact_for_task(ctx, task_id)
-        if artifact is None:
-            return None
-        _upsert_outcome(artifact, terminal_outcome="completed", profile=profile)
+        for artifact, profile in _artifacts_for_task(ctx, task_id):
+            _upsert_outcome(artifact, terminal_outcome="completed", profile=profile)
     except Exception:
         logger.warning("nv-artifact kanban_task_completed failed", exc_info=True)
     return None
 
 
 def _on_session_end(session_id=None, task_id=None, **kwargs):
-    """Recompute the owning artifact's cumulative cost from session_model_usage."""
+    """Recompute cumulative cost from session_model_usage for every artifact the
+    finished session owns — resolved by the hook ``task_id`` AND by the cards
+    bound to ``session_id`` (a gateway/API turn passes the session id as
+    ``task_id``, which owns no ownership row directly)."""
     try:
         ctx = _CTX
-        if ctx is None or not session_id or not task_id:
+        if ctx is None or not session_id:
             return None
-        artifact, profile = _artifact_for_task(ctx, task_id)
-        if artifact is None:
-            return None
-        _upsert_outcome(artifact, cost_usd=_session_cost(session_id), profile=profile)
+        cost = _session_cost(session_id)
+        for artifact, profile in _artifacts_for_session(ctx, task_id, session_id):
+            _upsert_outcome(artifact, cost_usd=cost, profile=profile)
     except Exception:
         logger.warning("nv-artifact on_session_end failed", exc_info=True)
     return None
@@ -661,15 +682,56 @@ def _cmd_pr_remap(args):
     pr = int(args.pr)
     to = str(args.to)
     task = getattr(args, "task", None)
+
+    # Resolve the target task (read-only) and its bound session, if any.
     conn = _db(ctx)
     try:
         row = conn.execute(
             "SELECT task_id FROM ownership WHERE repo = ? AND pr = ?", (repo, pr)
         ).fetchone()
-        new_task = str(task) if task else (row[0] if row else None)
-        if new_task is None:
-            _refuse({"status": "error", "reason": "no owning task to re-point"}, args)
+    finally:
+        conn.close()
+    new_task = str(task) if task else (row[0] if row else None)
+    if new_task is None:
+        _refuse({"status": "error", "reason": "no owning task to re-point"}, args)
+        return 1
+
+    import hermes_cli.kanban_db as kb
+
+    with _kb_connect(ctx) as kconn:
+        srow = kconn.execute(
+            "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
+        ).fetchone()
+    new_sess = srow[0] if srow else None
+
+    # Route BEFORE ownership (same rule as a claim): when the new owner's session
+    # is known, install its durable wake sub and force the routing owner to `to`
+    # (add_notify_sub only backfills a blank notifier_profile) BEFORE committing
+    # the re-point. If the route cannot be installed, refuse and leave ownership
+    # unchanged rather than re-point to an un-deliverable owner. When no session
+    # is bound yet, the route is deferred to the new owner's next claim/refresh —
+    # reported explicitly so the caller knows delivery is not yet wired.
+    if new_sess:
+        if not _register_wake_sub(ctx, new_task, new_sess, to):
+            _refuse({"status": "error", "repo": repo, "pr": pr,
+                     "reason": "wake subscription registration failed; ownership unchanged"}, args)
             return 1
+        try:
+            with _kb_connect(ctx) as uconn:
+                with kb.write_txn(uconn):
+                    uconn.execute(
+                        "UPDATE kanban_notify_subs SET notifier_profile = ? "
+                        "WHERE task_id = ? AND platform = 'api_server' AND chat_id = ?",
+                        (to, new_task, new_sess),
+                    )
+        except Exception:
+            logger.error("nv-artifact remap: notifier_profile re-point failed", exc_info=True)
+            _refuse({"status": "error", "repo": repo, "pr": pr,
+                     "reason": "wake routing update failed; ownership unchanged"}, args)
+            return 1
+
+    conn = _db(ctx)
+    try:
         conn.execute(
             "INSERT INTO ownership (repo, pr, task_id, profile) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(repo, pr) DO UPDATE SET task_id = excluded.task_id, profile = excluded.profile",
@@ -678,33 +740,10 @@ def _cmd_pr_remap(args):
         conn.commit()
     finally:
         conn.close()
-    # Re-point delivery too: later events resolve the NEW owner, so the new
-    # owning card needs a durable wake sub (chat_id = that card's bound session)
-    # or the notifier has nothing to wake. Best-effort; the owner is re-subbed on
-    # its next claim/refresh regardless.
-    try:
-        import hermes_cli.kanban_db as kb
-
-        with _kb_connect(ctx) as kconn:
-            srow = kconn.execute(
-                "SELECT session_id FROM tasks WHERE id = ?", (new_task,)
-            ).fetchone()
-        new_sess = srow[0] if srow else None
-        if new_sess:
-            _register_wake_sub(ctx, new_task, new_sess, to)
-            # add_notify_sub only backfills a blank notifier_profile, so a
-            # same-task remap that changes owner would keep routing the wake to
-            # the OLD profile. Force the routing owner to the new profile.
-            with _kb_connect(ctx) as uconn:
-                with kb.write_txn(uconn):
-                    uconn.execute(
-                        "UPDATE kanban_notify_subs SET notifier_profile = ? "
-                        "WHERE task_id = ? AND platform = 'api_server' AND chat_id = ?",
-                        (to, new_task, new_sess),
-                    )
-    except Exception:
-        logger.warning("nv-artifact remap: wake-sub re-point failed", exc_info=True)
-    _emit({"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}, args)
+    payload = {"status": "remapped", "repo": repo, "pr": pr, "task_id": new_task, "profile": to}
+    if not new_sess:
+        payload["wake"] = "deferred until the new owner's next claim (no session bound)"
+    _emit(payload, args)
     return 0
 
 

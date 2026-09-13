@@ -1225,15 +1225,16 @@ class GatewayKanbanWatchersMixin:
             )
 
     async def _deliver_durable_notifications(self, d: dict) -> None:
-        """Crash-safe, per-event delivery of a durable notify sub, preserving the
-        sub's transport.
+        """Crash-safe, per-event delivery of a durable notify sub to its owner.
 
         Peek-then-advance: each event is delivered individually and the cursor
-        advances to that event id ONLY after ``deliver_wake`` succeeds — for a
-        non-push (api_server) owner that means a profile-scoped self-post that
-        confirmed the persist ack (raises otherwise), deduped by a stable
-        ``(repo#pr, delivery-id)`` Idempotency-Key; for a push owner the
-        synthetic-event wake IS the delivery. A failure stops at that event
+        advances to that event id ONLY after ``deliver_wake`` succeeds — a
+        profile-scoped api_server self-post that confirmed the persist ack (it
+        raises otherwise), deduped by a stable ``(repo#pr, delivery-id)``
+        Idempotency-Key. Confirmable durable delivery exists only for the
+        api_server transport (its self-post carries the persist ack); a durable
+        sub on any other (push) transport is retained and alerted rather than
+        advanced on a fire-and-forget wake. A failure stops at that event
         (cursor contiguity), applies capped backoff, and NEVER deletes the sub;
         the next tick retries from here.
         """
@@ -1266,26 +1267,41 @@ class GatewayKanbanWatchersMixin:
         try:
             plat = _Platform((sub.get("platform") or "").lower())
         except ValueError:
-            return
-        # Prefer the owner profile's own adapter; a secondary api_server owner has
-        # none (it self-posts to the shared api_server via the profile mirror), so
-        # fall back to the shared/default adapter for that platform.
-        adapter = self._authorization_adapter(plat, owner_profile) or self.adapters.get(plat)
-        if adapter is None:
-            self._note_durable_failure(sub_key, f"no {plat.value} adapter available")
-            return
-        is_push = adapter_supports_push(adapter)
-        source = None
-        if is_push:
-            from gateway.session import SessionSource
-
-            _chat_type = str(sub.get("chat_type") or "").strip() or "group"
-            source = SessionSource(
-                platform=plat, chat_id=sub["chat_id"], chat_type=_chat_type,
-                thread_id=sub.get("thread_id") or None, user_id=sub.get("user_id"),
-                user_id_alt=sub.get("user_id_alt"), profile=owner_profile or None,
-                scope_id=_wake_scope_id(adapter, sub),
+            # An unroutable platform must not hot-loop: retain, back off, alert.
+            self._note_durable_failure(
+                sub_key, f"durable sub has unroutable platform {sub.get('platform')!r}"
             )
+            return
+        # Resolve the OWNER's adapter. api_server delivery is profile-scoped by
+        # owner_profile on the self-post, not by the adapter, so a secondary
+        # api_server owner with no adapter of its own is reached via the shared
+        # api_server adapter; a push transport's adapter, by contrast, IS the
+        # profile identity, so it is NEVER allowed to fall back to the default
+        # adapter (that would push to the wrong profile — the fail-closed profile
+        # resolution invariant, gateway/authz_mixin.py).
+        adapter = self._authorization_adapter(plat, owner_profile)
+        if adapter is None and plat == _Platform.API_SERVER:
+            adapter = self.adapters.get(plat)
+        if adapter is None:
+            self._note_durable_failure(
+                sub_key, f"no {plat.value} adapter for owner {owner_profile or 'default'}"
+            )
+            return
+        if adapter_supports_push(adapter):
+            # A push wake (synthetic MessageEvent through handle_message) returns
+            # after SPAWNING the turn — it is NOT a persistence ack, so advancing
+            # the cursor on its return would drop the event if the spawned turn
+            # fails. Durable delivery is confirmable only for api_server
+            # (self-post + X-Hermes-Turn-Persisted ack); a durable sub on a push
+            # transport is therefore retained (never advanced, never dropped) and
+            # surfaces as a sustained-failure alert. The nv-artifact plugin only
+            # ever registers api_server durable subs, so this is a defensive
+            # branch, not a live delivery path.
+            self._note_durable_failure(
+                sub_key,
+                f"durable delivery is unconfirmable on push transport {plat.value}",
+            )
+            return
 
         for ev in events:
             text = self._render_durable_event(ev, task, sub, board_slug)
@@ -1299,17 +1315,14 @@ class GatewayKanbanWatchersMixin:
                 key = ev.payload.get("idempotency_key")
             key = key or f"{sub['task_id']}:{ev.id}"
             try:
-                if is_push:
-                    await deliver_wake(adapter, text=text, source=source)
-                else:
-                    await deliver_wake(
-                        adapter,
-                        text=text,
-                        session_id=sub["chat_id"],
-                        owner_profile=owner_profile,
-                        idempotency_key=key,
-                        require_persist_ack=True,
-                    )
+                await deliver_wake(
+                    adapter,
+                    text=text,
+                    session_id=sub["chat_id"],
+                    owner_profile=owner_profile,
+                    idempotency_key=key,
+                    require_persist_ack=True,
+                )
             except Exception as exc:
                 # Delivery unconfirmed: leave the cursor unmoved (redelivered
                 # next tick), back off, and NEVER drop the durable sub.
@@ -1320,8 +1333,8 @@ class GatewayKanbanWatchersMixin:
             fail_counts.pop(sub_key, None)
             backoff.pop(sub_key, None)
             logger.info(
-                "kanban notifier: durable wake delivered task=%s event=%s owner=%s push=%s",
-                sub["task_id"], ev.id, owner_profile or "default", is_push,
+                "kanban notifier: durable wake delivered task=%s event=%s owner=%s",
+                sub["task_id"], ev.id, owner_profile or "default",
             )
 
     def _kanban_advance(

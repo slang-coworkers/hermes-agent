@@ -821,47 +821,63 @@ def _mk_task_and_durable_push_sub():
     return task_id
 
 
-def _durable_push_runner():
+def _durable_push_runner(*, owner_adapter):
     runner = object.__new__(GatewayRunner)
-    push_adapter = SimpleNamespace()  # no supports_async_delivery → push-capable
-    runner.adapters = {Platform.TELEGRAM: push_adapter}
-    runner._authorization_adapter = MagicMock(return_value=push_adapter)
+    default_push = SimpleNamespace()  # no supports_async_delivery → push-capable
+    runner.adapters = {Platform.TELEGRAM: default_push}
+    runner._authorization_adapter = MagicMock(return_value=owner_adapter)
     runner._kanban_sub_fail_counts = {}
+    runner._default_push_adapter = default_push
     return runner
 
 
 @pytest.mark.asyncio
-async def test_durable_push_sub_delivers_via_source_and_never_drops(monkeypatch):
-    """The durable policy is GENERIC (keyed on retry_policy, not the platform): a
-    PUSH durable sub delivers via the synthetic-event wake (source, no
-    persist-ack), advances on success, and is never dropped on failure."""
+async def test_durable_push_sub_is_retained_not_advanced(monkeypatch):
+    """A durable sub on a PUSH transport cannot be confirmed delivered: a push
+    wake (handle_message) returns after merely SPAWNING the turn, so advancing the
+    cursor on its return would drop the event if that turn later failed. The
+    durable path therefore refuses to deliver on push — it never calls
+    deliver_wake, retains the event (cursor unmoved), never drops the sub, and
+    records a failure for backoff/alert. (The nv-artifact plugin only registers
+    api_server durable subs; this is the defensive branch.)"""
     task_id = _mk_task_and_durable_push_sub()
     _publish(task_id, "push note", "push:1")
 
-    got = []
+    calls = []
 
-    async def _ok(adapter, *, text, source=None, session_id="",
-                  owner_profile=None, idempotency_key=None, require_persist_ack=None):
-        got.append({"source_passed": source is not None, "require_persist_ack": require_persist_ack})
+    async def _spy(adapter, **kw):
+        calls.append(kw)
 
-    monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
-    runner = _durable_push_runner()
+    monkeypatch.setattr("gateway.wake.deliver_wake", _spy)
+    push_adapter = SimpleNamespace()  # owner's own push adapter (present)
+    runner = _durable_push_runner(owner_adapter=push_adapter)
     await runner._deliver_durable_notifications(_peek_delivery(task_id))
 
-    assert len(got) == 1
-    assert got[0]["source_passed"] is True             # push branch uses source
-    assert got[0]["require_persist_ack"] in (None, False)  # persist-ack N/A on push
-    assert _peek_delivery(task_id)["events"] == []     # advanced on success
+    assert calls == []                                    # never attempts a push wake
+    assert len(_peek_delivery(task_id)["events"]) == 1    # retained (cursor unmoved)
+    assert _sub_exists(task_id)                           # never dropped
+    assert task_id in {k[0] for k in runner._kanban_durable_backoff}  # failure recorded
 
-    # Failure path: retained + cursor unmoved (never-drop applies to push too).
-    _publish(task_id, "push note 2", "push:2")
 
-    async def _boom(adapter, *, text, source=None, session_id="",
-                    owner_profile=None, idempotency_key=None, require_persist_ack=None):
-        raise RuntimeError("push transport down")
+@pytest.mark.asyncio
+async def test_durable_push_absent_owner_adapter_never_uses_default(monkeypatch):
+    """Fail-closed profile resolution: when a push owner has NO adapter of its
+    own, the durable path must NOT fall back to the shared/default push adapter
+    (that would deliver to the wrong profile). It records a failure and retains
+    the event; default-adapter fallback is allowed ONLY for api_server, whose
+    profile scoping rides on owner_profile, not on the adapter."""
+    task_id = _mk_task_and_durable_push_sub()
+    _publish(task_id, "push note", "push:1")
 
-    monkeypatch.setattr("gateway.wake.deliver_wake", _boom)
-    runner._kanban_durable_backoff.clear()
+    calls = []
+
+    async def _spy(adapter, **kw):
+        calls.append(adapter)
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _spy)
+    runner = _durable_push_runner(owner_adapter=None)  # owner has no adapter
     await runner._deliver_durable_notifications(_peek_delivery(task_id))
-    assert len(_peek_delivery(task_id)["events"]) == 1  # unseen → redelivered
-    assert _sub_exists(task_id)                          # never dropped
+
+    assert calls == []                                    # default adapter never used
+    assert len(_peek_delivery(task_id)["events"]) == 1    # retained
+    assert _sub_exists(task_id)                           # never dropped
