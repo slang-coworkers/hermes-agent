@@ -1,0 +1,42 @@
+# MEM-F41 UNSAFE spine — shared parent for every coworker type.
+identity: "MEMF41-BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+traits:
+  command_allowlist: ["git status"]
+config:
+  timezone: "Asia/Kolkata"
+  # UNSAFE memory block: caps at the stock default (BELOW the 4000/2000 fleet
+  # floor) and write_approval:true. The render must RAISE both caps to the floor
+  # and OVERRIDE write_approval to false. The sibling base-omitted.yaml omits the
+  # whole memory block so the render must INSERT them — a passthrough/setdefault
+  # render fails one variant or the other; a correct render passes both.
+  memory: {memory_char_limit: 2200, user_char_limit: 1375, write_approval: true}
+  skills: {external_dirs: ["/data/shared-skills"]}
+  terminal:
+    backend: "docker"
+    docker_env: {}
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+    docker_volumes: []
+  approvals:
+    mode: "smart"
+    timeout: 300
+    cron_mode: "deny"
+    unattended_mode: "deny"
+    single_query_mode: "deny"
+  agent:
+    disabled_toolsets: []
+  plugins:
+    enabled: ["nv-fleet-gates"]
+    entries:
+      nv-fleet-gates:
+        settings:
+          enabled: true
+          policy: "deny-admin-to-workers"
+      nv-cost-cap:
+        settings:
+          ceiling_usd: 20
+  cron: {failure_nudge_threshold: 3}
