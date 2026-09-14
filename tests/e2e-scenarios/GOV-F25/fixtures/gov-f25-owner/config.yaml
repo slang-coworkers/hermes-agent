@@ -23,13 +23,16 @@ timezone: Asia/Kolkata
 platforms:
   api_server:
     # gov-f25-owner is a SECONDARY multiplex profile and shares the default
-    # profile's api_server listener; it must NOT bind its own port. The profile
-    # inherits the process-level API_SERVER_KEY, whose presence would otherwise
-    # force-enable this listener and trip the multiplex check — this explicit
-    # `enabled: false` is exactly the guard gateway/config.py:2311-2323 documents
-    # (a secondary cannot bind its own api_server, gateway/run.py:9242-9244). The
-    # owner's session is reached only through the default's mirror at
-    # /p/gov-f25-owner/v1/chat/completions, which the durable notifier wakes.
+    # profile's api_server listener; it must NOT bind its own port. Under
+    # multiplex, config-load reads THIS profile's scoped .env (gateway/config.py
+    # _getenv:287-302 prefers the installed secret scope and does not fall back
+    # to os.environ), and Setup provisions the same API_SERVER_KEY into this
+    # profile's .env — whose presence would otherwise force-enable this listener
+    # and trip the multiplex check. This explicit `enabled: false` is exactly the
+    # guard gateway/config.py:2311-2323 documents (a secondary cannot bind its
+    # own api_server, gateway/run.py:9242-9244). The owner's session is reached
+    # only through the default's mirror at /p/gov-f25-owner/v1/chat/completions,
+    # which the durable notifier wakes.
     enabled: false
 sessions:
   auto_prune: false

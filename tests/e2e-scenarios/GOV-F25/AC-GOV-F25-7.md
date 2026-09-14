@@ -37,16 +37,19 @@ prove a real peer resumed in the SAME session; the tester pays for it.
 - A secondary multiplex profile **cannot bind its own api_server**
   (`gateway/run.py:9242-9244`); it shares the default's listener and MUST pin
   `platforms.api_server.enabled: false` (the guard `gateway/config.py:2311-2323`
-  documents — the inherited process-env key would otherwise force-enable it and
-  trip the multiplex check). `gov-f25-owner`'s fixture does exactly that.
+  documents — under multiplex, config-load reads the OWNER's own scoped `.env`
+  key (`_getenv:287-302` prefers the installed scope over `os.environ`), whose
+  presence would otherwise force-enable this listener and trip the multiplex
+  check). `gov-f25-owner`'s fixture does exactly that.
 - `API_SERVER_KEY` is a **profile-scoped credential, not a process-global var**:
-  under multiplexing `get_secret` reads the active profile's `<home>/.env` scope
-  and does NOT fall through to `os.environ`
-  (`agent/secret_scope.py:113-114,156-160`). So the per-turn Bearer auth of
-  `/p/gov-f25-owner/...` resolves from the OWNER's `.env`, and the notifier's own
-  wake self-POST resolves the same value — Setup step 2 writes the identical
-  test key into BOTH profile `.env` files (and step 3 also exports it into the
-  gateway process env, which config-load reads to key the default listener). The
+  under multiplexing both config-load (`gateway/config.py` `_getenv:287-302`) and
+  per-turn `get_secret` (`agent/secret_scope.py:113-114,156-160`) read the active
+  profile's `<home>/.env` scope and do NOT fall through to `os.environ`. So the
+  per-turn Bearer auth of `/p/gov-f25-owner/...` resolves from the OWNER's
+  `.env`, and the notifier's own wake self-POST resolves the same value — Setup
+  step 2 writes the identical test key into BOTH profile `.env` files (the
+  default's scoped `.env` keys its own listener; step 3 also exports the value
+  into the gateway process env as a fallback for any unscoped read at boot). The
   wake is 403-gated on it (`api_server.py:1902`).
 
 ## Setup
@@ -81,9 +84,12 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    `<home>/.env` and does NOT fall through to `os.environ`
    (`agent/secret_scope.py:113-114,156-160`), so it must be written into BOTH
    installed profile homes' `.env` for the per-turn auth of `/p/<profile>/v1/...`
-   to resolve. It is ALSO exported into the gateway's process env (step 3), which
-   config-load reads to force-enable + key the DEFAULT listener
-   (`gateway/config.py:2308-2325`). The key is a test-only literal guarding a
+   to resolve — and for config-load itself, which under multiplex reads each
+   profile's scoped `.env` (`gateway/config.py` `_getenv:287-302`) to force-enable
+   + key that profile's listener (`:2308-2325`; the DEFAULT's `.env` keys the
+   default listener, the OWNER's is why it needs `enabled: false`). The value is
+   ALSO exported into the gateway process env (step 3) as a fallback for any
+   unscoped read at boot. The key is a test-only literal guarding a
    loopback listener — not a credential to any service. Ports are persisted so
    every later subshell agrees (each ```bash block is its own subshell):
    ```bash
@@ -143,8 +149,9 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    here.
 5. Establish the claim through the OWNER's api_server mirror — a real
    (`model: live`) owner turn that runs the `gh` stub, so `post_tool_call`
-   claims `gov-f25/repo#41` first-claim-wins for THIS owner session. The bearer
-   is the process-env `API_SERVER_KEY` (same key every profile scope resolves):
+   claims `gov-f25/repo#41` first-claim-wins for THIS owner session. The Bearer
+   value sourced from `gov-f25.env` is identical to the key provisioned in the
+   OWNER's `.env` (which is where the mirror's per-turn auth resolves it):
    ```bash
    ( source $TB/harness.live.env && source $TB/gov-f25.env
      curl -sS -D $ART/scenario-AC-GOV-F25-7/claim-headers.txt \
@@ -296,10 +303,6 @@ are corroborating only.
 **Authoritative** (decides `## Pass`; stdlib `sqlite3`, no CLI):
 - The **202** in `$ART/scenario-AC-GOV-F25-7/webhook-code.txt` (asserted in
   Steps step 1).
-- `gateway.log` (best-effort diagnostics, NOT asserted — a successful
-  claim/skip/enqueue emits no dedicated success line): on failure, grep it for
-  the wake self-POST and any errors to localise the break —
-  `grep -nE '/p/gov-f25-owner/v1/chat/completions|gov-f25/repo|[Ee]rror|[Ww]arn' $ART/scenario-AC-GOV-F25-7/gateway.log`.
 - BOTH halves against the persisted baseline — the EXACT recorded `S0`, not the
   latest session:
   ```bash
@@ -334,7 +337,11 @@ are corroborating only.
     done )
   ```
 
-**Corroborating** (best-effort; a dashboard failure does not fail the criterion):
+**Corroborating** (best-effort; a failure here does not fail the criterion):
+- `gateway.log` diagnostics (NOT asserted — a successful claim/skip/enqueue emits
+  no dedicated success line): on failure, grep it for the wake self-POST and any
+  errors to localise the break —
+  `grep -nE '/p/gov-f25-owner/v1/chat/completions|gov-f25/repo|[Ee]rror|[Ww]arn' $ART/scenario-AC-GOV-F25-7/gateway.log`.
 - `step-1.png` (owner session `S0` before the delivery) / `step-2.png` (`S0`
   after, showing the new turn) from the dashboard session view.
 
