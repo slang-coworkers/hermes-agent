@@ -1,0 +1,697 @@
+"""nv-cost-cap — two-tier per-session cost cap with immortal sessions + runtime policy (COST-F29).
+
+Accrual has two sources, kept monotonic (``effective = max(previous, reconciled)``):
+  * fast path — ``post_api_request`` prices ``usage`` via ``estimate_usage_cost``
+    and accumulates per-session, idempotent by ``api_request_id``;
+  * authoritative — a recursive ``parent_session_id`` lineage read of the
+    READ-ONLY core ``state.db`` (subagent + aux + codex inclusive), run on
+    ``post_tool_call`` / ``on_session_end`` / ``pre_gateway_dispatch``.
+
+Two tiers, evaluated on the WINDOW DELTA (never the lifetime total):
+  * Tier-1 ``capUsd`` = the profile's rolling p90 over completed session totals;
+    a crossing (under Tier-2) records an escalation episode — never a hard stop.
+  * Tier-2 ``ceilingUsd`` resolved: per-profile override -> managed-scope fleet
+    ceiling -> owner-pinned fleet default -> plugin default.
+
+A non-immortal session crossing Tier-2 within a fire is stopped WITHOUT raising:
+the ``llm_execution`` middleware returns a synthetic terminal response,
+``pre_tool_call`` blocks, and ``pre_gateway_dispatch`` skips ONLY that session
+(recovery slash-commands exempt), plus the profile ESTOP belt when
+``settings.estop_on_breach`` (default true) so cron/kanban are gated too.
+Immortal sessions cap per UTC day and are never hard-stopped. Unknown pricing is
+fail-CLOSED. Runtime policy is set through the orchestrator-only ``hermes
+cost-cap`` CLI; no env var is a source of truth.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from . import policy, store
+
+logger = logging.getLogger(__name__)
+
+PLUGIN_KEY = "nv-cost-cap"
+DEFAULT_CEILING_USD = 25.0
+DEFAULT_P90_WINDOW = 50
+FLEET_CEILING_KEY = f"plugins.entries.{PLUGIN_KEY}.settings.fleet_ceiling_usd"
+
+# Set at register(); each profile home loads a DISTINCT module object with its
+# own _CTX (the plugin loader namespaces directory modules by HERMES_HOME), so
+# this module-global is profile-safe rather than a cross-profile shared cell.
+_CTX = None
+
+
+class ManagedPinnedError(Exception):
+    """Raised when a fleet-ceiling write targets a managed-pinned key."""
+
+
+# --- config + small utilities ---------------------------------------------
+
+def _finite(value) -> bool:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return False
+    return not (math.isnan(f) or math.isinf(f))
+
+
+def _cfg(key, default=None):
+    if _CTX is None:
+        return default
+    try:
+        value = _CTX.get_config(key, default)
+    except Exception:
+        logger.warning("nv-cost-cap config read failed for %r", key, exc_info=True)
+        return default
+    return default if value is None else value
+
+
+def _cfg_float(key, default) -> float:
+    try:
+        value = float(_cfg(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if _finite(value) else float(default)
+
+
+def _cfg_int(key, default) -> int:
+    try:
+        return int(_cfg(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _cfg_bool(key, default: bool) -> bool:
+    value = _cfg(key, default)
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _cfg_list(key):
+    value = _cfg(key, [])
+    return value if isinstance(value, list) else []
+
+
+def _today(kwargs) -> str:
+    """The window day — an injected ``_today`` (tests) or today's UTC date."""
+    injected = kwargs.get("_today")
+    if isinstance(injected, str) and injected:
+        return injected
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _state_db_path() -> str:
+    from hermes_constants import get_hermes_home
+
+    return str(get_hermes_home() / "state.db")
+
+
+def _current_profile_home() -> str:
+    from hermes_constants import get_hermes_home
+
+    return str(get_hermes_home())
+
+
+def _dig(mapping, dotted_key: str):
+    cur = mapping
+    for part in dotted_key.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _is_immortal(session_id, platform=None) -> bool:
+    # Config-driven, never hard-coded.
+    if isinstance(session_id, str) and session_id in _cfg_list("immortal_session_ids"):
+        return True
+    if platform and isinstance(platform, str) and platform in _cfg_list("immortal_platforms"):
+        return True
+    return False
+
+
+def _refresh_effective(session_id) -> float:
+    """Reconcile from state.db and persist the monotone effective spend.
+
+    Never raises: a reconcile failure keeps the previously-persisted effective.
+    """
+    try:
+        reconciled = policy.reconcile_session(session_id, state_db_path=_state_db_path())
+    except Exception:
+        logger.warning("nv-cost-cap reconcile failed for %s", session_id, exc_info=True)
+        return float(store.get_state(session_id)["effective_usd"])
+    return store.bump_effective(session_id, reconciled)
+
+
+# --- public policy helpers (bound by the acceptance-test contract) ---------
+
+def resolve_ceiling() -> float:
+    """Tier-2 ceiling for the ACTIVE profile, read live on every call.
+
+    Precedence: per-profile override -> managed-scope fleet ceiling ->
+    owner-pinned fleet default -> plugin default. No ``HERMES_*`` env var.
+    """
+    override = _cfg("profile_ceiling_usd", None)
+    if override is not None:
+        try:
+            value = float(override)
+            if _finite(value):
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        from hermes_cli import managed_scope
+
+        if managed_scope.is_key_managed(FLEET_CEILING_KEY):
+            managed_value = _dig(managed_scope.load_managed_config() or {}, FLEET_CEILING_KEY)
+            if managed_value is not None and _finite(managed_value):
+                return float(managed_value)
+    except Exception:
+        logger.warning("nv-cost-cap managed ceiling read failed", exc_info=True)
+
+    try:
+        owner_pinned = store.get_fleet_default()
+        if owner_pinned is not None and _finite(owner_pinned):
+            return float(owner_pinned)
+    except Exception:
+        logger.warning("nv-cost-cap owner-pinned ceiling read failed", exc_info=True)
+
+    return _cfg_float("default_ceiling_usd", DEFAULT_CEILING_USD)
+
+
+def set_fleet_ceiling(value: float) -> None:
+    """Write the owner-pinned fleet default; refuse when the key is managed-pinned."""
+    from hermes_cli import managed_scope
+
+    if managed_scope.is_key_managed(FLEET_CEILING_KEY):
+        raise ManagedPinnedError(
+            "fleet ceiling is pinned by managed scope; edit the managed config"
+        )
+    store.set_fleet_default(float(value))
+
+
+def tier1_cap(profile_home) -> float:
+    """Rolling p90 over the profile's completed session totals (inf when none)."""
+    window = _cfg_int("p90_window_sessions", DEFAULT_P90_WINDOW)
+    return policy.p90(policy.completed_session_totals(profile_home, window))
+
+
+def reconcile_session(session_id, *, state_db_path) -> float:
+    return policy.reconcile_session(session_id, state_db_path=state_db_path)
+
+
+def session_spend(session_id) -> float:
+    return float(store.get_state(session_id)["effective_usd"])
+
+
+def record_api_request(session_id, model, usage, api_request_id, *, provider=None, base_url=None) -> float:
+    """Fast-path accrual: price ``usage`` and accumulate, idempotent by id.
+
+    Builds ``CanonicalUsage`` from the SELECTED canonical token fields — never
+    splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
+    properties, not constructor args. Unknown pricing is fail-CLOSED: the call
+    is recorded ``unpriced`` (never as free), which the middleware /
+    ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal session.
+    Returns the running priced fast-path total.
+    """
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+    usage = usage or {}
+    canonical = CanonicalUsage(
+        input_tokens=int(usage.get("input_tokens", 0) or 0),
+        output_tokens=int(usage.get("output_tokens", 0) or 0),
+        cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
+        cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
+        reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
+        request_count=int(usage.get("request_count", 1) or 1),
+    )
+    amount = None
+    try:
+        result = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url)
+        amount = result.amount_usd
+    except Exception:
+        logger.warning("nv-cost-cap pricing failed for model=%s", model, exc_info=True)
+        amount = None
+
+    priced = amount is not None
+    total = store.record_call(
+        session_id, api_request_id, float(amount) if priced else 0.0, priced
+    )
+    store.bump_effective(session_id, total)
+    return total
+
+
+def episodes(session_id):
+    return store.episodes(session_id)
+
+
+# --- enforcement decision --------------------------------------------------
+
+def _session_stopped(session_id, *, today, platform=None):
+    """Mid-fire decision for ``pre_tool_call`` / ``llm_execution``.
+
+    Reconciles first (so a caller that seeded spend only in state.db is seen),
+    then returns True for a non-immortal session that is blocked, unpriced, or
+    whose current-fire delta has crossed the ceiling. Immortal sessions are
+    never stopped.
+    """
+    if _is_immortal(session_id, platform):
+        _refresh_effective(session_id)
+        return False, "immortal"
+    effective = _refresh_effective(session_id)
+    state = store.get_state(session_id)
+    if state["blocked"]:
+        return True, "blocked"
+    if store.unpriced_count(session_id) > 0:
+        return True, "unpriced"
+    ceiling = resolve_ceiling()
+    delta = effective - state["window_start_total"]
+    if _finite(ceiling) and delta >= ceiling:
+        return True, "over_ceiling"
+    return False, "under"
+
+
+def _engage_estop(session_id) -> None:
+    # Engage under the SERVING profile home (never the default home, which would
+    # write the fleet-root sentinel that binds every profile).
+    try:
+        from agent import estop
+
+        if not estop.is_engaged():
+            estop.engage(
+                reason=f"nv-cost-cap: session {session_id} exceeded the Tier-2 cost ceiling"
+            )
+    except Exception:
+        logger.warning("nv-cost-cap ESTOP engage failed", exc_info=True)
+
+
+def _record_escalation(session_id, budget_gen, today) -> None:
+    store.record_episode(
+        session_id, "escalation", budget_gen, today,
+        dedup_key=f"{session_id}:esc:{budget_gen}",
+    )
+
+
+def _record_breach(session_id, budget_gen, today, *, unpriced) -> None:
+    kind = "unknown_pricing" if unpriced else "breach"
+    store.record_episode(
+        session_id, kind, budget_gen, today,
+        dedup_key=f"{session_id}:{kind}:{budget_gen}",
+    )
+
+
+def _evaluate_daily(session_id, *, today) -> None:
+    """Immortal per-day windowing: record the crossing once per (session, day).
+
+    First sight starts the day from 0; a new day rolls the baseline to the
+    carried lifetime total, so an unchanged total on a new day records nothing
+    until fresh same-day spend crosses. Never engages ESTOP / skip / block.
+    """
+    effective = _refresh_effective(session_id)
+    state = store.get_state(session_id)
+    day_key = state["day_key"]
+    day_start = state["day_start_total"]
+    if day_key is None:
+        day_key, day_start = today, 0.0
+    elif day_key != today:
+        day_key, day_start = today, effective
+
+    unpriced_now = store.unpriced_count(session_id)
+    if unpriced_now > state["last_unpriced_count"]:
+        store.record_episode(
+            session_id, "unknown_pricing", state["budget_gen"], today,
+            dedup_key=f"{session_id}:unpriced:{today}",
+        )
+
+    ceiling = resolve_ceiling()
+    if _finite(ceiling) and (effective - day_start) >= ceiling:
+        store.record_episode(
+            session_id, "daily", state["budget_gen"], today,
+            dedup_key=f"{session_id}:daily:{today}",
+        )
+
+    store.set_state(
+        session_id, day_key=day_key, day_start_total=day_start,
+        last_unpriced_count=unpriced_now,
+    )
+
+
+def _evaluate_boundary(session_id, *, today, platform) -> bool:
+    """Fire-boundary evaluation for a non-immortal session.
+
+    Returns True when the just-ended fire crossed the ceiling (the gateway
+    caller then skips the current inbound). A boundary at unchanged spend is a
+    no-op — this prevents the pre_gateway_dispatch + on_session_end pair on ONE
+    real gateway turn from double-counting a generation. Never raises.
+    """
+    if _is_immortal(session_id, platform):
+        _evaluate_daily(session_id, today=today)
+        return False
+
+    effective = _refresh_effective(session_id)
+    state = store.get_state(session_id)
+    if state["blocked"]:
+        return True  # still blocked from a prior fire; record nothing new
+
+    unpriced_now = store.unpriced_count(session_id)
+    spend_increased = effective > state["last_evaluated_total"] + 1e-12
+    unpriced_new = unpriced_now > state["last_unpriced_count"]
+    if not (spend_increased or unpriced_new):
+        return False
+
+    ceiling = resolve_ceiling()
+    cap = tier1_cap(_current_profile_home())
+    budget_gen = state["budget_gen"] + 1
+    delta = effective - state["window_start_total"]
+    crossed = unpriced_new or (_finite(ceiling) and delta >= ceiling)
+
+    if crossed:
+        _record_breach(session_id, budget_gen, today, unpriced=unpriced_new)
+        store.set_state(
+            session_id, blocked=1, budget_gen=budget_gen,
+            last_evaluated_total=effective, last_unpriced_count=unpriced_now,
+        )
+        if _cfg_bool("estop_on_breach", True):
+            _engage_estop(session_id)
+        return True
+
+    if _finite(cap) and effective > cap:
+        _record_escalation(session_id, budget_gen, today)
+    store.set_state(
+        session_id, budget_gen=budget_gen, window_start_total=effective,
+        last_evaluated_total=effective, last_unpriced_count=unpriced_now,
+    )
+    return False
+
+
+# --- hook callbacks --------------------------------------------------------
+
+def _post_api_request(session_id=None, model=None, usage=None, api_request_id=None,
+                      provider=None, base_url=None, **kwargs):
+    try:
+        if not session_id or not api_request_id:
+            return None
+        return record_api_request(
+            session_id, model, usage, api_request_id, provider=provider, base_url=base_url
+        )
+    except Exception:
+        logger.warning("nv-cost-cap post_api_request failed", exc_info=True)
+        return None
+
+
+def _post_tool_call(session_id=None, **kwargs):
+    try:
+        if session_id:
+            _refresh_effective(session_id)
+    except Exception:
+        logger.warning("nv-cost-cap post_tool_call failed", exc_info=True)
+    return None
+
+
+def _on_session_start(session_id=None, **kwargs):
+    try:
+        if session_id and not store.session_exists(session_id):
+            # Seed a fresh per-fire baseline for a NEW session (idempotent zeros).
+            store.set_state(
+                session_id, window_start_total=0.0, last_evaluated_total=0.0,
+                budget_gen=0, effective_usd=0.0,
+            )
+    except Exception:
+        logger.warning("nv-cost-cap on_session_start failed", exc_info=True)
+    return None
+
+
+def _on_session_end(session_id=None, **kwargs):
+    try:
+        if session_id:
+            _evaluate_boundary(
+                session_id, today=_today(kwargs), platform=kwargs.get("platform")
+            )
+    except Exception:
+        logger.warning("nv-cost-cap on_session_end failed", exc_info=True)
+    return None
+
+
+def _pre_tool_call(session_id=None, **kwargs):
+    try:
+        if not session_id:
+            return None
+        stopped, _reason = _session_stopped(
+            session_id, today=_today(kwargs), platform=kwargs.get("platform")
+        )
+        if stopped:
+            return {
+                "action": "block",
+                "message": (
+                    "nv-cost-cap: this session has reached its Tier-2 cost ceiling; "
+                    "spending is paused. Start a new session (/new) or ask an operator "
+                    "to raise the ceiling."
+                ),
+            }
+        return None
+    except Exception:
+        logger.warning("nv-cost-cap pre_tool_call failed", exc_info=True)
+        return None
+
+
+def _resolve_recovery_command(event):
+    """Return a recognized recovery/steering command name, or None.
+
+    Only commands accepted by the built-in registry are exempt — an unknown
+    ``/foo`` must NOT bypass the cap. Fails toward enforcement on any error.
+    """
+    try:
+        get_command = getattr(event, "get_command", None)
+        if callable(get_command):
+            command = get_command()
+        else:
+            text = str(getattr(event, "text", "") or "").lstrip()
+            token = text.split(maxsplit=1)[0] if text.startswith("/") else ""
+            command = token[1:].split("@", 1)[0] if token else None
+        if command:
+            from hermes_cli.commands import resolve_command
+
+            if resolve_command(command) is not None:
+                return command
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_session_id(event, gateway, session_store):
+    try:
+        key = gateway._session_key_for_source(event.source)
+        store_obj = session_store if session_store is not None else getattr(gateway, "session_store", None)
+        if store_obj is None:
+            return None
+        return store_obj.peek_session_id(key)
+    except Exception:
+        logger.warning("nv-cost-cap session-id resolution failed", exc_info=True)
+        return None
+
+
+def _event_platform(event):
+    return getattr(getattr(event, "source", None), "platform", None)
+
+
+def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs):
+    try:
+        # Recovery/steering commands are never skipped — checked BEFORE any
+        # blocked/window state so an over-cap session can always be recovered.
+        if _resolve_recovery_command(event) is not None:
+            return None
+        session_id = _resolve_session_id(event, gateway, session_store)
+        if not session_id:
+            return None
+        stopped = _evaluate_boundary(
+            session_id, today=_today(kwargs), platform=_event_platform(event)
+        )
+        if stopped:
+            return {
+                "action": "skip",
+                "reason": "nv-cost-cap: session over the Tier-2 cost ceiling",
+            }
+        return None
+    except Exception:
+        logger.warning("nv-cost-cap pre_gateway_dispatch failed", exc_info=True)
+        return None
+
+
+# --- llm_execution middleware ----------------------------------------------
+
+def _synthetic_response(api_mode):
+    message = (
+        "Spending paused: this session reached its configured Tier-2 cost ceiling. "
+        "Start a new session (/new) or ask an operator to raise the ceiling."
+    )
+    if api_mode == "anthropic_messages":
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=message)],
+            stop_reason="end_turn",
+            model=None,
+            usage=None,
+        )
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                index=0,
+                finish_reason="stop",
+                message=SimpleNamespace(role="assistant", content=message, tool_calls=None),
+            )
+        ],
+        model=None,
+        usage=None,
+    )
+
+
+def _llm_execution(request=None, next_call=None, **kwargs):
+    """Short-circuit a non-immortal over-cap provider call with a synthetic
+    terminal response (never calling ``next_call``, never raising); otherwise
+    run the provider call exactly once and return its result.
+    """
+    session_id = kwargs.get("session_id")
+    api_mode = kwargs.get("api_mode")
+    try:
+        if session_id:
+            stopped, _reason = _session_stopped(
+                session_id, today=_today(kwargs), platform=kwargs.get("platform")
+            )
+            if stopped:
+                return _synthetic_response(api_mode)
+    except Exception:
+        # A raise here is swallowed by core (downstream proceeds); prefer to let
+        # the provider call run on an unexpected internal error rather than
+        # wrongly refuse a legitimate call. Fail-CLOSED for unknown pricing is
+        # handled deterministically in _session_stopped, not via this path.
+        logger.warning("nv-cost-cap llm_execution decision failed", exc_info=True)
+    if next_call is None:
+        return None
+    return next_call(request)
+
+
+# --- CLI -------------------------------------------------------------------
+
+def _orchestrator_profile() -> str:
+    orch = _cfg("orchestrator_profile", None)
+    if orch:
+        return orch
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly() or {}
+        kanban = cfg.get("kanban") if isinstance(cfg, dict) else None
+        pinned = kanban.get("orchestrator_profile") if isinstance(kanban, dict) else None
+        if pinned:
+            return pinned
+    except Exception:
+        logger.warning("nv-cost-cap orchestrator-profile read failed", exc_info=True)
+    return "default"
+
+
+def _write_profile_override(profile, value) -> None:
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
+
+    canon = normalize_profile_name(profile)
+    validate_profile_name(canon)
+    token = set_hermes_home_override(str(get_profile_dir(canon)))
+    try:
+        _CTX.set_config("profile_ceiling_usd", float(value))
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _cli_cost_cap(ns, **kwargs):
+    from hermes_cli.profiles import get_active_profile_name
+
+    command = getattr(ns, "cost_cap_command", None)
+    active = get_active_profile_name()
+
+    if command == "show":
+        result = {
+            "ok": True,
+            "active_profile": active,
+            "resolved_ceiling_usd": resolve_ceiling(),
+        }
+        print(json.dumps(result))
+        return result
+
+    if command == "set":
+        orchestrator = _orchestrator_profile()
+        # Self-gate BEFORE any mutation (no built-in CLI access control exists).
+        if active != orchestrator:
+            result = {
+                "ok": False,
+                "reason": (
+                    f"cost-cap set is orchestrator-only; active profile {active!r} "
+                    f"is not the orchestrator {orchestrator!r}"
+                ),
+            }
+            print(json.dumps(result))
+            return result
+
+        applied = {}
+        fleet_ceiling = getattr(ns, "fleet_ceiling_usd", None)
+        if fleet_ceiling is not None:
+            try:
+                set_fleet_ceiling(float(fleet_ceiling))
+                applied["fleet_ceiling_usd"] = float(fleet_ceiling)
+            except ManagedPinnedError as exc:
+                result = {
+                    "ok": False,
+                    "reason": (
+                        f"fleet ceiling is pinned by managed scope; edit the managed "
+                        f"config ({exc})"
+                    ),
+                }
+                print(json.dumps(result))
+                return result
+
+        profile = getattr(ns, "profile", None)
+        profile_ceiling = getattr(ns, "profile_ceiling_usd", None)
+        if profile and profile_ceiling is not None:
+            _write_profile_override(profile, float(profile_ceiling))
+            applied["profile"] = profile
+            applied["profile_ceiling_usd"] = float(profile_ceiling)
+
+        result = {"ok": True, "applied": applied}
+        print(json.dumps(result))
+        return result
+
+    result = {"ok": False, "reason": "usage: hermes cost-cap {show|set [--fleet-ceiling X] [--profile P --ceiling Y]}"}
+    print(json.dumps(result))
+    return result
+
+
+# --- registration ----------------------------------------------------------
+
+def register(ctx) -> None:
+    global _CTX
+    _CTX = ctx
+
+    from .cli import setup_cost_cap
+
+    ctx.register_hook("post_api_request", _post_api_request)
+    ctx.register_hook("post_tool_call", _post_tool_call)
+    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("pre_tool_call", _pre_tool_call)
+    ctx.register_hook("on_session_start", _on_session_start)
+    ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
+    ctx.register_middleware("llm_execution", _llm_execution)
+    ctx.register_cli_command(
+        name="cost-cap",
+        help="Inspect and set the two-tier per-session cost cap policy",
+        setup_fn=setup_cost_cap,
+        handler_fn=_cli_cost_cap,
+        description=(
+            "Show the resolved cost-cap policy, or (orchestrator profile only) set the "
+            "owner-pinned fleet ceiling and per-profile overrides."
+        ),
+    )
