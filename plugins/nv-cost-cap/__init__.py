@@ -174,13 +174,43 @@ def _refresh_effective(session_id) -> float:
     """Reconcile from state.db and persist the monotone effective spend.
 
     Never raises: a reconcile failure keeps the previously-persisted effective.
+    Also persists the authoritative-path unpriced marker — a lineage row core
+    stamped ``cost_status='unknown'`` sums to 0.0, so the numeric total is
+    fail-OPEN without it (the fast-path ``unpriced_count`` never sees a
+    reconcile-only row). Idempotent: only lifts the marker 0 -> 1.
     """
     try:
         reconciled = policy.reconcile_session(session_id, state_db_path=_state_db_path())
     except Exception:
         logger.warning("nv-cost-cap reconcile failed for %s", session_id, exc_info=True)
         return float(store.get_state(session_id)["effective_usd"])
+    try:
+        if (policy.lineage_unknown(session_id, state_db_path=_state_db_path())
+                and not store.get_state(session_id)["recon_unpriced"]):
+            store.set_state(session_id, recon_unpriced=1)
+    except Exception:
+        logger.warning("nv-cost-cap unknown-pricing scan failed for %s", session_id, exc_info=True)
     return store.bump_effective(session_id, reconciled)
+
+
+def _unpriced_signal(session_id) -> int:
+    """Distinct unpriced signals across BOTH accrual paths.
+
+    The fast-path count of ``priced=0`` calls plus the authoritative reconcile
+    marker (a lineage row core stamped ``cost_status='unknown'``, which sums to
+    0.0 and is otherwise invisible). Fed to the same fire-open / mid-fire-stop
+    logic as the fast-path count so a reconcile-only unknown is fail-CLOSED too.
+    """
+    try:
+        count = store.unpriced_count(session_id)
+    except Exception:
+        count = 0
+    try:
+        if store.get_state(session_id)["recon_unpriced"]:
+            count += 1
+    except Exception:
+        pass
+    return count
 
 
 # --- public policy helpers (bound by the acceptance-test contract) ---------
@@ -202,9 +232,11 @@ def resolve_ceiling() -> float:
 
     try:
         from hermes_cli import managed_scope
+        from hermes_cli.config import _expand_env_vars
 
         if managed_scope.is_key_managed(FLEET_CEILING_KEY):
-            managed_value = _dig(managed_scope.load_managed_config() or {}, FLEET_CEILING_KEY)
+            managed_cfg = _expand_env_vars(managed_scope.load_managed_config() or {})
+            managed_value = _dig(managed_cfg, FLEET_CEILING_KEY)
             if managed_value is not None and _finite(managed_value):
                 return float(managed_value)
     except Exception:
@@ -305,7 +337,7 @@ def _session_stopped(session_id, *, today, platform=None):
     state = store.get_state(session_id)
     if state["blocked"]:
         return True, "blocked"
-    if store.unpriced_count(session_id) > 0:
+    if _unpriced_signal(session_id) > 0:
         return True, "unpriced"
     ceiling = resolve_ceiling()
     delta = effective - state["window_start_total"]
@@ -362,7 +394,7 @@ def _evaluate_daily(session_id, *, today) -> None:
         # effective, so spend on the new day's first boundary still counts.
         day_key, day_start = today, state["last_evaluated_total"]
 
-    unpriced_now = store.unpriced_count(session_id)
+    unpriced_now = _unpriced_signal(session_id)
     if unpriced_now > state["last_unpriced_count"]:
         store.record_episode(
             session_id, "unknown_pricing", state["budget_gen"], today,
@@ -399,7 +431,7 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
     if state["blocked"]:
         return True  # still blocked from a prior fire; record nothing new
 
-    unpriced_now = store.unpriced_count(session_id)
+    unpriced_now = _unpriced_signal(session_id)
     spend_increased = effective > state["last_evaluated_total"] + 1e-12
     unpriced_new = unpriced_now > state["last_unpriced_count"]
     if not (spend_increased or unpriced_new):
@@ -580,6 +612,24 @@ def _synthetic_response(api_mode):
             model=None,
             usage=None,
         )
+    if api_mode == "codex_responses":
+        # codex_responses reaches this middleware (codex_app_server does not); its
+        # transport validates a response only when ``.output`` is a non-empty
+        # list, so the terminal must be Responses-shaped, not the chat shape below.
+        return SimpleNamespace(
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text=message)],
+                )
+            ],
+            output_text=message,
+            model=None,
+            usage=None,
+        )
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -694,6 +744,16 @@ def _cli_cost_cap(ns, **kwargs):
             print(json.dumps(result))
             return result
 
+        profile = getattr(ns, "profile", None)
+        profile_ceiling = getattr(ns, "profile_ceiling_usd", None)
+        if (profile is None) != (profile_ceiling is None):
+            result = {
+                "ok": False,
+                "reason": "--profile and --ceiling must be supplied together",
+            }
+            print(json.dumps(result))
+            return result
+
         applied = {}
         fleet_ceiling = getattr(ns, "fleet_ceiling_usd", None)
         if fleet_ceiling is not None:
@@ -711,8 +771,6 @@ def _cli_cost_cap(ns, **kwargs):
                 print(json.dumps(result))
                 return result
 
-        profile = getattr(ns, "profile", None)
-        profile_ceiling = getattr(ns, "profile_ceiling_usd", None)
         if profile and profile_ceiling is not None:
             _write_profile_override(profile, float(profile_ceiling))
             applied["profile"] = profile

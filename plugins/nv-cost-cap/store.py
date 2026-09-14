@@ -47,7 +47,8 @@ def _ensure_schema(conn) -> None:
         "immortal INTEGER NOT NULL DEFAULT 0, "
         "platform TEXT, "
         "day_key TEXT, "
-        "day_start_total REAL NOT NULL DEFAULT 0)"
+        "day_start_total REAL NOT NULL DEFAULT 0, "
+        "recon_unpriced INTEGER NOT NULL DEFAULT 0)"
     )
     _migrate_cap_state(conn)
     conn.execute(
@@ -69,6 +70,7 @@ def _ensure_schema(conn) -> None:
 _CAP_STATE_ADDED_COLUMNS = (
     ("immortal", "INTEGER NOT NULL DEFAULT 0"),
     ("platform", "TEXT"),
+    ("recon_unpriced", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -153,6 +155,7 @@ _STATE_DEFAULTS: Dict[str, Any] = {
     "platform": None,
     "day_key": None,
     "day_start_total": 0.0,
+    "recon_unpriced": 0,
 }
 
 
@@ -172,7 +175,8 @@ def get_state(session_id: str) -> Dict[str, Any]:
     try:
         row = conn.execute(
             "SELECT effective_usd, window_start_total, last_evaluated_total, "
-            "last_unpriced_count, budget_gen, blocked, immortal, platform, day_key, day_start_total "
+            "last_unpriced_count, budget_gen, blocked, immortal, platform, day_key, "
+            "day_start_total, recon_unpriced "
             "FROM cap_state WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -191,11 +195,12 @@ def get_state(session_id: str) -> Dict[str, Any]:
         "platform": row[7],
         "day_key": row[8],
         "day_start_total": float(row[9]),
+        "recon_unpriced": int(row[10]),
     }
 
 
 _REAL_COLUMNS = {"window_start_total", "last_evaluated_total", "day_start_total"}
-_INT_COLUMNS = {"last_unpriced_count", "budget_gen", "blocked", "immortal"}
+_INT_COLUMNS = {"last_unpriced_count", "budget_gen", "blocked", "immortal", "recon_unpriced"}
 _TEXT_COLUMNS = {"platform", "day_key"}
 _SETTABLE_COLUMNS = _REAL_COLUMNS | _INT_COLUMNS | _TEXT_COLUMNS | {"effective_usd"}
 

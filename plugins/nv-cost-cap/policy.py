@@ -93,6 +93,53 @@ def reconcile_session(session_id: str, *, state_db_path: str) -> float:
         conn.close()
 
 
+def _lineage_has_unknown(conn, nodes) -> bool:
+    """Whether any lineage node carries a ``cost_status='unknown'`` row.
+
+    Core stamps the status on EITHER core column (``sessions.cost_status`` or
+    ``session_model_usage.cost_status``), so both are scanned. A schema without
+    the column raises ``OperationalError`` — degraded to "no unknown here", the
+    same fail-on-error style as ``_node_spend`` — so enforcement fail-CLOSED is
+    driven only by a readable unknown row and the reconcile stays crash-safe.
+    """
+    ids = [n for n in nodes if n is not None]
+    if not ids:
+        return False
+    placeholders = ",".join("?" * len(ids))
+    for table, id_col in (("sessions", "id"), ("session_model_usage", "session_id")):
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM {table} WHERE {id_col} IN ({placeholders}) "
+                "AND cost_status = 'unknown' LIMIT 1",
+                ids,
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if row is not None:
+            return True
+    return False
+
+
+def lineage_unknown(session_id: str, *, state_db_path: str) -> bool:
+    """Whether the session's lineage contains an unknown-priced row.
+
+    Core persists an unknown-priced call as ``estimated_cost_usd=0.0`` with
+    ``cost_status='unknown'``, so the numeric reconcile sum alone is fail-OPEN on
+    the authoritative path; the caller turns this signal into a fail-CLOSED
+    per-session marker. Read-only, never raises.
+    """
+    if not session_id or not state_db_path or not os.path.exists(state_db_path):
+        return False
+    try:
+        conn = _ro_connect(state_db_path)
+    except sqlite3.OperationalError:
+        return False
+    try:
+        return _lineage_has_unknown(conn, _lineage(conn, session_id))
+    finally:
+        conn.close()
+
+
 def completed_session_totals(profile_home: str, window: int) -> List[float]:
     """Per-session OWN totals of the most-recently-COMPLETED sessions.
 
