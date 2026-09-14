@@ -70,8 +70,13 @@ breach also engages the profile **ESTOP** belt when `settings.estop_on_breach` i
 true (the default). ESTOP pauses the whole profile (every new turn, cron and
 kanban) until it is disengaged; an operator running a heavily multiplexed profile
 who wants only the precise per-session stop sets `estop_on_breach: false` — the
-in-band per-session refusals still apply. The ESTOP sentinel is always written
-under the **serving** profile home, never the fleet-default home.
+in-band per-session refusals still apply. The ESTOP sentinel is written under the
+**serving** profile home, not a *named* peer's. One edge case follows from core
+ESTOP: when the serving profile **is** `default`, its home is the fleet root, so a
+breach there writes the canonical-root sentinel every named profile checks and
+pauses the whole fleet. Default-profile sessions are not the Bot-Mode norm; if you
+run cost-capped work on the `default` profile and want a per-session-only stop,
+set `estop_on_breach: false` there.
 
 ## Runtime policy — `hermes cost-cap`, no env var
 
