@@ -32,9 +32,11 @@ composed and installed here rather than auto-installed.
    (`$OUT` a scratch dir; the type names `gov-f27-reviewer`/`gov-f27-fixer` are the
    rendered profile names).
 2. Install the two rendered coworker profiles into the testbed `$HERMES_HOME`, one
-   profile dir per type, keeping the dir basename equal to the type name:
-   `hermes profile install "$OUT/gov-f27-reviewer"` and
-   `hermes profile install "$OUT/gov-f27-fixer"` (the DEFAULT/orchestrator profiles
+   profile dir per type, keeping the dir basename equal to the type name. Pass `-y`
+   so the install runs unattended (without it the `Proceed with install? [y/N]`
+   prompt cancels under non-interactive stdin):
+   `hermes profile install -y "$OUT/gov-f27-reviewer"` and
+   `hermes profile install -y "$OUT/gov-f27-fixer"` (the DEFAULT/orchestrator profiles
    need not be installed for this panel check).
 3. **Precondition assert (before launching the dashboard):** for each installed
    profile, its dir basename is an exact key in that profile's rendered
