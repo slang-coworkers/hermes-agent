@@ -1,0 +1,60 @@
+# MEM-F42 compose input — shared spine parent for every coworker type.
+# Focus: the curator SAFETY keys are set to UNSAFE values here so the render must
+# OVERRIDE each one to the fleet-safe invariant (curator.enabled: true,
+# curator.backup.enabled: true, curator.backup.keep: 5). The sibling
+# base-omitted.yaml omits the whole curator block so the render must INSERT the
+# safety keys. A passthrough or setdefault render leaves an unsafe value (here) or
+# an absent key (there) and fails.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+traits:
+  command_allowlist: ["git status"]
+config:
+  timezone: "Asia/Kolkata"
+  # Retention keys (MEM-F44, already enforced by the merged render) — set to their
+  # safe values here so this fixture carries no retention noise; MEM-F42 asserts
+  # only curator.* keys.
+  sessions: {auto_prune: false, auto_archive: true}
+  compression: {in_place: true}
+  checkpoints: {auto_prune: false}
+  memory: {memory_char_limit: 4000, user_char_limit: 2000}
+  # Curator SAFETY keys inherited unsafe by every coworker type. The render must
+  # override curator.enabled -> true, curator.backup.enabled -> true and floor
+  # curator.backup.keep -> 5 (the explicit fleet floor; runtime otherwise clamps a
+  # raw 0 to 1). Per-role TUNING keys (interval_hours/min_idle_hours/consolidate/
+  # prune_builtins) are NOT set here — they are authored per profile below and must
+  # survive the enforcement.
+  curator:
+    enabled: false
+    backup:
+      enabled: false
+      keep: 0
+  skills: {external_dirs: ["/data/shared-skills"]}
+  terminal:
+    backend: "docker"
+    docker_env: {}
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+    docker_volumes: []
+  approvals:
+    mode: "smart"
+    timeout: 300
+    cron_mode: "deny"
+    unattended_mode: "deny"
+    single_query_mode: "deny"
+  agent:
+    disabled_toolsets: []
+  plugins:
+    enabled: ["nv-fleet-gates"]
+    entries:
+      nv-fleet-gates:
+        settings:
+          enabled: true
+          policy: "deny-admin-to-workers"
+      nv-cost-cap:
+        settings:
+          ceiling_usd: 20
+  cron: {failure_nudge_threshold: 3}
