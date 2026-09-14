@@ -67,6 +67,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `hermes-achievements` | dashboard tab | Steam-style collectible badges generated from your real Hermes session history |
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |
 | `nv-approval-ledger` | standalone (hook + 3 tools) | Immutable fleet approval-decision ledger — writer-gated agent decisions and webhook-observed human PR-review verdicts, read via `list_trusted_decisions` |
+| `nv-artifact` | standalone (4 hooks + 2 tools + dashboard tab) | Fleet PR→session ownership index (first-claim-wins) — the worker who creates a PR owns it, later PR webhook events reach the owning session instead of a new orphan — plus per-artifact outcome/cost analytics read via `hermes pr remap` / `hermes outcomes funnel\|winrate\|cost-per-merge` and an **Artifacts** dashboard page |
 
 Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the hooks-based plugins follows.
 
@@ -345,6 +346,35 @@ A single immutable approval-decision ledger for a whole fleet of coworker profil
 **Enabling:** `hermes plugins enable nv-approval-ledger` (or check the box in `hermes plugins`).
 
 **Disabling again:** `hermes plugins disable nv-approval-ledger`.
+
+### nv-artifact
+
+A fleet-wide index that answers *who owns this PR?* durably, so a PR created by one worker stays owned by that worker's session — and so per-artifact outcomes and cost are recorded for the whole fleet. One `plugin_db` holds three tables: the `ownership` and `outcomes` domain tables plus an internal `seen_deliveries` best-effort dedup table.
+
+**Ownership — first-claim-wins.** A `post_tool_call` observer watches every `terminal` and `execute_code` result: a successful invocation whose command carried a `gh pr create` AND whose output contains a `https://github.com/<owner>/<repo>/pull/<n>` URL claims `(repo, pr)` for the calling session. The claim is `INSERT OR IGNORE` on `UNIQUE(repo, pr)`: the first worker wins, a claim from a different profile is refused naming the current holder, and the same holder refreshes its own owning task in place. A command that merely echoes a PR URL (`gh pr view`, `gh pr list`) claims nothing, so an unrelated worker cannot win the irreversible first claim.
+
+**Later events reach the owner, not an orphan.** A single `pre_gateway_dispatch` observer sees every webhook delivery once. For an **unclaimed** `(repo, pr)` it returns `None` and the route's own dispatch is untouched. For a **claimed** `(repo, pr)` it durably enqueues the rendered event as a `notification` on the owning kanban card (resolved `ownership.task_id → tasks.session_id`, the raw owning session id) and returns `{"action":"skip"}`, so the default profile mints no throwaway session; the kanban notifier then wakes the owning (possibly secondary-profile) session by self-posting to that profile's `/p/<profile>/v1/chat/completions` mirror, advancing its cursor only after the turn is confirmed persisted. If the durable enqueue cannot commit the observer still returns `skip` (fail-closed — never `None`), so a claimed PR never re-opens an orphan. Re-delivery of the same `X-GitHub-Delivery` id is de-duplicated (best-effort); the end-to-end delivery guarantee is **at-least-once after the kanban notification commit**, with one documented pre-commit webhook-ingestion residual (because the webhook adapter returns HTTP 202 before the run starts, a gateway crash **or** a failed enqueue between GitHub's 202 and the kanban commit can lose that single delivery, and GitHub does not retry a 202'd delivery).
+
+**Outcomes and cost.** A kanban terminal observer (`kanban_task_completed`) and `on_session_end` append one `outcomes(artifact, terminal_outcome, cost_usd, profile)` row per artifact (`<repo>#<pr>`). `cost_usd` is the sum over all `session_model_usage` rows for the session (actual when recorded, else estimated — so auxiliary/subagent usage is included), attributed to the profile via the ownership row, written as an idempotent `UNIQUE(artifact)` upsert that SETS the recomputed cumulative (repeated `on_session_end` never double-counts, and a later read reflects usage recorded after the first fire).
+
+**Single fleet ledger.** The SQLite file is pinned to the `ledger_profile` owner's home (`<owner-home>/plugin-data/nv-artifact/data.db`) regardless of which profile or process writes, so every coworker resolves one authoritative ledger.
+
+**Reads are orchestrator-only.** `hermes pr remap <repo> <pr> --to <profile> [--task <id>]` re-points ownership; `hermes outcomes funnel|winrate|cost-per-merge` compute the outcome funnel (counts by `terminal_outcome`), win-rate (merged / total artifacts) and cost-per-merge (Σ cost over merged artifacts / merged count). Each verb — and the **Artifacts** dashboard page that renders the same three aggregates — refuses for a non-orchestrator profile. The gate is enforced in the handler (and in the dashboard read), not just by hiding a schema.
+
+**Config** — under `plugins.entries.nv-artifact.settings`:
+
+| Key | Meaning |
+|---|---|
+| `ledger_profile` | Owner profile whose home holds the single ledger DB (default `default`) |
+| `orchestrator_profile` | Profile allowed to run the read verbs and view the dashboard page (default `orchestrator`) |
+| `notify_route` | The webhook route the delivery observer matches (default `gh-pr`) |
+| `board` | Optional kanban board slug for the owning cards |
+
+`report_pr_created` and `resolve_pr_owner` are never model-facing (claiming is observer-driven). Delivery to a secondary profile's session needs no extra grant: it rides the kanban notifier's durable wake and the api_server's profile-scoped mirror, not a plugin-side message injection.
+
+**Enabling:** `hermes plugins enable nv-artifact` (or check the box in `hermes plugins`).
+
+**Disabling again:** `hermes plugins disable nv-artifact`.
 
 ## Adding a bundled plugin
 

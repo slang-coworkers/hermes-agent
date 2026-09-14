@@ -5,7 +5,7 @@ Two delivery strategies, selected by the target adapter's
 
 * Push-capable adapters (telegram, discord, plugin platforms, ...): inject a
   synthetic ``MessageEvent(internal=True)`` through ``adapter.handle_message``
-  — the pre-existing wake path, preserved exactly.
+  — the push wake path.
 
 * Stateless request/response adapters (the API server,
   ``supports_async_delivery = False``): ``handle_message`` would run the wake
@@ -59,6 +59,9 @@ async def deliver_wake(
     text: str,
     session_id: str = "",
     source: Any = None,
+    owner_profile: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    require_persist_ack: bool = False,
 ) -> None:
     """Deliver a wake turn to the session behind ``adapter``.
 
@@ -67,8 +70,22 @@ async def deliver_wake(
     ``SessionSource`` used to build the synthetic event — required for
     push-capable adapters.
 
-    Raises on failure (bad arguments, exhausted retries, HTTP error) so the
-    caller can rewind/retry instead of treating the wake as delivered.
+    ``owner_profile`` (keyword-only, defaulted): when set, the non-push
+    self-post targets the EXISTING profile-scoped mirror
+    ``POST /p/<owner_profile>/v1/chat/completions`` so the wake resumes a
+    SECONDARY-profile session (whose store the middleware scopes to
+    ``profiles/<owner>/state.db``); when ``None`` the unprefixed same-profile
+    ``/v1/chat/completions`` is used. ``idempotency_key`` (keyword-only,
+    defaulted): when set, sent as the ``Idempotency-Key`` request header so a
+    same-key retry is deduped by the api_server's in-flight/completed cache.
+    ``require_persist_ack`` (keyword-only, defaulted False): when True the
+    non-push self-post treats a 2xx as success ONLY if the response also carries
+    ``X-Hermes-Turn-Persisted: true`` (a durable caller opts in); when False a
+    2xx alone is success.
+
+    Raises on failure (bad arguments, exhausted retries, HTTP error, or — only
+    when ``require_persist_ack`` — a response that does not confirm persistence)
+    so the caller can rewind/retry instead of treating the wake as delivered.
     """
     if adapter_supports_push(adapter):
         if source is None:
@@ -91,11 +108,31 @@ async def deliver_wake(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
             "requires the raw session id to self-post the wake turn"
         )
-    await _self_post_chat_completion(adapter, text=text, session_id=session_id)
+    # Forward the optional args only when set, so a self-post that passes just
+    # (text, session_id) receives no unexpected keywords.
+    _extra: dict = {}
+    if owner_profile is not None:
+        _extra["owner_profile"] = owner_profile
+    if idempotency_key is not None:
+        _extra["idempotency_key"] = idempotency_key
+    if require_persist_ack:
+        _extra["require_persist_ack"] = require_persist_ack
+    await _self_post_chat_completion(
+        adapter,
+        text=text,
+        session_id=session_id,
+        **_extra,
+    )
 
 
 async def _self_post_chat_completion(
-    adapter: Any, *, text: str, session_id: str
+    adapter: Any,
+    *,
+    text: str,
+    session_id: str,
+    owner_profile: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    require_persist_ack: bool = False,
 ) -> None:
     """POST the wake text to the in-pod API server as a normal session turn.
 
@@ -104,6 +141,17 @@ async def _self_post_chat_completion(
     ``API_SERVER_KEY`` being configured, so a missing key is a hard error —
     raise loudly rather than run the wake in a fresh fingerprint-derived
     session nobody is looking at.
+
+    When ``owner_profile`` is set the request targets the profile-scoped mirror
+    ``/p/<owner_profile>/v1/chat/completions`` (the middleware scopes the
+    session store to that profile's ``state.db``), so a wake can resume a
+    SECONDARY-profile session; otherwise the unprefixed same-profile endpoint
+    is used. When ``require_persist_ack`` is set, a 2xx alone is NOT success —
+    the response must also carry ``X-Hermes-Turn-Persisted: true`` (a
+    server-generated ack that the target profile's final turn actually
+    committed); a missing / malformed / ``false`` ack RAISES so a durable
+    caller does not treat an unpersisted turn as delivered. When it is unset
+    (the default), a 2xx is success as before.
     """
     import aiohttp
 
@@ -122,11 +170,18 @@ async def _self_post_chat_completion(
 
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # bare IPv6 literal
-    url = f"http://{host}:{port}/v1/chat/completions"
+    # Profile-scoped mirror resumes a secondary-profile session; owner_profile
+    # None targets the unprefixed same-profile endpoint.
+    path = "/v1/chat/completions"
+    if owner_profile:
+        path = f"/p/{owner_profile}{path}"
+    url = f"http://{host}:{port}{path}"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "X-Hermes-Session-Id": session_id,
     }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     payload = {
         "model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
         "messages": [{"role": "user", "content": text}],
@@ -161,6 +216,26 @@ async def _self_post_chat_completion(
                             f"HTTP {resp.status}: {body}"
                         )
                     await resp.read()
+                    # A 2xx does not prove the turn committed: the handler 200s
+                    # even when the session-db write failed. A durable caller
+                    # (require_persist_ack) requires the server-generated persist
+                    # ack; a missing / malformed / false value is a delivery
+                    # failure (the caller must not advance its cursor). This is
+                    # NOT retried inline — the turn already ran; the durable
+                    # notifier re-delivers later under the same Idempotency-Key
+                    # so the api_server dedups it. Non-durable callers keep the
+                    # prior 2xx-is-success behaviour.
+                    if require_persist_ack:
+                        persisted = str(
+                            resp.headers.get("X-Hermes-Turn-Persisted", "")
+                        ).strip().lower()
+                        if persisted != "true":
+                            raise RuntimeError(
+                                f"wake self-post for session {session_id} did "
+                                f"not confirm persistence (X-Hermes-Turn-"
+                                f"Persisted={persisted!r}); treating as "
+                                f"undelivered"
+                            )
                     logger.info(
                         "wake self-post delivered for session %s (attempt %d)",
                         session_id,

@@ -208,6 +208,18 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
     return None
 
 
+# Generic durable-retry sub policy (retry_policy='durable'): a failing delivery
+# is retried with exponential capped backoff and NEVER dropped; on sustained
+# failure an operator alert is logged. Values are deliberately small
+# at the low end (a transient blip retries within seconds) and capped so a dead
+# owner does not hot-loop the notifier.
+_DURABLE_BACKOFF_BASE_SECONDS = 2.0
+_DURABLE_BACKOFF_CAP_SECONDS = 300.0
+# Consecutive failures after which the durable sub earns a loud operator alert
+# (still never dropped).
+_DURABLE_ALERT_THRESHOLD = 5
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -263,7 +275,7 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "notification")
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
@@ -462,6 +474,38 @@ class GatewayKanbanWatchersMixin:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
                             for sub in subs:
                                 try:
+                                    _d_platform = (sub.get("platform") or "").lower()
+                                    if (sub.get("retry_policy") or "default").lower() == "durable":
+                                        # Durable path (generic — keyed on the
+                                        # policy, never the platform): PEEK (never
+                                        # pre-advance) and bypass the local-adapter
+                                        # owner skip below (a secondary api_server
+                                        # owner has no local adapter). Delivery
+                                        # preserves the sub's transport — self-post
+                                        # for api_server, push wake otherwise — and
+                                        # never drops.
+                                        if _d_platform not in active_platforms:
+                                            continue
+                                        _new_cursor, _d_events = _kb.unseen_events_for_sub(
+                                            conn,
+                                            task_id=sub["task_id"],
+                                            platform=sub["platform"],
+                                            chat_id=sub["chat_id"],
+                                            thread_id=sub.get("thread_id") or "",
+                                            kinds=TERMINAL_KINDS,
+                                        )
+                                        if not _d_events:
+                                            continue
+                                        deliveries.append({
+                                            "sub": sub,
+                                            "old_cursor": sub.get("last_event_id") or 0,
+                                            "cursor": _new_cursor,
+                                            "events": _d_events,
+                                            "task": _kb.get_task(conn, sub["task_id"]),
+                                            "board": slug,
+                                            "durable": True,
+                                        })
+                                        continue
                                     owner_profile = sub.get("notifier_profile") or None
                                     if owner_profile and owner_profile != notifier_profile:
                                         _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
@@ -518,6 +562,12 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    if d.get("durable"):
+                        # Crash-safe per-event peek-then-advance delivery to a
+                        # (possibly secondary-profile) owner. Self-contained; does
+                        # not touch the default batch path below.
+                        await self._deliver_durable_notifications(d)
+                        continue
                     platform_str = (sub["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
@@ -571,6 +621,7 @@ class GatewayKanbanWatchersMixin:
                     # exists on the board.
                     wake_handoff = ""
                     wake_review_detail = ""
+                    wake_notification = ""
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -686,6 +737,20 @@ class GatewayKanbanWatchersMixin:
                             msg = (
                                 f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
                                 f" — needs a human decision{rc}{reason}"
+                            )
+                        elif kind == "notification":
+                            # Generic caller-supplied notification (publish_task_notification):
+                            # the payload's free-form message is the delivery body and,
+                            # for a wake subscription, is carried into the synthetic turn
+                            # below so the woken session sees the actual content.
+                            note = ""
+                            if ev.payload and ev.payload.get("message"):
+                                note = str(ev.payload["message"])[:500]
+                            wake_notification = note
+                            msg = (
+                                f"🔔 {board_tag}{tag}Kanban {sub['task_id']} — {note}"
+                                if note
+                                else f"🔔 {board_tag}{tag}Kanban {sub['task_id']} notification"
                             )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
@@ -819,9 +884,9 @@ class GatewayKanbanWatchersMixin:
                         # self-post below). Whether the cursor may advance now
                         # depends on the adapter class:
                         #
-                        # * push-capable: the text send WAS the delivery, so
-                        #   advance immediately (pre-existing behavior); the
-                        #   wake injection below stays best-effort.
+                        # * push-capable: the text send IS the delivery, so
+                        #   advance immediately; the wake injection below stays
+                        #   best-effort.
                         # * non-push (api_server): the wake self-post IS the
                         #   delivery. Advancing first would let a failed /
                         #   retry-exhausted self-post (swallowed by the
@@ -842,7 +907,7 @@ class GatewayKanbanWatchersMixin:
                         _WAKE_KINDS = (
                             "completed", "gave_up", "crashed", "timed_out",
                             "blocked", "review_requested", "changes_requested",
-                            "block_loop_detected",
+                            "block_loop_detected", "notification",
                         )
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
@@ -907,6 +972,11 @@ class GatewayKanbanWatchersMixin:
                                     "gateway.kanban.wake.review_detail",
                                     reason=wake_review_detail,
                                 )
+                            # Carry a generic notification's free-form message into
+                            # the wake turn inline (no i18n key — the content is the
+                            # caller's, not a fixed status string).
+                            if wake_notification:
+                                _synth += "\n" + wake_notification
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
@@ -1102,6 +1172,168 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _render_durable_event(self, ev, task, sub, board_slug) -> Optional[str]:
+        """Render ONE durable event to its wake text.
+
+        The body is built ONLY from the event's own immutable payload / kind and
+        the sub's task id — never from mutable task fields (assignee, title) —
+        because the wake carries a stable ``Idempotency-Key`` and the api_server
+        fingerprint hashes the body: a body that changed between a persisted-
+        but-unacked attempt and its retry would defeat the dedup and double-run.
+        A ``notification`` event carries the caller's free-form ``message``
+        (already the rendered event); other kinds get a concise per-event line.
+        """
+        if ev.kind == "notification":
+            note = ""
+            if isinstance(ev.payload, dict):
+                note = str(ev.payload.get("message") or "")
+            return note or f"Kanban {sub['task_id']} notification"
+        return f"Kanban {sub['task_id']}: {ev.kind}"
+
+    def _note_durable_failure(self, sub_key, cause) -> None:
+        """Record a durable-sub delivery failure: bump the fail count, schedule
+        an exponential capped backoff, and — on sustained failure — emit a loud
+        operator alert. Never drops the sub."""
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+        fails = fail_counts.get(sub_key, 0) + 1
+        fail_counts[sub_key] = fails
+        delay = min(
+            _DURABLE_BACKOFF_CAP_SECONDS,
+            # Cap the exponent before computing it — an unbounded shift on a
+            # long-poisoned sub is pointless work (the cap dominates anyway).
+            _DURABLE_BACKOFF_BASE_SECONDS * (2 ** min(fails - 1, 20)),
+        )
+        backoff[sub_key] = {"next_attempt": time.monotonic() + delay, "fails": fails}
+        if fails >= _DURABLE_ALERT_THRESHOLD:
+            logger.error(
+                "kanban notifier: DURABLE sub %s sustained delivery failure "
+                "(%d attempts, backoff %.1fs) — NOT dropping; operator "
+                "attention required: %s",
+                sub_key, fails, delay, cause,
+            )
+        else:
+            logger.warning(
+                "kanban notifier: durable wake failed for %s "
+                "(attempt %d, backoff %.1fs): %s",
+                sub_key, fails, delay, cause,
+            )
+
+    async def _deliver_durable_notifications(self, d: dict) -> None:
+        """Crash-safe, per-event delivery of a durable notify sub to its owner.
+
+        Peek-then-advance: each event is delivered individually and the cursor
+        advances to that event id ONLY after ``deliver_wake`` succeeds — a
+        profile-scoped api_server self-post that confirmed the persist ack (it
+        raises otherwise), deduped by a stable ``(repo#pr, delivery-id)``
+        Idempotency-Key. Confirmable durable delivery exists only for the
+        api_server transport (its self-post carries the persist ack); a durable
+        sub on any other (push) transport is retained and alerted rather than
+        advanced on a fire-and-forget wake. A failure stops at that event
+        (cursor contiguity), applies capped backoff, and NEVER deletes the sub;
+        the next tick retries from here.
+        """
+        from gateway.wake import adapter_supports_push, deliver_wake
+
+        sub = d["sub"]
+        task = d.get("task")
+        board_slug = d.get("board")
+        events = d.get("events") or []
+        owner_profile = sub.get("notifier_profile") or None
+        sub_key = (
+            sub["task_id"], sub["platform"],
+            sub["chat_id"], sub.get("thread_id") or "",
+        )
+
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+
+        # Still inside the capped-backoff window from a prior failure — leave the
+        # cursor untouched and retry a later tick.
+        state = backoff.get(sub_key)
+        if state and state.get("next_attempt", 0.0) > time.monotonic():
+            return
+
+        from gateway.config import Platform as _Platform
+        try:
+            plat = _Platform((sub.get("platform") or "").lower())
+        except ValueError:
+            # An unroutable platform must not hot-loop: retain, back off, alert.
+            self._note_durable_failure(
+                sub_key, f"durable sub has unroutable platform {sub.get('platform')!r}"
+            )
+            return
+        # Resolve the OWNER's adapter. api_server delivery is profile-scoped by
+        # owner_profile on the self-post, not by the adapter, so a secondary
+        # api_server owner with no adapter of its own is reached via the shared
+        # api_server adapter; a push transport's adapter, by contrast, IS the
+        # profile identity, so it is NEVER allowed to fall back to the default
+        # adapter (that would push to the wrong profile — the fail-closed profile
+        # resolution invariant, gateway/authz_mixin.py).
+        adapter = self._authorization_adapter(plat, owner_profile)
+        if adapter is None and plat == _Platform.API_SERVER:
+            adapter = self.adapters.get(plat)
+        if adapter is None:
+            self._note_durable_failure(
+                sub_key, f"no {plat.value} adapter for owner {owner_profile or 'default'}"
+            )
+            return
+        if adapter_supports_push(adapter):
+            # A push wake (synthetic MessageEvent through handle_message) returns
+            # after SPAWNING the turn — it is NOT a persistence ack, so advancing
+            # the cursor on its return would drop the event if the spawned turn
+            # fails. Durable delivery is confirmable only for api_server
+            # (self-post + X-Hermes-Turn-Persisted ack); a durable sub on a push
+            # transport is therefore retained (never advanced, never dropped) and
+            # surfaces as a sustained-failure alert rather than being delivered.
+            self._note_durable_failure(
+                sub_key,
+                f"durable delivery is unconfirmable on push transport {plat.value}",
+            )
+            return
+
+        for ev in events:
+            text = self._render_durable_event(ev, task, sub, board_slug)
+            if text is None:
+                # Nothing to deliver for this kind — advance past it so the
+                # cursor stays contiguous.
+                await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+                continue
+            key = None
+            if isinstance(ev.payload, dict):
+                key = ev.payload.get("idempotency_key")
+            key = key or f"{sub['task_id']}:{ev.id}"
+            try:
+                await deliver_wake(
+                    adapter,
+                    text=text,
+                    session_id=sub["chat_id"],
+                    owner_profile=owner_profile,
+                    idempotency_key=key,
+                    require_persist_ack=True,
+                )
+            except Exception as exc:
+                # Delivery unconfirmed: leave the cursor unmoved (redelivered
+                # next tick), back off, and NEVER drop the durable sub.
+                self._note_durable_failure(sub_key, exc)
+                return
+            # Delivery confirmed (deliver_wake raised otherwise) → mark SEEN.
+            await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+            fail_counts.pop(sub_key, None)
+            backoff.pop(sub_key, None)
+            logger.info(
+                "kanban notifier: durable wake delivered task=%s event=%s owner=%s",
+                sub["task_id"], ev.id, owner_profile or "default",
+            )
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,

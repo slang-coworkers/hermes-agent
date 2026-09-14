@@ -98,6 +98,76 @@ def test_deliver_wake_non_push_self_posts_raw_session_id(monkeypatch):
     ]
 
 
+def test_deliver_wake_require_persist_ack_raises_without_header():
+    """A durable caller (require_persist_ack) treats a 2xx WITHOUT
+    X-Hermes-Turn-Persisted:true as undelivered and RAISES, so its cursor is
+    not advanced. A non-durable caller (default) treats the same 2xx as success."""
+    from aiohttp import web
+
+    async def handler(request):
+        # 200 but NO persist ack header.
+        return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+    async def run():
+        runner, port = await _serve(handler)
+        try:
+            adapter = ApiServerLikeAdapter(port=port)
+            # Default caller: 2xx is success, no raise.
+            await deliver_wake(adapter, text="x", session_id="sid")
+            # Durable caller: missing persist ack → raise.
+            with pytest.raises(RuntimeError, match="persist"):
+                await deliver_wake(
+                    adapter, text="x", session_id="sid", require_persist_ack=True,
+                )
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
+def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
+    """With owner_profile set the self-post targets /p/<profile>/v1/chat/completions
+    (the profile-scoped mirror), carries the Idempotency-Key header, and succeeds
+    when the response confirms persistence via X-Hermes-Turn-Persisted:true."""
+    from aiohttp import web
+
+    seen = {}
+
+    async def handler(request):
+        seen["path"] = request.path
+        seen["idem"] = request.headers.get("Idempotency-Key")
+        seen["session_id"] = request.headers.get("X-Hermes-Session-Id")
+        return web.json_response(
+            {"choices": [{"message": {"content": "ok"}}]},
+            headers={"X-Hermes-Turn-Persisted": "true"},
+        )
+
+    async def run():
+        from aiohttp import web as _web
+
+        app = _web.Application()
+        app.router.add_post("/p/{profile}/v1/chat/completions", handler)
+        runner = _web.AppRunner(app)
+        await runner.setup()
+        site = _web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            adapter = ApiServerLikeAdapter(port=port, key="sekrit")
+            await deliver_wake(
+                adapter, text="review submitted", session_id="owner-sid",
+                owner_profile="gov-f25-owner", idempotency_key="o/r#7:D1",
+                require_persist_ack=True,
+            )
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    assert seen["path"] == "/p/gov-f25-owner/v1/chat/completions"
+    assert seen["idem"] == "o/r#7:D1"
+    assert seen["session_id"] == "owner-sid"
+
+
 def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
     """HTTP 429 (max_concurrent_runs cap) is transient — retried with backoff."""
     from aiohttp import web

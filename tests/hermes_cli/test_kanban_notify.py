@@ -1130,3 +1130,123 @@ def test_gc_archived_rows_already_removed_by_unsub(kanban_home):
         assert kb.list_notify_subs(conn, tid) == []
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# GOV-F25 UA-6: publish_task_notification appends a generic "notification"
+# event that BOTH notifier gates claim — TERMINAL_KINDS (passive delivery) and
+# _WAKE_KINDS (wake) — carrying its free-form payload["message"] into the
+# passive body and the synthetic wake turn. Without both additions a caller
+# could not deliver arbitrary later-event content and wake the owner.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_publish_task_notification_notify_wake_delivers_and_wakes(kanban_home):
+    """A publish_task_notification event on a notify+wake sub is both delivered
+    passively (TERMINAL_KINDS) AND drives the wake self-post, with its message
+    reaching both the passive body and the synthetic wake turn."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    note = "PR o/r#7 review comment: please rebase onto main"
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="artifact card", assignee="worker1")
+        kb.add_notify_sub(
+            conn, task_id=tid, platform="telegram", chat_id="chat1",
+            delivery_mode="notify+wake",
+        )
+        kb.publish_task_notification(conn, tid, note)
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._owns_kanban_dispatcher_lock = lambda: True
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+
+    sent_msgs: list[str] = []
+
+    async def _send(chat_id, msg, metadata=None):
+        sent_msgs.append(msg)
+
+    fake_adapter = MagicMock()
+    fake_adapter.send = AsyncMock(side_effect=_send)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+    tick_count = 0
+
+    async def _fast_sleep(_):
+        nonlocal tick_count
+        await _orig_sleep(0)
+        tick_count += 1
+        if tick_count >= 3:
+            runner._running = False
+
+    wake_mock = AsyncMock()
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
+         patch("gateway.wake.deliver_wake", new=wake_mock):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    # Passive delivery: the notification kind is claimed (TERMINAL_KINDS) and
+    # its message is rendered into the body.
+    assert len(sent_msgs) == 1
+    assert note in sent_msgs[0]
+    # Wake: the notification kind is claimed by _WAKE_KINDS and the message is
+    # carried into the synthetic wake turn text.
+    wake_mock.assert_awaited_once()
+    assert note in wake_mock.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_publish_task_notification_plain_notify_delivers_without_wake(kanban_home):
+    """A plain-notify sub delivers the notification passively (TERMINAL_KINDS)
+    but does not wake — the wake gate stays governed by delivery_mode."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    note = "CI status: green on abc123"
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify-only card", assignee="worker1")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
+        kb.publish_task_notification(conn, tid, note)
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._owns_kanban_dispatcher_lock = lambda: True
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    fake_adapter = MagicMock()
+    fake_adapter.send = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+    tick_count = 0
+
+    async def _fast_sleep(_):
+        nonlocal tick_count
+        await _orig_sleep(0)
+        tick_count += 1
+        if tick_count >= 3:
+            runner._running = False
+
+    wake_mock = AsyncMock()
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
+         patch("gateway.wake.deliver_wake", new=wake_mock):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_awaited_once()
+    assert note in fake_adapter.send.await_args.args[1]
+    wake_mock.assert_not_awaited()
