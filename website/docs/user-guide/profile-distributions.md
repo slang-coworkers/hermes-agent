@@ -50,8 +50,12 @@ my-research-agent/
 ├── config.yaml          # model, temperature, reasoning, tool defaults
 ├── skills/              # bundled skills that come with the agent
 ├── cron/                # scheduled tasks the agent runs
-└── mcp.json             # MCP servers the agent connects to
+└── mcp.json             # copied distribution artifact; not read at runtime (see note)
 ```
+
+:::note Which `mcp.json` is live at runtime
+The profile-root `mcp.json` shown here is **distribution-owned and copied on install, but not read at runtime** in v0.21.0 — a coworker type's live MCP servers belong in `config.yaml`'s `mcp_servers` key, or ship as a portable [Agent Plugin](../developer-guide/plugins/index.md). See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md) for the two MCP lanes.
+:::
 
 Recipients run:
 
@@ -552,7 +556,7 @@ The install-delete cycle is cheap enough to be disposable.
 ### Pin to a specific version
 
 :::note
-Git ref pinning (`#v1.2.0`) is planned but not in the initial release — install currently tracks the default branch. Track your installed version via `hermes profile info <name>` and hold off on updates until you're ready.
+Git ref pinning (`#v1.2.0`) is **not available in v0.21.0** — install tracks the source's default branch. `hermes profile info <name>` reports the manifest version and source string, **not** a resolved commit SHA; to pin a type, install from an immutable source (a per-release branch or a tag-only mirror) and record its commit out of band. See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md#pinning-a-type-to-an-exact-version).
 :::
 
 ### Check what version you're on vs. latest

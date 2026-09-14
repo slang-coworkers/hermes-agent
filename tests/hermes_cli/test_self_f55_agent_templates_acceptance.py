@@ -118,22 +118,19 @@ def installed_disabled(tmp_path, monkeypatch):
     home = _hermes_home(tmp_path, monkeypatch)
     repo_uri = _local_git_repo(PLUGIN_FIXTURE, tmp_path / "plugin-repo")
     name = _plugin_manifest_name(PLUGIN_FIXTURE)
-    # force=True clears a scanner 'caution' on the benign fixture (it cannot clear 'dangerous').
-    cmd_install(repo_uri, enable=False, force=True)
+    # No force= override: a caution/dangerous scan verdict must fail the install, not be bypassed.
+    cmd_install(repo_uri, enable=False)
     return home, name
 
 
 def test_ac_self_f55_1(installed_disabled):
     """A portable Agent Plugins v1 package installed with --no-enable lands on disk and is disabled."""
     home, name = installed_disabled
-    plugins_dir = home / "plugins"
-    landed = [
-        d
-        for d in (plugins_dir.iterdir() if plugins_dir.is_dir() else [])
-        if (d / "plugin.json").is_file()
-        and json.loads((d / "plugin.json").read_text(encoding="utf-8")).get("name") == name
-    ]
-    assert landed, "the portable package's plugin.json must land under <HERMES_HOME>/plugins/"
+    landed = home / "plugins" / name
+    assert (landed / "plugin.json").is_file(), (
+        "the portable package must land at <HERMES_HOME>/plugins/<manifest name>/"
+    )
+    assert _plugin_manifest_name(landed) == name, "the landed plugin.json must be the installed package"
     assert name not in _read_enabled(home), "--no-enable must not add the plugin to plugins.enabled"
 
     manager = PluginManager()
@@ -223,7 +220,8 @@ def test_ac_self_f55_5(tmp_path, monkeypatch):
     assert any(r.get("required") is False for r in requires), "env_requires must include an optional entry"
     template = staged / ".env.template"
     assert template.is_file(), "the distribution must ship a .env.template"
-    assert ENV_REQUIRED_VAR in template.read_text(encoding="utf-8"), ".env.template must name the required credential"
+    template_body = template.read_text(encoding="utf-8")
+    assert ENV_REQUIRED_VAR in template_body, ".env.template must name the required credential"
     (staged / ".env").write_text(f"SELF_F55_REQUIRED_TOKEN={ENV_SECRET_SENTINEL}\n", encoding="utf-8")
     plan = install_distribution(str(staged), name="f55env")
     installed = _installed_dir(plan, home, "f55env")
@@ -233,6 +231,9 @@ def test_ac_self_f55_5(tmp_path, monkeypatch):
     body = example.read_text(encoding="utf-8")
     assert ENV_REQUIRED_VAR in body, ".env.EXAMPLE must name the required credential"
     assert ENV_SECRET_SENTINEL not in body, ".env.EXAMPLE must not carry a real secret value"
+    # .env.EXAMPLE must be the shipped .env.template, copied verbatim — not a fallback synthesized
+    # from env_requires, which would also contain the required var and mask a broken copy.
+    assert body == template_body, ".env.EXAMPLE must be the distribution's .env.template, copied verbatim"
     assert not (installed / ".env").exists(), "a .env must never be copied from the distribution"
 
 
@@ -243,9 +244,15 @@ def test_ac_self_f55_6(tmp_path, monkeypatch):
     assert jobs_file.is_file(), "the distribution's cron/jobs.json must land on disk"
     jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
     records = jobs if isinstance(jobs, list) else jobs.get("jobs", [])
-    paused = [j for j in records if j.get("enabled") is False]
-    assert paused, "the distribution must ship a job authored enabled:false"
-    assert not is_job_runnable(paused[0]), "a job authored enabled:false must not be runnable"
+    job = next((j for j in records if j.get("enabled") is False), None)
+    assert job is not None, "the distribution must ship a job authored enabled:false"
+    assert job.get("state") == "paused", "the authored job must install in the paused state"
+    assert not is_job_runnable(job), "a job authored enabled:false must not be runnable"
+    # Isolate the enabled=false gate: with the pause marker removed, enabled=false alone must
+    # still make the job not runnable, so a state:paused marker cannot mask an enabled regression.
+    assert not is_job_runnable({**job, "state": "scheduled", "paused_at": None}), (
+        "enabled:false alone must gate runnability, independent of the pause marker"
+    )
 
 
 def test_ac_self_f55_7(tmp_path, monkeypatch):
