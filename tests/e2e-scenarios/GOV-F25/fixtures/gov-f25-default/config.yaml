@@ -16,6 +16,17 @@ providers:
     api_key: dummy-gov-f25-not-a-real-key
     default_model: aws/anthropic/bedrock-claude-opus-4-8
 timezone: Asia/Kolkata
+gateway:
+  # One gateway serves BOTH profiles. This default carries the gh-pr webhook
+  # route + the force-enabled api_server (API_SERVER_KEY, gateway/run.py:9370),
+  # and under the multiplexer the api_server mirrors /p/gov-f25-owner/v1/* so the
+  # durable notifier can wake the secondary owner. A secondary profile cannot
+  # bind its own api_server (gateway/run.py:9242-9244), so gov-f25-owner is
+  # reached only through this mirror. Nested gateway.* form is accepted
+  # (gateway/config.py:1280-1283, 1484-1516).
+  multiplex_profiles: true
+  multiplex_profile_allowlist:
+    - gov-f25-owner
 sessions:
   auto_prune: false
 platforms:
