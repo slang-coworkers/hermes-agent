@@ -113,5 +113,15 @@ def test_default_profile_keep_above_floor_is_preserved(module, tmp_path):
     assert cfg["curator"]["backup"]["keep"] == 12
     assert cfg["curator"]["enabled"] is True
     assert cfg["curator"]["backup"]["enabled"] is True
-    # A coworker with no declared keep is floored to exactly 5 in the same render.
     assert _raw(out, "worker")["curator"]["backup"]["keep"] == 5
+
+
+def test_keep_infinity_floors_without_crashing(module, tmp_path):
+    """A keep declared as YAML `.inf` (float infinity) floors to 5 rather than
+    crashing int() with OverflowError — a non-integer/malformed value never
+    propagates to disk."""
+    out = tmp_path / "out"
+    default_config = {"curator": {"backup": {"keep": float("inf")}}}
+    module.compose(str(_write_spec(tmp_path / "spec", _base_spec(default_config))), str(out))
+    cfg = _raw(out, "default")
+    assert cfg["curator"]["backup"]["keep"] == 5
