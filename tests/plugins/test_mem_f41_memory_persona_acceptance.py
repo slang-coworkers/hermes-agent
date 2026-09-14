@@ -1,18 +1,10 @@
 """Acceptance test for MEM-F41 — Per-agent file memory + persona.
 
-Target path in the fork: tests/plugins/test_mem_f41_memory_persona_acceptance.py
-Fixtures: tests/plugins/fixtures/mem-f41/  (ship the mem-f41-fixtures.tar.gz:
-    tar -xzf mem-f41-fixtures.tar.gz -C tests/plugins/fixtures/ )
-
 Proves the nv-coworker-compose render enforces the per-agent memory config keys
 (raised caps + write_approval off) on every rendered profile, that Hermes
 isolates each profile's MEMORY.md/USER.md by HERMES_HOME, and that the rendered
 SOUL.md is loaded as the security-scanned slot-#1 persona.
 
-Imports use only symbols whose module location is shared by the pinned release
-and main (load_on_disk_store, load_soul_md, build_system_prompt_parts /
-DEFAULT_AGENT_IDENTITY, migrate_config, SUPPORT_FLOOR_VERSION, DEFAULT_CONFIG,
-PluginManager); MemoryStore is not imported directly because its module moves.
 Render assertions read the RAW config.yaml (yaml.safe_load): load_config
 deep-merges DEFAULT_CONFIG, so an omitted key would read back the default and
 pass vacuously.
@@ -37,15 +29,13 @@ SPEC_OMITTED = FIXTURE_DIR / "coworker-types-omitted.yaml"
 # value 4000/2000); asserted below to strictly exceed the stock DEFAULT_CONFIG cap.
 FLOOR_MEMORY = 4000
 FLOOR_USER = 2000
-POWERUSER_MEMORY = 32000  # poweruser overrides only memory_char_limit
-BIGCONTEXT_USER = 16000   # bigcontext overrides only user_char_limit
+POWERUSER_MEMORY = 32000
+BIGCONTEXT_USER = 16000
 
 DOC_PAGE = (
     Path(__file__).resolve().parents[2]
     / "website" / "docs" / "user-guide" / "fleet-per-agent-memory.md"
 )
-# The page is discoverable via a link from an already-sidebar'd page; sidebars.ts
-# is out of the allowed diff surface, so a link is the in-surface discoverability.
 DOC_LINK_FROM = (
     Path(__file__).resolve().parents[2]
     / "website" / "docs" / "user-guide" / "features" / "memory.md"
@@ -320,8 +310,6 @@ def test_ac_mem_f41_6():
     pairs = [ln for ln in low.splitlines() if any(o in ln for o in okf) and any(n in ln for n in natives)]
     assert len(pairs) >= 2, "mapping section has no source->native pair rows"
 
-    # Discoverable via a real Markdown link from an already-sidebar'd page
-    # (sidebars.ts is out of the allowed diff surface).
     assert DOC_LINK_FROM.exists(), f"link source page missing: {DOC_LINK_FROM}"
     link_text = DOC_LINK_FROM.read_text(encoding="utf-8")
     assert re.search(
