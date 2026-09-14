@@ -28,7 +28,9 @@ def _load(tmp_path, monkeypatch, *, settings):
     hermes_home = tmp_path / "hermes-home"
     plugins_dir = hermes_home / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(PLUGIN_DIR, plugins_dir / PLUGIN_KEY)
+    dest = plugins_dir / PLUGIN_KEY
+    if not dest.exists():
+        shutil.copytree(PLUGIN_DIR, dest)
     (hermes_home / "config.yaml").write_text(
         yaml.safe_dump(
             {"plugins": {"enabled": [PLUGIN_KEY], "entries": {PLUGIN_KEY: {"settings": settings}}}}
@@ -215,6 +217,57 @@ def test_immortal_platform_enum_never_stops(tmp_path, monkeypatch):
     )
     assert calls["n"] == 1 and out == "ok"
     assert not estop.is_engaged()
+
+
+def test_immortal_policy_revocation_takes_effect(tmp_path, monkeypatch):
+    """Removing a platform from the immortal config makes an over-ceiling session enforce again."""
+    from gateway.config import Platform
+
+    hermes_home, manager, _ = _load(
+        tmp_path, monkeypatch,
+        settings={"profile_ceiling_usd": 1.0, "immortal_platforms": ["slack"]},
+    )
+    _seed(hermes_home, sessions=[("s-slack", None, 9.0, None)],
+          usage=[("s-slack", "opus", "", 9.0)])
+    # Classify immortal via the platform enum (persists the platform).
+    assert not _has(_pgd_platform(manager, "rk", "s-slack", Platform.SLACK), "skip")
+
+    # Reload at the SAME home with immortality REVOKED (empty immortal_platforms).
+    _, manager2, _ = _load(tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0})
+    # A platform-less pre_tool_call now recomputes against live config -> block.
+    assert _has(
+        manager2.invoke_hook(
+            "pre_tool_call", tool_name="terminal", args={}, session_id="s-slack",
+            task_id="t", tool_call_id="tc", turn_id="tn", api_request_id="a",
+        ),
+        "block",
+    )
+
+
+def test_moa_unpriced_remains_fail_closed(tmp_path, monkeypatch):
+    """A MoA (provider='moa') unpriceable turn stays fail-closed unpriced — never a free $0."""
+    _, manager, loaded = _load(tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0})
+    usage = {"input_tokens": 10, "output_tokens": 5, "request_count": 1}
+    total = loaded.module.record_api_request(
+        "s-moa", "moa", usage, "req-moa", provider="moa", base_url="",
+    )
+    assert total == 0.0
+    # Recorded unpriced (never a benign $0), so the middleware must refuse.
+    assert loaded.module.store.unpriced_count("s-moa") == 1
+
+    calls = {"n": 0}
+
+    def next_call(payload=None):
+        calls["n"] += 1
+        return "ok"
+
+    out = _llm_cb(manager)(
+        request={"model": "moa"}, next_call=next_call, session_id="s-moa",
+        model="moa", api_mode="anthropic_messages", provider="moa",
+        base_url="", api_request_id="z", turn_id="t",
+    )
+    assert calls["n"] == 0
+    assert getattr(out, "stop_reason", None) == "end_turn"
 
 
 def test_new_day_first_fire_crosses(tmp_path, monkeypatch):

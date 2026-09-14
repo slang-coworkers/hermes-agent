@@ -45,9 +45,11 @@ def _ensure_schema(conn) -> None:
         "budget_gen INTEGER NOT NULL DEFAULT 0, "
         "blocked INTEGER NOT NULL DEFAULT 0, "
         "immortal INTEGER NOT NULL DEFAULT 0, "
+        "platform TEXT, "
         "day_key TEXT, "
         "day_start_total REAL NOT NULL DEFAULT 0)"
     )
+    _migrate_cap_state(conn)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS episodes ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -59,6 +61,22 @@ def _ensure_schema(conn) -> None:
         "CREATE TABLE IF NOT EXISTS fleet_default ("
         "k TEXT PRIMARY KEY, value_usd REAL)"
     )
+    conn.commit()
+
+
+# Columns added after the initial cap_state shape; an additive migration keeps a
+# data.db written by an earlier plugin version loadable (new columns get defaults).
+_CAP_STATE_ADDED_COLUMNS = (
+    ("immortal", "INTEGER NOT NULL DEFAULT 0"),
+    ("platform", "TEXT"),
+)
+
+
+def _migrate_cap_state(conn) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cap_state)").fetchall()}
+    for name, decl in _CAP_STATE_ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cap_state ADD COLUMN {name} {decl}")
     conn.commit()
 
 
@@ -132,6 +150,7 @@ _STATE_DEFAULTS: Dict[str, Any] = {
     "budget_gen": 0,
     "blocked": 0,
     "immortal": 0,
+    "platform": None,
     "day_key": None,
     "day_start_total": 0.0,
 }
@@ -153,7 +172,7 @@ def get_state(session_id: str) -> Dict[str, Any]:
     try:
         row = conn.execute(
             "SELECT effective_usd, window_start_total, last_evaluated_total, "
-            "last_unpriced_count, budget_gen, blocked, immortal, day_key, day_start_total "
+            "last_unpriced_count, budget_gen, blocked, immortal, platform, day_key, day_start_total "
             "FROM cap_state WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -169,8 +188,9 @@ def get_state(session_id: str) -> Dict[str, Any]:
         "budget_gen": int(row[4]),
         "blocked": int(row[5]),
         "immortal": int(row[6]),
-        "day_key": row[7],
-        "day_start_total": float(row[8]),
+        "platform": row[7],
+        "day_key": row[8],
+        "day_start_total": float(row[9]),
     }
 
 
@@ -185,15 +205,15 @@ def set_state(session_id: str, **fields) -> None:
         conn.execute(
             "INSERT INTO cap_state (session_id, effective_usd, window_start_total, "
             "last_evaluated_total, last_unpriced_count, budget_gen, blocked, immortal, "
-            "day_key, day_start_total) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "platform, day_key, day_start_total) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(session_id) DO UPDATE SET "
             "effective_usd=excluded.effective_usd, "
             "window_start_total=excluded.window_start_total, "
             "last_evaluated_total=excluded.last_evaluated_total, "
             "last_unpriced_count=excluded.last_unpriced_count, "
             "budget_gen=excluded.budget_gen, blocked=excluded.blocked, "
-            "immortal=excluded.immortal, "
+            "immortal=excluded.immortal, platform=excluded.platform, "
             "day_key=excluded.day_key, day_start_total=excluded.day_start_total",
             (
                 session_id,
@@ -204,6 +224,7 @@ def set_state(session_id: str, **fields) -> None:
                 int(st["budget_gen"]),
                 int(st["blocked"]),
                 int(st["immortal"]),
+                st["platform"],
                 st["day_key"],
                 _sanitize(st["day_start_total"]),
             ),
@@ -244,9 +265,23 @@ def bump_effective(session_id: str, value: float) -> float:
     is correct.
     """
     value = _sanitize(value)
-    new = max(float(get_state(session_id)["effective_usd"]), value)
-    set_state(session_id, effective_usd=new)
-    return new
+    conn = _conn()
+    try:
+        # One atomic statement so two interleaving callbacks cannot overwrite a
+        # larger effective with a smaller stale value.
+        conn.execute(
+            "INSERT INTO cap_state (session_id, effective_usd) VALUES (?, ?) "
+            "ON CONFLICT(session_id) DO UPDATE SET "
+            "effective_usd = MAX(cap_state.effective_usd, excluded.effective_usd)",
+            (session_id, value),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT effective_usd FROM cap_state WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return float(row[0]) if row else value
+    finally:
+        conn.close()
 
 
 # --- episodes --------------------------------------------------------------

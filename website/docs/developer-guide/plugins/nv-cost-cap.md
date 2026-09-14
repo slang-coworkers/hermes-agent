@@ -25,7 +25,12 @@ double-counting (both sources estimate the same calls).
 
 **Unknown pricing is fail-CLOSED.** A call whose price is unknown is recorded
 `unpriced` and treated as a Tier-2 breach for a non-immortal session — never as
-free — so unbounded unpriced spend cannot bypass the cap.
+free — so unbounded unpriced spend cannot bypass the cap. A mixture-of-agents
+(`provider="moa"`) aggregator turn is unpriceable at the fast path, so it too is
+fail-closed; pricing it exactly at the moment of the call would need a generic
+core hook field exposing the resolved aggregator provider/model (a documented
+upstream ask), so until then the lineage reconcile is what folds in the real
+per-advisor MoA spend.
 
 ## Two tiers
 

@@ -40,12 +40,6 @@ DEFAULT_CEILING_USD = 25.0
 DEFAULT_P90_WINDOW = 50
 FLEET_CEILING_KEY = f"plugins.entries.{PLUGIN_KEY}.settings.fleet_ceiling_usd"
 
-# Virtual aggregator providers whose synthetic turn has no price of its own —
-# their real per-advisor spend is accounted separately and picked up by the
-# lineage reconcile. Treat such a turn as $0, never fail-closed "unpriced"
-# (which would wrongly block a legitimately-billed MoA session).
-_UNPRICED_EXEMPT_PROVIDERS = {"moa"}
-
 # Set at register(); each profile home loads a DISTINCT module object with its
 # own _CTX (the plugin loader namespaces directory modules by HERMES_HOME), so
 # this module-global is profile-safe rather than a cross-profile shared cell.
@@ -141,31 +135,39 @@ def _platform_value(platform):
 
 
 def _resolve_immortal(session_id, platform=None) -> bool:
-    """Immortality is config-driven; persist it so platform-less callbacks see it.
+    """Recompute immortality against the CURRENT config on every call.
 
-    ``pre_tool_call`` / ``llm_execution`` receive no ``platform``, so a
-    platform-immortal session is classified by an earlier callback that DID
-    carry the platform (``on_session_start`` / ``pre_gateway_dispatch`` /
-    ``on_session_end``) and the flag is persisted; the platform-less callers
-    then read the persisted flag. Session-id immortality needs no platform.
+    ``pre_tool_call`` / ``llm_execution`` receive no ``platform``, so the
+    session's platform is persisted by an earlier callback that DID carry it
+    (``on_session_start`` / ``pre_gateway_dispatch`` / ``on_session_end``) and
+    reused here. Membership is re-derived from live config each call — never a
+    sticky cached flag — so removing a session id or platform from the config
+    takes effect immediately (the cached ``immortal`` value is refreshed in both
+    directions). Session-id immortality needs no platform.
     """
-    immortal = isinstance(session_id, str) and session_id in _cfg_list("immortal_session_ids")
-    if not immortal:
-        value = _platform_value(platform)
-        if value is not None and value in {str(p) for p in _cfg_list("immortal_platforms")}:
-            immortal = True
-    if immortal:
-        try:
-            if not store.get_state(session_id)["immortal"]:
-                store.set_state(session_id, immortal=1)
-        except Exception:
-            logger.warning("nv-cost-cap immortal persist failed for %s", session_id, exc_info=True)
-        return True
-    # Platform-less caller: fall back to a previously-persisted classification.
     try:
-        return bool(store.get_state(session_id)["immortal"])
+        state = store.get_state(session_id)
     except Exception:
-        return False
+        state = None
+    stored_platform = state["platform"] if state else None
+    effective_platform = _platform_value(platform) or stored_platform
+
+    immortal = isinstance(session_id, str) and session_id in _cfg_list("immortal_session_ids")
+    if not immortal and effective_platform is not None:
+        immortal = effective_platform in {str(p) for p in _cfg_list("immortal_platforms")}
+
+    # Persist the seen platform and refresh the cached classification (both ways).
+    try:
+        updates = {}
+        if _platform_value(platform) is not None and _platform_value(platform) != stored_platform:
+            updates["platform"] = _platform_value(platform)
+        if state is None or state["immortal"] != int(immortal):
+            updates["immortal"] = int(immortal)
+        if updates:
+            store.set_state(session_id, **updates)
+    except Exception:
+        logger.warning("nv-cost-cap immortal persist failed for %s", session_id, exc_info=True)
+    return immortal
 
 
 def _refresh_effective(session_id) -> float:
@@ -275,10 +277,6 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
         amount = None
 
     priced = amount is not None
-    if not priced and str(provider or "").lower() in _UNPRICED_EXEMPT_PROVIDERS:
-        # A virtual aggregator turn (e.g. MoA): record as a benign $0 rather than
-        # fail-closed unpriced; the real advisor spend is in state.db already.
-        priced, amount = True, 0.0
     total = store.record_call(
         session_id, api_request_id, float(amount) if priced else 0.0, priced
     )
