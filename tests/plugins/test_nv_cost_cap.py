@@ -1,12 +1,15 @@
-"""Unit tests for nv-cost-cap internals not covered by a single acceptance row.
+"""Unit tests for nv-cost-cap internals not isolated by a single acceptance row.
 
-These exercise two behaviours the acceptance criteria imply but do not isolate:
-the fire-boundary double-count guard (a pre_gateway_dispatch + on_session_end
-pair on one gateway turn must not open a second generation at unchanged spend)
-and the unpriced-boundary path (an unknown-priced call reaching a boundary is a
-fail-closed breach, idempotent per unpriced event). Loaded through the real
-PluginManager discovery path from an isolated HERMES_HOME, like the acceptance
-test.
+These exercise behaviours the acceptance criteria imply but do not isolate: the
+fire-boundary double-count guard (a pre_gateway_dispatch + on_session_end pair on
+one gateway turn must not open a second generation at unchanged spend); the
+unpriced-boundary path (an unknown-priced call reaching a boundary is a
+fail-closed breach, idempotent per unpriced event); the additive cap_state
+migration of the recon_unpriced column on a pre-existing data.db; the
+column-presence-defensive lineage_unknown on a state.db that predates the
+cost_status column; and the authoritative-path reconcile-only unknown breach and
+its idempotence. Loaded through the real PluginManager discovery path from an
+isolated HERMES_HOME, like the acceptance test.
 """
 
 from __future__ import annotations
@@ -71,6 +74,40 @@ def _seed(hermes_home, sessions, usage):
         conn.executemany(
             "INSERT OR REPLACE INTO session_model_usage (session_id, model, task, estimated_cost_usd) "
             "VALUES (?, ?, ?, ?)",
+            usage,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_with_status(hermes_home, sessions, usage):
+    """Seed state.db WITH the runtime cost_status column on both tables.
+
+    sessions rows: (id, parent_session_id, estimated_cost_usd, ended_at, cost_status)
+    usage rows:    (session_id, model, task, estimated_cost_usd, cost_status)
+    """
+    conn = sqlite3.connect(hermes_home / "state.db")
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, "
+            "parent_session_id TEXT, estimated_cost_usd REAL DEFAULT 0, cost_status TEXT, "
+            "started_at REAL NOT NULL DEFAULT 0, ended_at REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_model_usage (session_id TEXT, "
+            "model TEXT, task TEXT DEFAULT '', estimated_cost_usd REAL NOT NULL DEFAULT 0, "
+            "cost_status TEXT, PRIMARY KEY (session_id, model, task))"
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, parent_session_id, estimated_cost_usd, ended_at, cost_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            sessions,
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO session_model_usage "
+            "(session_id, model, task, estimated_cost_usd, cost_status) VALUES (?, ?, ?, ?, ?)",
             usage,
         )
         conn.commit()
@@ -327,3 +364,72 @@ def test_nonfinite_ceiling_refused(tmp_path, monkeypatch):
             pass
     # The earlier valid owner-pinned value is unchanged (no stray write).
     assert loaded.module.resolve_ceiling() == 10.0
+
+
+def test_recon_unpriced_column_additive_migration(tmp_path, monkeypatch):
+    """An existing cap_state without recon_unpriced is migrated additively (default 0), not rebuilt."""
+    from plugins.plugin_storage import plugin_data_dir
+
+    _, _, loaded = _load(tmp_path, monkeypatch, settings={})
+    db_path = plugin_data_dir(PLUGIN_KEY) / "data.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        # The cap_state schema as it was BEFORE recon_unpriced existed.
+        conn.execute(
+            "CREATE TABLE cap_state (session_id TEXT PRIMARY KEY, "
+            "effective_usd REAL NOT NULL DEFAULT 0, window_start_total REAL NOT NULL DEFAULT 0, "
+            "last_evaluated_total REAL NOT NULL DEFAULT 0, last_unpriced_count INTEGER NOT NULL DEFAULT 0, "
+            "budget_gen INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0, "
+            "immortal INTEGER NOT NULL DEFAULT 0, platform TEXT, day_key TEXT, "
+            "day_start_total REAL NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO cap_state (session_id, effective_usd, blocked) VALUES ('old', 4.0, 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # First store access migrates in place (ALTER TABLE ADD COLUMN), no rebuild.
+    state = loaded.module.store.get_state("old")
+    assert state["recon_unpriced"] == 0
+    assert state["effective_usd"] == 4.0
+    assert state["blocked"] == 1
+
+
+def test_lineage_unknown_legacy_schema_is_false_and_crash_safe(tmp_path, monkeypatch):
+    """policy.lineage_unknown returns False (never raises) when state.db predates the cost_status column."""
+    hermes_home, _, loaded = _load(tmp_path, monkeypatch, settings={})
+    # _seed builds the pre-cost_status schema (no cost_status column on either table).
+    _seed(hermes_home, sessions=[("s", None, 0.0, None), ("c", "s", 0.0, None)],
+          usage=[("c", "opus", "", 0.0)])
+    db = str(hermes_home / "state.db")
+    assert loaded.module.policy.lineage_unknown("s", state_db_path=db) is False
+
+
+def test_authoritative_unknown_boundary_failclosed_idempotent(tmp_path, monkeypatch):
+    """A reconcile-only unknown row ($0, cost_status='unknown') on a descendant is a fail-closed breach, recorded once across repeated boundaries."""
+    import agent.estop as estop
+
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0},
+    )
+    # Ceiling 100 >> the $0 the unknown row sums to, so any breach is unknown-driven,
+    # not a numeric crossing. The unknown marker sits on a DESCENDANT (parent 's'),
+    # proving the reconcile scans cost_status across the whole lineage.
+    _seed_with_status(
+        hermes_home,
+        sessions=[("s", None, 0.0, None, None), ("c", "s", 0.0, None, None)],
+        usage=[("c", "opus", "", 0.0, "unknown")],
+    )
+    assert _has(_pgd(manager, "rk", "s"), "skip")
+    eps = loaded.module.episodes("s")
+    assert len(eps) == 1 and eps[0]["kind"] == "unknown_pricing"
+    gen = eps[0]["budgetGen"]
+    assert estop.is_engaged()
+
+    # Repeated boundary at the same unknown signal: no duplicate episode, no gen bump.
+    assert _has(_pgd(manager, "rk", "s"), "skip")
+    eps2 = loaded.module.episodes("s")
+    assert len(eps2) == 1 and eps2[0]["budgetGen"] == gen
+    estop.disengage()

@@ -7,8 +7,11 @@ isolated ``HERMES_HOME`` with an EMPTY bundled dir through the real
 each acceptance criterion and asserts the observable outcome.
 
 One ``test_ac_cost_f29_<n>`` per ``pytest:`` acceptance-criterion row in the ADR
-(``reports/cost-f29.md`` §Acceptance criteria), contiguous 1..8, docstring line
-1 = the criterion text.
+(``reports/cost-f29.md`` §Acceptance criteria), contiguous 1..9, docstring line
+1 summarizes the criterion. ``test_ac_cost_f29_5`` is parametrized over
+``api_mode`` in {anthropic_messages, chat_completions, codex_responses} and
+``test_ac_cost_f29_9`` over ``unknown_on`` in {usage, session} — each remains one
+criterion id with multiple parametrizations.
 
 Plugin public-helper contract the builder implements (fast-path accrual and
 episodes live in ``plugin_db("nv-cost-cap")`` under the active ``HERMES_HOME`` —
@@ -99,11 +102,23 @@ def _load(tmp_path, monkeypatch, *, settings=None, profile_name=None,
 def _seed_state_db(hermes_home, sessions, usage):
     """Seed the core state.db columns the plugin reads (READ-ONLY to it).
 
-    Mirrors the release schema (hermes_state_common.py:411-412): started_at and
-    ended_at are REAL epoch seconds; a completed session has ended_at NOT NULL.
-    PIN-MOVE RULE: re-verify these columns on any pin move.
-      sessions: (id, parent_session_id, estimated_cost_usd[, ended_at])
-      usage:    (session_id, model, task, estimated_cost_usd)   task='' = main-loop
+    Mirrors the release schema (hermes_state_common.py:411-431, :483-503):
+    started_at/ended_at are REAL epoch seconds (a completed session has
+    ended_at NOT NULL), and both tables carry a cost_status TEXT column
+    (:430, :498). Core persists an unknown-priced call as estimated_cost_usd
+    = float(estimated_cost_usd or 0.0) = 0.0 with cost_status='unknown'
+    (agent/codex_runtime.py:210-211,227-229; hermes_state.py:9596-9598) — the
+    authoritative unpriced signal AC-9 exercises, invisible to a bare
+    estimated_cost_usd sum. PIN-MOVE RULE: re-verify these columns on any pin move.
+      sessions: (id, parent_session_id, estimated_cost_usd[, ended_at[, cost_status]])
+                sessions.cost_status defaults to NULL here when unsupplied. Core
+                stamps cost_status on BOTH tables at runtime — sessions via
+                update_token_counts (hermes_state.py:9380/:9401), session_model_usage
+                via the per-model upsert (:9580) — and portability import also
+                copies sessions.cost_status; so an unknown row can land on either.
+      usage:    (session_id, model, task, estimated_cost_usd[, cost_status])
+                task='' = main-loop; usage.cost_status defaults to 'estimated'
+                (a priced row) here and is 'unknown' for an unpriced row.
     """
     db = hermes_home / "state.db"
     conn = sqlite3.connect(db)
@@ -111,7 +126,7 @@ def _seed_state_db(hermes_home, sessions, usage):
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             "id TEXT PRIMARY KEY, parent_session_id TEXT, "
-            "estimated_cost_usd REAL DEFAULT 0, "
+            "estimated_cost_usd REAL DEFAULT 0, cost_status TEXT, "
             "started_at REAL NOT NULL DEFAULT 0, ended_at REAL, end_reason TEXT)"
         )
         conn.execute(
@@ -119,21 +134,24 @@ def _seed_state_db(hermes_home, sessions, usage):
             "session_id TEXT, model TEXT, task TEXT DEFAULT '', "
             "billing_provider TEXT DEFAULT '', billing_base_url TEXT DEFAULT '', "
             "billing_mode TEXT DEFAULT '', "
-            "estimated_cost_usd REAL NOT NULL DEFAULT 0, "
+            "estimated_cost_usd REAL NOT NULL DEFAULT 0, cost_status TEXT, "
             "PRIMARY KEY (session_id, model, billing_provider, "
             "billing_base_url, billing_mode, task))"
         )
-        rows = [(s + (None,))[:4] if len(s) == 3 else s for s in sessions]
+        srows = [tuple(s) + (None,) * (5 - len(s)) for s in sessions]
         conn.executemany(
             "INSERT OR REPLACE INTO sessions "
-            "(id, parent_session_id, estimated_cost_usd, ended_at) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
+            "(id, parent_session_id, estimated_cost_usd, ended_at, cost_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            srows,
         )
+        urows = [tuple(u) if len(u) == 5 else (tuple(u) + ("estimated",))
+                 for u in usage]
         conn.executemany(
             "INSERT OR REPLACE INTO session_model_usage "
-            "(session_id, model, task, estimated_cost_usd) VALUES (?, ?, ?, ?)",
-            usage,
+            "(session_id, model, task, estimated_cost_usd, cost_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            urows,
         )
         conn.commit()
     finally:
@@ -266,7 +284,7 @@ def test_ac_cost_f29_1(tmp_path, monkeypatch):
     t2 = _hook_num(manager.invoke_hook("post_api_request",
                                        **_post_api_kwargs(sid, "req-A", u)))
     assert t1 == pytest.approx(exp)     # priced by Hermes' own estimate_usage_cost
-    assert t2 == pytest.approx(t1)      # same api_request_id => counted once
+    assert t2 == pytest.approx(t1)
     t3 = _hook_num(manager.invoke_hook("post_api_request",
                                        **_post_api_kwargs(sid, "req-B", u)))
     if exp > 0:
@@ -439,15 +457,37 @@ def _assert_terminal(resp, api_mode):
         block = content[0]
         assert getattr(block, "type", None) == "text"
         assert isinstance(getattr(block, "text", None), str) and block.text
+    elif api_mode == "codex_responses":
+        # codex_responses reaches the middleware, so the synthetic must be a
+        # clean assistant terminal the REAL Responses validator accepts. The
+        # combined checks (validate_response + completed status + an assistant
+        # message with output_text) reject a chat shape, a status='failed', or a
+        # non-message/in-progress item that would not be a clean stop downstream.
+        from agent.transports.codex import ResponsesApiTransport
+        assert getattr(resp, "status", None) == "completed"
+        assert ResponsesApiTransport().validate_response(resp) is True
+        output = getattr(resp, "output", None)
+        assert isinstance(output, list) and output
+        item = output[0]
+        assert getattr(item, "type", None) == "message"
+        assert getattr(item, "role", None) == "assistant"
+        assert getattr(item, "status", None) == "completed"
+        texts = [getattr(c, "text", None)
+                 for c in (getattr(item, "content", None) or [])
+                 if getattr(c, "type", None) == "output_text"]
+        assert any(isinstance(t, str) and t for t in texts)
+        assert isinstance(getattr(resp, "output_text", None), str) and resp.output_text
     else:
         choices = getattr(resp, "choices", None)
         assert choices and getattr(choices[0], "message", None) is not None
         assert getattr(choices[0].message, "content", None)
 
 
-@pytest.mark.parametrize("api_mode", ["anthropic_messages", "chat_completions"])
+@pytest.mark.parametrize(
+    "api_mode", ["anthropic_messages", "chat_completions", "codex_responses"]
+)
 def test_ac_cost_f29_5(tmp_path, monkeypatch, api_mode):
-    """llm_execution over Tier-2 returns a transport-valid synthetic response without calling next_call and without raising; under Tier-2 it calls next_call once."""
+    """llm_execution over Tier-2 returns a transport-valid synthetic response valid for the active api_mode (incl. codex_responses, accepted by ResponsesApiTransport.validate_response) without calling next_call and without raising; under Tier-2 it calls next_call once."""
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
     )
@@ -518,7 +558,7 @@ def test_ac_cost_f29_7(tmp_path, monkeypatch):
     # (b) with an owner-pinned default set, a managed-scope pin wins over it.
     _, _, orch_b = _load(tmp_path / "b", monkeypatch, settings={},
                          profile_name="orchestrator")
-    orch_b.module.set_fleet_ceiling(50.0)          # owner-pinned default = 50
+    orch_b.module.set_fleet_ceiling(50.0)
     managed = tmp_path / "b" / "managed"
     managed.mkdir()
     (managed / "config.yaml").write_text(
@@ -528,7 +568,7 @@ def test_ac_cost_f29_7(tmp_path, monkeypatch):
     )
     _, _, orch_b2 = _load(tmp_path / "b", monkeypatch, settings={},
                           profile_name="orchestrator", managed_dir=managed)
-    assert orch_b2.module.resolve_ceiling() == pytest.approx(7.0)   # managed wins
+    assert orch_b2.module.resolve_ceiling() == pytest.approx(7.0)
 
     # (c) owner-pinned fleet default set by the orchestrator is observed by a
     # worker profile (propagation); a HERMES_* env var does not change it.
@@ -607,3 +647,49 @@ def test_ac_cost_f29_8(tmp_path, monkeypatch):
                                          profile_ceiling_usd=None))
     assert res_w is not None and "orchestrator" in str(res_w).lower()
     assert worker.module.resolve_ceiling() == pytest.approx(42.0)
+
+
+# ---------------------------------------------------------------------------
+# AC-COST-F29-9
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("unknown_on", ["usage", "session"])
+def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
+    """A reconciled lineage row with cost_status='unknown' (estimated_cost_usd=0.0) is fail-CLOSED on the authoritative path: a non-immortal session is a Tier-2 breach, while a same-0.0-total priced control is not refused."""
+    import agent.estop as estop
+
+    # Ceiling 100 >> the 0.0 an unknown row sums to numerically, so a refusal
+    # here can ONLY come from unknown-pricing detection on the reconcile path,
+    # not from a numeric cap crossing (that isolates R1-2 from AC-4/AC-5).
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0},
+    )
+    # The unknown marker sits on a DESCENDANT (parent_session_id=s-unknown), so a
+    # refusal proves the reconcile scans cost_status across the whole lineage,
+    # not just the requested session — on EITHER column core stamps it on:
+    # session_model_usage.cost_status ("usage") or sessions.cost_status
+    # ("session"). The priced control mirrors depth+column so the discriminator
+    # is the status, not the placement.
+    if unknown_on == "usage":
+        sessions = [("s-unknown", None, 0.0, None),
+                    ("s-unknown-child", "s-unknown", 0.0, None),
+                    ("s-zero", None, 0.0, None),
+                    ("s-zero-child", "s-zero", 0.0, None)]
+        usage = [("s-unknown-child", "opus", "", 0.0, "unknown"),
+                 ("s-zero-child", "opus", "", 0.0, "estimated")]
+    else:
+        sessions = [("s-unknown", None, 0.0, None, None),
+                    ("s-unknown-child", "s-unknown", 0.0, None, "unknown"),
+                    ("s-zero", None, 0.0, None, None),
+                    ("s-zero-child", "s-zero", 0.0, None, "estimated")]
+        usage = []
+    _seed_state_db(hermes_home, sessions=sessions, usage=usage)
+
+    assert not _has_action(_pgd(manager, "rk-zero", "s-zero"), "skip")
+    assert not estop.is_engaged()
+
+    assert _has_action(_pgd(manager, "rk-unk", "s-unknown"), "skip")
+    assert estop.is_engaged()
+    assert _has_action(_pre_tool(manager, "s-unknown"), "block")
+    _assert_terminal(_mw_over(_llm_execution_cb(manager), "s-unknown"),
+                     "anthropic_messages")
+    estop.disengage()
