@@ -24,8 +24,8 @@ api_server profile-scoped mirror `POST /p/gov-f25-owner/v1/chat/completions`.
 prove a real peer resumed in the SAME session; the tester pays for it.
 
 **Topology (one gateway, cited to the pinned tree):**
-- The api_server is a loopback listener **force-enabled by the presence of
-  `API_SERVER_KEY`** (`gateway/run.py:9370`) on `:8642` (`DEFAULT_PORT`,
+- The api_server is a loopback listener **force-enabled by a usable
+  `API_SERVER_KEY`** (`gateway/config.py:2308-2325`) on `:8642` (`DEFAULT_PORT`,
   `gateway/platforms/api_server.py:266`); under the multiplexer it mirrors
   `/p/<profile>/v1/*` (`api_server.py:36`, `_make_profile_prefix_middleware`
   `:2179-2208`, installed `:7758`) so the wake can reach the secondary owner.
@@ -35,13 +35,19 @@ prove a real peer resumed in the SAME session; the tester pays for it.
   port. A POST to `:8642/.../webhooks/gh-pr` 404s (the api_server has no webhook
   route); the round-1 defect.
 - A secondary multiplex profile **cannot bind its own api_server**
-  (`gateway/run.py:9242-9244`), so `gov-f25-owner` deliberately declares no
-  `platforms.api_server` and is reached only through the default's mirror.
-- `API_SERVER_KEY` is set as a process env var on the gateway, so
-  `agent.secret_scope.get_secret("API_SERVER_KEY")` resolves the same key for
-  EVERY profile scope — the Bearer that authenticates `/p/gov-f25-owner/...` for
-  this scenario is the identical key the notifier's own wake self-POST uses
-  (`api_server.py:1902`), which is why the wake is 403-gated on it.
+  (`gateway/run.py:9242-9244`); it shares the default's listener and MUST pin
+  `platforms.api_server.enabled: false` (the guard `gateway/config.py:2311-2323`
+  documents — the inherited process-env key would otherwise force-enable it and
+  trip the multiplex check). `gov-f25-owner`'s fixture does exactly that.
+- `API_SERVER_KEY` is a **profile-scoped credential, not a process-global var**:
+  under multiplexing `get_secret` reads the active profile's `<home>/.env` scope
+  and does NOT fall through to `os.environ`
+  (`agent/secret_scope.py:113-114,156-160`). So the per-turn Bearer auth of
+  `/p/gov-f25-owner/...` resolves from the OWNER's `.env`, and the notifier's own
+  wake self-POST resolves the same value — Setup step 2 writes the identical
+  test key into BOTH profile `.env` files (and step 3 also exports it into the
+  gateway process env, which config-load reads to key the default listener). The
+  wake is 403-gated on it (`api_server.py:1902`).
 
 ## Setup
 
@@ -70,14 +76,25 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    SH
      chmod +x $TB/bin/gh )
    ```
-2. Persist the shared api_server key + ports so every later subshell agrees on
-   them (each ```bash block is its own subshell). The key is a test-only literal
-   guarding a loopback listener — not a credential to any service:
+2. Provision the shared api_server key. `API_SERVER_KEY` is a **profile-scoped
+   credential**: under multiplexing `get_secret` reads the active profile's
+   `<home>/.env` and does NOT fall through to `os.environ`
+   (`agent/secret_scope.py:113-114,156-160`), so it must be written into BOTH
+   installed profile homes' `.env` for the per-turn auth of `/p/<profile>/v1/...`
+   to resolve. It is ALSO exported into the gateway's process env (step 3), which
+   config-load reads to force-enable + key the DEFAULT listener
+   (`gateway/config.py:2308-2325`). The key is a test-only literal guarding a
+   loopback listener — not a credential to any service. Ports are persisted so
+   every later subshell agrees (each ```bash block is its own subshell):
    ```bash
    ( source $TB/harness.live.env
-     cat > $TB/gov-f25.env <<'ENV'
-   export API_SERVER_KEY=govf25livesvr2f9c8a1b4d70e6392c5a8f1d0e3b6c9a
-   export HERMES_API_PORT=8642
+     KEY=govf25livesvr2f9c8a1b4d70e6392c5a8f1d0e3b6c9a
+     for p in gov-f25-default gov-f25-owner; do
+       printf '\nAPI_SERVER_KEY=%s\n' "$KEY" >> "$HERMES_HOME/profiles/$p/.env"
+     done
+     cat > $TB/gov-f25.env <<ENV
+   export API_SERVER_KEY=$KEY
+   export API_SERVER_PORT=8642
    export WEBHOOK_PORT=8644
    ENV
    )
@@ -102,7 +119,7 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    # readiness: api_server (:8642) AND webhook adapter (:8644) both listening —
    # both /health are unauthenticated (api_server.py:3162; webhook.py:502).
    ( source $TB/gov-f25.env
-     timeout 300 bash -c 'until curl -fsS "http://127.0.0.1:${HERMES_API_PORT}/health" >/dev/null 2>&1; do sleep 2; done'
+     timeout 300 bash -c 'until curl -fsS "http://127.0.0.1:${API_SERVER_PORT}/health" >/dev/null 2>&1; do sleep 2; done'
      timeout 120 bash -c 'until curl -fsS "http://127.0.0.1:${WEBHOOK_PORT}/health" >/dev/null 2>&1; do sleep 2; done' )
    ```
    → expect: both curls return before their timeout, and
@@ -117,7 +134,7 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    ```bash
    ( source $TB/gov-f25.env
      code=$(curl -sS -o /dev/null -w '%{http_code}' \
-       "http://127.0.0.1:${HERMES_API_PORT}/p/gov-f25-owner/v1/health")
+       "http://127.0.0.1:${API_SERVER_PORT}/p/gov-f25-owner/v1/health")
      echo "owner-mirror-health=$code"
      [ "$code" = "200" ] || { echo "multiplex NOT serving gov-f25-owner (got $code)"; exit 1; } )
    ```
@@ -133,7 +150,7 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
      curl -sS -D $ART/scenario-AC-GOV-F25-7/claim-headers.txt \
        -o $ART/scenario-AC-GOV-F25-7/claim-resp.json \
        -w 'claim-http=%{http_code}\n' \
-       -X POST "http://127.0.0.1:${HERMES_API_PORT}/p/gov-f25-owner/v1/chat/completions" \
+       -X POST "http://127.0.0.1:${API_SERVER_PORT}/p/gov-f25-owner/v1/chat/completions" \
        -H "Authorization: Bearer $API_SERVER_KEY" \
        -H "Content-Type: application/json" \
        --data '{"model":"aws/anthropic/bedrock-claude-opus-4-8","stream":false,"max_tokens":400,"messages":[{"role":"user","content":"Use the terminal tool to run EXACTLY this command, then reply with the pull-request URL it printed and nothing else: gh pr create --title \"feat: gov-f25 sample\" --body \"scenario claim\""}]}' \
@@ -232,7 +249,9 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
        -H "X-GitHub-Event: pull_request_review" \
        -H "X-GitHub-Delivery: gov-f25-delivery-2" \
        -H "X-Hub-Signature-256: $SIG" \
-       --data "$BODY" > $ART/scenario-AC-GOV-F25-7/webhook-code.txt )
+       --data "$BODY" > $ART/scenario-AC-GOV-F25-7/webhook-code.txt
+     code=$(cat $ART/scenario-AC-GOV-F25-7/webhook-code.txt); echo "webhook-http=$code"
+     [ "$code" = "202" ] || { echo "expected 202 at :8644 gh-pr route (got $code — endpoint/signature/route problem)"; exit 1; } )
    ```
    → expect: **HTTP 202** (the webhook adapter is fire-and-forget and returns 202
    before the run starts, `gateway/platforms/webhook.py:969-987`). The PR is
@@ -275,10 +294,12 @@ are corroborating only.
 ## Evidence
 
 **Authoritative** (decides `## Pass`; stdlib `sqlite3`, no CLI):
-- The **202** in `$ART/scenario-AC-GOV-F25-7/webhook-code.txt`.
-- `gateway.log` routing lines showing the claim, the claimed-PR SKIP + durable
-  enqueue, and the wake self-POST to `/p/gov-f25-owner/v1/chat/completions`
-  (`grep -nE 'gov-f25/repo|action.*skip|/p/gov-f25-owner/v1/chat/completions|wake' $ART/scenario-AC-GOV-F25-7/gateway.log`).
+- The **202** in `$ART/scenario-AC-GOV-F25-7/webhook-code.txt` (asserted in
+  Steps step 1).
+- `gateway.log` (best-effort diagnostics, NOT asserted — a successful
+  claim/skip/enqueue emits no dedicated success line): on failure, grep it for
+  the wake self-POST and any errors to localise the break —
+  `grep -nE '/p/gov-f25-owner/v1/chat/completions|gov-f25/repo|[Ee]rror|[Ww]arn' $ART/scenario-AC-GOV-F25-7/gateway.log`.
 - BOTH halves against the persisted baseline — the EXACT recorded `S0`, not the
   latest session:
   ```bash
