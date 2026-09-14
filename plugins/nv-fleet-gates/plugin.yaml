@@ -1,6 +1,6 @@
 name: nv-fleet-gates
 version: 0.1.0
-description: "The fleet's single pre_tool_call veto: one ordered, block-before-approve predicate chain (SANDBOX -> FLEET-ADMIN SCOPE -> WIRING -> critique/plan/egress GATES) that fails closed on its own errors, canonicalises tool names through a vendored alias map, and asserts its restricted set against the running registry at load. Ships a session-correlated codex_critique tool (+ /codex-critique slash alias) that records the critique row the gate consumes, and a `hermes wire add|remove|list` CLI over a fleet-shared edges store."
+description: "The fleet's single pre_tool_call veto: one ordered, block-before-approve predicate chain (SANDBOX -> FLEET-ADMIN SCOPE -> WIRING -> MCP-SCOPE -> critique/plan/egress GATES) that fails closed on its own errors, canonicalises tool names through a vendored alias map, and asserts its restricted set against the running registry at load. The MCP-SCOPE predicate denies any mcp_* tool absent from the calling profile's rendered per-role allow-list (transport-aware, fail-closed), making per-profile MCP scope non-bypassable. Ships a session-correlated codex_critique tool (+ /codex-critique slash alias) that records the critique row the gate consumes, and a `hermes wire add|remove|list` CLI over a fleet-shared edges store."
 author: NousResearch
 kind: standalone
 manifest_version: 1

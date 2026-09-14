@@ -7,6 +7,8 @@ predicate chain and returns the FIRST match:
       -> SANDBOX          (ISO-F10; inert unless enforce_sandbox)
       -> FLEET-ADMIN      (GOV-F26; orchestrator-only admin tools)
       -> WIRING unwired   (A2A-F18; wired-only peer messaging)
+      -> MCP-SCOPE        (GOV-F27; mcp_* absent from the profile's rendered
+                           allow-list denied, transport-aware, fail-closed)
       -> GATES            (host-writer path / plan gate / critique gate + PR
                            invitation — LOOP-F37/F38, ISO-F10 merged)
       -> WIRING approve   (A2A-F19; gated edge -> escalate to the human gate)
@@ -210,6 +212,10 @@ def register(ctx) -> None:
     admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN
     skills_root = ctx.get_config("skills_root")
     shared_learnings_path = ctx.get_config("shared_learnings_path")
+    # GOV-F27: the full profile-keyed MCP allow-list the compose render writes
+    # into every profile ({profile: {sanitized mcp__srv__tool: transport}}); the
+    # predicate selects this profile's entry by _current_profile().
+    mcp_scope = ctx.get_config("mcp_scope", {}) or {}
     # When the managed layer pins the role map, roles come ONLY from it (a
     # profile absent from it defaults to worker) so a per-profile config cannot
     # add itself as orchestrator — ctx.get_config alone returns the deep-merged
@@ -258,8 +264,6 @@ def register(ctx) -> None:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
             )
-        if canon.startswith("mcp_"):
-            return _block("sandbox: stdio mcp_* call denied under an enforced container backend")
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
@@ -271,6 +275,16 @@ def register(ctx) -> None:
                     "waived inside the sandbox"
                 )
         return None
+
+    def _mcp_scope_block(canon, args):
+        # GOV-F27: deny any mcp_* tool absent from THIS profile's rendered
+        # allow-list (fail-closed), so a bot widening its own config buys nothing
+        # — the policy is keyed by the process identity, not a value it can raise.
+        if not canon.startswith("mcp_"):
+            return None
+        scope = mcp_scope.get(_current_profile()) if isinstance(mcp_scope, dict) else None
+        reason = predicates.mcp_scope_reason(canon, scope, enforce_sandbox)
+        return _block(reason) if reason else None
 
     def _fleet_admin_block(canon, args):
         if _is_orch():
@@ -404,7 +418,7 @@ def register(ctx) -> None:
             backstop = _restricted_block()
             if backstop:
                 return backstop
-            for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block):
+            for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block, _mcp_scope_block):
                 blocked = predicate(canon, args)
                 if blocked:
                     return blocked

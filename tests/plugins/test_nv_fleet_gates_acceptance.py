@@ -486,7 +486,10 @@ def test_ac_iso_f10_1(tmp_path, monkeypatch):
 
 
 def test_ac_iso_f10_2(tmp_path, monkeypatch):
-    """With enforce_sandbox true: a mismatched backend blocks; on the matching backend stdio mcp_* and dangerous terminal are refused, a benign call passes, and ensure_task_env is consulted."""
+    """With enforce_sandbox true: a mismatched backend blocks; on the matching backend an
+    allow-listed stdio mcp_* tool and a dangerous terminal are refused, a benign call passes,
+    and ensure_task_env is consulted. The stdio block is the transport-specific sandbox denial
+    (allow-listed + stdio + enforce_sandbox), which is distinct from an absent-scope denial."""
     import tools.terminal_tool as tt
     calls = {"env": 0}
 
@@ -495,8 +498,13 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
         return object()                                  # non-None: sandbox env is ready
 
     monkeypatch.setattr(tt, "ensure_task_env", _ready_env, raising=False)
-    # plan_gate off so a mutating terminal reaches the sandbox predicate, not the plan gate
-    manager, _, _ = _load(tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False)
+    # plan_gate off so a mutating terminal reaches the sandbox predicate, not the plan gate.
+    # The stdio sample is explicitly allow-listed (transport stdio) so this assertion exercises
+    # transport-specific sandbox denial rather than absent-scope denial.
+    manager, _, _ = _load(
+        tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False,
+        mcp_scope={"worker-a": {"mcp__local_fs__read_file": "stdio"}},
+    )
     _loaded(manager)
     _run_critique(monkeypatch, "sess-1")
 
@@ -504,7 +512,7 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
     assert _act(_gate(manager, "terminal", {"command": "ls"})) == "block"
 
     monkeypatch.setenv("TERMINAL_ENV", "docker")
-    assert _act(_gate(manager, "mcp_some_stdio_tool", {})) == "block"
+    assert _act(_gate(manager, "mcp__local_fs__read_file", {})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "rm -rf /"})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "ls"})) != "block"
     assert calls["env"] >= 1

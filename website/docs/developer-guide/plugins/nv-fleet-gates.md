@@ -9,6 +9,8 @@ canonicalise(tool_name)
   → SANDBOX          (per-session sandbox backend; inert unless enforce_sandbox)
   → FLEET-ADMIN      (admin-shaped tools are orchestrator-only)
   → WIRING (unwired) (peer messaging is refused unless a wiring edge exists)
+  → MCP-SCOPE        (an mcp_* tool absent from the calling profile's rendered
+                      allow-list is denied; transport-aware, fail-closed)
   → GATES            (host-writer path · plan gate · critique gate + PR-comment
                       human invitation)
   → WIRING (approve) (a gated edge escalates to the human-approval gate)
@@ -36,8 +38,9 @@ managed scope so a per-profile config cannot widen them.
 |---|---|
 | `profile_roles` | map of profile name → role; a profile is the orchestrator when its role is `orchestrator`. Read from the managed-scope merge, so a per-profile override cannot escalate a worker. |
 | `edges_db_path` | absolute path to the **fleet-shared** SQLite edges store (outside any profile home), written by `hermes wire` and read by every profile's predicate. |
-| `enforce_sandbox` | when true, the SANDBOX predicate checks the resolved backend, denies stdio `mcp_*` calls, brings up the container task env, and re-asserts the dangerous-command floor. Off by default. |
+| `enforce_sandbox` | when true, the SANDBOX predicate checks the resolved backend, brings up the container task env, and re-asserts the dangerous-command floor; and the MCP-SCOPE predicate additionally denies any non-`remote` (stdio/unknown-transport) `mcp_*` call. Off by default. |
 | `expected_backend` | the container backend a profile's tool calls must resolve to when `enforce_sandbox` is true. |
+| `mcp_scope` | the full profile-keyed MCP allow-list the compose plugin renders into **every** profile: `{profile: {mcp__<server>__<tool>: transport}}`. The MCP-SCOPE predicate selects the calling profile's entry by identity and denies any `mcp_*` tool absent from it (a profile absent from the map is denied all MCP — fail-closed); under `enforce_sandbox` a non-`remote` transport is also denied. The whole map is copied into each profile because `ctx.get_config` resolves against the active profile home. |
 | `plan_gate` | when true, `write_file`/`patch`/mutating `terminal` are refused until the session has itself created a plan under `.hermes/plans/*.md`. |
 | `required_stages` | the critique stages a session must have recorded (fresh) before a marked delivery or a `gh pr` egress. |
 | `stage_markers` | the delivery-marker prefixes (`[Fix Report]`, `[Review Verdict]`, …) that make a `message_agent` a gated delivery. |
@@ -86,3 +89,9 @@ in two places:
 
 `message_agent` is the one documented exclusion from the presence scan — it is
 injected, not registry-registered, so it is matched by constant in the gate.
+
+## See also
+
+- [Fleet MCP scope](../../user-guide/fleet-mcp-scope.md) — how the compose plugin
+  renders each role's `mcp_servers` and the profile-keyed `mcp_scope` the
+  MCP-SCOPE predicate enforces.

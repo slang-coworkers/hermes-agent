@@ -1,0 +1,42 @@
+# OBS-F46 compose input — shared spine parent for every coworker type.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+traits:
+  command_allowlist: ["git status"]
+# Fleet-invariant config keys every coworker profile inherits (real key names;
+# terminal.image/volumes are docker_image/docker_volumes per the tree).
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: true, auto_archive: false}
+  compression: {in_place: false}
+  checkpoints: {auto_prune: true}
+  memory: {memory_char_limit: 4000, user_char_limit: 2000}
+  skills: {external_dirs: ["/data/shared-skills"]}
+  terminal:
+    backend: "docker"
+    docker_env: {}
+    docker_mount_cwd_to_workspace: true
+    docker_image: "hermes-sandbox:pinned"
+    docker_volumes: []
+  approvals:
+    mode: "smart"
+    timeout: 300
+    cron_mode: "deny"
+    unattended_mode: "deny"
+    single_query_mode: "deny"
+  agent:
+    disabled_toolsets: []
+  plugins:
+    enabled: ["nv-fleet-gates"]
+    entries:
+      nv-fleet-gates:
+        settings:
+          enabled: true
+          policy: "deny-admin-to-workers"
+      nv-cost-cap:
+        settings:
+          ceiling_usd: 20
+  cron: {failure_nudge_threshold: 3}

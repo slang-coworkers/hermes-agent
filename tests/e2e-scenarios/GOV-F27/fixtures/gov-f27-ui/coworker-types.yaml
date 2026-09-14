@@ -1,0 +1,45 @@
+# GOV-F27 AC-9 UI scenario compose spec. Type names are the rendered profile
+# names (hence the mcp_scope keys AND the installed profile-dir basenames), so
+# they are gov-f27-reviewer / gov-f27-fixer — namespaced to avoid colliding with
+# a T-suite bot in the shared testbed home.
+project: gov-f27-ui
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: gov-f27-reviewer
+spines:
+  base: {source: spines/base.yaml}
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+rooms:
+  fleet-room:
+    name: Fleet
+    members: [orchestrator, gov-f27-reviewer, gov-f27-fixer]
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, gov-f27-reviewer, gov-f27-fixer]
+types:
+  orchestrator:
+    extends: [base]
+    identity: "Fleet orchestrator"
+    ui_meta: {title: Orchestrator, description: "Fleet orchestrator", shape: hexagon}
+  gov-f27-reviewer:
+    extends: [base]
+    identity: "PR reviewer with a read-only MCP scope"
+    skills: [review-skill]
+    overlays: [critique-gate]
+    mcp:
+      docs-ro:
+        url: https://onecli.local/mcp/docs
+        include: [search_docs]
+    ui_meta: {title: Reviewer, description: "PR reviewer", shape: diamond}
+  gov-f27-fixer:
+    extends: [base]
+    identity: "Implementer with a write MCP scope"
+    skills: [fix-skill]
+    mcp:
+      repo-rw:
+        url: https://onecli.local/mcp/repo
+        include: [create_issue, create_pr]
+    ui_meta: {title: Fixer, description: "Implementer", shape: square}
