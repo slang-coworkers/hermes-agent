@@ -60,19 +60,30 @@ here runs against the ONE gateway launched in step 3. This is a `live:`
 scenario, so the harness env is `$TB/harness.live.env` (dummy key, real base
 URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
 
-1. Put a `gh` stub first on PATH so a create is deterministic and offline (no
-   real GitHub write); it echoes the canonical PR URL the observer parses. The
-   stub must be on the GATEWAY's PATH (step 3 exports it) so the owner's
-   `terminal` tool call resolves it:
+1. Put a deterministic offline `gh` stub in `$TB/bin`. The owner turn invokes it
+   by its **concrete absolute path** (step 6 bakes the expanded `$TB/bin/gh` into
+   the claim prompt): the `terminal` tool runs under a sanitized PATH shell
+   snapshot from which BOTH `$TB/bin` and the `$TB` variable are absent
+   (`tools/environments/local.py` `_sanitize_subprocess_env` rebuilds PATH), so
+   PATH-based resolution of `gh` cannot be relied on — this was the r2 root cause.
+   `pr create` prints the canonical PR URL the observer parses; `--version`
+   prints a UNIQUE marker the Setup guard (step 5) asserts to prove the absolute
+   stub is reachable through the terminal tool WITHOUT printing a claimable URL:
    ```bash
    ( source $TB/harness.live.env
      mkdir -p $TB/bin
      cat > $TB/bin/gh <<'SH'
    #!/usr/bin/env bash
-   # Minimal gh stub: `gh pr create ...` prints the PR URL the observer matches.
+   # Offline gh stub for GOV-F25 AC-GOV-F25-7 — invoked by ABSOLUTE path.
    if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
      echo "Creating pull request for feature into main"
      echo "https://github.com/gov-f25/repo/pull/41"
+     exit 0
+   fi
+   if [ "$1" = "--version" ]; then
+     # Unique marker: distinguishes this stub from a real gh (which prints
+     # "gh version 2.x") for the Setup guard, and prints NO claimable URL.
+     echo "GOVF25_STUB_MARKER gh version 0.0.0-govf25-stub"
      exit 0
    fi
    exit 0
@@ -111,12 +122,14 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    `gh-pr` webhook route on `:8644` and the force-enabled api_server on `:8642`,
    and — via `HERMES_BUNDLED_PLUGINS=$WT/plugins` — discovers `nv-artifact` for
    BOTH served profiles (each fixture opts it in through `plugins.enabled`;
-   `hermes_cli/plugins.py:90`). `PATH="$TB/bin:$PATH"` puts the `gh` stub on the
-   gateway's PATH so the owner's tool call is offline:
+   `hermes_cli/plugins.py:90`). The offline `gh` stub is NOT relied on via `$PATH`
+   here — the `terminal` tool sanitizes/reconstructs PATH per call
+   (`tools/environments/local.py` `_sanitize_subprocess_env`), so the launch
+   env's PATH never reaches it; the claim (step 6) invokes the stub by its
+   concrete absolute path instead:
    ```bash
    ( source $TB/harness.live.env && source $TB/gov-f25.env && cd $WT
      mkdir -p $ART/scenario-AC-GOV-F25-7
-     PATH="$TB/bin:$PATH" \
      HERMES_BUNDLED_PLUGINS="$WT/plugins" \
      API_SERVER_KEY="$API_SERVER_KEY" \
        .venv/bin/hermes -p gov-f25-default gateway run \
@@ -147,21 +160,54 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    → expect: `owner-mirror-health=200`. A `404` means `multiplex_profiles`/the
    allowlist is wrong in the default fixture — a scenario/fixture defect, FAIL
    here.
-5. Establish the claim through the OWNER's api_server mirror — a real
-   (`model: live`) owner turn that runs the `gh` stub, so `post_tool_call`
-   claims `gov-f25/repo#41` first-claim-wins for THIS owner session. The Bearer
-   value sourced from `gov-f25.env` is identical to the key provisioned in the
-   OWNER's `.env` (which is where the mirror's per-turn auth resolves it):
+5. **Guard — prove the terminal tool can execute the offline stub BEFORE the
+   claim**, so a PATH-snapshot/reachability regression fails loudly HERE instead
+   of reading as a green setup with a silent claimless FAIL (the r2 failure
+   mode). Drive a probe owner turn through the api_server mirror that runs, via
+   the `terminal` tool, the ABSOLUTE stub's `--version` (a benign subcommand that
+   prints the marker but NO pull URL — so it does not claim), plus
+   `command -v gh` / `$PATH` for the diagnostic the report records; then assert
+   the marker came back:
    ```bash
    ( source $TB/harness.live.env && source $TB/gov-f25.env
+     GH_ABS="$TB/bin/gh"                       # expands to the REAL absolute path, e.g. /tmp/.../bin/gh
+     GUARD_CMD='command -v gh; echo "PATH=$PATH"; '"$GH_ABS"' --version'   # $PATH stays literal for the model's shell to expand
+     GUARD_PROMPT='Using the terminal tool, run this and reply with its stdout verbatim and nothing else: '"$GUARD_CMD"
+     PROBE=$(jq -n --arg content "$GUARD_PROMPT" \
+       '{model:"aws/anthropic/bedrock-claude-opus-4-8",stream:false,max_tokens:300,messages:[{role:"user",content:$content}]}')
+     curl -sS -o $ART/scenario-AC-GOV-F25-7/terminal-path-probe.json \
+       -w 'guard-http=%{http_code}\n' \
+       -X POST "http://127.0.0.1:${API_SERVER_PORT}/p/gov-f25-owner/v1/chat/completions" \
+       -H "Authorization: Bearer $API_SERVER_KEY" -H "Content-Type: application/json" \
+       --data "$PROBE" | tee $ART/scenario-AC-GOV-F25-7/terminal-path-probe.txt
+     grep -q GOVF25_STUB_MARKER $ART/scenario-AC-GOV-F25-7/terminal-path-probe.json \
+       || { echo "GUARD FAIL: terminal tool cannot execute the offline gh stub at $GH_ABS (PATH-snapshot / reachability regression) — see terminal-path-probe.json"; exit 1; }
+     echo "guard-ok: stub reachable by absolute path through the terminal tool" )
+   ```
+   → expect: `guard-ok` and the probe response contains `GOVF25_STUB_MARKER`. If
+   it does not (the terminal tool ran the real `/usr/bin/gh`, or the absolute path
+   is unreachable), FAIL here — the claim in step 6 would otherwise silently not
+   happen.
+6. Establish the claim through the OWNER's api_server mirror — a real
+   (`model: live`) owner turn that runs the stub **BY ABSOLUTE PATH**, so
+   `post_tool_call` parses the printed URL and claims `gov-f25/repo#41`
+   first-claim-wins for THIS owner session. The prompt bakes the EXPANDED
+   `$TB/bin/gh` path host-side (never the literal `$TB/bin/gh` string — `$TB` is
+   absent from the terminal snapshot, so the literal form fails identically). The
+   Bearer is the key provisioned in the OWNER's `.env` (where the mirror's
+   per-turn auth resolves it):
+   ```bash
+   ( source $TB/harness.live.env && source $TB/gov-f25.env
+     GH_ABS="$TB/bin/gh"
+     CLAIM_PROMPT='Use the terminal tool to run EXACTLY this command by its absolute path, then reply with the pull-request URL it printed and nothing else: '"$GH_ABS"' pr create --title "feat: gov-f25 sample" --body "scenario claim"'
+     BODY=$(jq -n --arg content "$CLAIM_PROMPT" \
+       '{model:"aws/anthropic/bedrock-claude-opus-4-8",stream:false,max_tokens:400,messages:[{role:"user",content:$content}]}')
      curl -sS -D $ART/scenario-AC-GOV-F25-7/claim-headers.txt \
        -o $ART/scenario-AC-GOV-F25-7/claim-resp.json \
        -w 'claim-http=%{http_code}\n' \
        -X POST "http://127.0.0.1:${API_SERVER_PORT}/p/gov-f25-owner/v1/chat/completions" \
-       -H "Authorization: Bearer $API_SERVER_KEY" \
-       -H "Content-Type: application/json" \
-       --data '{"model":"aws/anthropic/bedrock-claude-opus-4-8","stream":false,"max_tokens":400,"messages":[{"role":"user","content":"Use the terminal tool to run EXACTLY this command, then reply with the pull-request URL it printed and nothing else: gh pr create --title \"feat: gov-f25 sample\" --body \"scenario claim\""}]}' \
-       | tee -a $ART/scenario-AC-GOV-F25-7/claim-code.txt
+       -H "Authorization: Bearer $API_SERVER_KEY" -H "Content-Type: application/json" \
+       --data "$BODY" | tee -a $ART/scenario-AC-GOV-F25-7/claim-code.txt
      # The response header carries the session the api_server ran under.
      grep -i '^X-Hermes-Session-Id:' $ART/scenario-AC-GOV-F25-7/claim-headers.txt | tr -d '\r' )
    ```
@@ -169,9 +215,9 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    session). Because the POST is non-streamed it returns only after the turn
    (and its `post_tool_call`) completes, so the claim is committed by the time
    it returns. If the model does not call the tool (no claim row appears in
-   step 6), re-POST once with the same directive — a `live:` turn is
+   step 7), re-POST once with the same directive — a `live:` turn is
    nondeterministic; the tier budget (`/hermes-ui-driver` §1f) covers the retry.
-6. Record the baseline against the EXACT owning session — the card's bound
+7. Record the baseline against the EXACT owning session — the card's bound
    `tasks.session_id` (`S0`), its pre-delivery message count `N0`, and the
    default profile's session-count baseline — and PERSIST them to
    `$ART/ac7-baseline.json` so step 2 asserts against the recorded session, not
@@ -215,7 +261,7 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
    ```
    → expect: `BASELINE <task> <S0> <N0> <d0>` printed and `ac7-baseline.json`
    written; the claim owner is `gov-f25-owner`.
-7. (Corroborating, best-effort — NOT gating; `## Pass` below is the `state.db`
+8. (Corroborating, best-effort — NOT gating; `## Pass` below is the `state.db`
    assertion, which stands with or without this.) Capture the owner session view
    from the dashboard BEFORE the second delivery. Launch a read-only dashboard
    on the SAME `HERMES_HOME` (shared `state.db`), WITHOUT `API_SERVER_KEY` in its
