@@ -1,0 +1,38 @@
+# MEM-F43 fixture: base spine omits skills.external_dirs / env_passthrough / docker_volumes,
+# so the render must insert all three from scratch.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+shared_learnings_root: /data/shared-learnings
+
+spines:
+  base:
+    source: spines/base-omitted.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer]
+
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer]
+  sessions:
+    auto_prune: false

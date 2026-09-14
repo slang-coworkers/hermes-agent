@@ -1,0 +1,38 @@
+# MEM-F43 fixture: base spine declares a pre-existing skills.external_dirs the render must preserve.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+# The fleet's shared-learnings git clone (host path). _enforce_shared_learnings reads it.
+shared_learnings_root: /data/shared-learnings
+
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer]
+
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer]
+  sessions:
+    auto_prune: false

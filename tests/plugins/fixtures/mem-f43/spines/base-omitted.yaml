@@ -1,0 +1,19 @@
+# Base spine (omitted variant) — no skills.external_dirs, no terminal.env_passthrough, no
+# terminal.docker_volumes, so the render must INSERT <clone>/skills, WIKI_PATH passthrough,
+# and the clone mount from scratch.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+traits:
+  command_allowlist: ["git status"]
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: false}
+  checkpoints: {auto_prune: false}
+  compression: {in_place: true}
+  terminal:
+    backend: "docker"
+    docker_image: "hermes-sandbox:pinned"
+    docker_mount_cwd_to_workspace: true
