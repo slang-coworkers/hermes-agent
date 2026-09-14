@@ -44,6 +44,7 @@ def _ensure_schema(conn) -> None:
         "last_unpriced_count INTEGER NOT NULL DEFAULT 0, "
         "budget_gen INTEGER NOT NULL DEFAULT 0, "
         "blocked INTEGER NOT NULL DEFAULT 0, "
+        "immortal INTEGER NOT NULL DEFAULT 0, "
         "day_key TEXT, "
         "day_start_total REAL NOT NULL DEFAULT 0)"
     )
@@ -130,6 +131,7 @@ _STATE_DEFAULTS: Dict[str, Any] = {
     "last_unpriced_count": 0,
     "budget_gen": 0,
     "blocked": 0,
+    "immortal": 0,
     "day_key": None,
     "day_start_total": 0.0,
 }
@@ -151,7 +153,7 @@ def get_state(session_id: str) -> Dict[str, Any]:
     try:
         row = conn.execute(
             "SELECT effective_usd, window_start_total, last_evaluated_total, "
-            "last_unpriced_count, budget_gen, blocked, day_key, day_start_total "
+            "last_unpriced_count, budget_gen, blocked, immortal, day_key, day_start_total "
             "FROM cap_state WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -166,8 +168,9 @@ def get_state(session_id: str) -> Dict[str, Any]:
         "last_unpriced_count": int(row[3]),
         "budget_gen": int(row[4]),
         "blocked": int(row[5]),
-        "day_key": row[6],
-        "day_start_total": float(row[7]),
+        "immortal": int(row[6]),
+        "day_key": row[7],
+        "day_start_total": float(row[8]),
     }
 
 
@@ -181,15 +184,16 @@ def set_state(session_id: str, **fields) -> None:
     try:
         conn.execute(
             "INSERT INTO cap_state (session_id, effective_usd, window_start_total, "
-            "last_evaluated_total, last_unpriced_count, budget_gen, blocked, "
+            "last_evaluated_total, last_unpriced_count, budget_gen, blocked, immortal, "
             "day_key, day_start_total) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(session_id) DO UPDATE SET "
             "effective_usd=excluded.effective_usd, "
             "window_start_total=excluded.window_start_total, "
             "last_evaluated_total=excluded.last_evaluated_total, "
             "last_unpriced_count=excluded.last_unpriced_count, "
             "budget_gen=excluded.budget_gen, blocked=excluded.blocked, "
+            "immortal=excluded.immortal, "
             "day_key=excluded.day_key, day_start_total=excluded.day_start_total",
             (
                 session_id,
@@ -199,6 +203,7 @@ def set_state(session_id: str, **fields) -> None:
                 int(st["last_unpriced_count"]),
                 int(st["budget_gen"]),
                 int(st["blocked"]),
+                int(st["immortal"]),
                 st["day_key"],
                 _sanitize(st["day_start_total"]),
             ),
@@ -206,6 +211,28 @@ def set_state(session_id: str, **fields) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def all_states() -> List[Dict[str, Any]]:
+    """Every tracked per-session state row (for ``hermes cost-cap show``)."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT session_id, effective_usd, window_start_total, blocked, immortal "
+            "FROM cap_state ORDER BY session_id ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "session_id": r[0],
+            "effective_usd": float(r[1]),
+            "window_start_total": float(r[2]),
+            "blocked": bool(r[3]),
+            "immortal": bool(r[4]),
+        }
+        for r in rows
+    ]
 
 
 def bump_effective(session_id: str, value: float) -> float:

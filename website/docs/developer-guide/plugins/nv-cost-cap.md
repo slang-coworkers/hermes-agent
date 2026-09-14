@@ -27,13 +27,14 @@ double-counting (both sources estimate the same calls).
 `unpriced` and treated as a Tier-2 breach for a non-immortal session — never as
 free — so unbounded unpriced spend cannot bypass the cap.
 
-## Two tiers, on the window delta
+## Two tiers
 
-Crossings are evaluated on the **window delta**, never the lifetime total.
+**Tier-2 and the immortal daily cap are evaluated on the window delta**, never the
+lifetime total; **Tier-1 compares the reconciled session total** against the p90.
 
 - **Tier-1 `capUsd`** — the profile's rolling **p90** (nearest-rank) over its
   *completed* historical session totals (an in-flight session and out-of-window
-  older sessions excluded). A session whose reconciled total crosses Tier-1
+  older sessions excluded). A session whose reconciled **total** crosses Tier-1
   (while under Tier-2) records an **escalation episode** carrying a monotonic
   `budgetGen` — it is *not* hard-stopped.
 - **Tier-2 `ceilingUsd`** — the resolved hard ceiling. A **non-immortal** session

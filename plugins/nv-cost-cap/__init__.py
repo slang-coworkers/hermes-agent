@@ -40,6 +40,12 @@ DEFAULT_CEILING_USD = 25.0
 DEFAULT_P90_WINDOW = 50
 FLEET_CEILING_KEY = f"plugins.entries.{PLUGIN_KEY}.settings.fleet_ceiling_usd"
 
+# Virtual aggregator providers whose synthetic turn has no price of its own —
+# their real per-advisor spend is accounted separately and picked up by the
+# lineage reconcile. Treat such a turn as $0, never fail-closed "unpriced"
+# (which would wrongly block a legitimately-billed MoA session).
+_UNPRICED_EXEMPT_PROVIDERS = {"moa"}
+
 # Set at register(); each profile home loads a DISTINCT module object with its
 # own _CTX (the plugin loader namespaces directory modules by HERMES_HOME), so
 # this module-global is profile-safe rather than a cross-profile shared cell.
@@ -127,13 +133,39 @@ def _dig(mapping, dotted_key: str):
     return cur
 
 
-def _is_immortal(session_id, platform=None) -> bool:
-    # Config-driven, never hard-coded.
-    if isinstance(session_id, str) and session_id in _cfg_list("immortal_session_ids"):
+def _platform_value(platform):
+    # event.source.platform is a Platform enum whose .value is the string form
+    # ("slack", "cli", ...); config lists platforms by that string.
+    value = getattr(platform, "value", platform)
+    return str(value) if value is not None else None
+
+
+def _resolve_immortal(session_id, platform=None) -> bool:
+    """Immortality is config-driven; persist it so platform-less callbacks see it.
+
+    ``pre_tool_call`` / ``llm_execution`` receive no ``platform``, so a
+    platform-immortal session is classified by an earlier callback that DID
+    carry the platform (``on_session_start`` / ``pre_gateway_dispatch`` /
+    ``on_session_end``) and the flag is persisted; the platform-less callers
+    then read the persisted flag. Session-id immortality needs no platform.
+    """
+    immortal = isinstance(session_id, str) and session_id in _cfg_list("immortal_session_ids")
+    if not immortal:
+        value = _platform_value(platform)
+        if value is not None and value in {str(p) for p in _cfg_list("immortal_platforms")}:
+            immortal = True
+    if immortal:
+        try:
+            if not store.get_state(session_id)["immortal"]:
+                store.set_state(session_id, immortal=1)
+        except Exception:
+            logger.warning("nv-cost-cap immortal persist failed for %s", session_id, exc_info=True)
         return True
-    if platform and isinstance(platform, str) and platform in _cfg_list("immortal_platforms"):
-        return True
-    return False
+    # Platform-less caller: fall back to a previously-persisted classification.
+    try:
+        return bool(store.get_state(session_id)["immortal"])
+    except Exception:
+        return False
 
 
 def _refresh_effective(session_id) -> float:
@@ -187,7 +219,9 @@ def resolve_ceiling() -> float:
 
 
 def set_fleet_ceiling(value: float) -> None:
-    """Write the owner-pinned fleet default; refuse when the key is managed-pinned."""
+    """Write the owner-pinned fleet default; refuse a managed-pinned key or a non-finite value."""
+    if not _finite(value):
+        raise ValueError("fleet ceiling must be a finite number")
     from hermes_cli import managed_scope
 
     if managed_scope.is_key_managed(FLEET_CEILING_KEY):
@@ -241,6 +275,10 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
         amount = None
 
     priced = amount is not None
+    if not priced and str(provider or "").lower() in _UNPRICED_EXEMPT_PROVIDERS:
+        # A virtual aggregator turn (e.g. MoA): record as a benign $0 rather than
+        # fail-closed unpriced; the real advisor spend is in state.db already.
+        priced, amount = True, 0.0
     total = store.record_call(
         session_id, api_request_id, float(amount) if priced else 0.0, priced
     )
@@ -262,7 +300,7 @@ def _session_stopped(session_id, *, today, platform=None):
     whose current-fire delta has crossed the ceiling. Immortal sessions are
     never stopped.
     """
-    if _is_immortal(session_id, platform):
+    if _resolve_immortal(session_id, platform):
         _refresh_effective(session_id)
         return False, "immortal"
     effective = _refresh_effective(session_id)
@@ -321,7 +359,10 @@ def _evaluate_daily(session_id, *, today) -> None:
     if day_key is None:
         day_key, day_start = today, 0.0
     elif day_key != today:
-        day_key, day_start = today, effective
+        # New day: the baseline is the total carried INTO the day (the previous
+        # day's ending total), not the current — possibly already-increased —
+        # effective, so spend on the new day's first boundary still counts.
+        day_key, day_start = today, state["last_evaluated_total"]
 
     unpriced_now = store.unpriced_count(session_id)
     if unpriced_now > state["last_unpriced_count"]:
@@ -339,7 +380,7 @@ def _evaluate_daily(session_id, *, today) -> None:
 
     store.set_state(
         session_id, day_key=day_key, day_start_total=day_start,
-        last_unpriced_count=unpriced_now,
+        last_evaluated_total=effective, last_unpriced_count=unpriced_now,
     )
 
 
@@ -351,7 +392,7 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
     no-op — this prevents the pre_gateway_dispatch + on_session_end pair on ONE
     real gateway turn from double-counting a generation. Never raises.
     """
-    if _is_immortal(session_id, platform):
+    if _resolve_immortal(session_id, platform):
         _evaluate_daily(session_id, today=today)
         return False
 
@@ -423,6 +464,10 @@ def _on_session_start(session_id=None, **kwargs):
                 session_id, window_start_total=0.0, last_evaluated_total=0.0,
                 budget_gen=0, effective_usd=0.0,
             )
+        if session_id:
+            # Persist the immortal classification here (this callback carries the
+            # platform) so the platform-less pre_tool_call / llm_execution see it.
+            _resolve_immortal(session_id, kwargs.get("platform"))
     except Exception:
         logger.warning("nv-cost-cap on_session_start failed", exc_info=True)
     return None
@@ -599,6 +644,8 @@ def _write_profile_override(profile, value) -> None:
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
 
+    if not _finite(value):
+        raise ValueError("profile ceiling must be a finite number")
     canon = normalize_profile_name(profile)
     validate_profile_name(canon)
     token = set_hermes_home_override(str(get_profile_dir(canon)))
@@ -619,6 +666,7 @@ def _cli_cost_cap(ns, **kwargs):
             "ok": True,
             "active_profile": active,
             "resolved_ceiling_usd": resolve_ceiling(),
+            "sessions": store.all_states(),
         }
         print(json.dumps(result))
         return result
@@ -634,6 +682,18 @@ def _cli_cost_cap(ns, **kwargs):
                     f"is not the orchestrator {orchestrator!r}"
                 ),
             }
+            print(json.dumps(result))
+            return result
+
+        # Validate BOTH requested values before any mutation, so a non-finite
+        # ceiling is never silently persisted as 0.0 or reported as applied.
+        requested = {
+            "fleet_ceiling_usd": getattr(ns, "fleet_ceiling_usd", None),
+            "profile_ceiling_usd": getattr(ns, "profile_ceiling_usd", None),
+        }
+        invalid = [name for name, value in requested.items() if value is not None and not _finite(value)]
+        if invalid:
+            result = {"ok": False, "reason": f"{invalid[0]} must be a finite number"}
             print(json.dumps(result))
             return result
 
