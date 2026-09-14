@@ -1,0 +1,63 @@
+# MEM-F41 compose input — OMITTED variant. Same roster as coworker-types.yaml,
+# but the input omits the memory block entirely (spine base-omitted.yaml, the
+# poweruser type, and this default_config all omit it), so the render must
+# INSERT the floor caps and write_approval:false on every profile.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+spines:
+  base:
+    source: spines/base-omitted.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "MEMF41-ORCH-IDENTITY"
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "MEMF41-REVIEWER-IDENTITY"
+    invariants: ["INV-SHARED", "INV-REVIEWER"]
+    context: ["CTX-SHARED", "CTX-REVIEWER"]
+    skills: ["review-skill"]
+    overlays: ["critique-gate"]
+    traits:
+      command_allowlist: ["git status", "gh pr view"]
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer:
+    extends: [base]
+    identity: "MEMF41-FIXER-IDENTITY"
+    skills: ["fix-skill"]
+    ui_meta: {title: "Fixer", description: "Implementer", shape: "square"}
+  poweruser:
+    extends: [base]
+    identity: "MEMF41-POWERUSER-IDENTITY"
+    ui_meta: {title: "Power User", description: "Large memory coworker", shape: "circle"}
+  bigcontext:
+    extends: [base]
+    identity: "MEMF41-BIGCONTEXT-IDENTITY"
+    ui_meta: {title: "Big Context", description: "Large user-profile coworker", shape: "octagon"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer, fixer, poweruser, bigcontext]
+
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer, poweruser, bigcontext]
+  platforms:
+    webhook:
+      extra:
+        routes:
+          pr:
+            secret: "SECRET-PR"
+            profile: reviewer
+            events: [pull_request]

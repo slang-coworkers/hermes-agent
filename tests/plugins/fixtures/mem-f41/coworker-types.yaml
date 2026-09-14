@@ -1,0 +1,76 @@
+# MEM-F41 compose input — UNSAFE variant. The spine sets the memory caps BELOW
+# the fleet floor and write_approval:true; the render must RAISE the caps to the
+# floor and OVERRIDE write_approval to false on every profile. The `poweruser`
+# type declares HIGHER caps in its own config block — the render must preserve
+# those (max semantics, never clamp down).
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "MEMF41-ORCH-IDENTITY"
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "MEMF41-REVIEWER-IDENTITY"
+    invariants: ["INV-SHARED", "INV-REVIEWER"]
+    context: ["CTX-SHARED", "CTX-REVIEWER"]
+    skills: ["review-skill"]
+    overlays: ["critique-gate"]
+    traits:
+      command_allowlist: ["git status", "gh pr view"]
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer:
+    extends: [base]
+    identity: "MEMF41-FIXER-IDENTITY"
+    skills: ["fix-skill"]
+    ui_meta: {title: "Fixer", description: "Implementer", shape: "square"}
+  poweruser:
+    extends: [base]
+    identity: "MEMF41-POWERUSER-IDENTITY"
+    # Type-level config deep-merges over the spine (the _resolve_type merge seam).
+    # Declares ONLY a higher memory_char_limit — the render must preserve it while
+    # still raising the omitted user_char_limit to the floor (independent per-key).
+    config:
+      memory: {memory_char_limit: 32000}
+    ui_meta: {title: "Power User", description: "Large memory coworker", shape: "circle"}
+  bigcontext:
+    extends: [base]
+    identity: "MEMF41-BIGCONTEXT-IDENTITY"
+    # Declares ONLY a higher user_char_limit — the render must preserve it while
+    # still raising the omitted memory_char_limit to the floor (independent per-key).
+    config:
+      memory: {user_char_limit: 16000}
+    ui_meta: {title: "Big Context", description: "Large user-profile coworker", shape: "octagon"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer, fixer, poweruser, bigcontext]
+
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer, poweruser, bigcontext]
+  # DEFAULT (multiplexer) tier is also unattended — write_approval:true here must
+  # be overridden to false, and the caps inserted at the floor.
+  memory: {write_approval: true}
+  platforms:
+    webhook:
+      extra:
+        routes:
+          pr:
+            secret: "SECRET-PR"
+            profile: reviewer
+            events: [pull_request]

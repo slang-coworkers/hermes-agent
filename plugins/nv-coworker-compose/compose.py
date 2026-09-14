@@ -54,6 +54,21 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Raised fleet baseline for per-agent curated memory. Stock is 2200/1375
+# (config_defaults.py memory.memory_char_limit / memory.user_char_limit) — too
+# small for the coworker types — so the render floors every profile up to these.
+# A type that legitimately needs more may declare a higher value: it is preserved
+# unchanged and per-key (never clamped down, never coupled). Both keys have real
+# readers (MemoryStore.__init__ and the _char_limit truncation gate).
+_MEMORY_FLOOR: Dict[str, int] = {
+    "memory.memory_char_limit": 4000,
+    "memory.user_char_limit": 2000,
+}
+# Coworkers and the DEFAULT multiplexer are unattended, so a memory write must
+# not stall on a human approval prompt: write_approval is forced off on every
+# rendered profile, overriding a spine/type that declared it true.
+_MEMORY_INVARIANTS: Dict[str, Any] = {"memory.write_approval": False}
+
 # Fleet-uniform approval policy (GOV-F23). These eight keys are pinned ONCE,
 # machine-wide, in the managed-scope fragment (out_root/managed/config.yaml) that
 # native _load_config_impl deep-merges (managed-wins) onto every profile
@@ -321,6 +336,18 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = copy.deepcopy(value)
 
 
+def _get_dotted(mapping: Dict[str, Any], dotted: str) -> Any:
+    """Read counterpart to ``_set_dotted``: return the leaf named by a dotted
+    path, or ``None`` if any segment is absent or blocked by a non-mapping node.
+    Used to compare a declared value against the floor before enforcing it."""
+    node: Any = mapping
+    for key in dotted.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
 def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
     """Remove the leaf named by a dotted path, then prune each now-empty mapping
     along the path bottom-up. A sibling key that is still populated stops the
@@ -366,6 +393,23 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
     "explicitly and never by assumption". A setdefault-style fill would leave a
     stale unsafe value untouched, so this always overwrites the leaf."""
     for dotted, value in _RETENTION_INVARIANTS.items():
+        _set_dotted(config, dotted, value)
+
+
+def _enforce_memory_policy(config: Dict[str, Any]) -> None:
+    """Raise per-agent memory caps to the fleet floor (never clamp a higher
+    declared value down; each key independently) and force write_approval off.
+    Mirrors ``_enforce_retention``: always writes the leaf so a stale or omitted
+    value can never survive to disk. A non-integer declared cap floors to the
+    minimum rather than propagating a malformed value."""
+    for dotted, floor in _MEMORY_FLOOR.items():
+        current = _get_dotted(config, dotted)
+        try:
+            current_int = int(current) if current is not None else 0
+        except (TypeError, ValueError):
+            current_int = 0
+        _set_dotted(config, dotted, max(current_int, floor))
+    for dotted, value in _MEMORY_INVARIANTS.items():
         _set_dotted(config, dotted, value)
 
 
@@ -1345,6 +1389,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        _enforce_memory_policy(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
         _strip_fleet_uniform_approvals(resolved["config"])
         _enforce_deny_floor(resolved["config"])
@@ -1358,6 +1403,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
+    _enforce_memory_policy(default_config)
     _validate_approval_lists(default_config, include_allowlist=False)
     _strip_fleet_uniform_approvals(default_config)
     _force_default_allowlist_empty(default_config)
