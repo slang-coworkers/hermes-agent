@@ -291,6 +291,9 @@ def message_agent_tool(
     sender_handle = _handle(me)
     prefix = f"Message from 🤖 {sender_handle} (@{sender_handle}): "
 
+    # Background delivery workers may not inherit the gateway venv on PATH.
+    from tools.bot_relay import _hermes_cli
+
     # ── peer target: '<peer>/<agent>' or a bare registered peer name ──
     peer_match = _PEER_TARGET_RE.match(raw_target)
     bare_peer = raw_target.lower() if raw_target.lower() in peers else None
@@ -313,7 +316,7 @@ def message_agent_tool(
         # local-teammate path's `-p <resolved>` pin below.
         return _start_delivery(
             [
-                "hermes",
+                _hermes_cli(),
                 "-p",
                 _self_profile_name(root),
                 "peer",
@@ -361,7 +364,7 @@ def message_agent_tool(
 
     return _start_delivery(
         [
-            "hermes",
+            _hermes_cli(),
             "-p",
             resolved,
             "chat",
