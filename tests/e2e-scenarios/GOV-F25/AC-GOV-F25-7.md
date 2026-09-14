@@ -288,8 +288,16 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
 1. POST a signed SECOND GitHub delivery (a `pull_request_review` for the SAME
    `gov-f25/repo#41`, a DISTINCT `X-GitHub-Delivery`, a valid
    `X-Hub-Signature-256` over the raw body with the `gh-pr` route secret) to the
-   default profile's webhook route on the **webhook adapter port** (`:8644`), the
-   ADR outline's `/p/gov-f25-default/webhooks/gh-pr` (`webhook.py:298`):
+   base profile's **plain** webhook route on the **webhook adapter port**
+   (`:8644`), `/webhooks/gh-pr` (`webhook.py:291`). Do NOT use
+   `/p/gov-f25-default/webhooks/gh-pr`: under `hermes -p gov-f25-default gateway
+   run` the multiplexer serves the base/primary profile under the LITERAL name
+   `default` (not `gov-f25-default`; `hermes_cli/profiles.py` `profiles_to_serve`),
+   so the profile-prefixed form 404s (`webhook.py:565-648` "Unknown or
+   unconfigured profile"; the allowlisted SECONDARY `gov-f25-owner` IS served
+   under its own name, which is why the Setup-6 claim's `/p/gov-f25-owner/...`
+   works). The plain `/webhooks/gh-pr` dispatches to the base profile — the one
+   carrying the `gh-pr` route + nv-artifact's `pre_gateway_dispatch` observer:
    ```bash
    ( source $TB/harness.live.env && source $TB/gov-f25.env
      SECRET=gov-f25-gh-pr-test-hmac-secret
@@ -297,14 +305,14 @@ URL, credential injected at the OneCLI-proxy hop — never a real key on disk).
      SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.*= //')"
      curl -sS -o $ART/scenario-AC-GOV-F25-7/webhook-resp.txt \
        -w '%{http_code}' \
-       -X POST "http://127.0.0.1:${WEBHOOK_PORT}/p/gov-f25-default/webhooks/gh-pr" \
+       -X POST "http://127.0.0.1:${WEBHOOK_PORT}/webhooks/gh-pr" \
        -H "Content-Type: application/json" \
        -H "X-GitHub-Event: pull_request_review" \
        -H "X-GitHub-Delivery: gov-f25-delivery-2" \
        -H "X-Hub-Signature-256: $SIG" \
        --data "$BODY" > $ART/scenario-AC-GOV-F25-7/webhook-code.txt
      code=$(cat $ART/scenario-AC-GOV-F25-7/webhook-code.txt); echo "webhook-http=$code"
-     [ "$code" = "202" ] || { echo "expected 202 at :8644 gh-pr route (got $code — endpoint/signature/route problem)"; exit 1; } )
+     [ "$code" = "202" ] || { echo "expected 202 at :8644 /webhooks/gh-pr (got $code — endpoint/signature/route problem)"; exit 1; } )
    ```
    → expect: **HTTP 202** (the webhook adapter is fire-and-forget and returns 202
    before the run starts, `gateway/platforms/webhook.py:969-987`). The PR is
