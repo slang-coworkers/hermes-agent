@@ -178,6 +178,19 @@ def test_unpriced_boundary_is_failclosed_and_idempotent(tmp_path, monkeypatch):
     estop.disengage()
 
 
+def test_set_state_cannot_undo_atomic_effective_bump(tmp_path, monkeypatch):
+    """A set_state that updates other columns (or a stale effective) never lowers effective spend."""
+    _, _, loaded = _load(tmp_path, monkeypatch, settings={})
+    store = loaded.module.store
+    assert store.bump_effective("s", 10.0) == 10.0
+    # Updating an unrelated column must not rewrite effective back down.
+    store.set_state("s", blocked=1, budget_gen=3)
+    assert store.get_state("s")["effective_usd"] == 10.0
+    # Even an explicit stale/lower effective is clamped by MAX and cannot lower it.
+    store.set_state("s", effective_usd=0.0)
+    assert store.get_state("s")["effective_usd"] == 10.0
+
+
 def test_immortal_platform_enum_never_stops(tmp_path, monkeypatch):
     """A platform-immortal session (Platform enum, not str) is never skipped, blocked, refused, or ESTOP'd."""
     import agent.estop as estop

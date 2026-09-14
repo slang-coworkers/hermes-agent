@@ -194,40 +194,46 @@ def get_state(session_id: str) -> Dict[str, Any]:
     }
 
 
+_REAL_COLUMNS = {"window_start_total", "last_evaluated_total", "day_start_total"}
+_INT_COLUMNS = {"last_unpriced_count", "budget_gen", "blocked", "immortal"}
+_TEXT_COLUMNS = {"platform", "day_key"}
+_SETTABLE_COLUMNS = _REAL_COLUMNS | _INT_COLUMNS | _TEXT_COLUMNS | {"effective_usd"}
+
+
 def set_state(session_id: str, **fields) -> None:
-    """Read-modify-write the full state row (upsert), preserving unset columns."""
+    """Update ONLY the supplied columns of the state row (no full-row rewrite).
+
+    A full read-modify-write would race ``bump_effective``: a concurrent caller
+    could re-persist a stale ``effective_usd`` snapshot and undo a larger bumped
+    value. So this touches only the columns passed, and ``effective_usd`` is
+    always applied as ``MAX(effective_usd, ?)`` so it can never be lowered.
+    """
     if not fields:
         return
-    st = get_state(session_id)
-    st.update(fields)
+    unknown = set(fields) - _SETTABLE_COLUMNS
+    if unknown:
+        raise ValueError(f"unknown cap_state columns: {sorted(unknown)}")
+    clauses = []
+    params = []
+    for column, value in fields.items():
+        if column == "effective_usd":
+            clauses.append("effective_usd = MAX(effective_usd, ?)")
+            params.append(_sanitize(value))
+        elif column in _REAL_COLUMNS:
+            clauses.append(f"{column} = ?")
+            params.append(_sanitize(value))
+        elif column in _INT_COLUMNS:
+            clauses.append(f"{column} = ?")
+            params.append(int(value))
+        else:  # nullable text: platform, day_key
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    params.append(session_id)
     conn = _conn()
     try:
+        conn.execute("INSERT OR IGNORE INTO cap_state (session_id) VALUES (?)", (session_id,))
         conn.execute(
-            "INSERT INTO cap_state (session_id, effective_usd, window_start_total, "
-            "last_evaluated_total, last_unpriced_count, budget_gen, blocked, immortal, "
-            "platform, day_key, day_start_total) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(session_id) DO UPDATE SET "
-            "effective_usd=excluded.effective_usd, "
-            "window_start_total=excluded.window_start_total, "
-            "last_evaluated_total=excluded.last_evaluated_total, "
-            "last_unpriced_count=excluded.last_unpriced_count, "
-            "budget_gen=excluded.budget_gen, blocked=excluded.blocked, "
-            "immortal=excluded.immortal, platform=excluded.platform, "
-            "day_key=excluded.day_key, day_start_total=excluded.day_start_total",
-            (
-                session_id,
-                _sanitize(st["effective_usd"]),
-                _sanitize(st["window_start_total"]),
-                _sanitize(st["last_evaluated_total"]),
-                int(st["last_unpriced_count"]),
-                int(st["budget_gen"]),
-                int(st["blocked"]),
-                int(st["immortal"]),
-                st["platform"],
-                st["day_key"],
-                _sanitize(st["day_start_total"]),
-            ),
+            f"UPDATE cap_state SET {', '.join(clauses)} WHERE session_id = ?", params
         )
         conn.commit()
     finally:
