@@ -457,7 +457,6 @@ def _post_tool_call(session_id=None, **kwargs):
 def _on_session_start(session_id=None, **kwargs):
     try:
         if session_id and not store.session_exists(session_id):
-            # Seed a fresh per-fire baseline for a NEW session (idempotent zeros).
             store.set_state(
                 session_id, window_start_total=0.0, last_evaluated_total=0.0,
                 budget_gen=0, effective_usd=0.0,

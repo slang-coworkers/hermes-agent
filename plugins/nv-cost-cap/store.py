@@ -64,8 +64,8 @@ def _ensure_schema(conn) -> None:
     conn.commit()
 
 
-# Columns added after the initial cap_state shape; an additive migration keeps a
-# data.db written by an earlier plugin version loadable (new columns get defaults).
+# Keep schema upgrades additive so an existing data.db stays loadable (new
+# columns are backfilled with defaults rather than requiring a rebuild).
 _CAP_STATE_ADDED_COLUMNS = (
     ("immortal", "INTEGER NOT NULL DEFAULT 0"),
     ("platform", "TEXT"),
