@@ -397,5 +397,6 @@ The curator also refuses to run if `min_idle_hours` hasn't elapsed, so on an act
 
 - [Skills System](/user-guide/features/skills) — how skills work in general and the self-improvement loop that creates them
 - [Memory](/user-guide/features/memory) — a parallel background review that maintains long-term memory
+- [Fleet bounded memory](/user-guide/fleet-bounded-memory) — how a coworker fleet enables the curator per profile alongside the memory caps and in-turn overflow consolidation
 - [Bundled Skills Catalog](/reference/skills-catalog)
 - [Issue #7816](https://github.com/NousResearch/hermes-agent/issues/7816) — original proposal and design discussion

@@ -69,6 +69,25 @@ _MEMORY_FLOOR: Dict[str, int] = {
 # rendered profile, overriding a spine/type that declared it true.
 _MEMORY_INVARIANTS: Dict[str, Any] = {"memory.write_approval": False}
 
+# Curator SAFETY invariants (MEM-F42). The curator maintains the agent-created
+# skills index that is loaded into every turn's system prompt, so enabling it and
+# its rollback-able pre-run backup on every profile is the skills-index leg of
+# bounded always-loaded memory. Forced true (never setdefault) so a re-pin to a
+# tree whose curator default flipped off cannot silently leave a profile's skills
+# index unbounded, and so every real pass attempts a recoverable snapshot. The
+# per-role TUNING keys (interval_hours/min_idle_hours/consolidate/prune_builtins)
+# are deliberately NOT here — they flow from the resolved spec per profile.
+_CURATOR_INVARIANTS: Dict[str, Any] = {
+    "curator.enabled": True,
+    "curator.backup.enabled": True,
+}
+# backup.keep is a FLOOR, not a fixed value: a spine that legitimately retains a
+# deeper snapshot history is preserved (a fixed 5 would delete older snapshots —
+# data loss), while a below-floor/0/absent keep is raised to 5 so retention depth
+# is a deliberate, visible fleet floor rather than the runtime's implicit 0->1
+# clamp. Same floor-MAX shape as _MEMORY_FLOOR.
+_CURATOR_BACKUP_KEEP_FLOOR = 5
+
 # Fleet-uniform approval policy (GOV-F23). These eight keys are pinned ONCE,
 # machine-wide, in the managed-scope fragment (out_root/managed/config.yaml) that
 # native _load_config_impl deep-merges (managed-wins) onto every profile
@@ -411,6 +430,24 @@ def _enforce_memory_policy(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, max(current_int, floor))
     for dotted, value in _MEMORY_INVARIANTS.items():
         _set_dotted(config, dotted, value)
+
+
+def _enforce_curator(config: Dict[str, Any]) -> None:
+    """Force the curator safety invariants and floor backup.keep on ``config``,
+    overriding a declared value and inserting an omitted one alike. Mirrors
+    ``_enforce_memory_policy``: the two booleans are always overwritten so a stale
+    or omitted value can never survive to disk, and keep is floor-MAX — a higher
+    declared retention depth is preserved, a lower/0/absent/non-integer one is
+    raised to the floor. Only the three safety leaves are touched, so per-role
+    tuning merged from the resolved spec is left intact."""
+    for dotted, value in _CURATOR_INVARIANTS.items():
+        _set_dotted(config, dotted, value)
+    declared = _get_dotted(config, "curator.backup.keep")
+    try:
+        declared_int = int(declared) if declared is not None else 0
+    except (TypeError, ValueError, OverflowError):
+        declared_int = 0
+    _set_dotted(config, "curator.backup.keep", max(declared_int, _CURATOR_BACKUP_KEEP_FLOOR))
 
 
 def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool) -> None:
@@ -1712,6 +1749,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
         _enforce_memory_policy(resolved["config"])
+        _enforce_curator(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
         _strip_fleet_uniform_approvals(resolved["config"])
         _enforce_deny_floor(resolved["config"])
@@ -1726,6 +1764,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
 
     _enforce_retention(default_config)
     _enforce_memory_policy(default_config)
+    _enforce_curator(default_config)
     _validate_approval_lists(default_config, include_allowlist=False)
     _strip_fleet_uniform_approvals(default_config)
     _force_default_allowlist_empty(default_config)

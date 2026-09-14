@@ -1,0 +1,92 @@
+# MEM-F42 compose input — the lego spec nv-coworker-compose renders from.
+# The base spine sets the curator SAFETY keys to unsafe values; each profile below
+# authors its own per-role curator TUNING (interval_hours/min_idle_hours/consolidate/
+# prune_builtins), and reviewer also raises backup.keep. The render must (a) force the
+# safety invariants on every profile — enabled/backup.enabled true, backup.keep floored
+# to >= 5 — and (b) preserve every profile's divergent per-role tuning and any keep
+# above the floor, proving the enforcement touches ONLY the safety leaves.
+project: demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: reviewer
+
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# A type may carry its own `config:` block; it deep-merges last (leaf-wins) over the
+# spine config, so per-role curator tuning here overrides the base curator dict key-wise
+# while the base safety keys remain until the render enforces them.
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+    config:
+      curator:
+        interval_hours: 72
+        min_idle_hours: 6
+        consolidate: true
+        prune_builtins: false
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator", shape: "hexagon"}
+  reviewer:
+    extends: [base]
+    identity: "REVIEWER-IDENTITY"
+    invariants: ["INV-SHARED", "INV-REVIEWER"]
+    context: ["CTX-SHARED", "CTX-REVIEWER"]
+    skills: ["review-skill"]
+    overlays: ["critique-gate"]
+    traits:
+      command_allowlist: ["git status", "gh pr view"]
+    config:
+      curator:
+        interval_hours: 336
+        min_idle_hours: 1
+        consolidate: false
+        prune_builtins: true
+        backup:
+          keep: 12          # above the floor -> the render must PRESERVE it (floor-MAX)
+    ui_meta: {title: "Reviewer", description: "PR reviewer", shape: "diamond"}
+  fixer:
+    extends: [base]
+    identity: "FIXER-IDENTITY"
+    skills: ["fix-skill"]
+    config:
+      curator:
+        interval_hours: 240
+        min_idle_hours: 4
+        consolidate: true
+        prune_builtins: true
+    ui_meta: {title: "Fixer", description: "Implementer", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "Fleet"
+    members: [orchestrator, reviewer, fixer]
+
+# DEFAULT (multiplexer) profile only. Unsafe safety keys (render must override) plus its
+# own per-profile tuning (render must preserve).
+default_config:
+  gateway:
+    multiplex_profiles: true
+    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
+  curator:
+    enabled: false
+    interval_hours: 500
+    min_idle_hours: 5
+    consolidate: false
+    prune_builtins: true
+    backup:
+      enabled: false
+      keep: 0
+  platforms:
+    webhook:
+      extra:
+        routes:
+          pr:
+            secret: "SECRET-PR"
+            profile: reviewer
+            events: [pull_request]
