@@ -134,16 +134,18 @@ When you want a coworker type's MCP servers (and skills) to be an installable, e
 profile unit, package them as an [Agent Plugins v1](../developer-guide/plugins/index.md)
 portable package: `plugin.json` + `skills/<name>/SKILL.md` + `mcp.json`, no Python.
 
+The minimal `plugin.json`:
+
 ```json
-// plugin.json
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "self-f55-agent-plugin"
 }
 ```
 
+The package's `mcp.json` is exactly `{$schema, mcpServers}`; a server's `args`/`env`/`cwd` may reference the package's own paths with `${PLUGIN_ROOT}` / `${PLUGIN_DATA}`:
+
 ```json
-// mcp.json — exactly {$schema, mcpServers}; servers may reference the package's own paths
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
@@ -177,15 +179,17 @@ Lifecycle and behaviour:
 ## Pinning a type to an exact version
 
 Ref pinning on `hermes profile install` — `install <source>#<ref>` — is **not** available in
-v0.21.0: install shallow-clones the source's default branch, and `.git` is discarded, so no
-resolved commit is recorded (`hermes profile info` prints the source string and install
-timestamp, not a commit SHA). Until a `source_revision` field lands upstream, pin a type by
-**source immutability**, not by a client-side ref:
+v0.21.0: install shallow-clones the source's **default branch** and cannot select a branch or
+tag within a repository, and `.git` is discarded, so no resolved commit is recorded
+(`hermes profile info` prints the source string and install timestamp, not a commit SHA).
+Until a `source_revision` field lands upstream, pin a type by **source immutability**, not by
+a client-side ref:
 
-- Render each release into an **immutable source** the profiles point at — a per-release
-  branch (`rel/<date>`) or a release-tag-only mirror — and never rewrite it.
-- Resolve the commit **out of band** at render time (`git ls-remote` / `git rev-parse`
-  against that ref) and record it in your own release ledger.
+- Point each profile at a **distinct immutable source whose *default branch* is the release**
+  — a per-release mirror repository (its default branch frozen to that release) or a
+  versioned immutable local directory — never a shared source you keep advancing.
+- Resolve that source's commit **out of band** at render time (`git ls-remote` /
+  `git rev-parse`) and record it in your own release ledger.
 
 (By contrast, the Agent Plugins v1 installer *does* pin: `hermes plugins install --ref <sha>`
 takes a full 40-character commit SHA. Portable MCP servers can therefore be pinned today; a

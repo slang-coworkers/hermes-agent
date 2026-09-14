@@ -556,7 +556,7 @@ The install-delete cycle is cheap enough to be disposable.
 ### Pin to a specific version
 
 :::note
-Git ref pinning (`#v1.2.0`) is **not available in v0.21.0** — install tracks the source's default branch. `hermes profile info <name>` reports the manifest version and source string, **not** a resolved commit SHA; to pin a type, install from an immutable source (a per-release branch or a tag-only mirror) and record its commit out of band. See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md#pinning-a-type-to-an-exact-version).
+Git ref pinning (`#v1.2.0`) is **not available in v0.21.0** — install shallow-clones the source's default branch and cannot select a branch or tag within a repository. `hermes profile info <name>` reports the manifest version and source string, **not** a resolved commit SHA; to pin a type, install from a **distinct immutable source whose default branch is the release** (a per-release mirror repository or a versioned immutable local directory) and record its commit out of band. See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md#pinning-a-type-to-an-exact-version).
 :::
 
 ### Check what version you're on vs. latest
