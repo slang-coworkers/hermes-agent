@@ -7,11 +7,12 @@ isolated ``HERMES_HOME`` with an EMPTY bundled dir through the real
 each acceptance criterion and asserts the observable outcome.
 
 One ``test_ac_cost_f29_<n>`` per ``pytest:`` acceptance-criterion row in the ADR
-(``reports/cost-f29.md`` §Acceptance criteria), contiguous 1..9, docstring line
+(``reports/cost-f29.md`` §Acceptance criteria), contiguous 1..10, docstring line
 1 summarizes the criterion. ``test_ac_cost_f29_5`` is parametrized over
 ``api_mode`` in {anthropic_messages, chat_completions, codex_responses} and
 ``test_ac_cost_f29_9`` over ``unknown_on`` in {usage, session} — each remains one
-criterion id with multiple parametrizations.
+criterion id with multiple parametrizations. ``test_ac_cost_f29_10`` is the
+ESTOP-guard fail-open regression (COST-F29-CAP-1).
 
 Plugin public-helper contract the builder implements (fast-path accrual and
 episodes live in ``plugin_db("nv-cost-cap")`` under the active ``HERMES_HOME`` —
@@ -692,4 +693,46 @@ def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
     assert _has_action(_pre_tool(manager, "s-unknown"), "block")
     _assert_terminal(_mw_over(_llm_execution_cb(manager), "s-unknown"),
                      "anthropic_messages")
+    estop.disengage()
+
+
+# ---------------------------------------------------------------------------
+# AC-COST-F29-10
+# ---------------------------------------------------------------------------
+def test_ac_cost_f29_10(tmp_path, monkeypatch):
+    """A named-profile Tier-2 breach engages its OWN profile-local ESTOP sentinel even while a fleet-root ESTOP is already engaged, so a fleet resume leaves the breaching profile paused (no fail-open on the belt)."""
+    import agent.estop as estop
+
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
+        profile_name="worker",
+    )
+    # A fleet-root ESTOP is already engaged (an operator `hermes pause`, or a
+    # default-profile breach), so estop.is_engaged() is already True under this
+    # named profile — the exact condition a fleet-inclusive guard short-circuits.
+    fleet_sentinel = tmp_path / ".hermes" / "ESTOP"
+    fleet_sentinel.parent.mkdir(parents=True, exist_ok=True)
+    fleet_sentinel.write_text("{}", encoding="utf-8")
+    profile_sentinel = hermes_home / "ESTOP"
+    assert estop.is_engaged() is True
+    assert not profile_sentinel.exists()
+
+    # Breach Tier-2 on the named profile: a low fire advances the per-fire
+    # baseline, then a crossing fire (delta >= ceiling) is refused.
+    _seed_state_db(hermes_home, sessions=[("w", None, 0.5, None)],
+                   usage=[("w", "opus", "", 0.5)])
+    _pgd(manager, "rk", "w")
+    _seed_state_db(hermes_home, sessions=[("w", None, 10.0, None)],
+                   usage=[("w", "opus", "", 10.0)])
+    assert _has_action(_pgd(manager, "rk", "w"), "skip")
+
+    # The breach must write the profile's OWN sentinel — not lean on the
+    # pre-existing fleet one — else a fleet resume would resume this profile.
+    assert profile_sentinel.exists()
+
+    # Operator clears the FLEET ESTOP (removing only the fleet-root sentinel);
+    # the breaching profile stays paused via its own profile-local sentinel.
+    fleet_sentinel.unlink()
+    assert profile_sentinel.exists()
+    assert estop.is_engaged() is True
     estop.disengage()
