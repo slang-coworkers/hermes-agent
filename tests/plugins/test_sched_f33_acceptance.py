@@ -478,6 +478,24 @@ def test_cron_jobs_absolute_oneshot_has_finite_repeat(tmp_path, monkeypatch):
     assert job["repeat"] == {"times": 1, "completed": 0}
 
 
+def test_cron_jobs_naive_absolute_oneshot_rejected(tmp_path, monkeypatch):
+    """A naive absolute one-shot (no timezone offset) is rejected under any ambient timezone — it would render differently per host."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    # the rejection is decided from the declared value's tzinfo, so it must hold
+    # regardless of the compositor's ambient timezone
+    for i, tz in enumerate(("UTC", "Asia/Kolkata")):
+        monkeypatch.setenv("TZ", tz)
+        types = {
+            "orchestrator": {"extends": ["base"], "identity": "O"},
+            "worker": {"extends": ["base"], "identity": "W",
+                       "cron_jobs": [{"name": "naive", "schedule": "2030-01-01T09:00:00", "prompt": "p"}]},
+        }
+        spec = _write_inline_spec(tmp_path / f"spec-{i}", types, spine)
+        with pytest.raises(module.CompositionError, match="timezone offset"):
+            module.compose(str(spec), str(tmp_path / f"out-{i}"))
+
+
 def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
     """A non-boolean no_agent and a job with neither prompt nor script are render errors."""
     module = _load_compose(tmp_path, monkeypatch)

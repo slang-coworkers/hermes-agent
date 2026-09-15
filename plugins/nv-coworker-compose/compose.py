@@ -16,6 +16,7 @@ import copy
 import json
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
@@ -1427,6 +1428,20 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
         raise CompositionError(
             f"{profile}: cron job {name!r} has an invalid schedule {raw_schedule!r}: {exc}"
         ) from exc
+    if schedule.get("kind") == "once":
+        # An absolute one-shot must be timezone-qualified: parse_schedule anchors
+        # a naive timestamp to the compositor's active timezone, so its run_at
+        # would differ across hosts — breaking the host-independent render.
+        try:
+            declared_dt = datetime.fromisoformat(raw_schedule.replace("Z", "+00:00"))
+        except ValueError:
+            declared_dt = None
+        if declared_dt is None or declared_dt.tzinfo is None:
+            raise CompositionError(
+                f"{profile}: cron job {name!r}: absolute one-shot schedule {raw_schedule!r} must "
+                "include a timezone offset (or 'Z') — a naive timestamp is anchored to the "
+                "compositor's timezone and would not render identically across hosts"
+            )
 
     script = decl.get("script")
     if script is not None:
