@@ -1436,6 +1436,10 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
             )
         script = script.strip()
     prompt = decl.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        raise CompositionError(
+            f"{profile}: cron job {name!r} 'prompt' must be a string, got {type(prompt).__name__}"
+        )
     has_prompt = isinstance(prompt, str) and bool(prompt.strip())
     if not (has_prompt or script):
         raise CompositionError(
@@ -1493,10 +1497,10 @@ def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> Non
     """Serialize a coworker type's resolved cron_jobs to ``<profile>/cron/jobs.json``
     in the canonical ``{"jobs": [...]}`` shape ``load_jobs`` consumes. A duplicate
     job name across the resolved extends chain is a render error — job identity
-    must be unambiguous. No file is written when the type declares no cron jobs
-    (the empty ``cron/`` directory already exists)."""
-    if not cron_jobs:
-        return
+    must be unambiguous. The file is written unconditionally (an empty declaration
+    renders ``{"jobs": []}``) so re-rendering into a persistent, git-tracked output
+    tree clears a job removed from the spec instead of leaving a stale record that
+    ``profile update`` would then redeploy."""
     jobs: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     for decl in cron_jobs:

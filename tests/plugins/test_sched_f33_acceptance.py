@@ -501,3 +501,27 @@ def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
     }
     with pytest.raises(module.CompositionError, match="prompt or a script"):
         module.compose(str(_write_inline_spec(tmp_path / "spec2", types_empty, spine)), str(tmp_path / "out2"))
+
+
+def test_cron_jobs_removed_from_dirty_output_are_cleared(tmp_path, monkeypatch):
+    """Re-rendering a spec with all cron jobs removed into the same (persistent) output clears the stale jobs.json."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    out = tmp_path / "out"
+    with_jobs = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {"extends": ["base"], "identity": "W",
+                   "cron_jobs": [{"name": "j", "schedule": "*/5 * * * *", "prompt": "p", "script": "s.py"}]},
+    }
+    r1 = module.compose(str(_write_inline_spec(tmp_path / "spec1", with_jobs, spine)), str(out))
+    assert _read_jobs(Path(r1["worker"]) / "cron"), "first render must populate jobs.json"
+
+    # the declaration is removed and the spec re-rendered into the SAME output tree
+    # (the git-tracked review surface); the stale record must not survive
+    without_jobs = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {"extends": ["base"], "identity": "W"},
+    }
+    r2 = module.compose(str(_write_inline_spec(tmp_path / "spec2", without_jobs, spine)), str(out))
+    payload = json.loads((Path(r2["worker"]) / "cron" / "jobs.json").read_text(encoding="utf-8"))
+    assert payload == {"jobs": []}
