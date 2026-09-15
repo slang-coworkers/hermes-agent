@@ -187,6 +187,66 @@ def test_wrapper_refuses_ro_rw_ca_mount(tmp_path):
 
 
 @pytest.mark.linux_only
+def test_wrapper_refuses_compact_env_override(tmp_path):
+    """A launch that carries every required name-only -e AND a compact
+    `-e=HTTPS_PROXY=<attacker proxy>` override is refused before podman runs,
+    and the attacker token never reaches the log or stderr."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e=HTTPS_PROXY=http://x:aoc_override@10.9.9.9:1"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+    logged = log.read_text(encoding="utf-8")
+    assert "aoc_override" not in logged and "aoc_override" not in result.stderr
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_env_file(tmp_path):
+    """An `--env-file` on a long-lived launch is forbidden outright (its contents
+    are opaque and could override a protected proxy/CA var)."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s", "--env-file", "/tmp/evil.env"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the
     podman-3.4.4-compatible {{index .Labels "K"}} before being forwarded."""

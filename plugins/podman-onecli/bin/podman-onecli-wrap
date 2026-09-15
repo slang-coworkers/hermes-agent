@@ -80,6 +80,12 @@ authority_of() {
     printf '%s' "$_u"
 }
 
+redact_userinfo() {
+    # Defense in depth: never let a scheme://userinfo@ token reach the log even
+    # if a value-bearing argument slips past validation.
+    printf '%s' "$1" | sed 's#://[^@ ]*@#://<redacted>@#g'
+}
+
 is_cgroup_probe() {
     # $@ = full argv (verb + rest). Match ONLY the pinned docker.py probe shape
     # (tools/environments/docker.py:776-785):
@@ -154,14 +160,29 @@ validate_launch() {
         elif [ "$_prev" = "-v" ] || [ "$_prev" = "--volume" ]; then
             check_ca_mount "$_tok"
         else
+            # Any env form other than a bare two-token `-e NAME` can carry a
+            # value or read one from a file, which would override a protected
+            # proxy/CA var past this validation and leak into the launch log.
+            # Env-files are opaque, so they are refused outright; compact and
+            # attached forms are refused when they name a protected var.
             case "$_tok" in
-                --env=*)
-                    _n="${_tok#--env=}"
+                --env-file | --env-file=*)
+                    refuse "environment files are forbidden on a long-lived launch" ;;
+                -e=* | --env=*)
+                    _n="${_tok#*=}"
                     _n="${_n%%=*}"
-                    is_protected_name "$_n" && refuse "explicit value override for protected env $_n"
-                    ;;
-                --volume=*)
-                    check_ca_mount "${_tok#--volume=}" ;;
+                    is_protected_name "$_n" && refuse "explicit env override for protected env $_n" ;;
+                -e?*)
+                    _n="${_tok#-e}"
+                    _n="${_n%%=*}"
+                    is_protected_name "$_n" && refuse "explicit env override for protected env $_n" ;;
+                --env?*)
+                    _n="${_tok#--env}"
+                    _n="${_n#=}"
+                    _n="${_n%%=*}"
+                    is_protected_name "$_n" && refuse "explicit env override for protected env $_n" ;;
+                --volume=* | -v=*)
+                    check_ca_mount "${_tok#*=}" ;;
             esac
         fi
         _prev="$_tok"
@@ -212,7 +233,7 @@ exec_launch() {
         set -- "$@" "$_cur"
     done
     set -- "$_verb" "--label" "nv.hermes-ppid=$PPID" "$@"
-    log_line "launch: $*"
+    log_line "launch: $(redact_userinfo "$*")"
     exec "$PODMAN" "$@"
 }
 
