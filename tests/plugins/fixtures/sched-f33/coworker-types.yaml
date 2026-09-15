@@ -1,0 +1,29 @@
+# SCHED-F33 acceptance fixture — the lego spec nv-coworker-compose renders from.
+# The render emits each type's cron jobs (the spine job appended to the type's)
+# into <profile>/cron/jobs.json and the cron config keys by value into config.yaml.
+project: sched-f33-demo
+default_profile: default
+orchestrator_profile: orchestrator
+worker_profile: fixer
+
+spines:
+  base:
+    source: spines/base.yaml
+
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "ORCH-IDENTITY"
+  fixer:
+    extends: [base]
+    identity: "FIXER-IDENTITY"
+    # Pre-task cron gates: a data-collection `script` job, an http `monitor`
+    # job (alias -> monitor_url), and a script-form `monitor` job (-> monitor_script).
+    cron_jobs:
+      - {name: prewarm, schedule: "*/15 * * * *", prompt: "warm the cache", script: "prewarm.py"}
+      - {name: watch_url, schedule: "0 * * * *", prompt: "check health", monitor: "https://example.invalid/health"}
+      - {name: watch_script, schedule: "0 0 * * *", prompt: "check health", monitor: "healthcheck.py"}
