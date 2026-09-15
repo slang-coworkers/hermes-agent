@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import FrozenSet
 
 from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource
 
@@ -23,6 +24,14 @@ class OneCLISecretSource(SecretSource):
     name = "onecli"
     label = "OneCLI credential gateway"
     shape = "mapped"
+
+    def __init__(self, api_key_env: str = "ONECLI_API_KEY") -> None:
+        self._api_key_env = api_key_env or "ONECLI_API_KEY"
+
+    def protected_env_vars(self, cfg: dict) -> FrozenSet[str]:
+        # The OneCLI control-plane bootstrap key must never be overwritten by any
+        # source (agent/secret_sources/base.py:186).
+        return frozenset({self._api_key_env})
 
     def fetch(self, cfg: dict, home_path: Path) -> FetchResult:
         # The ABC contract requires fetch() to never raise; every failure path

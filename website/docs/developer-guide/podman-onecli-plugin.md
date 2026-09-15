@@ -24,6 +24,9 @@ Settings live under `plugins.entries.podman-onecli.settings` (never a new
 `HERMES_*` variable):
 
 ```yaml
+secrets:
+  onecli:
+    enabled: true          # required — the SecretSource is inactive otherwise
 plugins:
   enabled: [podman-onecli]
   entries:
@@ -37,7 +40,7 @@ plugins:
 ```
 
 The SecretSource only runs at startup when `secrets.onecli.enabled: true` is in
-the rendered config. The bootstrap key named by `api_key_env` (default
+the rendered config (shown above). The bootstrap key named by `api_key_env` (default
 `ONECLI_API_KEY`) authenticates the onboard/render step to OneCLI; its **value**
 stays in the host environment and is never rendered into a profile.
 

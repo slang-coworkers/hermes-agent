@@ -109,3 +109,25 @@ def test_onboard_raises_when_container_config_unresolved(tmp_path, monkeypatch):
     ]
     ref = hermes_home / "plugin-data" / PLUGIN_KEY / "identities" / "cred-f28-bot-a.json"
     assert not ref.exists()
+
+
+def test_bootstrap_key_uses_source_environment_and_is_protected(tmp_path, monkeypatch):
+    """The bootstrap key resolves from the per-fetch environment view (falling
+    back to os.environ), and the SecretSource marks it protected so no source
+    can overwrite it."""
+    from agent.secret_sources.base import reset_source_environment, set_source_environment
+    from agent.secret_sources.registry import get_source
+
+    monkeypatch.setenv("ONECLI_API_KEY", "host-key")
+    manager, loaded, _ = _load(tmp_path, monkeypatch, "\n          cred-f28-bot-a: []")
+    oc = loaded.module.oneclient
+
+    assert oc._api_key() == "host-key"
+    token = set_source_environment({"ONECLI_API_KEY": "ctx-key"})
+    try:
+        assert oc._api_key() == "ctx-key"
+    finally:
+        reset_source_environment(token)
+
+    source = get_source("onecli", scope=manager.scope_key)
+    assert source.protected_env_vars({}) == frozenset({"ONECLI_API_KEY"})

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json as _json
 import logging
-import os
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Optional, Tuple
 from urllib.parse import urlencode
+
+from agent.secret_sources.base import get_source_environment
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,13 @@ def set_transport(fn: Optional[Transport]) -> None:
     _TRANSPORT = fn
 
 
+def _api_key() -> str:
+    """Read the bootstrap key from the per-fetch environment view (falling back
+    to os.environ), so a profile-local key is honored over another profile's
+    process value (agent/secret_sources/base.py:58-70)."""
+    return get_source_environment().get(_API_KEY_ENV, "")
+
+
 def _request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any]:
     fn = _TRANSPORT
     if fn is not None:
@@ -60,7 +68,7 @@ def _real_request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any
         raise OneCLIError("gateway_api_base_url is not configured for the OneCLI client")
     url = base.rstrip("/") + path
     headers = {"Accept": "application/json"}
-    api_key = os.environ.get(_API_KEY_ENV, "")
+    api_key = _api_key()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     data = None

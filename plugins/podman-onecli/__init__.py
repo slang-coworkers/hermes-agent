@@ -16,11 +16,12 @@ from .secret_source import OneCLISecretSource
 
 
 def register(ctx) -> None:
+    api_key_env = ctx.get_config("api_key_env", "ONECLI_API_KEY") or "ONECLI_API_KEY"
     oneclient.configure(
         gateway_api_base_url=ctx.get_config("gateway_api_base_url"),
-        api_key_env=ctx.get_config("api_key_env", "ONECLI_API_KEY"),
+        api_key_env=api_key_env,
     )
-    ctx.register_secret_source(OneCLISecretSource())
+    ctx.register_secret_source(OneCLISecretSource(api_key_env=api_key_env))
     ctx.register_hook("on_session_start", reconcile_identity)
     profile_secret_sets = ctx.get_config("profile_secret_sets", {}) or {}
     ctx.register_cli_command(

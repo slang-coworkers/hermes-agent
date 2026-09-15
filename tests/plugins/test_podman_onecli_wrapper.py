@@ -247,6 +247,67 @@ def test_wrapper_refuses_env_file(tmp_path):
 
 
 @pytest.mark.linux_only
+def test_wrapper_refuses_env_host(tmp_path):
+    """`--env-host` imports the whole host env (ONECLI_API_KEY, provider creds)
+    into the sandbox, so it is refused on a long-lived launch even when the
+    proxy/CA arguments are otherwise valid."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s", "--env-host"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_nonprotected_value_env(tmp_path):
+    """A value-bearing env argument for a NON-protected var (e.g.
+    `-e API_TOKEN=sk-live-canary`) is refused too: only name-only `-e NAME` is
+    accepted, so no secret value is ever forwarded or logged."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "API_TOKEN=sk-live-canary"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+    logged = log.read_text(encoding="utf-8")
+    assert "sk-live-canary" not in logged and "sk-live-canary" not in result.stderr
+
+
+@pytest.mark.linux_only
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the
     podman-3.4.4-compatible {{index .Labels "K"}} before being forwarded."""

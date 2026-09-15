@@ -54,7 +54,15 @@ def make_onboard_handler(profile_secret_sets):
                 f"no plugins.entries.podman-onecli.settings.profile_secret_sets entry "
                 f"for {identifier!r}; add it (use [] to leave the agent ungranted)"
             )
-        secrets = list(sets[identifier] or [])
+        raw = sets[identifier] or []
+        if not isinstance(raw, list) or not all(
+            isinstance(s, str) and s for s in raw
+        ):
+            raise ValueError(
+                f"profile_secret_sets[{identifier!r}] must be a list of non-empty "
+                f"provider names (got {raw!r})"
+            )
+        secrets = list(raw)
         oneclient.ensure_agent(identifier=identifier)
         oneclient.set_secrets(identifier=identifier, secrets=secrets)
         config = oneclient.get_container_config(agent=identifier)
