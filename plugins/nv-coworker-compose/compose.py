@@ -15,8 +15,9 @@ from __future__ import annotations
 import copy
 import json
 import re
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import yaml
 
@@ -1246,6 +1247,7 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
     skills: List[Any] = []
     workflows: List[Any] = []
     overlays: List[Any] = []
+    cron_jobs: List[Any] = []
     traits: Dict[str, Any] = {}
     config: Dict[str, Any] = {}
     mcp: Any = None
@@ -1264,6 +1266,9 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
         skills.extend(layer.get("skills") or [])
         workflows.extend(layer.get("workflows") or [])
         overlays.extend(layer.get("overlays") or [])
+        # cron_jobs append across the chain (like skills/workflows), NOT deduped:
+        # a duplicate job name is a render error resolved in _render_cron_jobs.
+        cron_jobs.extend(layer.get("cron_jobs") or [])
         traits = _deep_merge(traits, layer.get("traits") or {})
         config = _deep_merge(config, layer.get("config") or {})
 
@@ -1287,6 +1292,7 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
         "skills": _dedup(skills),
         "workflows": _dedup(workflows),
         "overlays": _dedup(overlays),
+        "cron_jobs": cron_jobs,
         "config": config,
         "mcp": mcp,
         "ui_meta": tinfo.get("ui_meta") or {},
@@ -1328,6 +1334,168 @@ def _write_common(pdir: Path) -> None:
     (pdir / "cron").mkdir(exist_ok=True)
 
 
+# Keys a cron_jobs declaration may carry. An unknown key fails closed: a
+# misspelled 'script' would otherwise be silently dropped and render a pre-task
+# gate that never gates.
+_CRON_JOB_KEYS = frozenset(
+    {"name", "schedule", "prompt", "script", "monitor", "monitor_url", "monitor_script", "no_agent"}
+)
+
+
+def _normalize_monitor(name: str, decl: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the model-facing ``monitor`` alias into the stored
+    ``(monitor_script, monitor_url)`` pair, mirroring
+    ``tools/cronjob_tools.py:_split_monitor_arg``: an ``http(s)://`` value is a
+    URL source, anything else is a script path. An explicit ``monitor_url`` /
+    ``monitor_script`` in the declaration passes through unchanged. Declaring
+    the alias alongside an explicit field, or two explicit sources, is ambiguous
+    and rejected. Each returned member is ``None`` or a non-empty string."""
+    monitor = decl.get("monitor")
+    explicit_script = decl.get("monitor_script")
+    explicit_url = decl.get("monitor_url")
+    if monitor is not None and (explicit_script is not None or explicit_url is not None):
+        raise CompositionError(
+            f"cron job {name!r}: declare either 'monitor' or an explicit "
+            "monitor_url/monitor_script, not both"
+        )
+    if monitor is not None:
+        if not isinstance(monitor, str):
+            raise CompositionError(f"cron job {name!r}: 'monitor' must be a string")
+        value = monitor.strip()
+        if not value:
+            return None, None
+        if value.lower().startswith(("http://", "https://")):
+            return None, value
+        return value, None
+
+    def _clean(raw: Any, field: str) -> Optional[str]:
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise CompositionError(f"cron job {name!r}: {field!r} must be a string")
+        return raw.strip() or None
+
+    return _clean(explicit_script, "monitor_script"), _clean(explicit_url, "monitor_url")
+
+
+def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
+    """Render one declared cron job into the persisted record ``cron.jobs`` loads.
+
+    A deterministic ``id`` (uuid5 of profile+name, never uuid4) and the parsed
+    dict ``schedule`` keep an unchanged distribution byte-identical on re-render;
+    no now-based field is written (the scheduler's due-scan recovers
+    ``next_run_at`` for cron/interval jobs). Fail-closed on a malformed
+    declaration, and execution-mode invariants mirror
+    ``cron/jobs.py:_validate_job_mode_invariants`` so a rendered job can never be
+    a shape the runtime would silently auto-pause or mis-gate."""
+    from cron.jobs import parse_schedule
+
+    if not isinstance(decl, dict):
+        raise CompositionError(
+            f"{profile}: each cron_jobs entry must be a mapping, got {type(decl).__name__}"
+        )
+    unknown = set(decl) - _CRON_JOB_KEYS
+    if unknown:
+        raise CompositionError(
+            f"{profile}: cron job has unknown key(s): "
+            f"{', '.join(sorted(repr(k) for k in unknown))}; "
+            f"supported: {', '.join(sorted(_CRON_JOB_KEYS))}"
+        )
+    name = decl.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise CompositionError(
+            f"{profile}: cron job 'name' must be a non-empty string, got {name!r}"
+        )
+    raw_schedule = decl.get("schedule")
+    if not isinstance(raw_schedule, str) or not raw_schedule.strip():
+        raise CompositionError(
+            f"{profile}: cron job {name!r} 'schedule' must be a non-empty string"
+        )
+    raw_schedule = raw_schedule.strip()
+    # A relative one-shot ("in 30m") parses to a run_at computed from the current
+    # time (cron/jobs.py:1090-1103), which is non-deterministic across renders; a
+    # git-versioned distribution carries only recurring or absolute schedules.
+    if raw_schedule.lower().startswith("in "):
+        raise CompositionError(
+            f"{profile}: cron job {name!r}: relative one-shot schedule {raw_schedule!r} is "
+            "not deterministic in a rendered distribution (its run_at is computed from "
+            "render time); use a recurring cron/interval schedule"
+        )
+    try:
+        schedule = parse_schedule(raw_schedule)
+    except ValueError as exc:
+        raise CompositionError(
+            f"{profile}: cron job {name!r} has an invalid schedule {raw_schedule!r}: {exc}"
+        ) from exc
+
+    script = decl.get("script")
+    if script is not None:
+        if not isinstance(script, str) or not script.strip():
+            raise CompositionError(
+                f"{profile}: cron job {name!r} 'script' must be a non-empty string"
+            )
+        script = script.strip()
+    monitor_script, monitor_url = _normalize_monitor(name, decl)
+    no_agent = bool(decl.get("no_agent"))
+
+    # Execution-mode invariants (cron/jobs.py:2192-2204): a rendered job must be a
+    # shape the runtime accepts, else it is silently auto-paused or mis-gated.
+    if monitor_script and monitor_url:
+        raise CompositionError(
+            f"{profile}: cron job {name!r}: monitor_script and monitor_url are mutually exclusive"
+        )
+    if (monitor_script or monitor_url) and no_agent:
+        raise CompositionError(
+            f"{profile}: cron job {name!r}: a monitor gate cannot be combined with no_agent "
+            "(a monitor job suppresses or wakes the agent)"
+        )
+    if no_agent and not script:
+        raise CompositionError(
+            f"{profile}: cron job {name!r}: no_agent requires a script (the script is the job)"
+        )
+
+    job: Dict[str, Any] = {
+        "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{_SELF_PLUGIN}:{profile}:{name}").hex[:12],
+        "name": name,
+        "schedule": schedule,
+    }
+    prompt = decl.get("prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        job["prompt"] = prompt
+    if script:
+        job["script"] = script
+    if monitor_script:
+        job["monitor_script"] = monitor_script
+    if monitor_url:
+        job["monitor_url"] = monitor_url
+    if no_agent:
+        job["no_agent"] = True
+    return job
+
+
+def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> None:
+    """Serialize a coworker type's resolved cron_jobs to ``<profile>/cron/jobs.json``
+    in the canonical ``{"jobs": [...]}`` shape ``load_jobs`` consumes. A duplicate
+    job name across the resolved extends chain is a render error — job identity
+    must be unambiguous. No file is written when the type declares no cron jobs
+    (the empty ``cron/`` directory already exists)."""
+    if not cron_jobs:
+        return
+    jobs: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for decl in cron_jobs:
+        job = _build_cron_job(profile, decl)
+        if job["name"] in seen:
+            raise CompositionError(
+                f"{profile}: duplicate cron job name {job['name']!r} across the extends chain"
+            )
+        seen.add(job["name"])
+        jobs.append(job)
+    (cron_dir / "jobs.json").write_text(
+        json.dumps({"jobs": jobs}, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def _load_overlays(names: List[Any], overlays_root: Path) -> List[Dict[str, Any]]:
     out = []
     for name in names:
@@ -1367,6 +1535,7 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
                 resolved["context"], resolved["invariants"])
     _write_yaml(pdir / "config.yaml", resolved["config"])
     _write_common(pdir)
+    _render_cron_jobs(pdir / "cron", tname, resolved["cron_jobs"])
 
     skills_dir = pdir / "skills"
     skills_dir.mkdir(exist_ok=True)

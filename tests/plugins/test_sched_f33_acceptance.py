@@ -85,6 +85,13 @@ def agent_env(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     (home / "scripts").mkdir(parents=True)
     (home / "cron").mkdir(parents=True)
+    # run_job fails fast with "no model configured" (cron/scheduler.py:5988)
+    # before the stubbed agent is reached unless a model resolves from
+    # job/env/config.yaml. The agent itself is stubbed (see _install_agent_stubs),
+    # so a bare model.default is enough to pass that gate hermetically.
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "stub-model"}}), encoding="utf-8"
+    )
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HOME", str(tmp_path / "os-home"))
     # cron modules cache get_hermes_home() at import — reload so storage,
@@ -188,6 +195,21 @@ def test_ac_sched_f33_2(tmp_path, monkeypatch):
     assert (cron_dir / "jobs.json").exists(), "compose must render cron/jobs.json for declared cron jobs"
     by_name = _read_jobs(cron_dir)
 
+    # append order across the extends chain: the spine job first, then the type's
+    # own in declaration order (append semantics, not a merge or a sort)
+    payload = json.loads((cron_dir / "jobs.json").read_text(encoding="utf-8"))
+    assert [j["name"] for j in payload["jobs"]] == [
+        "fleet_doctor", "prewarm", "watch_url", "watch_script"
+    ]
+    # no now-based field is rendered — the distribution must re-render
+    # byte-identically on any host at any time (the byte-identical check below can
+    # pass with a now-based field when two renders land in the same cron interval,
+    # so assert absence directly). next_run_at/failure_streak are recovered by the
+    # scheduler's due-scan, not written by the render.
+    for j in payload["jobs"]:
+        for now_based in ("next_run_at", "created_at", "last_run_at", "failure_streak"):
+            assert now_based not in j, f"{j['name']}: {now_based} must not be rendered"
+
     # every declared job (spine 'fleet_doctor' appended to the type's three) must
     # render as a schedulable record: a parsed dict schedule, a non-empty id, and
     # a computable next run (a string schedule is repaired to {} on scan and never
@@ -223,6 +245,11 @@ def test_ac_sched_f33_2(tmp_path, monkeypatch):
     assert by_name["fleet_doctor"].get("script") == "doctor.py"
     orch_jobs = _read_jobs(_profile_dir(rendered, out, "orchestrator") / "cron")
     assert orch_jobs["fleet_doctor"].get("script") == "doctor.py"
+
+    # the profile is part of the deterministic id seed: the inherited fleet_doctor
+    # gets a DIFFERENT id per profile (execution history is keyed by id), so the
+    # id is not a function of the job name alone
+    assert orch_jobs["fleet_doctor"]["id"] != by_name["fleet_doctor"]["id"]
 
     # deterministic ids: re-rendering the unchanged spec is byte-identical
     # (compose writes no now-based fields; next_run_at is recovered on scan)
@@ -341,3 +368,93 @@ def test_ac_sched_f33_7(agent_env, monkeypatch):
     _write_script(agent_env, "mon.py", "print('state B')\n")
     run_job(get_job(job["id"]) or job)
     assert observed["agent_runs"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Beside unit tests — fail-closed rendering of malformed cron_jobs declarations.
+# Each builds an inline spec under tmp_path; the architect's frozen fixture
+# (whose ids are the chain join-key) is never mutated.
+# --------------------------------------------------------------------------- #
+def _write_inline_spec(spec_dir, types, spine):
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / "spines").mkdir(exist_ok=True)
+    for sub in ("skills", "workflows", "overlays"):
+        (spec_dir / sub).mkdir(exist_ok=True)
+    (spec_dir / "spines" / "base.yaml").write_text(yaml.safe_dump(spine), encoding="utf-8")
+    spec = {
+        "project": "f33-inline",
+        "default_profile": "default",
+        "orchestrator_profile": "orchestrator",
+        "spines": {"base": {"source": "spines/base.yaml"}},
+        "skills_root": "skills",
+        "workflows_root": "workflows",
+        "overlays_root": "overlays",
+        "types": types,
+    }
+    path = spec_dir / "coworker-types.yaml"
+    path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return path
+
+
+def test_cron_jobs_duplicate_name_rejected(tmp_path, monkeypatch):
+    """A duplicate cron job name across the resolved extends chain is a render error."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {
+        "identity": "BASE",
+        "cron_jobs": [{"name": "dup", "schedule": "*/5 * * * *", "prompt": "p", "script": "a.py"}],
+    }
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"],
+            "identity": "W",
+            "cron_jobs": [{"name": "dup", "schedule": "0 * * * *", "prompt": "q", "script": "b.py"}],
+        },
+    }
+    spec = _write_inline_spec(tmp_path / "spec", types, spine)
+    with pytest.raises(module.CompositionError, match="duplicate.*dup"):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_cron_jobs_no_agent_invariants_rejected(tmp_path, monkeypatch):
+    """no_agent combined with a monitor gate, and no_agent without a script, are render errors (native execution-mode invariants)."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    base_types = {"orchestrator": {"extends": ["base"], "identity": "O"}}
+
+    # no_agent + monitor gate → rejected
+    types_monitor = dict(base_types)
+    types_monitor["worker"] = {
+        "extends": ["base"], "identity": "W",
+        "cron_jobs": [{"name": "bad", "schedule": "*/5 * * * *", "script": "s.py",
+                       "monitor": "m.py", "no_agent": True}],
+    }
+    spec1 = _write_inline_spec(tmp_path / "spec1", types_monitor, spine)
+    with pytest.raises(module.CompositionError, match="no_agent"):
+        module.compose(str(spec1), str(tmp_path / "out1"))
+
+    # no_agent without a script → rejected
+    types_noscript = dict(base_types)
+    types_noscript["worker"] = {
+        "extends": ["base"], "identity": "W",
+        "cron_jobs": [{"name": "bad", "schedule": "*/5 * * * *", "prompt": "p", "no_agent": True}],
+    }
+    spec2 = _write_inline_spec(tmp_path / "spec2", types_noscript, spine)
+    with pytest.raises(module.CompositionError, match="no_agent requires a script"):
+        module.compose(str(spec2), str(tmp_path / "out2"))
+
+
+def test_cron_jobs_relative_oneshot_rejected(tmp_path, monkeypatch):
+    """A relative one-shot schedule ('in 30m') is rejected — its run_at is computed from render time and is not deterministic in a distribution."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"], "identity": "W",
+            "cron_jobs": [{"name": "relative", "schedule": "in 30m", "prompt": "p"}],
+        },
+    }
+    spec = _write_inline_spec(tmp_path / "spec", types, spine)
+    with pytest.raises(module.CompositionError, match="relative one-shot"):
+        module.compose(str(spec), str(tmp_path / "out"))
