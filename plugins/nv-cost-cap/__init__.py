@@ -353,7 +353,17 @@ def _engage_estop(session_id) -> None:
     try:
         from agent import estop
 
-        if not estop.is_engaged():
+        # Guard on the PROFILE-LOCAL sentinel, not is_engaged(): is_engaged() is
+        # fleet-root-inclusive (estop.py:93-107), so a pre-existing fleet ESTOP
+        # would short-circuit engage() and leave this profile with no sentinel of
+        # its own — fail-open once the fleet sentinel is lifted. sentinel_path() is
+        # the profile-local path engage() writes; an unreadable stat engages anyway
+        # (fail toward enforcement, mirroring is_engaged's fail-safe).
+        try:
+            profile_estop_written = estop.sentinel_path().exists()
+        except OSError:
+            profile_estop_written = False
+        if not profile_estop_written:
             estop.engage(
                 reason=f"nv-cost-cap: session {session_id} exceeded the Tier-2 cost ceiling"
             )
