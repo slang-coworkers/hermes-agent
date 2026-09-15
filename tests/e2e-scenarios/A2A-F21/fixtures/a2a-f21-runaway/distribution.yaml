@@ -1,0 +1,8 @@
+name: a2a-f21-runaway
+version: 0.1.0
+description: "A2A-F21 AC-A2A-F21-5 live single-agent runaway circuit-breaker scenario. One Bot-Mode-managed profile whose config carries tool_loop_guardrails.hard_stop_enabled: true with a low, fast-tripping hard_stop_after.exact_failure so a real model driven into an identical failing-tool loop is blocked at the threshold (before_call -> repeated_exact_failure_block) and the turn stops without running away. Single interactive session, no message_agent recipient subprocess, so the live provider key resolves from the profile's own .env via key_env (written post-install by the scenario Setup)."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
