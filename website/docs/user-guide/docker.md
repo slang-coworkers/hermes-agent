@@ -80,6 +80,8 @@ tool_loop_guardrails:
     exact_failure: 5
     idempotent_no_progress: 5
 ```
+
+For a multi-coworker **fleet** these hard stops are not left to each profile's discretion: the same `tool_loop_guardrails` block (together with `kanban.failure_limit`) must be rendered into every coworker profile and pinned in managed scope by LOOP-F35; that render dependency is not yet shipped. See [Fleet runaway protection (managed-scope pinned)](configuration.md#fleet-runaway-protection-managed-scope-pinned).
 :::
 
 Note: the API server is gated on `API_SERVER_ENABLED=true`. To expose it beyond `127.0.0.1` inside the container, also set `API_SERVER_HOST=0.0.0.0` and an `API_SERVER_KEY` (minimum 8 characters — generate one with `openssl rand -hex 32`). Example:
