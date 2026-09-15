@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from . import oneclient
 
 logger = logging.getLogger(__name__)
+
+# The identifier becomes a OneCLI agent name and a URL path segment, so it is
+# constrained to a safe grammar rather than URL-quoted after the fact.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def onboard_setup(parser) -> None:
@@ -29,6 +34,8 @@ def _identifier_from(profile: str) -> str:
     identifier = Path(profile).expanduser().name
     if not identifier:
         raise ValueError(f"could not derive a profile identifier from {profile!r}")
+    if not _IDENTIFIER_RE.match(identifier):
+        raise ValueError(f"unsafe OneCLI profile identifier {identifier!r}")
     return identifier
 
 
@@ -42,10 +49,20 @@ def make_onboard_handler(profile_secret_sets):
 
     def onboard_handler(args) -> None:
         identifier = _identifier_from(args.profile)
+        if identifier not in sets:
+            raise ValueError(
+                f"no plugins.entries.podman-onecli.settings.profile_secret_sets entry "
+                f"for {identifier!r}; add it (use [] to leave the agent ungranted)"
+            )
+        secrets = list(sets[identifier] or [])
         oneclient.ensure_agent(identifier=identifier)
-        secrets = list(sets.get(identifier, []) or [])
         oneclient.set_secrets(identifier=identifier, secrets=secrets)
-        oneclient.get_container_config(agent=identifier)
+        config = oneclient.get_container_config(agent=identifier)
+        if config is None:
+            raise oneclient.OneCLIError(
+                f"onboarding {identifier!r}: container-config did not resolve after "
+                f"ensure_agent/set_secrets"
+            )
         _persist_identity(identifier, secrets_granted=len(secrets))
 
     return onboard_handler

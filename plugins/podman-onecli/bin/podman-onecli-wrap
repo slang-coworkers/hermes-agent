@@ -37,6 +37,11 @@ refuse() {
     exit 3
 }
 
+require_expected() {
+    [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
+    [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
+}
+
 has_flag() {
     _f="$1"
     shift
@@ -76,19 +81,23 @@ authority_of() {
 }
 
 is_cgroup_probe() {
-    # $@ = full argv (verb + rest). The cgroup probe is a `run --rm` with no
-    # -e and no -v (a real launch always carries the egress -e vars + CA -v).
-    _has_rm=0
-    _has_e=0
-    _has_v=0
-    for _t in "$@"; do
-        case "$_t" in
-            --rm) _has_rm=1 ;;
-            -e | --env) _has_e=1 ;;
-            -v | --volume) _has_v=1 ;;
-        esac
-    done
-    [ "$_has_rm" = 1 ] && [ "$_has_e" = 0 ] && [ "$_has_v" = 0 ]
+    # $@ = full argv (verb + rest). Match ONLY the pinned docker.py probe shape
+    # (tools/environments/docker.py:776-785):
+    #   run --rm --cpus 0.5 --memory 64m --pids-limit 32 <image> sleep 0
+    # Anything else that merely looks like `run --rm` falls through to
+    # validate_launch (fail closed) rather than being allowlisted.
+    shift
+    [ "$#" -eq 10 ] || return 1
+    [ "$1" = "--rm" ] || return 1
+    [ "$2" = "--cpus" ] || return 1
+    [ "$3" = "0.5" ] || return 1
+    [ "$4" = "--memory" ] || return 1
+    [ "$5" = "64m" ] || return 1
+    [ "$6" = "--pids-limit" ] || return 1
+    [ "$7" = "32" ] || return 1
+    [ "$9" = "sleep" ] || return 1
+    [ "${10}" = "0" ] || return 1
+    return 0
 }
 
 is_storage_probe() {
@@ -100,14 +109,26 @@ is_storage_probe() {
 
 check_ca_mount() {
     # $1 = a -v spec. Sets _ca_ok / _ca_bad for a mount targeting EXPECTED_CA.
+    # The mode is parsed option-by-option: a mount is read-only only when it
+    # carries `ro` AND no `rw` (so `ro,rw` is rejected, not treated as ro).
     _spec="$1"
     case "$_spec" in
         *":${EXPECTED_CA}:"*)
             _mode="${_spec##*:}"
-            case "$_mode" in
-                ro | ro,* | *,ro) _ca_ok=1 ;;
-                *) _ca_bad=1 ;;
-            esac
+            _mode_ro=0
+            _mode_rw=0
+            _oldifs="$IFS"
+            IFS=','
+            for _opt in $_mode; do
+                [ "$_opt" = "ro" ] && _mode_ro=1
+                [ "$_opt" = "rw" ] && _mode_rw=1
+            done
+            IFS="$_oldifs"
+            if [ "$_mode_rw" = 1 ] || [ "$_mode_ro" = 0 ]; then
+                _ca_bad=1
+            else
+                _ca_ok=1
+            fi
             ;;
         *":${EXPECTED_CA}")
             _ca_bad=1 ;; # HOST:CONTAINER with no mode = read-write default
@@ -251,27 +272,21 @@ case "$verb" in
         exit $?
         ;;
     run)
-        if has_flag "-d" "$@"; then
-            require_ok=1
-        elif is_cgroup_probe "$@"; then
-            require_ok=0
-        else
-            require_ok=1
+        # A `run` without -d that matches the pinned cgroup probe is the only
+        # allowlisted run; everything else (including any other `run --rm`) is a
+        # long-lived launch and must pass validation.
+        if ! has_flag "-d" "$@" && is_cgroup_probe "$@"; then
+            exec "$PODMAN" "$@"
         fi
-        if [ "$require_ok" = 1 ]; then
-            [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
-            [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
-            validate_launch "$@"
-            exec_launch "$@"
-        fi
-        exec "$PODMAN" "$@"
+        require_expected
+        validate_launch "$@"
+        exec_launch "$@"
         ;;
     create)
         if is_storage_probe "$@"; then
             exec "$PODMAN" "$@"
         fi
-        [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
-        [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
+        require_expected
         validate_launch "$@"
         exec_launch "$@"
         ;;
