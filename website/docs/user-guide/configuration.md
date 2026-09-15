@@ -1796,6 +1796,38 @@ agent:
 
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
+### Fleet runaway protection (managed-scope pinned)
+
+In a multi-coworker fleet the guardrails above are not left to each profile's discretion — they are a mandatory **policy**. Every coworker profile **must render** the same `tool_loop_guardrails` block and `kanban.failure_limit`, and because those values are identical for every coworker they are also **pinned in managed scope** (the one `/etc/hermes/config.yaml` that Hermes deep-merges, managed-wins, onto every profile) so a self-modifying bot cannot widen them:
+
+```yaml
+tool_loop_guardrails:
+  hard_stop_enabled: true      # circuit-break repeated failing calls, not just warn (mandatory for unattended coworkers)
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+kanban:
+  failure_limit: 2             # durable breaker: auto-block a task after N consecutive failures
+```
+
+This block **will be deployed** by the fleet's `nv-coworker-compose` render plus the managed-scope pin; wiring these exact keys into the compose plugin's render set is tracked under **LOOP-F35** and is not yet shipped, so treat the block above as the required fleet **policy** rather than something already rendered on every profile today. `hard_stop_enabled: true` must be set **explicitly**: at this release there is no `non_interactive_hard_stop_enabled` auto-default, so a gateway, cron job or kanban worker does **not** hard-stop on a repeated failing tool call unless the profile turns it on. `kanban.failure_limit` is the complementary durable circuit-breaker — a task whose consecutive-failure count reaches the limit is auto-blocked instead of retried forever.
+
+**Where each NanoClaw runaway behaviour landed.** The port is deliberately honest about what is native today and what is deferred:
+
+| NanoClaw runaway behaviour | Hermes landing in the managed-scope fleet |
+|---|---|
+| echo-drop (suppress a no-op / echo reply) | the in-turn **identical-call** breaker (`agent.stall_guards`, observational — it appends a notice, it never blocks) plus @-mention-gated room engagement; a strict message-level echo suppressor is **deferred / not shipped** and travels with CH-F53 |
+| bounced-a2a redrive | **cross-gateway** peering only, deferred (CH-F53) — there is no bounced-message redrive inside the one-gateway fleet |
+| runaway card | the fleet **cost**-ceiling alert (COST-F30), the one actionable human alert the fleet raises when a bot runs away |
+| `A2A_MAX_PINGPONG_TURNS` | **not rendered** in this one-gateway fleet — the a2a ping-pong cap is a cross-gateway peering guardrail and travels with CH-F53 if peering is ever revived |
+
+The identical-call breaker is an *observational* tool-call notice, and there is no consecutive-round cap on the in-gateway Bot Chat path, so echo-drop's message-level suppression is explicitly out of scope for this fleet configuration and deferred to CH-F53. See also [Docker / unattended deployments](docker.md).
+
 ## TTS Configuration
 
 ```yaml
