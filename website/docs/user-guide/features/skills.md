@@ -414,6 +414,85 @@ For a fleet of coworker profiles that share one learnings store and synthesise i
 
 All four skills appear in your skill index. If you create a new skill called `my-custom-workflow` locally, it shadows the external version.
 
+## Mirroring skills across every bot (hourly refresh)
+
+`external_dirs` also solves a fleet problem: keeping one set of skills in sync across every profile (bot) on a single gateway, and refreshing it on a schedule — with no gateway restart and no session interruption. This is a configuration recipe, not a separate feature: it combines the shared external directory above, the skill-index cache, and a script-only cron job.
+
+### One directory, every bot
+
+Point every profile's `config.yaml` at the same directory:
+
+```yaml
+skills:
+  external_dirs:
+    - /data/shared-skills
+```
+
+Each profile reads its own `config.yaml`, and because every profile lists the same path, one directory feeds every bot on the gateway — there is no per-bot copy. In a coworker fleet the distribution's `config.yaml` carries this key, so a newly rendered profile inherits it automatically. Confirm a skill reached a bot with `hermes -p <bot> skills list` (or the dashboard's Skills page): it appears on every profile that lists the directory.
+
+### The hourly fetch is a script-only cron job
+
+Refreshing the directory — a `git pull` of a skills repo, an `rsync`, or a loop of hub updates — needs no LLM: it is a script on a timer. Create it with the schedule as the **first positional argument** (there is no `--schedule` flag):
+
+```bash
+hermes cron create "every 1h" --script refresh-skills.py --no-agent
+```
+
+`--no-agent` skips the model entirely — the script *is* the job. The script must live under the active profile's `$HERMES_HOME/scripts/` directory (for the default profile that resolves to `~/.hermes/scripts/`). A `.sh` or `.bash` script runs under `bash`; any other extension runs under the current Python interpreter. A reference `refresh-skills.py`:
+
+```python
+"""Refresh the shared external skills directory. Runs LLM-free on a cron timer."""
+import subprocess
+from pathlib import Path
+
+SHARED = Path("/data/shared-skills")
+
+# Fast-forward the shared skills checkout. Clone it once beforehand, or swap
+# this for an rsync from your source of truth.
+if (SHARED / ".git").is_dir():
+    subprocess.run(["git", "-C", str(SHARED), "pull", "--ff-only"], check=True)
+```
+
+See [Script-Only Cron Jobs](/guides/cron-script-only) for the full no-agent contract.
+
+:::warning Point it only at a trusted source
+Skills in an external directory are loaded as trusted local content — unlike Skills Hub installs and project skills, they are **not** run through the install security scanner or the scan-time quarantine. An hourly `git pull` therefore distributes whatever is on the tracked branch to every profile that lists the directory, with no review gate in between. Mirror only a repository and branch whose write access is controlled and whose changes are reviewed before they land.
+:::
+
+**Credentials are scrubbed by default.** Hermes removes its managed model-provider credentials — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the like — from the environment of every cron script before it runs, and they cannot be re-enabled: Hermes refuses to register a model-provider credential for environment passthrough, whether the request comes from a skill or from `terminal.env_passthrough` in `config.yaml`. To pull a **private** skills repository, use SSH or a Git credential helper rather than a token in the environment — cron scripts also strip GitHub tokens such as `GITHUB_TOKEN` and `GH_TOKEN`, which likewise cannot be re-enabled through `terminal.env_passthrough`. If a refresh script genuinely needs a custom, non-provider variable, allowlist that exact name under `terminal.env_passthrough` in `config.yaml`.
+
+### Zero-downtime pickup
+
+Changes are usable without restarting the gateway, but two different caches are involved — know which surface reads which.
+
+The **discovery** surfaces re-scan on the first call at or after the skill index's 30-second cache TTL: `skills_list` and the dashboard Skills page reflect additions and removals, and `skill_view` reads a named skill directly.
+
+- **Adding or removing a skill** changes the directory's scan signature, so it is seen on the very next scan.
+- **Editing a skill in place** is invisible to the signature, so it is bounded by the 30-second TTL.
+
+An agent can therefore find and use a freshly mirrored skill through these tools mid-conversation, with no restart.
+
+The always-present skill **index** in a conversation's system prompt is a separate, process-level cache, held stable to preserve prompt-prefix caching and **not** re-validated against disk when files change. A running conversation, a context compaction, a restore, and a newly started session in the same long-running gateway process are not guaranteed to show a just-mirrored skill in that index; `/reload-skills` rebuilds the in-chat `/slash`-command map but deliberately leaves the system-prompt index untouched. For immediate use without a restart, rely on the discovery tools above; to refresh the system-prompt index for every new session, restart the gateway.
+
+### Limits — the cron job is the mechanism, not a workaround
+
+Be explicit about what this recipe does and does not do:
+
+- **No automatic hub update.** Hermes does not periodically pull Skills Hub taps on its own; the cron job is what performs the fetch.
+- **No built-in cross-profile fan-out.** Nothing copies skills from one profile into another. The shared `external_dirs` directory *is* the fan-out — every profile reads it directly.
+
+For skills **installed from Skills Hub taps** (via `hermes skills install`), the shared-directory `git pull` does not apply — update each profile's installed hub skills instead, looping the per-profile update verb inside the same refresh script. Because the loop is shell, make this one a `.sh`/`.bash` script:
+
+```bash
+for bot in orchestrator worker-1 worker-2; do
+  hermes -p "$bot" skills update
+done
+```
+
+### Who can write to the shared directory
+
+`external_dirs` is a discovery source, not a write-protection boundary. Whether the Hermes process — or an agent's `skill_manage` actions — may modify files there is governed by filesystem permissions and your profile/toolset setup, as covered under [External Skill Directories](#external-skill-directories) above. Note that the built-in cron fetch runs as the gateway's own OS user, so it cannot be granted write access that the gateway itself is denied; enforcing a single writer for the shared directory means running the fetch as a separate, more-privileged account or external process, which is outside this recipe.
+
 ## Project-Local Skills
 
 Repos can carry their own skills, active only for sessions started inside that project — the same pattern other agent harnesses use for repo-local configuration. When you launch Hermes inside a git checkout, it looks for skills in:
