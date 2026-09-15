@@ -1,0 +1,13 @@
+name: nv-cost-cap
+version: 0.1.0
+description: "Two-tier per-session cost cap with immortal sessions and runtime policy. Accrues each session's spend from Hermes's own accounting via an idempotent post_api_request fast path (priced with estimate_usage_cost, keyed by api_request_id) reconciled against a recursive parent_session_id lineage read of state.db (main+aux+subagent), with effective spend held monotonic. Computes a two-tier per-session cap: Tier-1 = the profile's rolling p90 over completed session totals (a crossing records an escalation episode), Tier-2 = a configured ceiling resolved per-profile-override -> managed-scope fleet ceiling -> owner-pinned fleet default. A non-immortal session that crosses Tier-2 within a fire is hard-stopped WITHOUT raising: the llm_execution middleware returns a synthetic terminal response, pre_tool_call blocks, and pre_gateway_dispatch skips ONLY that session (recovery slash-commands exempt), plus the profile ESTOP belt when settings.estop_on_breach (default true) so cron/kanban are gated too. Immortal sessions cap per UTC day (never hard-stopped). Unknown pricing is fail-CLOSED. Runtime policy is set through an orchestrator-only `hermes cost-cap` CLI; no env var is a source of truth."
+author: NousResearch
+kind: standalone
+manifest_version: 1
+provides_hooks:
+  - post_api_request
+  - post_tool_call
+  - on_session_end
+  - pre_tool_call
+  - on_session_start
+  - pre_gateway_dispatch
