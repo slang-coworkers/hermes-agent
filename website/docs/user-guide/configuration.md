@@ -2432,8 +2432,9 @@ Each [profile](/user-guide/profiles) has its own `config.yaml`, so each profile 
 **Resolution precedence** (first match wins):
 
 1. The `HERMES_TIMEZONE` environment variable.
-2. The active profile's `config.yaml` `timezone` key.
-3. The server's local time.
+2. An administrator's **managed-scope** pin — a managed overlay applied over `config.yaml`, so an admin-pinned zone overrides the profile's own value.
+3. The active profile's own `config.yaml` `timezone` key.
+4. The server's local time.
 
 An invalid IANA value (a typo, an unknown zone) logs a warning and falls back to server-local time — Hermes never crashes on a bad timezone string.
 
@@ -2445,7 +2446,7 @@ An invalid IANA value (a typo, an unknown zone) logs a warning and falls back to
 
 **What stays in the host or operator zone** — operator-facing surfaces are not re-rendered per profile:
 
-- **Standard application logs.** The log files live under `{HERMES_HOME}/logs/` (per profile), but their timestamps render in the host (server) local zone, matching the operator's own shell — not the profile zone.
+- **Standard application logs.** Their timestamps render in the host (server) local zone, matching the operator's own shell — not the profile zone. Under a multiplexed gateway the log files are written to the gateway process's own `{HERMES_HOME}/logs/` directory, not per profile (the desktop dashboard is the exception, which routes logs per profile).
 - **The web dashboard** renders cron times in the operator's **browser** zone.
 - `hermes cron list` and status print the stored timestamp verbatim, so a job's time shows there in that job's own (profile) zone — a persisted value, not a re-render.
 
@@ -2455,7 +2456,7 @@ A [multi-profile gateway](/user-guide/multi-profile-gateways) bridges the **laun
 - leave the **default / multiplexer profile's** `timezone` **empty** (`""`), and
 - start the gateway process with **no** `HERMES_TIMEZONE` already set in its environment.
 
-If either is non-empty, that single zone pins every profile in the process and per-profile overrides are ignored. Set `timezone` only on the individual coworker profiles.
+If either is non-empty, that single zone pins every profile in the process and per-profile overrides are ignored. Set `timezone` only on the individual coworker profiles. (Likewise, an administrator's managed-scope pin overrides a profile's own `config.yaml` timezone — see the precedence list above.)
 :::
 
 Related:
