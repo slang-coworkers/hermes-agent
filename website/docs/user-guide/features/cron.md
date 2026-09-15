@@ -1034,6 +1034,54 @@ Hermes's own `~/.hermes/state.db` is an internal schema that changes between rel
 
 Credit: this recipe set was prompted by @iankar8's exploration in [#2654](https://github.com/NousResearch/hermes-agent/pull/2654), which proposed adding sql/file/command triggers as a parallel mechanism. The `script` + `wakeAgent` gate already covers all three cases at $0, so the work landed as documentation instead.
 
+### Pre-task gates for a coworker fleet
+
+A fleet of coworker profiles (rendered by `nv-coworker-compose`) enforces NanoClaw-parity pre-task cron gates entirely with native Hermes cron. There is no separate gate runtime — the gates are the cron features documented above, configured by value and shipped as part of each profile's distribution.
+
+**The gate semantics (what maps to what):**
+
+- **Script gate → `wakeAgent`.** A pre-task `script` whose last non-empty stdout line is `{"wakeAgent": false}` skips the run silently (no LLM, no delivery); any other last line wakes the agent. This is the [`wakeAgent`](#skipping-the-agent-entirely-wakeagent) gate above.
+- **Change-detector gate → `monitor`.** A `monitor` source (script or URL) suppresses the run when its output is byte-identical to the previous agent-triggering tick; the first tick and any change wake the agent. A monitor job hashes its source's exact output each tick and only wakes the agent on a change (set one via the `cronjob` tool's `monitor` field).
+- **Script timeout → `cron.script_timeout_seconds`.** Pre-task scripts are killed after this many seconds. The stock default is `3600`; the fleet pins **`30`** (NanoClaw parity). Resolution chain: module override → `HERMES_CRON_SCRIPT_TIMEOUT` → `cron.script_timeout_seconds` → default (see [cron internals › Script-Backed Jobs](../../developer-guide/cron-internals.md#script-backed-jobs)).
+- **Failure-streak nudge → `cron.failure_nudge_threshold`.** When a recurring job fails this many times in a row, its next failure delivery carries an advisory review nudge. `0` disables it. The in-code default is `3`, but there is **no `config_defaults` entry** for this key, so a fleet that wants the nudge must emit it **by value**.
+
+```yaml
+# config.cron on the fleet spine — both keys are emitted by value into every
+# rendered coworker profile's config.yaml.
+cron:
+  script_timeout_seconds: 30   # NanoClaw parity (stock default is 3600)
+  failure_nudge_threshold: 3   # no config_defaults entry; must be explicit (0 disables)
+```
+
+:::warning A failed pre-task script does NOT gate the run
+This is the one place the model differs from NanoClaw. A pre-task `script` that exits non-zero does **not** skip the agent — its output is injected as a `## Script Error` block and the agent still runs. Only `{"wakeAgent": false}` (or an unchanged `monitor`) suppresses a run. Use `wakeAgent` when you want a script to decide whether to wake the agent.
+:::
+
+**Declaring gated jobs in the compose spec.** A coworker type declares its pre-task jobs under a top-level `cron_jobs:` list, which appends across the `extends` chain (a spine ships fleet-wide jobs; a type adds its own; a duplicate job name across the chain is a render error — names are compared **case-insensitively**, matching the runtime's job-reference resolution, so `Health` and `health` collide). Each entry is `{name, schedule, prompt?, script?, monitor?, no_agent?}`; the `monitor` alias is normalized to `monitor_url` (for an `http(s)://` value) or `monitor_script` (otherwise). The render writes each type's jobs to `<profile>/cron/jobs.json`.
+
+```yaml
+# a coworker type in coworker-types.yaml
+fixer:
+  extends: [base]
+  cron_jobs:
+    - {name: prewarm,      schedule: "*/15 * * * *", prompt: "warm the cache", script: "prewarm.py"}
+    - {name: watch_health, schedule: "0 * * * *",    prompt: "check health",   monitor: "https://example.invalid/health"}
+```
+
+Because `cron/` is [distribution-owned](../profile-distributions.md), these jobs are git-versioned and the whole `cron/` directory is replaced on `hermes profile update`. The rendered file carries no volatile timestamps or failure counters, so it re-renders byte-identically; the scheduler reconstructs each job's `next_run_at` on its next due-scan, and mutable counters such as the failure streak restart from their defaults after the directory is replaced. Only recurring (`cron`/`interval`) or timezone-qualified absolute schedules belong here — a **relative one-shot** (`in 30m`) is rejected because its run time would be computed at render time, a **naive absolute** timestamp (no offset) is rejected because it would be anchored to the compositor's active timezone and so would not render identically across hosts, and an **already-expired absolute one-shot** (a past timestamp outside the scheduler's grace window) is rejected because it would render but never fire — the same input native `create_job` refuses. Ad-hoc cron jobs added by hand on a managed coworker profile share this same `cron/jobs.json` and would be replaced on the next `profile update`; manage fleet cron jobs through the spec, not by editing the file.
+
+:::note Trust boundary — cron specs are team-authored
+The `cron_jobs` in a coworker spec are written by the fleet operator and reviewed as part of the distribution, so the render treats their `prompt`/`script` as trusted — the same position as hand-editing `cron/jobs.json`. Hermes's runtime gateway-lifecycle guard (`check_gateway_lifecycle`, which blocks a cron job that schedules a `hermes gateway restart`-style SIGTERM-respawn loop, [#30719](https://github.com/NousResearch/hermes-agent/issues/30719)) fires on the **untrusted** creation paths — the agent's `cronjob` tool and `hermes cron create` — not on a pre-rendered distribution. A spec author is therefore responsible for not scheduling a gateway-lifecycle command; the compose render does not re-run that guard.
+:::
+
+**Operability — nothing is silently disabled.** A job that keeps failing is surfaced, never quietly turned off:
+
+- `hermes cron incidents list` / `hermes cron incidents ack <id>` — durable, deduplicated failure incidents you can review and acknowledge.
+- `hermes cron doctor` — checks scheduled jobs for common health issues (exit `1` when something is actionable).
+- Only a structurally *unrunnable* job shape is auto-paused, and it is recorded as such — there is no pause-after-N-failures.
+
+**Not yet native (tracked upstream).** Automatic next-run **failure backoff** (pushing the next run out after a failure) and **auto-pause after N consecutive failures** are not part of native cron. Until they land upstream, the fleet's answer to a persistently failing job is the failure-streak nudge plus `hermes cron incidents` / `hermes cron doctor` — advisory and human-actioned, never a silent disable.
+
 ### Chaining jobs: `context_from`
 
 A cron job can consume the most recent successful output of one or more other jobs by listing their names (or IDs) in `context_from`:

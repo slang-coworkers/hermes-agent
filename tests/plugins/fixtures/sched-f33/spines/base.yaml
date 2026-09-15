@@ -1,0 +1,13 @@
+# Base spine — shared parent for every coworker type in this fixture.
+identity: "BASE-IDENTITY"
+config:
+  timezone: "Asia/Kolkata"
+  # NanoClaw parity: 30 s script timeout (Hermes default is 3600); the nudge
+  # threshold has no config_defaults entry, so it must be emitted by value.
+  cron:
+    script_timeout_seconds: 30
+    failure_nudge_threshold: 3
+# A fleet-wide cron job declared on the spine — it must APPEND to each type's
+# own cron_jobs (so every coworker profile carries it).
+cron_jobs:
+  - {name: fleet_doctor, schedule: "0 */12 * * *", prompt: "run cron doctor", script: "doctor.py"}
