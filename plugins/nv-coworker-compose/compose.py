@@ -559,6 +559,20 @@ def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
     config["command_allowlist"] = []
 
 
+def _strip_default_timezone(config: Dict[str, Any]) -> None:
+    """Drop any ``timezone`` from the DEFAULT/multiplexer profile config. The gateway
+    promotes a non-empty ``timezone`` in the launch (DEFAULT) profile's config.yaml to
+    the PROCESS-GLOBAL ``HERMES_TIMEZONE`` env var (gateway/run.py:2862-2865,
+    presence-sensitive per :2654-2656); hermes_time._timezone_cache_identity then pins
+    that single ("environment", tz) identity for EVERY multiplexed profile
+    (hermes_time.py:48-51, :60-63), clobbering each coworker's own zone. The DEFAULT
+    config inherits the base spine's timezone via ``_merged_spine_config``, so it is
+    deleted here (empty == absent for both the bridge and hermes_time, both ``.strip()``)
+    to leave the fleet zone unset and let each coworker profile resolve under its own
+    ("config", path) identity. DEFAULT-only — coworker profiles keep their own timezone."""
+    config.pop("timezone", None)
+
+
 def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     """OVERWRITE ``approvals.deny`` with exactly the fixed force-push/tag/release
     deny floor on a rendered profile config.
@@ -2051,6 +2065,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_approval_lists(default_config, include_allowlist=False)
     _strip_fleet_uniform_approvals(default_config)
     _force_default_allowlist_empty(default_config)
+    _strip_default_timezone(default_config)
     _enforce_deny_floor(default_config)
     _render_engage(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
