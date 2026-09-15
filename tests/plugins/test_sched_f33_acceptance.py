@@ -27,7 +27,7 @@ FIXTURE_SPEC = FIXTURE_DIR / "coworker-types.yaml"
 
 
 # --------------------------------------------------------------------------- #
-# Compose harness (AC-1, AC-2) — isolated discovery of the bundled plugin
+# Compose harness (AC-1, AC-2) — isolated plugin discovery
 # --------------------------------------------------------------------------- #
 def _load_compose(tmp_path, monkeypatch):
     import shutil
@@ -201,14 +201,15 @@ def test_ac_sched_f33_2(tmp_path, monkeypatch):
     assert [j["name"] for j in payload["jobs"]] == [
         "fleet_doctor", "prewarm", "watch_url", "watch_script"
     ]
-    # no now-based field is rendered — the distribution must re-render
+    # no runtime field is rendered — the distribution must re-render
     # byte-identically on any host at any time (the byte-identical check below can
     # pass with a now-based field when two renders land in the same cron interval,
-    # so assert absence directly). next_run_at/failure_streak are recovered by the
-    # scheduler's due-scan, not written by the render.
+    # so assert absence directly). next_run_at is reconstructed by the scheduler's
+    # due-scan; mutable counters like failure_streak restart from their defaults
+    # when the distribution-owned cron/ is replaced on update.
     for j in payload["jobs"]:
-        for now_based in ("next_run_at", "created_at", "last_run_at", "failure_streak"):
-            assert now_based not in j, f"{j['name']}: {now_based} must not be rendered"
+        for runtime_field in ("next_run_at", "created_at", "last_run_at", "failure_streak"):
+            assert runtime_field not in j, f"{j['name']}: {runtime_field} must not be rendered"
 
     # every declared job (spine 'fleet_doctor' appended to the type's three) must
     # render as a schedulable record: a parsed dict schedule, a non-empty id, and
@@ -372,8 +373,8 @@ def test_ac_sched_f33_7(agent_env, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Beside unit tests — fail-closed rendering of malformed cron_jobs declarations.
-# Each builds an inline spec under tmp_path; the architect's frozen fixture
-# (whose ids are the chain join-key) is never mutated.
+# Each builds an isolated inline spec under tmp_path so a mutation cannot leak
+# across cases or alter the shared acceptance fixture.
 # --------------------------------------------------------------------------- #
 def _write_inline_spec(spec_dir, types, spine):
     spec_dir.mkdir(parents=True, exist_ok=True)
@@ -458,3 +459,45 @@ def test_cron_jobs_relative_oneshot_rejected(tmp_path, monkeypatch):
     spec = _write_inline_spec(tmp_path / "spec", types, spine)
     with pytest.raises(module.CompositionError, match="relative one-shot"):
         module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_cron_jobs_absolute_oneshot_has_finite_repeat(tmp_path, monkeypatch):
+    """An absolute one-shot job renders a finite repeat budget, matching native create_job."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"], "identity": "W",
+            "cron_jobs": [{"name": "one", "schedule": "2030-01-01T09:00:00+00:00", "prompt": "run once"}],
+        },
+    }
+    rendered = module.compose(str(_write_inline_spec(tmp_path / "spec", types, spine)), str(tmp_path / "out"))
+    job = _read_jobs(Path(rendered["worker"]) / "cron")["one"]
+    assert job["schedule"]["kind"] == "once"
+    assert job["repeat"] == {"times": 1, "completed": 0}
+
+
+def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
+    """A non-boolean no_agent and a job with neither prompt nor script are render errors."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    base_types = {"orchestrator": {"extends": ["base"], "identity": "O"}}
+
+    # no_agent must be a real boolean, not a truthy string like "false"
+    types_bool = dict(base_types)
+    types_bool["worker"] = {
+        "extends": ["base"], "identity": "W",
+        "cron_jobs": [{"name": "b", "schedule": "*/5 * * * *", "script": "s.py", "no_agent": "false"}],
+    }
+    with pytest.raises(module.CompositionError, match="no_agent.*boolean"):
+        module.compose(str(_write_inline_spec(tmp_path / "spec1", types_bool, spine)), str(tmp_path / "out1"))
+
+    # a job with neither prompt nor script has nothing to run
+    types_empty = dict(base_types)
+    types_empty["worker"] = {
+        "extends": ["base"], "identity": "W",
+        "cron_jobs": [{"name": "e", "schedule": "*/5 * * * *", "monitor": "https://x.invalid/h"}],
+    }
+    with pytest.raises(module.CompositionError, match="prompt or a script"):
+        module.compose(str(_write_inline_spec(tmp_path / "spec2", types_empty, spine)), str(tmp_path / "out2"))

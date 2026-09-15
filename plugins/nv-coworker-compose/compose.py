@@ -1435,8 +1435,21 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
                 f"{profile}: cron job {name!r} 'script' must be a non-empty string"
             )
         script = script.strip()
+    prompt = decl.get("prompt")
+    has_prompt = isinstance(prompt, str) and bool(prompt.strip())
+    if not (has_prompt or script):
+        raise CompositionError(
+            f"{profile}: cron job {name!r} needs a prompt or a script (an empty payload has nothing to run)"
+        )
     monitor_script, monitor_url = _normalize_monitor(name, decl)
-    no_agent = bool(decl.get("no_agent"))
+    # 'false'/'0' are truthy strings, so a bare bool() would flip an intended
+    # off to on; require an actual boolean (fail closed).
+    raw_no_agent = decl.get("no_agent", False)
+    if not isinstance(raw_no_agent, bool):
+        raise CompositionError(
+            f"{profile}: cron job {name!r}: 'no_agent' must be a boolean, got {type(raw_no_agent).__name__}"
+        )
+    no_agent = raw_no_agent
 
     # Execution-mode invariants (cron/jobs.py:2192-2204): a rendered job must be a
     # shape the runtime accepts, else it is silently auto-paused or mis-gated.
@@ -1459,8 +1472,11 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
         "name": name,
         "schedule": schedule,
     }
-    prompt = decl.get("prompt")
-    if isinstance(prompt, str) and prompt.strip():
+    # A one-shot carries a finite repeat budget, matching native create_job
+    # (cron/jobs.py:2307-2309); a recurring job defaults to forever when omitted.
+    if schedule.get("kind") == "once":
+        job["repeat"] = {"times": 1, "completed": 0}
+    if has_prompt:
         job["prompt"] = prompt
     if script:
         job["script"] = script
