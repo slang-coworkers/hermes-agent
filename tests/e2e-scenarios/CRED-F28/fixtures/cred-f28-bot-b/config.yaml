@@ -1,6 +1,9 @@
 # CRED-F28 AC-2 fixture (bot B, the ungranted sibling). Identical render to bot
 # A; it is onboarded (identity ensured, empty grant) but never granted a secret
 # set, so its sandbox curl through the proxy must return 401.
+secrets:
+  onecli:
+    enabled: true          # activate the OneCLI SecretSource (off by default)
 proxy:
   enabled: false
 terminal:
