@@ -1,0 +1,18 @@
+name: podman-onecli
+label: OneCLI credential gateway
+kind: standalone
+version: 1.0.0
+description: >
+  Per-profile OneCLI egress identity for Hermes fleet profiles (CRED-F28).
+  Registers a OneCLI SecretSource that resolves a profile's proxy coordinates
+  (never a provider credential), an on_session_start re-assert of the launch
+  profile's OneCLI identity, and the onecli-onboard CLI that ensures a
+  profile's agent and secret grants before render. Ships a fail-closed podman
+  wrapper (bin/podman-onecli-wrap) that the substrate sets as
+  HERMES_DOCKER_BINARY: it refuses a long-lived sandbox launch missing the
+  rendered OneCLI proxy env or read-only CA mount, allowlists Hermes's
+  capability probes, and provides a sweep verb for orphaned sandboxes.
+author: slang-coworkers
+provides_tools: []
+provides_hooks:
+  - on_session_start

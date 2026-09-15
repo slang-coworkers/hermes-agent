@@ -1,0 +1,284 @@
+#!/bin/sh
+# podman-onecli-wrap (CRED-F28) — the HERMES_DOCKER_BINARY shim for the OneCLI
+# egress topology. It fails closed on a long-lived sandbox launch that is
+# missing the rendered OneCLI proxy env or the read-only CA mount, allowlists
+# Hermes's two capability probes verbatim, forwards every other podman command
+# unchanged, and preserves stdout byte-for-byte (the docker backend parses the
+# container-id line). It never invokes the real podman on a refused launch.
+#
+# Substrate-set environment:
+#   PODMAN_ONECLI_PODMAN         real podman binary (default: podman)
+#   PODMAN_ONECLI_EXPECTED_PROXY host:port authority the proxy env must carry
+#   PODMAN_ONECLI_EXPECTED_CA    container path the CA must be mounted at (:ro)
+#   PODMAN_ONECLI_LOG            optional path for launch/refusal audit lines
+# Proxy/CA VALUES arrive by name via the wrapper's own process env (Hermes uses
+# name-only `-e KEY`; the docker client env is os.environ + rendered values).
+
+PODMAN="${PODMAN_ONECLI_PODMAN:-podman}"
+EXPECTED_PROXY="${PODMAN_ONECLI_EXPECTED_PROXY:-}"
+EXPECTED_CA="${PODMAN_ONECLI_EXPECTED_CA:-}"
+LOG="${PODMAN_ONECLI_LOG:-}"
+
+PROXY_NAMES="HTTPS_PROXY https_proxy HTTP_PROXY http_proxy"
+CA_NAMES="SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS HERMES_CA_BUNDLE DENO_CERT"
+
+log_line() {
+    # $1 = already-safe message (never a raw proxy URL or env value)
+    if [ -n "$LOG" ]; then
+        printf '%s\n' "$1" >> "$LOG" 2>/dev/null || true
+    fi
+}
+
+refuse() {
+    # $1 = reason with proxy userinfo already redacted
+    _msg="podman-onecli-wrap: refuse long-lived launch — $1"
+    printf '%s\n' "$_msg" >&2
+    log_line "$_msg"
+    exit 3
+}
+
+has_flag() {
+    _f="$1"
+    shift
+    for _t in "$@"; do
+        [ "$_t" = "$_f" ] && return 0
+    done
+    return 1
+}
+
+is_protected_name() {
+    for _p in $PROXY_NAMES $CA_NAMES; do
+        [ "$_p" = "$1" ] && return 0
+    done
+    return 1
+}
+
+count_occurrences() {
+    # $1 = name, $2 = space-delimited collected names
+    _c=0
+    for _x in $2; do
+        [ "$_x" = "$1" ] && _c=$((_c + 1))
+    done
+    printf '%s' "$_c"
+}
+
+env_value() {
+    # Resolve the wrapper's process-env value for a fixed protected var name.
+    eval "printf '%s' \"\${$1:-}\""
+}
+
+authority_of() {
+    _u="$1"
+    _u="${_u#*://}"   # strip scheme
+    _u="${_u#*@}"     # strip userinfo (drops the aoc_ token)
+    _u="${_u%%/*}"    # strip any path
+    printf '%s' "$_u"
+}
+
+is_cgroup_probe() {
+    # $@ = full argv (verb + rest). The cgroup probe is a `run --rm` with no
+    # -e and no -v (a real launch always carries the egress -e vars + CA -v).
+    _has_rm=0
+    _has_e=0
+    _has_v=0
+    for _t in "$@"; do
+        case "$_t" in
+            --rm) _has_rm=1 ;;
+            -e | --env) _has_e=1 ;;
+            -v | --volume) _has_v=1 ;;
+        esac
+    done
+    [ "$_has_rm" = 1 ] && [ "$_has_e" = 0 ] && [ "$_has_v" = 0 ]
+}
+
+is_storage_probe() {
+    # $@ = full argv (verb + rest). Exactly: create --storage-opt size=1m hello-world
+    shift
+    [ "$#" -eq 3 ] || return 1
+    [ "$1" = "--storage-opt" ] && [ "$2" = "size=1m" ] && [ "$3" = "hello-world" ]
+}
+
+check_ca_mount() {
+    # $1 = a -v spec. Sets _ca_ok / _ca_bad for a mount targeting EXPECTED_CA.
+    _spec="$1"
+    case "$_spec" in
+        *":${EXPECTED_CA}:"*)
+            _mode="${_spec##*:}"
+            case "$_mode" in
+                ro | ro,* | *,ro) _ca_ok=1 ;;
+                *) _ca_bad=1 ;;
+            esac
+            ;;
+        *":${EXPECTED_CA}")
+            _ca_bad=1 ;; # HOST:CONTAINER with no mode = read-write default
+    esac
+}
+
+validate_launch() {
+    # $@ = full argv (verb + rest). Refuses (exits) on any missing/invalid item.
+    _e_names=" "
+    _ca_ok=0
+    _ca_bad=0
+    _prev=""
+    for _tok in "$@"; do
+        if [ "$_prev" = "-e" ] || [ "$_prev" = "--env" ]; then
+            case "$_tok" in
+                *=*)
+                    _n="${_tok%%=*}"
+                    is_protected_name "$_n" && refuse "explicit value override for protected env $_n"
+                    ;;
+                *)
+                    _e_names="$_e_names$_tok " ;;
+            esac
+        elif [ "$_prev" = "-v" ] || [ "$_prev" = "--volume" ]; then
+            check_ca_mount "$_tok"
+        else
+            case "$_tok" in
+                --env=*)
+                    _n="${_tok#--env=}"
+                    _n="${_n%%=*}"
+                    is_protected_name "$_n" && refuse "explicit value override for protected env $_n"
+                    ;;
+                --volume=*)
+                    check_ca_mount "${_tok#--volume=}" ;;
+            esac
+        fi
+        _prev="$_tok"
+    done
+
+    [ "$_ca_bad" = 0 ] || refuse "CA mount to $EXPECTED_CA is not read-only"
+    [ "$_ca_ok" = 1 ] || refuse "missing read-only CA mount to $EXPECTED_CA"
+
+    for _n in $PROXY_NAMES $CA_NAMES; do
+        _c=$(count_occurrences "$_n" "$_e_names")
+        [ "$_c" -ge 1 ] || refuse "missing name-only -e $_n"
+        [ "$_c" -le 1 ] || refuse "duplicate -e $_n"
+    done
+
+    for _n in $PROXY_NAMES; do
+        _val=$(env_value "$_n")
+        [ -n "$_val" ] || refuse "empty proxy value for $_n"
+        _auth=$(authority_of "$_val")
+        [ "$_auth" = "$EXPECTED_PROXY" ] || refuse "proxy authority mismatch for $_n (got '$_auth', want '$EXPECTED_PROXY')"
+    done
+
+    for _n in $CA_NAMES; do
+        _val=$(env_value "$_n")
+        [ "$_val" = "$EXPECTED_CA" ] || refuse "CA env $_n does not point at $EXPECTED_CA"
+    done
+}
+
+exec_launch() {
+    # $@ = full argv (verb + rest). Drop --add-host *:host-gateway (podman 3.4.4
+    # rejects host-gateway; never emitted under OPTION A but dropped as a belt),
+    # inject --label nv.hermes-ppid=$PPID, log the transformed argv, then exec.
+    _verb="$1"
+    shift
+    _total=$#
+    _proc=0
+    while [ "$_proc" -lt "$_total" ]; do
+        _cur="$1"
+        shift
+        _proc=$((_proc + 1))
+        if [ "$_cur" = "--add-host" ] && [ "$_proc" -lt "$_total" ]; then
+            case "$1" in
+                *:host-gateway)
+                    shift
+                    _proc=$((_proc + 1))
+                    continue ;;
+            esac
+        fi
+        set -- "$@" "$_cur"
+    done
+    set -- "$_verb" "--label" "nv.hermes-ppid=$PPID" "$@"
+    log_line "launch: $*"
+    exec "$PODMAN" "$@"
+}
+
+rewrite_label_template() {
+    printf '%s' "$1" | sed 's/{{\.Label "\([^"]*\)"}}/{{index .Labels "\1"}}/g'
+}
+
+exec_ps() {
+    # $@ = full argv (verb + rest). Rewrite {{.Label "K"}} -> {{index .Labels "K"}}
+    # in --format so podman 3.4.4 (whose ps has no .Label method) can serve it.
+    _verb="$1"
+    shift
+    _total=$#
+    _proc=0
+    while [ "$_proc" -lt "$_total" ]; do
+        _cur="$1"
+        shift
+        _proc=$((_proc + 1))
+        case "$_cur" in
+            --format=*)
+                _fmt=$(rewrite_label_template "${_cur#--format=}")
+                set -- "$@" "--format=$_fmt"
+                continue ;;
+        esac
+        if [ "$_cur" = "--format" ] && [ "$_proc" -lt "$_total" ]; then
+            _fmt=$(rewrite_label_template "$1")
+            shift
+            _proc=$((_proc + 1))
+            set -- "$@" "--format" "$_fmt"
+            continue
+        fi
+        set -- "$@" "$_cur"
+    done
+    exec "$PODMAN" "$_verb" "$@"
+}
+
+do_sweep() {
+    # Remove hermes-agent=1 containers whose recorded nv.hermes-ppid is dead.
+    _list=$("$PODMAN" ps -a --filter label=hermes-agent=1 \
+        --format '{{.ID}} {{index .Labels "nv.hermes-ppid"}}' 2>/dev/null) || return 0
+    printf '%s\n' "$_list" | while read -r _cid _ppid; do
+        [ -n "$_cid" ] || continue
+        [ -n "$_ppid" ] || continue
+        if ! kill -0 "$_ppid" 2>/dev/null; then
+            "$PODMAN" rm -f "$_cid" >/dev/null 2>&1 || true
+        fi
+    done
+    return 0
+}
+
+verb="${1:-}"
+
+case "$verb" in
+    sweep)
+        shift
+        do_sweep "$@"
+        exit $?
+        ;;
+    run)
+        if has_flag "-d" "$@"; then
+            require_ok=1
+        elif is_cgroup_probe "$@"; then
+            require_ok=0
+        else
+            require_ok=1
+        fi
+        if [ "$require_ok" = 1 ]; then
+            [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
+            [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
+            validate_launch "$@"
+            exec_launch "$@"
+        fi
+        exec "$PODMAN" "$@"
+        ;;
+    create)
+        if is_storage_probe "$@"; then
+            exec "$PODMAN" "$@"
+        fi
+        [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
+        [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
+        validate_launch "$@"
+        exec_launch "$@"
+        ;;
+    ps)
+        exec_ps "$@"
+        ;;
+    *)
+        exec "$PODMAN" "$@"
+        ;;
+esac
