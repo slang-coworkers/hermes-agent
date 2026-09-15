@@ -1,4 +1,9 @@
-"""Acceptance test for SCHED-F33 — pre-task script gates with failure backoff and auto-pause.
+"""Acceptance test for SCHED-F33 — pre-task cron gates for a coworker fleet.
+
+Covers the rendered script ``wakeAgent`` gate, the ``monitor`` change-detector,
+the ``script_timeout_seconds`` and ``failure_nudge_threshold`` config keys, and
+the failure-streak nudge. Automatic failure backoff / auto-pause are NOT native
+(tracked upstream) and are deliberately out of scope here.
 
 One test per acceptance criterion (node id ``test_ac_sched_f33_<n>``); the first
 docstring line is the criterion text in prose form (Markdown formatting
@@ -398,7 +403,8 @@ def _write_inline_spec(spec_dir, types, spine):
 
 
 def test_cron_jobs_duplicate_name_rejected(tmp_path, monkeypatch):
-    """A duplicate cron job name across the resolved extends chain is a render error."""
+    """A duplicate cron job name across the resolved extends chain is a render error,
+    including a case-only collision that the runtime would resolve ambiguously."""
     module = _load_compose(tmp_path, monkeypatch)
     spine = {
         "identity": "BASE",
@@ -416,6 +422,37 @@ def test_cron_jobs_duplicate_name_rejected(tmp_path, monkeypatch):
     with pytest.raises(module.CompositionError, match="duplicate.*dup"):
         module.compose(str(spec), str(tmp_path / "out"))
 
+    spine_case = {
+        "identity": "BASE",
+        "cron_jobs": [{"name": "Health", "schedule": "0 * * * *", "prompt": "p"}],
+    }
+    types_case = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"],
+            "identity": "W",
+            "cron_jobs": [{"name": "health", "schedule": "*/5 * * * *", "prompt": "q"}],
+        },
+    }
+    spec_case = _write_inline_spec(tmp_path / "spec-case", types_case, spine_case)
+    with pytest.raises(module.CompositionError, match="duplicate.*[Hh]ealth"):
+        module.compose(str(spec_case), str(tmp_path / "out-case"))
+
+
+@pytest.mark.parametrize("bad", [{}, False, "", 0])
+def test_cron_jobs_container_must_be_list(tmp_path, monkeypatch, bad):
+    """A non-list cron_jobs container is a render error — a falsey {}/False/""/0
+    must fail closed, not coerce to [] and silently drop the fleet's gates."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {"extends": ["base"], "identity": "W", "cron_jobs": bad},
+    }
+    spec = _write_inline_spec(tmp_path / "spec", types, spine)
+    with pytest.raises(module.CompositionError, match="cron_jobs.*must be a list"):
+        module.compose(str(spec), str(tmp_path / "out"))
+
 
 def test_cron_jobs_no_agent_invariants_rejected(tmp_path, monkeypatch):
     """no_agent combined with a monitor gate, and no_agent without a script, are render errors (native execution-mode invariants)."""
@@ -423,7 +460,6 @@ def test_cron_jobs_no_agent_invariants_rejected(tmp_path, monkeypatch):
     spine = {"identity": "BASE"}
     base_types = {"orchestrator": {"extends": ["base"], "identity": "O"}}
 
-    # no_agent + monitor gate → rejected
     types_monitor = dict(base_types)
     types_monitor["worker"] = {
         "extends": ["base"], "identity": "W",
@@ -434,7 +470,6 @@ def test_cron_jobs_no_agent_invariants_rejected(tmp_path, monkeypatch):
     with pytest.raises(module.CompositionError, match="no_agent"):
         module.compose(str(spec1), str(tmp_path / "out1"))
 
-    # no_agent without a script → rejected
     types_noscript = dict(base_types)
     types_noscript["worker"] = {
         "extends": ["base"], "identity": "W",
@@ -478,6 +513,24 @@ def test_cron_jobs_absolute_oneshot_has_finite_repeat(tmp_path, monkeypatch):
     assert job["repeat"] == {"times": 1, "completed": 0}
 
 
+def test_cron_jobs_past_absolute_oneshot_rejected(tmp_path, monkeypatch):
+    """An already-expired absolute one-shot is a render error: compute_next_run is None
+    (outside the grace window), so it would render but never fire — native create_job
+    rejects the same input (cron/jobs.py:2378-2390)."""
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"], "identity": "W",
+            "cron_jobs": [{"name": "expired", "schedule": "2020-01-01T09:00:00+00:00", "prompt": "run once"}],
+        },
+    }
+    spec = _write_inline_spec(tmp_path / "spec", types, spine)
+    with pytest.raises(module.CompositionError, match="never fire"):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
 def test_cron_jobs_naive_absolute_oneshot_rejected(tmp_path, monkeypatch):
     """A naive absolute one-shot (no timezone offset) is rejected under any ambient timezone — it would render differently per host."""
     module = _load_compose(tmp_path, monkeypatch)
@@ -511,7 +564,6 @@ def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
     with pytest.raises(module.CompositionError, match="no_agent.*boolean"):
         module.compose(str(_write_inline_spec(tmp_path / "spec1", types_bool, spine)), str(tmp_path / "out1"))
 
-    # a job with neither prompt nor script has nothing to run
     types_empty = dict(base_types)
     types_empty["worker"] = {
         "extends": ["base"], "identity": "W",
@@ -543,3 +595,69 @@ def test_cron_jobs_removed_from_dirty_output_are_cleared(tmp_path, monkeypatch):
     r2 = module.compose(str(_write_inline_spec(tmp_path / "spec2", without_jobs, spine)), str(out))
     payload = json.loads((Path(r2["worker"]) / "cron" / "jobs.json").read_text(encoding="utf-8"))
     assert payload == {"jobs": []}
+
+
+def test_rendered_cron_job_loads_and_fires_through_run_job(tmp_path, monkeypatch):
+    """A rendered cron/jobs.json loads through cron.jobs.load_jobs and its jobs execute
+    through run_job — the render → load → fire path end to end, guarding against schema
+    drift between the render and the loader/scheduler the acceptance criteria test in
+    isolation (AC-2 proves the shape; AC-5/6/7 build via create_job, not the render)."""
+    import importlib
+
+    module = _load_compose(tmp_path, monkeypatch)
+    spine = {"identity": "BASE"}
+    types = {
+        "orchestrator": {"extends": ["base"], "identity": "O"},
+        "worker": {
+            "extends": ["base"], "identity": "W",
+            "cron_jobs": [
+                {"name": "gate", "schedule": "every 5m", "prompt": "do it", "script": "gate.py"},
+                {"name": "watch", "schedule": "every 5m", "prompt": "summarize", "monitor": "mon.py"},
+            ],
+        },
+    }
+    out = tmp_path / "out"
+    rendered = module.compose(str(_write_inline_spec(tmp_path / "spec", types, spine)), str(out))
+    rendered_cron = Path(rendered["worker"]) / "cron"
+
+    # Deploy the rendered distribution into a run home exactly as `profile update`
+    # would: cron/jobs.json verbatim, the referenced scripts under scripts/, a stub
+    # model so run_job clears its model gate. Then drive it as the scheduler does.
+    run_home = tmp_path / "run-home"
+    (run_home / "cron").mkdir(parents=True)
+    (run_home / "scripts").mkdir(parents=True)
+    (run_home / "cron" / "jobs.json").write_bytes((rendered_cron / "jobs.json").read_bytes())
+    (run_home / "scripts" / "gate.py").write_text('print(\'{"wakeAgent": false}\')\n', encoding="utf-8")
+    (run_home / "scripts" / "mon.py").write_text("print('state A')\n", encoding="utf-8")
+    (run_home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "stub-model"}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(run_home))
+    import hermes_constants
+
+    importlib.reload(hermes_constants)
+    import cron.jobs
+
+    importlib.reload(cron.jobs)
+    import cron.monitor
+
+    importlib.reload(cron.monitor)
+    import cron.scheduler
+
+    importlib.reload(cron.scheduler)
+
+    from cron.jobs import load_jobs
+    from cron.scheduler import SILENT_MARKER, run_job
+
+    loaded = {j["name"]: j for j in load_jobs()}
+    assert set(loaded) == {"gate", "watch"}, "the rendered jobs.json loads through load_jobs unchanged"
+
+    observed = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    _success, _doc, final, _error = run_job(loaded["gate"])
+    assert final == SILENT_MARKER
+    assert observed["agent_runs"] == 0
+
+    run_job(loaded["watch"])
+    assert observed["agent_runs"] == 1

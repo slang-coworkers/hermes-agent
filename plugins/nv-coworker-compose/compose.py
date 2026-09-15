@@ -1269,7 +1269,14 @@ def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> 
         overlays.extend(layer.get("overlays") or [])
         # cron_jobs append across the chain (like skills/workflows), NOT deduped:
         # a duplicate job name is a render error resolved in _render_cron_jobs.
-        cron_jobs.extend(layer.get("cron_jobs") or [])
+        # A non-list container fails closed rather than coercing to [] — a falsey
+        # {}/""/0 would otherwise silently drop the fleet's gates on re-render.
+        declared_cron_jobs = layer.get("cron_jobs", [])
+        if not isinstance(declared_cron_jobs, list):
+            raise CompositionError(
+                f"{tname}: 'cron_jobs' must be a list, got {type(declared_cron_jobs).__name__}"
+            )
+        cron_jobs.extend(declared_cron_jobs)
         traits = _deep_merge(traits, layer.get("traits") or {})
         config = _deep_merge(config, layer.get("config") or {})
 
@@ -1389,7 +1396,7 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
     declaration, and execution-mode invariants mirror
     ``cron/jobs.py:_validate_job_mode_invariants`` so a rendered job can never be
     a shape the runtime would silently auto-pause or mis-gate."""
-    from cron.jobs import parse_schedule
+    from cron.jobs import compute_next_run, parse_schedule
 
     if not isinstance(decl, dict):
         raise CompositionError(
@@ -1441,6 +1448,18 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
                 f"{profile}: cron job {name!r}: absolute one-shot schedule {raw_schedule!r} must "
                 "include a timezone offset (or 'Z') — a naive timestamp is anchored to the "
                 "compositor's timezone and would not render identically across hosts"
+            )
+        # Native create_job rejects a one-shot whose run_at is already past the
+        # scheduler's grace window: compute_next_run returns None and the due-scan
+        # would never fire it, leaving a scheduled-but-dead record
+        # (cron/jobs.py:2378-2390). Mirror that check so the render cannot admit a
+        # job the runtime refuses. A future one-shot returns its fixed declared
+        # run_at, so accepted output stays byte-identical across renders.
+        if compute_next_run(schedule) is None:
+            raise CompositionError(
+                f"{profile}: cron job {name!r}: absolute one-shot schedule {raw_schedule!r} "
+                "is already in the past (outside the scheduler's grace window) and would "
+                "never fire; native create_job rejects it"
             )
 
     script = decl.get("script")
@@ -1512,7 +1531,10 @@ def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> Non
     """Serialize a coworker type's resolved cron_jobs to ``<profile>/cron/jobs.json``
     in the canonical ``{"jobs": [...]}`` shape ``load_jobs`` consumes. A duplicate
     job name across the resolved extends chain is a render error — job identity
-    must be unambiguous. The file is written unconditionally (an empty declaration
+    must be unambiguous, and names are compared case-insensitively because the
+    runtime resolves a job reference that way (``cron/jobs.py`` ``resolve_job_ref``
+    lower-cases both sides and raises ``AmbiguousJobReference`` on >1 match). The
+    file is written unconditionally (an empty declaration
     renders ``{"jobs": []}``) so re-rendering into a persistent, git-tracked output
     tree clears a job removed from the spec instead of leaving a stale record that
     ``profile update`` would then redeploy."""
@@ -1520,11 +1542,13 @@ def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> Non
     seen: Set[str] = set()
     for decl in cron_jobs:
         job = _build_cron_job(profile, decl)
-        if job["name"] in seen:
+        name_key = job["name"].lower()
+        if name_key in seen:
             raise CompositionError(
-                f"{profile}: duplicate cron job name {job['name']!r} across the extends chain"
+                f"{profile}: duplicate cron job name {job['name']!r} across the extends chain "
+                "(names are matched case-insensitively by the runtime)"
             )
-        seen.add(job["name"])
+        seen.add(name_key)
         jobs.append(job)
     (cron_dir / "jobs.json").write_text(
         json.dumps({"jobs": jobs}, indent=2) + "\n", encoding="utf-8"
