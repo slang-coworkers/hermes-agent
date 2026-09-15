@@ -1,0 +1,23 @@
+# Base spine (conflicting variant) — carries a PRE-EXISTING skills.external_dirs entry the
+# render must preserve while adding <clone>/skills, and a terminal block with an empty
+# docker_volumes the render appends the clone mount to.
+identity: "BASE-IDENTITY"
+invariants: ["INV-SHARED"]
+context: ["CTX-SHARED"]
+skills: ["shared-skill"]
+workflows: ["hermes-verify"]
+traits:
+  command_allowlist: ["git status"]
+config:
+  timezone: "Asia/Kolkata"
+  sessions: {auto_prune: false}
+  checkpoints: {auto_prune: false}
+  compression: {in_place: true}
+  skills:
+    external_dirs: ["/data/some-other-skills"]
+  terminal:
+    backend: "docker"
+    docker_image: "hermes-sandbox:pinned"
+    docker_mount_cwd_to_workspace: true
+    docker_volumes: []
+    env_passthrough: []

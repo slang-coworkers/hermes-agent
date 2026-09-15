@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import parse_qs, urlparse, urlunparse
 
-from hermes_cli.profiles import get_active_profile_name
+from hermes_cli.profiles import get_active_profile_name, get_profile_dir
 from utils import is_truthy_value
 
-from .compose import CompositionError, compose, load_spec
+from .compose import WIKI_MOUNT, CompositionError, _safe_name, compose, load_spec
 from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -626,6 +626,56 @@ def apply_capture_env(profile_home: Union[str, Path]) -> None:
     _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
 
 
+WIKI_JOB_NAME = "shared-learnings-wiki-fold"
+_WIKI_FOLD_PROMPT = (
+    "Synthesise the fleet's shared-learnings clone into a navigable wiki with the "
+    f"llm-wiki skill. WIKI_PATH is set to {WIKI_MOUNT} (the clone's read-write container "
+    f"mount) in this profile's .env; read the learnings under {WIKI_MOUNT} and write the "
+    f"wiki (sources -> concepts -> index) back into {WIKI_MOUNT}. Do not push — the "
+    "orchestrator promotes the clone by PR."
+)
+
+
+def activate_shared_learnings(profile_homes: Dict[str, str], orchestrator: str, clone: str) -> None:
+    """Activate (not stage) the orchestrator-only wiki fold over the shared-learnings
+    clone (MEM-F43). Touches ONLY the orchestrator profile home: upserts
+    ``WIKI_PATH=<container mount>`` into its ``.env`` (the value the sandbox resolves
+    through the ``terminal.env_passthrough`` allowlist the render added), seeds the
+    bundled ``llm-wiki`` skill into it, and creates exactly one enabled, recurring
+    ``llm-wiki`` agent cron job. Every worker profile and the DEFAULT gateway root are
+    left untouched. Idempotent: a second call finds the named job already present and
+    creates nothing, and the ``.env`` upsert collapses any duplicate ``WIKI_PATH`` lines.
+
+    The Hermes-home override wraps BOTH ``sync_skills`` and ``create_job`` so the cron
+    job's provider/model snapshot is taken from the orchestrator profile, not the launch
+    home. ``clone`` (the host clone path) is the render's mount SOURCE; the fold reads it
+    through the container mount, so only ``WIKI_MOUNT`` is written into the ``.env``."""
+    from cron.jobs import create_job, load_jobs, use_cron_store
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.skills_sync import sync_skills
+
+    orch_home = profile_homes.get(orchestrator)
+    if not orch_home:
+        return
+    orch_home = Path(orch_home)
+
+    _upsert_env_var(orch_home / ".env", "WIKI_PATH", WIKI_MOUNT)
+
+    token = set_hermes_home_override(str(orch_home))
+    try:
+        sync_skills(quiet=True)
+        with use_cron_store(str(orch_home)):
+            if not any(job.get("name") == WIKI_JOB_NAME for job in load_jobs()):
+                create_job(
+                    prompt=_WIKI_FOLD_PROMPT,
+                    schedule="1d",
+                    name=WIKI_JOB_NAME,
+                    skills=["llm-wiki"],
+                )
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _install(rendered_dir: str, name: str) -> str:
     from hermes_cli.profile_distribution import install_distribution
     plan = install_distribution(str(rendered_dir), name=name, force=True)
@@ -714,6 +764,27 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
                     })
                 except RpcError as exc:
                     failures.append(f"groups.create {room_id}: {exc}")
+
+    # Activate the shared-learnings wiki fold LAST — only when every install /
+    # metadata / room step succeeded, so a partial onboard never leaves a recurring
+    # orchestrator cron behind. Skipped entirely for a fleet without a clone.
+    clone = data.get("shared_learnings_root")
+    if not failures and clone:
+        orchestrator_profile = _safe_name("profile", data.get("orchestrator_profile", "orchestrator"))
+        default_profile = _safe_name("profile", data.get("default_profile", "default"))
+        coworker_names = [_safe_name("type", name) for name in types]
+        try:
+            profile_homes = {
+                name: str(get_profile_dir(name))
+                for name in dict.fromkeys([*coworker_names, default_profile])
+            }
+            activate_shared_learnings(
+                profile_homes=profile_homes,
+                orchestrator=orchestrator_profile,
+                clone=str(clone),
+            )
+        except Exception as exc:
+            failures.append(f"shared learnings activation: {exc}")
 
     if failures:
         return {"ok": False, "error": "; ".join(failures), "warnings": failures}
@@ -896,6 +967,7 @@ def register(ctx) -> None:
 __all__ = [
     "compose", "load_spec", "CompositionError",
     "onboard_coworker", "onboard_project",
+    "activate_shared_learnings",
     "validate_gateway_url", "_gateway_preflight", "_ws_probe",
     "_dispatch_rpc", "_clone_repo", "register",
 ]

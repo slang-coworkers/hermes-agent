@@ -393,6 +393,17 @@ def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
             break
 
 
+def _ensure_list_member(config: Dict[str, Any], dotted: str, value: str) -> None:
+    """Append ``value`` to the list at ``dotted`` iff absent, preserving every
+    pre-existing entry — the opposite of ``_set_dotted``'s overwrite. A missing
+    or non-list leaf is replaced with a fresh single-element list."""
+    current = _get_dotted(config, dotted)
+    items = list(current) if isinstance(current, list) else []
+    if value not in items:
+        items.append(value)
+    _set_dotted(config, dotted, items)
+
+
 def _is_platform_key(key: Any) -> bool:
     """True iff ``key`` names a platform (including dynamically-registered plugin
     platforms), tested with the ``Platform(key)`` constructor rather than by
@@ -413,6 +424,40 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
     stale unsafe value untouched, so this always overwrites the leaf."""
     for dotted, value in _RETENTION_INVARIANTS.items():
         _set_dotted(config, dotted, value)
+
+
+# Container path the shared-learnings clone is mounted at (MEM-F43). Kept OUTSIDE
+# /workspace because tools/environments/docker.py matches ":/workspace" as a
+# substring, so any ":/workspace..." mount would suppress the coworker's auto
+# cwd->/workspace bind.
+WIKI_MOUNT = "/mnt/shared-learnings"
+
+
+def _enforce_shared_learnings(config: Dict[str, Any], clone: str, is_orchestrator: bool) -> None:
+    """Surface the fleet's shared-learnings clone into a coworker profile (MEM-F43).
+
+    Three edits, each idempotent: add ``<clone>/skills`` to ``skills.external_dirs``
+    (host path — external-dir discovery runs host-side) and ``WIKI_PATH`` to
+    ``terminal.env_passthrough`` (so the per-profile sandbox forwards it), both
+    preserving any pre-existing entries; and mount the clone ROOT into the sandbox
+    via ``terminal.docker_volumes`` — read-write for the orchestrator (which builds
+    the wiki), read-only for every other coworker (defence-in-depth). The mount is
+    access-mode-sensitive, so any inherited clone mount (rw or ro) is dropped before
+    the single role-appropriate form is appended — an inherited rw form must never
+    survive onto a worker."""
+    _ensure_list_member(config, "skills.external_dirs", f"{clone}/skills")
+    _ensure_list_member(config, "terminal.env_passthrough", "WIKI_PATH")
+
+    rw_mount = f"{clone}:{WIKI_MOUNT}"
+    ro_mount = f"{rw_mount}:ro"
+    desired = rw_mount if is_orchestrator else ro_mount
+    current = _get_dotted(config, "terminal.docker_volumes")
+    volumes = [
+        entry for entry in (current if isinstance(current, list) else [])
+        if not (isinstance(entry, str) and entry.strip() in {rw_mount, ro_mount})
+    ]
+    volumes.append(desired)
+    _set_dotted(config, "terminal.docker_volumes", volumes)
 
 
 def _enforce_memory_policy(config: Dict[str, Any]) -> None:
@@ -1742,12 +1787,22 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # it runs ONCE here — after Phase A resolve, before the per-profile writes.
     _render_mcp_scope(resolved_by_type, default_config, default_profile)
 
+    # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never
+    # on the DEFAULT/multiplexer gateway root. Absent for fleets without shared
+    # learnings, in which case the enforcement is skipped entirely.
+    shared_learnings_root = data.get("shared_learnings_root")
+
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
     rendered: Dict[str, str] = {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
+        if shared_learnings_root:
+            _enforce_shared_learnings(
+                resolved["config"], str(shared_learnings_root),
+                is_orchestrator=(tname == orchestrator_profile),
+            )
         _enforce_memory_policy(resolved["config"])
         _enforce_curator(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
