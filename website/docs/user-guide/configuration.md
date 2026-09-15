@@ -2417,13 +2417,52 @@ The browser toolset supports multiple providers. See the [Browser feature page](
 
 ## Timezone
 
-Override the server-local timezone with an IANA timezone string. Affects timestamps in logs, cron scheduling, and system prompt time injection.
+Override the server-local timezone with an IANA timezone string. It grounds cron scheduling, durable cron run records, and the bot's system-prompt clock; standard application-log timestamps stay in the host (server) zone. See [Per-profile timezone](#per-profile-timezone) below for multi-profile behavior.
 
 ```yaml
 timezone: "America/New_York"   # IANA timezone (default: "" = server-local time)
 ```
 
 Supported values: any IANA timezone identifier (e.g. `America/New_York`, `Europe/London`, `Asia/Kolkata`, `UTC`). Leave empty or omit for server-local time.
+
+### Per-profile timezone
+
+Each [profile](/user-guide/profiles) has its own `config.yaml`, so each profile can set its own `timezone`. When `HERMES_TIMEZONE` is unset, resolution is keyed to the active profile's config path, so a process that multiplexes profiles — a [multi-profile gateway](/user-guide/multi-profile-gateways), or the desktop app running several bots — does not reuse one profile's cached zone for another. A process-level `HERMES_TIMEZONE` takes precedence over every profile in that process; see the warning below.
+
+**Resolution precedence** (first match wins):
+
+1. The `HERMES_TIMEZONE` environment variable.
+2. The active profile's `config.yaml` `timezone` key.
+3. The server's local time.
+
+An invalid IANA value (a typo, an unknown zone) logs a warning and falls back to server-local time — Hermes never crashes on a bad timezone string.
+
+**What the configured zone grounds** — the bot's own clock and its durable records:
+
+- **Cron scheduling.** A job's `next_run_at` is computed in the profile's zone, so `0 14 * * *` fires at 14:00 profile-local rather than 14:00 UTC.
+- **Cron run records.** The execution-ledger `claimed_at` / `started_at` / `finished_at` stamps and the run-log output filenames use the profile's wall clock.
+- **The system-prompt clock.** The bot's temporal awareness (its `Conversation started:` line) is rendered in the profile's zone.
+
+**What stays in the host or operator zone** — operator-facing surfaces are not re-rendered per profile:
+
+- **Standard application logs.** The log files live under `{HERMES_HOME}/logs/` (per profile), but their timestamps render in the host (server) local zone, matching the operator's own shell — not the profile zone.
+- **The web dashboard** renders cron times in the operator's **browser** zone.
+- `hermes cron list` and status print the stored timestamp verbatim, so a job's time shows there in that job's own (profile) zone — a persisted value, not a re-render.
+
+:::warning Multiplexed gateways: leave the default profile's timezone empty
+A [multi-profile gateway](/user-guide/multi-profile-gateways) bridges the **launch (default) profile's** `timezone` into the process-global `HERMES_TIMEZONE` environment variable once at startup, and `HERMES_TIMEZONE` has the **highest** precedence for every profile in that process. For per-profile overrides to take effect:
+
+- leave the **default / multiplexer profile's** `timezone` **empty** (`""`), and
+- start the gateway process with **no** `HERMES_TIMEZONE` already set in its environment.
+
+If either is non-empty, that single zone pins every profile in the process and per-profile overrides are ignored. Set `timezone` only on the individual coworker profiles.
+:::
+
+Related:
+
+- Provisioning tooling — for example a [profile distribution](/user-guide/profile-distributions) — can write the `timezone` key into each profile's `config.yaml`.
+- Sandboxes do not read the active profile's `config.yaml` timezone directly. Hermes's built-in code-execution bridge sets the child `TZ` only from the process-global `HERMES_TIMEZONE` (which must stay unset for per-profile multiplexing), so provisioning must launch each profile's sandbox with `TZ` set from the same timezone value where matching shell timestamps matter.
+- An agent-initiated write to `config.yaml` is a dangerous command requiring human [approval](/user-guide/cli), so a bot cannot silently change its own timezone.
 
 ## Discord
 
