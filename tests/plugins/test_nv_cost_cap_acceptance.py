@@ -659,7 +659,7 @@ def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
 
     # Ceiling 100 >> the 0.0 an unknown row sums to numerically, so a refusal
     # here can ONLY come from unknown-pricing detection on the reconcile path,
-    # not from a numeric cap crossing (that isolates R1-2 from AC-4/AC-5).
+    # not from a numeric cap crossing.
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0},
     )

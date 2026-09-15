@@ -347,8 +347,9 @@ def _session_stopped(session_id, *, today, platform=None):
 
 
 def _engage_estop(session_id) -> None:
-    # Engage under the SERVING profile home (never the default home, which would
-    # write the fleet-root sentinel that binds every profile).
+    # Engage under the SERVING profile home so a named profile's breach is scoped
+    # to it. When the serving profile IS `default`, that home is the fleet root,
+    # so the belt is fleet-wide there (docs note this; estop_on_breach: false opts out).
     try:
         from agent import estop
 
