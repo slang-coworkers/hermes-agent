@@ -572,6 +572,67 @@ def test_wrapper_accepts_loopback_no_proxy(tmp_path):
 
 
 @pytest.mark.linux_only
+def test_wrapper_refuses_unknown_value_flag_before_env(tmp_path):
+    """AC-CRED-F28-1 (fail-closed dispatch): an unrecognised option before the
+    image is refused, so an unknown value-taking flag cannot consume the image
+    token and let a later pre-image `-e SECRET=value` escape the scan into the
+    sandbox and the audit log. `--detach-keys ctrl-x -e API_TOKEN=…` is refused;
+    podman is never invoked and the secret never reaches the log or stderr."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    # An unknown value-taking flag whose value looks like a bare positional,
+    # followed by a value-bearing secret env — the exact image-boundary shift.
+    argv += ["--detach-keys", "ctrl-x", "-e", "API_TOKEN=sk-live-canary"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+    logged = log.read_text(encoding="utf-8")
+    assert "sk-live-canary" not in logged and "sk-live-canary" not in result.stderr
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_proxy_authority_in_path(tmp_path):
+    """AC-CRED-F28-1 (authority parsing): a proxy value whose real host is hidden
+    in the path (`http://evil.example/path@172.17.0.1:10255` — a URL parser
+    resolves the host as evil.example) is refused, so the aoc_ token cannot be
+    sent to an attacker-controlled proxy that spoofs the expected authority."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    for name in PROXY_NAMES:
+        env[name] = f"http://evil.example/path@{EXPECTED_PROXY}"
+    result = subprocess.run(
+        [str(WRAPPER), *_valid_argv(ca_host)], env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the
     podman-3.4.4-compatible {{index .Labels "K"}} before being forwarded."""

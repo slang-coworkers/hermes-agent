@@ -99,10 +99,21 @@ env_value() {
 }
 
 authority_of() {
+    # Extract host:port from a proxy URL per RFC 3986: isolate the authority
+    # (between scheme:// and the first '/', '?' or '#') BEFORE stripping the
+    # userinfo, so a value like http://evil.example/path@host cannot masquerade
+    # as `host` (the real host there is evil.example). A value without an
+    # http(s):// scheme yields "" — a guaranteed mismatch, so it is refused.
     _u="$1"
-    _u="${_u#*://}"   # strip scheme
+    case "$_u" in
+        http://*) _u="${_u#http://}" ;;
+        https://*) _u="${_u#https://}" ;;
+        *) printf '%s' ""; return ;;
+    esac
+    _u="${_u%%/*}"    # strip /path
+    _u="${_u%%\?*}"   # strip ?query
+    _u="${_u%%#*}"    # strip #fragment
     _u="${_u#*@}"     # strip userinfo (drops the aoc_ token)
-    _u="${_u%%/*}"    # strip any path
     printf '%s' "$_u"
 }
 
@@ -129,7 +140,23 @@ is_value_flag() {
         --network-alias | --sysctl | --health-cmd | --health-interval | \
         --health-retries | --health-timeout | --health-start-period | --cidfile | \
         --runtime | --arch | --os | --variant | --timeout | --tz | --umask | \
-        --volume-driver | --pidfile | --conmon-pidfile | --systemd)
+        --volume-driver | --pidfile | --conmon-pidfile | --systemd | --detach-keys)
+            return 0 ;;
+    esac
+    return 1
+}
+
+is_boolean_flag() {
+    # Podman run/create flags that take NO value. Any pre-image option that is
+    # neither this nor is_value_flag is refused (fail closed) so an unknown
+    # value-taking flag cannot consume the image token and let later pre-image
+    # `-e`/`-v` arguments escape validation.
+    case "$1" in
+        -d | --detach | --init | --rm | -i | --interactive | -t | --tty | \
+        -it | -ti | -itd | -dit | --privileged | --read-only | --no-healthcheck | \
+        -q | --quiet | --replace | --rmi | --tls-verify | --sig-proxy | \
+        --oom-kill-disable | -P | --publish-all | --no-hosts | --passwd | \
+        --unsetenv-all | --use-imagestore | --group-add-keep-groups)
             return 0 ;;
     esac
     return 1
@@ -209,6 +236,8 @@ validate_launch() {
                 refuse "host environment passthrough (--env-host) is forbidden on a long-lived launch" ;;
             --env-file | --env-file=*)
                 refuse "environment files are forbidden on a long-lived launch" ;;
+            --secret | --secret=*)
+                refuse "podman secrets are forbidden on a long-lived launch (no credential value in the sandbox)" ;;
             -e | --env)
                 _await="e" ;;
             -v | --volume)
@@ -222,7 +251,16 @@ validate_launch() {
             --*=*)
                 : ;;   # some --flag=value (e.g. --network=none) — not env/volume
             -*)
-                is_value_flag "$_tok" && _await="skip" ;;
+                # An unknown value-taking flag would consume the image token and
+                # let later pre-image -e/-v escape the scan, so anything not
+                # recognised as value-taking or boolean is refused (fail closed).
+                if is_value_flag "$_tok"; then
+                    _await="skip"
+                elif is_boolean_flag "$_tok"; then
+                    :
+                else
+                    refuse "unsupported option '$_tok' on a long-lived launch"
+                fi ;;
             *)
                 _seen_image=1 ;;   # first bare positional = the image
         esac

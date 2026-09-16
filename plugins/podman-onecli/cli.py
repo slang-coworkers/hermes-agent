@@ -34,7 +34,8 @@ def _identifier_from(profile: str) -> str:
     identifier = Path(profile).expanduser().name
     if not identifier:
         raise ValueError(f"could not derive a profile identifier from {profile!r}")
-    if not _IDENTIFIER_RE.match(identifier):
+    if _IDENTIFIER_RE.fullmatch(identifier) is None:
+        # fullmatch, not match: `match(...$)` accepts a trailing newline.
         raise ValueError(f"unsafe OneCLI profile identifier {identifier!r}")
     return identifier
 

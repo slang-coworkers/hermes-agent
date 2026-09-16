@@ -161,7 +161,9 @@ def test_oneclient_validates_identifier_before_transport(tmp_path, monkeypatch):
 
     oc.set_transport(_NoCall())
     try:
-        for bad in ("../etc", "a/b", "bad id", "", "-leading", "tok\nen"):
+        # "valid\n" is the trailing-newline case that re.match(...$) would accept
+        # but fullmatch rejects.
+        for bad in ("../etc", "a/b", "bad id", "", "-leading", "tok\nen", "valid\n"):
             with pytest.raises(oc.OneCLIError):
                 oc.ensure_agent(identifier=bad)
             with pytest.raises(oc.OneCLIError):
@@ -170,3 +172,23 @@ def test_oneclient_validates_identifier_before_transport(tmp_path, monkeypatch):
                 oc.set_secrets(identifier=bad, secrets=[])
     finally:
         oc.set_transport(None)
+
+
+def test_oneclient_bearer_redirect_refused(tmp_path, monkeypatch):
+    """The real client refuses an HTTP redirect rather than following it, because
+    urllib copies the Authorization: Bearer header onto the redirect target — a
+    redirecting or malicious control plane could otherwise exfiltrate the
+    bootstrap key to another origin. The no-redirect handler is wired into the
+    opener the client uses."""
+    import email.message
+    import urllib.error
+    import urllib.request
+
+    _, loaded, _ = _load(tmp_path, monkeypatch, "\n          cred-f28-bot-a: []")
+    oc = loaded.module.oneclient
+
+    assert any(isinstance(h, oc._NoRedirect) for h in oc._OPENER.handlers)
+    handler = oc._NoRedirect()
+    req = urllib.request.Request("https://onecli.example/api/agents")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", email.message.Message(), "https://evil.example/")

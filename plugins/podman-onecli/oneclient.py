@@ -42,6 +42,23 @@ class OneCLIError(RuntimeError):
     """A OneCLI control-plane call returned an unexpected status."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects. urllib copies the Authorization header onto the
+    redirect target, so a redirecting (or malicious) control plane could
+    exfiltrate the bootstrap bearer key to another origin. The OneCLI API does
+    not redirect, so any redirect is treated as an error rather than followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(
+            req.full_url, code,
+            "OneCLI: refusing HTTP redirect (would forward the bootstrap key to another origin)",
+            headers, fp,
+        )
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 def configure(*, gateway_api_base_url: Optional[str], api_key_env: str = "ONECLI_API_KEY") -> None:
     """Store the real-transport coordinates. Makes no network call."""
     global _GATEWAY_API_BASE_URL, _API_KEY_ENV
@@ -56,7 +73,9 @@ def set_transport(fn: Optional[Transport]) -> None:
 
 
 def _validate_identifier(identifier: str) -> str:
-    if not isinstance(identifier, str) or not _IDENTIFIER_RE.match(identifier):
+    # fullmatch, not match: `match(...$)` accepts a trailing newline, so a value
+    # like "agent\n" would pass and reach a request path/body.
+    if not isinstance(identifier, str) or _IDENTIFIER_RE.fullmatch(identifier) is None:
         raise OneCLIError(f"unsafe OneCLI identifier {identifier!r}")
     return identifier
 
@@ -108,7 +127,7 @@ def _real_request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - base is operator config
+        with _OPENER.open(req, timeout=30) as resp:  # noqa: S310 - base is https-checked operator config
             status = int(resp.getcode())
             raw = resp.read()
     except urllib.error.HTTPError as exc:
