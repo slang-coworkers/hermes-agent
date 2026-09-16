@@ -55,13 +55,22 @@ def _load(tmp_path, monkeypatch):
 def _make_spec(tmp_path, *, egress=BASE_EGRESS, spine_config=None, default_config=None, name="spec"):
     spec_dir = tmp_path / name
     (spec_dir / "spines").mkdir(parents=True)
+    base_config = dict(spine_config or {})
+    # ISO-F13 (#29) requires container_persistent set explicitly to a bool per role.
+    terminal = dict(base_config.get("terminal") or {})
+    terminal.setdefault("container_persistent", True)
+    base_config["terminal"] = terminal
     (spec_dir / "spines" / "base.yaml").write_text(
-        yaml.safe_dump({"identity": "BASE", "config": dict(spine_config or {})}), encoding="utf-8"
+        yaml.safe_dump({"identity": "BASE", "config": base_config}), encoding="utf-8"
     )
     spec = {
         "project": "iso-f14",
         "default_profile": "default",
         "orchestrator_profile": "worker",
+        # ISO-F13 (#29) mount composition requires an explicit workspace_root (abs, outside the
+        # fleet Hermes root); install_surfaces defaults to none.
+        "workspace_root": "/data/coworkers",
+        "install_surfaces": [],
         "spines": {"base": {"source": "spines/base.yaml"}},
         "types": {"worker": {"extends": ["base"], "identity": "WORKER", "config": {}}},
     }
@@ -180,10 +189,12 @@ def test_whitespace_and_passthrough_collisions_rejected(tmp_path, monkeypatch, t
 
 
 def test_docker_extra_args_unrelated_allowed(tmp_path, monkeypatch):
-    """A non-controlled -e/-v in docker_extra_args is left alone (no over-blocking)."""
+    """A non-mount, non-egress extra_arg the egress belt does not control passes it (no
+    over-blocking). It must also be on ISO-F13's coworker allowlist, since that gate runs on
+    the same profile: --shm-size is a vetted non-mount resource flag both permit."""
     module = _load(tmp_path, monkeypatch)
     spec = _make_spec(tmp_path, name="extra-ok",
-                      spine_config={"terminal": {"docker_extra_args": ["-e", "TERM=xterm", "-v", "/data:/data:ro"]}})
+                      spine_config={"terminal": {"docker_extra_args": ["--shm-size", "64m"]}})
     assert module.compose(str(spec), str(tmp_path / "out"))
 
 

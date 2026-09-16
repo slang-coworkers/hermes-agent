@@ -30,6 +30,9 @@ terminal:
   # ISO-F15 session-driver seam (already on the baseline): the fleet's only backend.
   backend: docker
   docker_shared_container_key: ""
+  # ISO-F13 (#29) requires container_persistent set explicitly per role; the bind-mounted
+  # workspace survives across the persist-false container lifecycle because it stays true.
+  container_persistent: true
   # ISO-F14 egress posture.
   docker_image: hermes-sandbox:latest   # SUBSTITUTE the actual fleet sandbox image shipping bash+curl
   container_memory: 1024                 # MiB pin (reaches the kernel via CRED-F28's cgroup-probe allowlist)
