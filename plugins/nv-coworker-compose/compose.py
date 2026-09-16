@@ -428,6 +428,52 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
+# ISO-F15 session-driver seam: the built-in "docker" backend is the ONLY terminal
+# backend the fleet permits — it yields a per-profile-labelled podman container via
+# the fleet-global HERMES_DOCKER_BINARY wrapper (deployment config, never rendered
+# here). "local" and every other backend are banned fleet-wide.
+_SESSION_DRIVER_BACKEND = "docker"
+
+
+def _enforce_session_driver(config: Dict[str, Any], profile_name: str) -> None:
+    """Force the fleet session-driver invariants onto one profile's ``config``
+    (ISO-F15), rejecting any spec that fights them.
+
+    ``terminal.backend`` is forced to ``"docker"``: an omitted key is written
+    (overriding the stock ``local`` default) and an explicit ``"docker"`` is
+    kept, but any other value — any other string or any non-string — raises
+    ``CompositionError``. ``terminal.docker_shared_container_key`` is forced to
+    the empty string: only an omitted key or the exact string ``""`` is accepted;
+    every other value is refused the same way, including falsey non-strings
+    (``False``/``0``/``[]``/``{}``/``None``) that the config->env bridge would
+    serialise to a NON-empty env string and so collapse per-profile container
+    identity to one shared container. The content type-check runs before any
+    comparison, so a non-string YAML value raises ``CompositionError`` rather
+    than a raw ``TypeError``.
+    """
+    terminal = config.get("terminal")
+    if isinstance(terminal, dict):
+        if "backend" in terminal and not (
+            isinstance(terminal["backend"], str)
+            and terminal["backend"] == _SESSION_DRIVER_BACKEND
+        ):
+            raise CompositionError(
+                f"{profile_name}: terminal.backend must be 'docker' "
+                f"(the fleet's per-profile podman sandbox backend); "
+                f"got {terminal['backend']!r}"
+            )
+        if "docker_shared_container_key" in terminal and not (
+            isinstance(terminal["docker_shared_container_key"], str)
+            and terminal["docker_shared_container_key"] == ""
+        ):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_shared_container_key must be "
+                f"empty; got {terminal['docker_shared_container_key']!r}"
+            )
+    _set_dotted(config, "terminal.backend", _SESSION_DRIVER_BACKEND)
+    _set_dotted(config, "terminal.docker_shared_container_key", "")
+
+
 # Container path the shared-learnings clone is mounted at (MEM-F43). Kept OUTSIDE
 # /workspace because tools/environments/docker.py matches ":/workspace" as a
 # substring, so any ":/workspace..." mount would suppress the coworker's auto
@@ -2023,6 +2069,18 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         tname = _safe_name("type", tname)
         resolved_by_type[tname] = _resolve_type(tname, tinfo or {}, spines)
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
+
+    # ISO-F15 session-driver seam, enforced as an all-or-nothing pre-pass: force
+    # terminal.backend: docker + terminal.docker_shared_container_key: "" on EVERY
+    # rendered profile (every coworker type AND the DEFAULT multiplexer) and reject
+    # any other backend or a non-empty shared key. Validated + normalised here,
+    # before the Phase-B write loop, so a violation on a later-resolved profile
+    # (DEFAULT is resolved and written last) raises before out_root holds any
+    # config.yaml — no partial fleet on disk.
+    for driver_tname, driver_resolved in resolved_by_type.items():
+        _enforce_session_driver(driver_resolved["config"], driver_tname)
+    _enforce_session_driver(default_config, default_profile)
+
     session_flags = _resolve_session_mode(default_config, resolved_by_type)
     # Per-role MCP scope needs the whole fleet's declarations (per-role subsets,
     # the DEFAULT union, and the profile-keyed veto policy in every profile), so
