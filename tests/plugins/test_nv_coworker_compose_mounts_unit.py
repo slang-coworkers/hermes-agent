@@ -125,3 +125,28 @@ def test_nonlist_install_surfaces_refused(module, tmp_path):
     spec = _write(tmp_path / "s", _base(install_surfaces="/data/tools"))
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_install_surface_at_clone_destination_refused(module, tmp_path):
+    """An install surface equal to the shared-learnings mount point collides with the
+    clone's container destination (both would emit -v ...:/mnt/shared-learnings) and
+    must be refused so the closed set never carries a shadowing mount."""
+    spec = _write(tmp_path / "s", _base(
+        shared_learnings_root="/data/learnings-clone",
+        install_surfaces=[module.WIKI_MOUNT],
+    ))
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_symlink_loop_workspace_root_refused(module, tmp_path):
+    """A workspace_root that is a symlink loop fails closed: Path.resolve() raises
+    RuntimeError on 3.11/3.12 and the containment check must convert that to a
+    CompositionError, not let it escape raw."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    spec = _write(tmp_path / "s", _base(workspace_root=str(a)))
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))

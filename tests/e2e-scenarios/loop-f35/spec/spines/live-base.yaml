@@ -5,7 +5,7 @@
 identity: "LOOP-F35 live base"
 config:
   terminal:
-    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
+    container_persistent: true
   model:
     default: aws/anthropic/bedrock-claude-opus-4-8
   api: https://inference-api.nvidia.com

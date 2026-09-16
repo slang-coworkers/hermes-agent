@@ -27,7 +27,4 @@ types:
       - {name: prewarm, schedule: "*/15 * * * *", prompt: "warm the cache", script: "prewarm.py"}
       - {name: watch_url, schedule: "0 * * * *", prompt: "check health", monitor: "https://example.invalid/health"}
       - {name: watch_script, schedule: "0 0 * * *", prompt: "check health", monitor: "healthcheck.py"}
-
-# ISO-F13: mandatory fleet key — workspace root mounted rw per coworker,
-# outside the fleet Hermes root. A spec omitting it now fails closed.
 workspace_root: /data/coworkers

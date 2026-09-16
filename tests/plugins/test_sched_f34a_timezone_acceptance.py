@@ -73,11 +73,11 @@ def _write_spec(root):
     (spines / "base.yaml").write_text(yaml.safe_dump({
         "identity": "BASE-IDENTITY",
         "config": {"timezone": BASE_TZ, "sessions": {"auto_prune": False},
-                   "terminal": {"container_persistent": True}},  # ISO-F13: required per-role key
+                   "terminal": {"container_persistent": True}},
     }), encoding="utf-8")
     spec = spec_dir / "coworker-types.yaml"
     spec.write_text(yaml.safe_dump({
-        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
+        "workspace_root": "/data/coworkers",
         "default_profile": "default",
         "orchestrator_profile": "orchestrator",
         "spines": {"base": {"source": "spines/base.yaml"}},

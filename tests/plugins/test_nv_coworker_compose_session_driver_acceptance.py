@@ -91,7 +91,7 @@ _OMIT = object()  # sentinel: leave the key out of the rendered spec entirely
 
 
 def _terminal_block(backend, shared_key):
-    terminal = {"container_persistent": True}  # ISO-F13: required per-role key
+    terminal = {"container_persistent": True}
     if backend is not _OMIT:
         terminal["backend"] = backend
     if shared_key is not _OMIT:
@@ -124,7 +124,7 @@ def _write_spec(
     """
     spec_dir.mkdir(parents=True, exist_ok=True)
     spec = {
-        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
+        "workspace_root": "/data/coworkers",
         "orchestrator_profile": orchestrator_profile or next(iter(types)),
         "default_profile": default_profile,
         "types": types,

@@ -77,7 +77,7 @@ def _write_spec(spec_dir: Path, spec: dict) -> Path:
 
 def _base_spec(default_config: dict) -> dict:
     return {
-        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
+        "workspace_root": "/data/coworkers",
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},

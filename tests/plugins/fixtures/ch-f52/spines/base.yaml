@@ -6,7 +6,7 @@
 identity: "Slang fleet coworker."
 config:
   terminal:
-    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
+    container_persistent: true
   timezone: "Asia/Kolkata"
   sessions:
     auto_prune: false

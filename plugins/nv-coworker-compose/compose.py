@@ -564,7 +564,8 @@ def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
     try:
         resolved = host_path.resolve()
         root = protected_root.resolve()
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
+        # RuntimeError: symlink loop (3.11/3.12); ValueError: embedded NUL. Fail closed.
         return True
     if resolved == root:
         return True
@@ -605,7 +606,6 @@ def _enforce_mount_composition(
     ``docker_mount_cwd_to_workspace: true``."""
     protected_root = get_default_hermes_root()
 
-    # container_persistent: explicit per-role bool, never defaulted or coerced.
     persistent = _get_dotted(config, "terminal.container_persistent")
     if not isinstance(persistent, bool):
         raise CompositionError(
@@ -613,8 +613,6 @@ def _enforce_mount_composition(
             f"bool per role; got {persistent!r}"
         )
 
-    # workspace_root is a mandatory fleet key: absent / null / blank is refused, never
-    # "skip enforcement" (the fail-closed hinge, AC-ISO-F13-1).
     ws_root = _require_abs_mount_path(workspace_root, "workspace_root", profile_name)
     ws = ws_root / profile_name / "workspace"
 
@@ -661,7 +659,6 @@ def _enforce_mount_composition(
             f"{current_list!r}; only the shared-learnings mount may pre-exist mount composition"
         )
 
-    # Containment against the fleet root — descendant OR ancestor exposes the subtree.
     checked = [("workspace_root", ws)]
     if shared_learnings_root:
         checked.append(("shared_learnings_root", Path(str(shared_learnings_root))))
@@ -673,19 +670,22 @@ def _enforce_mount_composition(
                 f"Hermes root {str(protected_root)!r}"
             )
 
-    # Reject duplicate / colliding resolved same-path destinations (advisory hardening:
-    # keeps the closed set free of a redundant or conflicting -v).
+    # No two -v may target the same container destination. Same-path mounts land at
+    # their own host path; the clone lands at WIKI_MOUNT — an install surface equal to
+    # WIKI_MOUNT would shadow the clone. Rejecting the collision keeps the set well-formed.
+    destinations = [("workspace_root", str(ws))]
+    if clone_mount is not None:
+        destinations.append(("shared_learnings_root", WIKI_MOUNT))
+    destinations.extend(("install_surface", str(surface)) for surface in surfaces)
     seen: Dict[str, str] = {}
-    for label, host in [("workspace_root", ws), *[("install_surface", s) for s in surfaces]]:
-        key = str(host.resolve())
-        if key in seen:
+    for label, dest in destinations:
+        if dest in seen:
             raise CompositionError(
-                f"{profile_name}: {label} {str(host)!r} collides on resolved destination "
-                f"with an earlier same-path mount ({seen[key]!r})"
+                f"{profile_name}: {label} container destination {dest!r} collides with "
+                f"an earlier mount ({seen[dest]})"
             )
-        seen[key] = str(host)
+        seen[dest] = label
 
-    # Build the explicit, ordered, closed set: workspace (rw), clone (if any), surfaces (ro).
     volumes = [f"{ws}:{ws}:rw"]
     if clone_mount is not None:
         volumes.append(clone_mount)
@@ -2286,9 +2286,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # learnings, in which case the enforcement is skipped entirely.
     shared_learnings_root = data.get("shared_learnings_root")
 
-    # ISO-F13 mount-composition inputs — uniform fleet keys, policed per coworker type
-    # below. workspace_root is required (fail-closed); install_surfaces defaults to []
-    # and is validated in the enforcer.
+    # Uniform fleet mount inputs, policed per coworker type below (validated in the enforcer).
     workspace_root = data.get("workspace_root")
     install_surfaces = data.get("install_surfaces")
 
@@ -2303,7 +2301,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 resolved["config"], str(shared_learnings_root),
                 is_orchestrator=(tname == orchestrator_profile),
             )
-        # ISO-F13: the single, final owner of terminal.docker_volumes — runs after
+        # The single, final owner of terminal.docker_volumes — runs after
         # _enforce_shared_learnings (the only earlier writer) so it composes the closed
         # policed set on top of the permitted clone mount.
         _enforce_mount_composition(

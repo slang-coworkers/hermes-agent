@@ -43,7 +43,4 @@ types:
         url: https://onecli.local/mcp/repo
         include: [create_issue, create_pr]
     ui_meta: {title: Fixer, description: "Implementer", shape: square}
-
-# ISO-F13: mandatory fleet key — workspace root mounted rw per coworker,
-# outside the fleet Hermes root. A spec omitting it now fails closed.
 workspace_root: /data/coworkers

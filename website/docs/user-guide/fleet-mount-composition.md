@@ -33,7 +33,7 @@ explicit, ordered, **closed** set and forces two more terminal keys:
 |---|---|---|
 | `terminal.docker_volumes` | the closed set: the profile workspace root mounted **rw** same-path (`<ws>:<ws>:rw`, `<ws> = <workspace_root>/<profile>/workspace`), then the MEM-F43 shared-learnings clone mount when a clone is configured (rw for the orchestrator, `:ro` for every other coworker, at `/mnt/shared-learnings`), then each declared install surface mounted **ro** same-path (`<surface>:<surface>:ro`) — and nothing else | Appended verbatim to `docker run -v` after a colon check, no allowlist (`tools/environments/docker.py`); an entry containing the substring `:/workspace` sets `workspace_explicitly_mounted`. |
 | `terminal.docker_mount_cwd_to_workspace` | forced `true` (overwrites a spec `false`) | Read as `auto_mount_cwd` (`tools/terminal_tool.py`); mounts the launch cwd at `/workspace` **only when** no volume already claims `/workspace`. A kanban worker launched with `cwd=<task workspace>` then gets that card's checkout at `/workspace`. |
-| `terminal.container_persistent` | **not written by the render** — required from the spec, per role (see below) | Read at `tools/terminal_tool.py`; `true` = persistent bind mounts + a reused container, `false` = a fresh sandbox per card. |
+| `terminal.container_persistent` | **not written by the render** — required from the spec, per role (see below) | Read at `tools/terminal_tool.py`; `true` = persistent bind-mounted state and a container kept across cards (stop+rm lifecycle), `false` = a fresh tmpfs sandbox per card. |
 
 The workspace bind mount is deliberate: a rw host mount makes `_docker_has_host_access`
 true (`tools/terminal_tool.py`), so `_should_skip_container_guards` stays false
@@ -79,9 +79,10 @@ config:
     container_persistent: true   # true: long-lived shared sandbox; false: per-card boundary
 ```
 
-`workspace_root` (and every install surface) must be an **absolute path**, must
-**not** contain a `:` or a `..` component, must **not** begin with `/workspace`,
-and must resolve **outside** the fleet Hermes root.
+`workspace_root` (and every install surface) must be an **absolute POSIX path**
+(the fleet target is Linux/podman, so a Windows drive-letter path is rejected by
+the `:` check), must **not** contain a `:` or a `..` component, must **not** begin
+with `/workspace`, and must resolve **outside** the fleet Hermes root.
 
 ## What the render refuses (fail-closed)
 

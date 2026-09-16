@@ -21,10 +21,8 @@ coworker_config:
   terminal.docker_env: {}
   terminal.docker_mount_cwd_to_workspace: true
   terminal.docker_image: "hermes-sandbox:pinned"
-  # terminal.docker_volumes is no longer a fleet-invariant constant: ISO-F13 renders it
-  # as a per-profile policed closed set (workspace rw at <workspace_root>/<profile>/workspace,
-  # plus the shared-learnings clone and install surfaces). Its per-profile value is pinned by
-  # test_nv_coworker_compose_mounts_acceptance.py (AC-ISO-F13-1/2), not in this fleet-uniform map.
+  # Per-profile docker_volumes are asserted by the mount-composition acceptance test and
+  # intentionally do not belong in this fleet-uniform map.
   # The eight fleet-uniform approval keys (six approvals.* + two
   # security.approval.*) are machine-wide managed scope, not profile-local; their
   # placement is asserted by GOV-F23 AC-1 (managed fragment) and AC-3 (absent from

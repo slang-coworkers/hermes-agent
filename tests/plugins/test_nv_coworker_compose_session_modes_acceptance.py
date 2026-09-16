@@ -60,7 +60,7 @@ def _write_fixture_spec(spec_dir: Path, spec: dict) -> Path:
 
 def _base_spec() -> dict:
     return {
-        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
+        "workspace_root": "/data/coworkers",
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},

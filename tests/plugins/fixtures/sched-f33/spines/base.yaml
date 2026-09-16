@@ -2,7 +2,7 @@
 identity: "BASE-IDENTITY"
 config:
   terminal:
-    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
+    container_persistent: true
   timezone: "Asia/Kolkata"
   # NanoClaw parity: 30 s script timeout (Hermes default is 3600); the nudge
   # threshold has no config_defaults entry, so it must be emitted by value.
