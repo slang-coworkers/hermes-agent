@@ -492,13 +492,17 @@ _EGRESS_CA_BUNDLE_VARS = (
     "DENO_CERT",
 )
 _EGRESS_PROVIDER_PLACEHOLDER = "onecli-injects-at-request-time"
-# v2 drops the v1 swap-token scheme outright: a HERMES_PROXY_TOKEN_* key anywhere in
-# a spec is an egress collision, never rendered.
+# Swap-token keys would create a second credential path, so any HERMES_PROXY_TOKEN_*
+# key in a spec is refused.
 _EGRESS_FORBIDDEN_ENV_PREFIX = "HERMES_PROXY_TOKEN_"
 # podman 3.4.4 has no host.docker.internal mapping, so a proxy address carrying the
 # docker-desktop alias is rewritten to the literal docker0 bridge gateway IP.
 _DOCKER_BRIDGE_HOST = "host.docker.internal"
 _DOCKER_BRIDGE_IP = "172.17.0.1"
+# A well-formed environment variable name. The docker backend strips whitespace off
+# env names/values, so a controlled name is compared AFTER strip (a padded name would
+# otherwise slip the collision check and become live at runtime).
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _normalize_proxy_addr(addr: str) -> str:
@@ -529,10 +533,22 @@ def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
     if not isinstance(providers, list):
         raise CompositionError(
             f"egress.provider_env must be a list of names, got {type(providers).__name__}")
+    reserved = set(_EGRESS_PROXY_VARS) | set(_EGRESS_NO_PROXY_VARS) | set(_EGRESS_CA_BUNDLE_VARS)
+    normalized_providers: List[str] = []
     for name in providers:
-        if not isinstance(name, str) or not name.strip():
+        if not isinstance(name, str):
             raise CompositionError(
-                f"egress.provider_env entries must be non-empty strings, got {name!r}")
+                f"egress.provider_env entries must be strings, got {name!r}")
+        stripped = name.strip()
+        if not _ENV_NAME_RE.match(stripped):
+            raise CompositionError(
+                f"egress.provider_env entries must be valid env var names, got {name!r}")
+        # A provider name that is itself a reserved egress control would clobber the proxy/CA
+        # value with the placeholder (the provider loop runs last), or emit a forbidden token.
+        if stripped in reserved or stripped.startswith(_EGRESS_FORBIDDEN_ENV_PREFIX):
+            raise CompositionError(
+                f"egress.provider_env must not name a reserved egress control, got {name!r}")
+        normalized_providers.append(stripped)
 
     memory = egress.get("container_memory")
     if isinstance(memory, bool) or not isinstance(memory, int) or memory <= 0:
@@ -549,7 +565,7 @@ def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
         "ca_host_path": ca_host_path,
         "ca_container_path": ca_container_path,
         "ca_mount": f"{ca_host_path}:{ca_container_path}:ro",
-        "provider_env": list(providers),
+        "provider_env": normalized_providers,
         "sandbox_image": sandbox_image,
         "container_memory": memory,
         "container_cpu": cpu,
@@ -573,60 +589,113 @@ def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
 
 
 def _is_controlled_env_name(name: Any, controlled: Set[str]) -> bool:
-    return isinstance(name, str) and (
-        name in controlled or name.startswith(_EGRESS_FORBIDDEN_ENV_PREFIX)
-    )
+    if not isinstance(name, str):
+        return False
+    # Compare after strip: the docker backend strips whitespace off env names, so a
+    # padded controlled name (" HTTPS_PROXY ") would otherwise slip this check and
+    # become a live override at runtime.
+    stripped = name.strip()
+    return stripped in controlled or stripped.startswith(_EGRESS_FORBIDDEN_ENV_PREFIX)
+
+
+def _extra_arg_env_name(tok: str, nxt: Any) -> Optional[str]:
+    """The env var NAME a ``docker_extra_args`` token would set, or None. Handles the
+    separate (``-e KEY``), joined (``--env=KEY``) and attached (``-eKEY``) forms."""
+    if tok in ("-e", "--env"):
+        return str(nxt).split("=", 1)[0] if nxt is not None else ""
+    if tok.startswith("--env="):
+        return tok[len("--env="):].split("=", 1)[0]
+    if tok.startswith("-e") and tok != "-e":
+        rest = tok[2:]
+        rest = rest[1:] if rest.startswith("=") else rest
+        return rest.split("=", 1)[0]
+    return None
+
+
+def _extra_arg_mount_dest(tok: str, nxt: Any) -> Optional[str]:
+    """The container destination a ``docker_extra_args`` mount token targets, or None.
+    Handles ``-v``/``--volume`` (separate, joined, attached) and ``--mount`` (its
+    ``dst=``/``destination=``/``target=`` field)."""
+    spec: Optional[str] = None
+    is_mount = False
+    if tok in ("-v", "--volume"):
+        spec = None if nxt is None else str(nxt)
+    elif tok.startswith("--volume="):
+        spec = tok[len("--volume="):]
+    elif tok.startswith("-v") and tok != "-v":
+        rest = tok[2:]
+        spec = rest[1:] if rest.startswith("=") else rest
+    elif tok == "--mount":
+        spec, is_mount = (None if nxt is None else str(nxt)), True
+    elif tok.startswith("--mount="):
+        spec, is_mount = tok[len("--mount="):], True
+    if spec is None:
+        return None
+    if is_mount:
+        for field in spec.split(","):
+            key, _, value = field.partition("=")
+            if key.strip() in ("dst", "destination", "target"):
+                return value.strip()
+        return None
+    parts = spec.split(":")
+    return parts[1] if len(parts) >= 2 else None
+
+
+def _consumes_next_extra_arg(tok: str) -> bool:
+    """True for the value-taking flag spellings whose value is the NEXT token, so the
+    scan skips it (an attached/joined form carries its value in the same token)."""
+    return tok in ("-e", "--env", "-v", "--volume", "--mount")
 
 
 def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
                                    profile_name: str, controlled: Set[str]) -> None:
-    """Reject a ``docker_extra_args`` list that would inject a competing egress
-    control the render does not own: a controlled env var (``-e``/``--env``), an
-    ``--env-file`` (its contents are opaque at render time — rejected whatever the
-    path), a network override, or a divergent CA ``-v``/``--volume``."""
+    """Reject a ``docker_extra_args`` list that would inject a competing egress control
+    the render does not own: a non-string entry (the backend drops it, shifting the
+    argv into a valid override), a controlled env var (any ``-e``/``--env`` spelling),
+    an ``--env-file`` (its contents are opaque here), a network override, an override
+    of the pinned resource limits, or ANY mount at the CA path (the render owns that
+    mount via ``docker_volumes``, so even a duplicate canonical one is refused)."""
     ca_container_path = params["ca_container_path"]
-    ca_mount = params["ca_mount"]
+    # Reject non-strings up front: the backend discards them, which would shift a value
+    # token (e.g. `["-e", 7, "HTTPS_PROXY=…"]`) into a valid override the scan below
+    # would otherwise consume as `-e`'s (harmless) value.
+    for tok in extra:
+        if not isinstance(tok, str):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_extra_args entries must be strings, got {tok!r}")
     i = 0
     while i < len(extra):
         tok = extra[i]
         nxt = extra[i + 1] if i + 1 < len(extra) else None
-        if isinstance(tok, str):
-            if tok in ("--network", "--net") or tok.startswith(("--network=", "--net=")):
-                raise CompositionError(
-                    f"{profile_name}: egress collision — docker_extra_args must not set the "
-                    f"container network ({tok!r}); the fleet topology is render-owned")
-            if tok.startswith("--env-file"):
-                raise CompositionError(
-                    f"{profile_name}: egress collision — docker_extra_args must not pass "
-                    f"--env-file (its contents can smuggle a controlled egress var)")
-            if tok in ("-e", "--env"):
-                name = str(nxt).split("=", 1)[0] if nxt is not None else ""
-                if _is_controlled_env_name(name, controlled):
-                    raise CompositionError(
-                        f"{profile_name}: egress collision — docker_extra_args sets a "
-                        f"controlled env var ({name!r})")
-                i += 2
-                continue
-            if tok.startswith(("-e=", "--env=")):
-                name = tok.split("=", 1)[1].split("=", 1)[0]
-                if _is_controlled_env_name(name, controlled):
-                    raise CompositionError(
-                        f"{profile_name}: egress collision — docker_extra_args sets a "
-                        f"controlled env var ({name!r})")
-            if tok in ("-v", "--volume"):
-                if nxt is not None and _targets_ca(nxt, ca_container_path) and str(nxt) != ca_mount:
-                    raise CompositionError(
-                        f"{profile_name}: egress collision — docker_extra_args mounts a divergent "
-                        f"source on {ca_container_path!r}")
-                i += 2
-                continue
-            if tok.startswith(("-v=", "--volume=")):
-                val = tok.split("=", 1)[1]
-                if _targets_ca(val, ca_container_path) and val != ca_mount:
-                    raise CompositionError(
-                        f"{profile_name}: egress collision — docker_extra_args mounts a divergent "
-                        f"source on {ca_container_path!r}")
-        i += 1
+
+        if tok in ("--network", "--net") or tok.startswith(("--network=", "--net=")):
+            raise CompositionError(
+                f"{profile_name}: egress collision — docker_extra_args must not set the container "
+                f"network ({tok!r}); the fleet topology is render-owned")
+        # -m is the only single-dash `-m*` podman flag (memory), so its attached form
+        # (`-m512m`) is caught by the prefix alongside --memory/--cpus.
+        if tok in ("--memory", "--cpus") or tok.startswith(("--memory=", "--cpus=", "-m")):
+            raise CompositionError(
+                f"{profile_name}: egress collision — docker_extra_args must not override the pinned "
+                f"resource limits ({tok!r})")
+        if tok == "--env-file" or tok.startswith("--env-file="):
+            raise CompositionError(
+                f"{profile_name}: egress collision — docker_extra_args must not pass --env-file "
+                f"(its contents can smuggle a controlled egress var)")
+
+        env_name = _extra_arg_env_name(tok, nxt)
+        if env_name is not None and _is_controlled_env_name(env_name, controlled):
+            raise CompositionError(
+                f"{profile_name}: egress collision — docker_extra_args sets a controlled env var "
+                f"({env_name!r})")
+
+        dest = _extra_arg_mount_dest(tok, nxt)
+        if dest is not None and dest == ca_container_path:
+            raise CompositionError(
+                f"{profile_name}: egress collision — docker_extra_args must not mount at the CA path "
+                f"{ca_container_path!r}; the render owns that mount")
+
+        i += 2 if _consumes_next_extra_arg(tok) else 1
 
 
 def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_name: str) -> None:
@@ -667,6 +736,20 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
             if _is_controlled_env_name(name, controlled):
                 raise CompositionError(
                     f"{profile_name}: egress collision — docker_forward_env forwards a controlled "
+                    f"egress var ({name!r})")
+
+    # env_passthrough is another host-env-forwarding path (values ride into the sandbox at
+    # exec), so a controlled name there would override the rendered proxy/CA env.
+    passthrough = terminal.get("env_passthrough")
+    if passthrough is not None:
+        if not isinstance(passthrough, list):
+            raise CompositionError(
+                f"{profile_name}: terminal.env_passthrough must be a list, "
+                f"got {type(passthrough).__name__}")
+        for name in passthrough:
+            if _is_controlled_env_name(name, controlled):
+                raise CompositionError(
+                    f"{profile_name}: egress collision — env_passthrough forwards a controlled "
                     f"egress var ({name!r})")
 
     volumes = terminal.get("docker_volumes")

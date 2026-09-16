@@ -5,10 +5,12 @@ description: "How nv-coworker-compose renders the OPTION-A egress posture so a c
 
 # Fleet egress lockdown
 
-Every profile that `nv-coworker-compose` renders carries a single, uniform **egress
-posture**: a coworker's tool sandbox reaches the outside world **only through the OneCLI
-credential gateway**, and the sandbox **never holds a raw credential**. This ports the
-NanoClaw egress guarantee onto the Hermes fleet.
+Every profile that `nv-coworker-compose` renders **from a spec carrying the required
+`egress:` block** (see below) carries a single, uniform **egress posture**: a coworker's
+tool sandbox reaches the outside world **only through the OneCLI credential gateway**, and
+the sandbox **never holds a raw credential**. This ports the NanoClaw egress guarantee onto
+the Hermes fleet. A fleet deployment spec MUST carry the `egress:` block; a spec that omits
+it (a dev/test spec) renders with no egress enforcement.
 
 ## The OPTION-A topology
 
@@ -70,18 +72,26 @@ nothing), so no partial fleet lands on disk. The operator-visible messages are o
 `<profile>: egress collision …`:
 
 - `terminal.docker_env[<KEY>]` — a proxy / no-proxy / CA-bundle / provider name, or any
-  `HERMES_PROXY_TOKEN_*` key, present in `docker_env`. Remove it; the render owns it.
-- `docker_forward_env forwards a controlled egress var (<NAME>)` — a controlled env name in
-  `docker_forward_env`.
+  `HERMES_PROXY_TOKEN_*` key, present in `docker_env` (matched after a whitespace strip, since
+  the runtime strips env names). Remove it; the render owns it.
+- `docker_forward_env` / `env_passthrough forwards a controlled egress var (<NAME>)` — a
+  controlled env name in either host-env forwarding list.
 - `egress collision on the CA mount — a divergent source targets <ca_container_path>` — a
-  `docker_volumes` (or `docker_extra_args -v`) entry that mounts a different source at the CA
-  container path.
-- `docker_extra_args …` — a `-e`/`--env`/`--env=` naming a controlled var, an `--env-file`
-  (its contents are opaque at render time, rejected unconditionally), or a `--network`/`--net`
-  override.
+  `terminal.docker_volumes` entry that mounts a different source at the CA container path.
+- `docker_extra_args must not mount at the CA path <ca_container_path>` — ANY
+  `-v`/`--volume`/`--mount` in `docker_extra_args` targeting the CA path, canonical or
+  divergent (the render owns that mount via `docker_volumes`, so a duplicate is refused too).
+- `docker_extra_args …` — a non-string entry (the backend discards it, shifting the argv into a
+  valid override); a `-e`/`--env` in any form (separate, `--env=`, or attached `-eKEY`) naming a
+  controlled var; an `--env-file` (its contents are opaque at render time, rejected
+  unconditionally); a `--network`/`--net` override; or a `--memory`/`-m`/`--cpus` override of the
+  pinned resource limits.
 
 Unrelated `docker_env` / `docker_extra_args` entries (a legitimate `LANG`, an unrelated
 `-v /data:/data:ro`) are preserved.
+
+The `egress:` block itself is validated: a provider name that is malformed or names a reserved
+egress control is refused (`egress.provider_env must not name a reserved egress control`).
 
 ## Scope and what this render does NOT do
 

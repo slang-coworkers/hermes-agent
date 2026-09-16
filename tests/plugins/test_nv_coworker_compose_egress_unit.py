@@ -129,15 +129,52 @@ def test_docker_forward_env_controlled_rejected(tmp_path, monkeypatch):
     ["--env", "SSL_CERT_FILE=/x"],
     ["--env=CURL_CA_BUNDLE=/x"],
     ["-e", "HERMES_PROXY_TOKEN_A=x"],
+    ["-eHTTPS_PROXY=http://evil:1"],
+    ["-e", 7, "HTTPS_PROXY=http://evil:1"],                # non-string entry the backend would discard
     ["--network", "host"],
     ["--net=host"],
+    ["--memory", "0"],
+    ["--cpus", "4"],
+    ["-m=0"],
+    ["-m512m"],
     ["--env-file", "/tmp/secrets.env"],
     ["-v", f"/tmp/rogue.crt:{CA_CONTAINER_PATH}:ro"],
     [f"--volume=/tmp/rogue.crt:{CA_CONTAINER_PATH}:ro"],
+    [f"-v/tmp/rogue.crt:{CA_CONTAINER_PATH}:ro"],
+    ["-v", f"{CA_HOST_PATH}:{CA_CONTAINER_PATH}:ro"],      # the render owns the CA mount, so even a canonical one is refused
+    ["--mount", f"type=bind,source=/tmp/x,destination={CA_CONTAINER_PATH}"],
+    [f"--mount=type=bind,src=/tmp/x,target={CA_CONTAINER_PATH}"],
 ])
 def test_docker_extra_args_collisions_rejected(tmp_path, monkeypatch, extra):
     module = _load(tmp_path, monkeypatch)
     spec = _make_spec(tmp_path, name="extra", spine_config={"terminal": {"docker_extra_args": extra}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+@pytest.mark.parametrize("name", ["HTTPS_PROXY", " HTTPS_PROXY ", "NODE_EXTRA_CA_CERTS",
+                                  "HERMES_PROXY_TOKEN_X", "not a name", ""])
+def test_provider_env_reserved_or_malformed_rejected(tmp_path, monkeypatch, name):
+    """A provider name that is a reserved control (or malformed) is refused at validation —
+    else the provider loop would clobber the proxy/CA value or emit a forbidden token."""
+    module = _load(tmp_path, monkeypatch)
+    egress = dict(BASE_EGRESS, provider_env=[name])
+    with pytest.raises(module.CompositionError):
+        module.compose(str(_make_spec(tmp_path, name="prov", egress=egress)), str(tmp_path / "out"))
+
+
+@pytest.mark.parametrize("terminal", [
+    {"docker_env": {" HTTPS_PROXY ": "http://evil:1"}},
+    {"docker_env": {" HERMES_PROXY_TOKEN_X ": "x"}},
+    {"docker_forward_env": [" HTTPS_PROXY "]},
+    {"env_passthrough": ["HTTPS_PROXY"]},
+    {"env_passthrough": [" ANTHROPIC_API_KEY "]},
+])
+def test_whitespace_and_passthrough_collisions_rejected(tmp_path, monkeypatch, terminal):
+    """Controlled names survive a runtime whitespace-strip, and env_passthrough is another
+    forwarding path — both must be caught after strip, not by raw-name match."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="ws", spine_config={"terminal": terminal})
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
 
