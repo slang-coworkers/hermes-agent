@@ -131,3 +131,42 @@ def test_bootstrap_key_uses_source_environment_and_is_protected(tmp_path, monkey
 
     source = get_source("onecli", scope=manager.scope_key)
     assert source.protected_env_vars({}) == frozenset({"ONECLI_API_KEY"})
+
+
+def test_oneclient_requires_secure_base(tmp_path, monkeypatch):
+    """The bootstrap key rides an Authorization: Bearer header, so the real
+    client refuses to build a request against a cleartext-HTTP base — except a
+    loopback host, the documented local-dev exception."""
+    _, loaded, _ = _load(tmp_path, monkeypatch, "\n          cred-f28-bot-a: []")
+    oc = loaded.module.oneclient
+
+    oc._require_secure_base("https://onecli.example")     # TLS — ok
+    oc._require_secure_base("http://127.0.0.1:10255")     # loopback dev — ok
+    oc._require_secure_base("http://localhost:8080")      # loopback dev — ok
+    for bad in ("http://onecli.example", "http://10.0.0.9:9000", "ftp://onecli.example"):
+        with pytest.raises(oc.OneCLIError):
+            oc._require_secure_base(bad)
+
+
+def test_oneclient_validates_identifier_before_transport(tmp_path, monkeypatch):
+    """Every OneCLI call re-validates the identifier grammar (defense in depth)
+    and refuses before any transport call on an unsafe value, so no unvalidated
+    value can reach a request path or JSON body."""
+    _, loaded, _ = _load(tmp_path, monkeypatch, "\n          cred-f28-bot-a: []")
+    oc = loaded.module.oneclient
+
+    class _NoCall:
+        def __call__(self, *a, **k):
+            raise AssertionError("transport must not be called on an invalid identifier")
+
+    oc.set_transport(_NoCall())
+    try:
+        for bad in ("../etc", "a/b", "bad id", "", "-leading", "tok\nen"):
+            with pytest.raises(oc.OneCLIError):
+                oc.ensure_agent(identifier=bad)
+            with pytest.raises(oc.OneCLIError):
+                oc.get_container_config(agent=bad)
+            with pytest.raises(oc.OneCLIError):
+                oc.set_secrets(identifier=bad, secrets=[])
+    finally:
+        oc.set_transport(None)

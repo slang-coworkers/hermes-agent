@@ -307,6 +307,270 @@ def test_wrapper_refuses_nonprotected_value_env(tmp_path):
     assert "sk-live-canary" not in logged and "sk-live-canary" not in result.stderr
 
 
+def _valid_argv(ca_host: Path, *, mode: str = "ro") -> list:
+    """A well-formed long-lived launch: every required name-only -e and a
+    read-only CA mount, before the image; `sleep infinity` after it."""
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:{mode}", "img", "sleep", "infinity"]
+    return argv
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_container_run_bypass(tmp_path):
+    """AC-CRED-F28-1 (dispatch): `podman container run …` is normalised to `run`
+    and validated, not passed through unvalidated. A `container run -d … sleep
+    infinity` with no proxy env or CA mount is refused and podman is never
+    invoked (a naive first-token dispatch would forward it verbatim)."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+
+    argv = ["container", "run", "-d", "--name", "s", "img", "sleep", "infinity"]
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("prefix", [["--log-level=error"], ["--log-level", "error"]])
+def test_wrapper_refuses_global_option_prefixed_launch(tmp_path, prefix):
+    """AC-CRED-F28-1 (dispatch): a leading podman global option before the verb
+    — whether `--flag=value` or a `--flag value` separated form — is refused.
+    Hermes always emits the verb first, so a global-prefixed launch is a bypass
+    attempt and must not reach an unvalidated dispatch path."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = [*prefix, *_valid_argv(ca_host)]
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+def test_wrapper_ignores_post_image_env_and_volume(tmp_path):
+    """AC-CRED-F28-1 (image boundary): `-e`/`-v` tokens AFTER the image are the
+    container command, not podman flags, so they do not count toward the proxy /
+    CA requirement. A launch whose only proxy `-e` names sit after the image is
+    refused for missing controls; podman is never invoked."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    # No pre-image -e / -v; the proxy names and CA mount are all after `img`.
+    argv = ["run", "-d", "--name", "s", "img", "sleep", "infinity"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_control_plane_key_env(tmp_path):
+    """AC-CRED-F28-3 (no secret in sandbox): an otherwise-valid launch that also
+    carries `-e ONECLI_API_KEY` is refused — the control-plane bootstrap key
+    lives in the wrapper's process env, so forwarding its name would inject it
+    into the sandbox. Its value never reaches the log or stderr."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "ONECLI_API_KEY"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    env["ONECLI_API_KEY"] = "aoc_bootstrap_canary_DO_NOT_LEAK"
+    result = subprocess.run(
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+    logged = log.read_text(encoding="utf-8")
+    assert "aoc_bootstrap_canary_DO_NOT_LEAK" not in logged
+    assert "aoc_bootstrap_canary_DO_NOT_LEAK" not in result.stderr
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_nonallowlisted_env(tmp_path):
+    """AC-CRED-F28-3 (no secret in sandbox): a name-only `-e` for a var that is
+    neither a rendered egress/CA/NO_PROXY name nor a declared provider
+    placeholder is refused — only allowlisted names may ride into the sandbox,
+    so an arbitrary host var cannot be forwarded by name."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "AWS_SECRET_ACCESS_KEY"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    env["AWS_SECRET_ACCESS_KEY"] = "host-only-secret-canary"
+    result = subprocess.run(
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+def test_wrapper_allows_declared_provider_placeholder(tmp_path):
+    """AC-CRED-F28-3 (allowlist is additive): a provider placeholder name the
+    substrate declares via PODMAN_ONECLI_ALLOWED_ENV is accepted on an otherwise
+    valid launch — the render forwards placeholder provider keys, not secrets."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "ANTHROPIC_API_KEY"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    env["PODMAN_ONECLI_ALLOWED_ENV"] = "ANTHROPIC_API_KEY"
+    env["ANTHROPIC_API_KEY"] = "onecli-injects-at-egress"  # placeholder, not a secret
+    result = subprocess.run(
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0
+    assert "ANTHROPIC_API_KEY" in rec.read_text(encoding="utf-8")
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_malformed_proxy_without_leak(tmp_path):
+    """AC-CRED-F28-1 (redaction): a malformed proxy value with no scheme/userinfo
+    delimiters (so authority parsing cannot strip it) is refused, and its token
+    never reaches the refusal message on stderr or the audit log."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    for name in PROXY_NAMES:
+        env[name] = "aoc_LEAK_ME_TOKEN"  # malformed: no scheme, no userinfo '@'
+    result = subprocess.run(
+        [str(WRAPPER), *_valid_argv(ca_host)], env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+    assert "LEAK_ME_TOKEN" not in log.read_text(encoding="utf-8")
+    assert "LEAK_ME_TOKEN" not in result.stderr
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_wildcard_no_proxy(tmp_path):
+    """AC-CRED-F28-1 (egress guarantee): when the launch forwards `-e NO_PROXY`
+    and the process value is a broadened `*`, the launch is refused — a wildcard
+    NO_PROXY would make the sandbox bypass the OneCLI proxy for every host."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "NO_PROXY"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    env["NO_PROXY"] = "*"
+    result = subprocess.run(
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.linux_only
+def test_wrapper_accepts_loopback_no_proxy(tmp_path):
+    """AC-CRED-F28-1 (egress guarantee): a forwarded `-e NO_PROXY` whose value is
+    exactly the expected loopback bypass list is accepted — only a broadened
+    value is refused, not the rendered loopback set."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["-e", "NO_PROXY"]
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    env = _launch_env(tmp_path, stub, rec, log)
+    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+    result = subprocess.run(
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0
+    assert "NO_PROXY" in rec.read_text(encoding="utf-8")
+
+
 @pytest.mark.linux_only
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the

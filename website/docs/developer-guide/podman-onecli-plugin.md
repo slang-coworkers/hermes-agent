@@ -44,6 +44,11 @@ the rendered config (shown above). The bootstrap key named by `api_key_env` (def
 `ONECLI_API_KEY`) authenticates the onboard/render step to OneCLI; its **value**
 stays in the host environment and is never rendered into a profile.
 
+`gateway_api_base_url` must be `https://` — the bootstrap key rides an
+`Authorization: Bearer` header, so the client refuses to build a request against
+a cleartext-HTTP base. A loopback host (`127.0.0.1`, `localhost`, `::1`) may use
+`http://` for local development only.
+
 ## Onboarding
 
 `hermes onecli-onboard --profile <name|path>` runs, in order:
@@ -69,19 +74,45 @@ driven by these environment variables:
 | `PODMAN_ONECLI_PODMAN` | Real podman binary (default `podman`). |
 | `PODMAN_ONECLI_EXPECTED_PROXY` | `host:port` authority the proxy env must carry. |
 | `PODMAN_ONECLI_EXPECTED_CA` | Container path the CA must be mounted at (read-only). |
+| `PODMAN_ONECLI_EXPECTED_NO_PROXY` | Loopback bypass list a forwarded `NO_PROXY`/`no_proxy` must equal (default `127.0.0.1,localhost,::1`). |
+| `PODMAN_ONECLI_ALLOWED_ENV` | Space-delimited extra name-only `-e` vars the render forwards — the **provider placeholder keys**. The proxy/CA/`NO_PROXY` names are always allowed; every other `-e NAME` is refused. |
+| `PODMAN_ONECLI_FORBIDDEN_ENV` | Space-delimited host-only credential names that must **never** be forwarded (default `ONECLI_API_KEY`, the control-plane bootstrap key). |
 | `PODMAN_ONECLI_LOG` | Optional audit path for accepted-launch and refusal lines. |
 
 On a **long-lived launch** (`run -d` / `create` that starts a persistent
 sandbox) the wrapper refuses unless the argv carries a name-only `-e` for every
 rendered egress variable (the four proxy vars and the six CA-trust vars), every
 proxy value's `host:port` authority equals `PODMAN_ONECLI_EXPECTED_PROXY`, and a
-read-only mount to `PODMAN_ONECLI_EXPECTED_CA` is present. A refusal is logged
-with the proxy userinfo redacted, exits non-zero, and never invokes the real
-podman. The wrapper passes through Hermes's capability probes verbatim (the
-cgroup probe and the `--storage-opt` probe), adds `--label nv.hermes-ppid=$PPID`
-to accepted launches (so a `sweep` verb can reap sandboxes whose worker died),
-and rewrites the `ps` `{{.Label "K"}}` template to the podman-3.4.4-compatible
-`{{index .Labels "K"}}`.
+read-only mount to `PODMAN_ONECLI_EXPECTED_CA` is present. It parses the podman
+flags **only up to the image** — `-e`/`-v` tokens in the container-command
+position (after the image) are never counted as controls — and normalises the
+dispatch so alternate invocation forms cannot skip validation: a
+`podman container run|create …` sub-noun is treated as `run`/`create`, and a
+leading global option before the verb (which Hermes never emits) is refused.
+
+Two rules keep host secrets out of the sandbox. **Allowlist:** a name-only `-e
+NAME` is accepted only for a rendered egress/CA name, `NO_PROXY`/`no_proxy`, or a
+provider placeholder the substrate declares in `PODMAN_ONECLI_ALLOWED_ENV`; any
+other `-e NAME` is refused (a name-only `-e` pulls its value from the wrapper's
+own process env, so an un-listed name could forward a host value). **Denylist:**
+the control-plane bootstrap key (`PODMAN_ONECLI_FORBIDDEN_ENV`, default
+`ONECLI_API_KEY`) is refused outright. A forwarded `NO_PROXY`/`no_proxy` must
+equal `PODMAN_ONECLI_EXPECTED_NO_PROXY` — a broadened or `*` value that would let
+the sandbox bypass the proxy is refused (it is never *required*, since the pinned
+render may omit it).
+
+> The render's provider placeholder names are the one thing the wrapper cannot
+> know a priori; the substrate must list them in `PODMAN_ONECLI_ALLOWED_ENV`
+> (e.g. `ANTHROPIC_API_KEY`). An un-declared placeholder fails closed — the
+> launch is refused, never leaked.
+
+A refusal is logged with proxy userinfo and any `aoc_` token unconditionally
+redacted from every emitted line (stderr and the audit log), exits non-zero, and
+never invokes the real podman. The wrapper passes through Hermes's capability
+probes verbatim (the cgroup probe and the `--storage-opt` probe), adds `--label
+nv.hermes-ppid=$PPID` to accepted launches (so a `sweep` verb can reap sandboxes
+whose worker died), and rewrites the `ps` `{{.Label "K"}}` template to the
+podman-3.4.4-compatible `{{index .Labels "K"}}`.
 
 ## Security posture
 

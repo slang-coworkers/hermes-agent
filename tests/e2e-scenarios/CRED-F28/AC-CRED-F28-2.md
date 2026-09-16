@@ -68,6 +68,10 @@ drive() {  # $1 = profile, $2 = phase (pre|post|ungranted)
   PODMAN_ONECLI_PODMAN="$PODMAN" PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255 \
   PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt \
   PODMAN_ONECLI_LOG="$d/podman-calls.log" CONTAINER_HOST="$CONTAINER_HOST" \
+  `# Both fixtures are [] (ungranted), so the render forwards only proxy/CA/NO_PROXY` \
+  `# vars — all in the wrapper's default allowlist. A profile GRANTED a provider` \
+  `# must also export PODMAN_ONECLI_ALLOWED_ENV=<placeholder names> or the wrapper` \
+  `# fails closed on the un-declared -e (e.g. PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY).` \
   ART="$d" BOT="$1" PHASE="$2" PODMAN="$PODMAN" python3 - <<'PY'
 import json, os, subprocess
 from tools.terminal_tool import terminal_tool

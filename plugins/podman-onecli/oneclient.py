@@ -14,14 +14,21 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from agent.secret_sources.base import get_source_environment
 
 logger = logging.getLogger(__name__)
+
+# The identifier becomes a OneCLI agent name and a URL path segment. cli.py
+# already validates it, but the client re-checks (defense in depth) so no
+# unvalidated value can reach a request path or JSON body from any caller.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # Transport contract: (method, path, *, json=None) -> (status: int, body: dict | None)
 Transport = Callable[..., Tuple[int, Any]]
@@ -48,6 +55,29 @@ def set_transport(fn: Optional[Transport]) -> None:
     _TRANSPORT = fn
 
 
+def _validate_identifier(identifier: str) -> str:
+    if not isinstance(identifier, str) or not _IDENTIFIER_RE.match(identifier):
+        raise OneCLIError(f"unsafe OneCLI identifier {identifier!r}")
+    return identifier
+
+
+def _require_secure_base(base: str) -> None:
+    """The bootstrap key rides an Authorization: Bearer header, so the base must
+    be TLS. Only a loopback host may use http:// (local-dev gateway)."""
+    parts = urlsplit(base)
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    if scheme == "https":
+        return
+    if scheme == "http" and host in _LOOPBACK_HOSTS:
+        return
+    raise OneCLIError(
+        "gateway_api_base_url must be https:// (http:// is allowed only for a "
+        f"loopback host); refusing to send the OneCLI bootstrap key over "
+        f"{scheme or '?'}://{host or '?'}"
+    )
+
+
 def _api_key() -> str:
     """Read the bootstrap key from the per-fetch environment view (falling back
     to os.environ), so a profile-local key is honored over another profile's
@@ -66,6 +96,7 @@ def _real_request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any
     base = _GATEWAY_API_BASE_URL
     if not base:
         raise OneCLIError("gateway_api_base_url is not configured for the OneCLI client")
+    _require_secure_base(base)
     url = base.rstrip("/") + path
     headers = {"Accept": "application/json"}
     api_key = _api_key()
@@ -94,6 +125,7 @@ def _real_request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any
 
 def ensure_agent(*, identifier: str) -> dict:
     """POST /api/agents. Idempotent: 201/200 -> created, 409 -> already exists."""
+    _validate_identifier(identifier)
     status, _ = _request("POST", "/api/agents", json={"identifier": identifier})
     if status in (200, 201):
         return {"created": True}
@@ -104,6 +136,7 @@ def ensure_agent(*, identifier: str) -> dict:
 
 def set_secrets(*, identifier: str, secrets) -> Optional[dict]:
     """POST /api/agents/<identifier>/secrets with the selective provider set."""
+    _validate_identifier(identifier)
     status, body = _request(
         "POST", f"/api/agents/{identifier}/secrets", json={"secrets": list(secrets)}
     )
@@ -114,6 +147,7 @@ def set_secrets(*, identifier: str, secrets) -> Optional[dict]:
 
 def get_container_config(*, agent: str) -> Optional[dict]:
     """GET /v1/container-config?agent=<id>. 200 -> body, 404 -> None (unprovisioned)."""
+    _validate_identifier(agent)
     status, body = _request(
         "GET", "/v1/container-config?" + urlencode({"agent": agent}), json=None
     )
