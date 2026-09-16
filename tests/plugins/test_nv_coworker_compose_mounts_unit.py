@@ -157,9 +157,6 @@ def test_symlink_loop_workspace_root_refused(module, tmp_path):
         module.compose(str(spec), str(tmp_path / "out"))
 
 
-# A '//'-prefixed absolute path is non-canonical: POSIX preserves the two-slash
-# prefix, so it evades the string '/workspace' guards while resolve() collapses it.
-
 def test_double_slash_workspace_root_refused(module, tmp_path):
     """A "//workspace-fleet" workspace_root slips past both the `.startswith("/workspace")`
     and `:/workspace` guards, so _require_abs_mount_path must reject it as non-canonical."""
@@ -186,9 +183,6 @@ def test_double_slash_clone_destination_collision_refused(module, tmp_path):
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
 
-
-# terminal.docker_extra_args is a second mount channel — appended verbatim to
-# `docker run` (docker.py:1368-1401) — so it must not carry a bind/volume flag.
 
 @pytest.mark.parametrize("extra", [
     pytest.param(["-v", "/data/coworkers:/stolen:ro"], id="short-space"),
