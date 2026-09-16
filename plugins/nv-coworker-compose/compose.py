@@ -590,37 +590,68 @@ def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
     return False
 
 
-_MOUNT_FLAGS_LONG = ("--volume", "--mount", "--volumes-from")
-# docker run's boolean short flags carry no value, so they may be bundled BEFORE the
-# one value-taking short flag in a cluster (`-itv /host:/c` parses as `-i -t -v`).
-# The value-taking `-v` must be caught even when hidden behind them.
-_DOCKER_BOOL_SHORT_FLAGS = frozenset("diPqt")
+# terminal.docker_extra_args is appended VERBATIM to the container `run`
+# (docker.py:1368-1401; the egress filter at :636-666 only touches env/network), a
+# second channel beside docker_volumes. Allowlist only flags whose name AND value
+# cannot select a host path, mount, socket, device, or namespace; every other flag, and
+# every short flag, is refused, so the channel is closed by construction. Mounts keep
+# exactly one policed channel, docker_volumes.
+# Value True = the flag consumes a value (inline ``=value`` or the next token); False =
+# boolean. Each permitted flag is a resource-limit, lifecycle, or hardening flag.
+_EXTRA_ARG_ALLOWLIST: Dict[str, bool] = {
+    "--shm-size": True,
+    "--cap-drop": True,
+    "--memory": True,
+    "--memory-swap": True,
+    "--memory-reservation": True,
+    "--cpus": True,
+    "--cpu-shares": True,
+    "--cpuset-cpus": True,
+    "--pids-limit": True,
+    "--ulimit": True,
+    "--restart": True,
+    "--stop-signal": True,
+    "--stop-timeout": True,
+    "--read-only": False,
+    "--init": False,
+    "--no-healthcheck": False,
+}
 
 
-def _is_mount_flag(token: str) -> bool:
-    """True when a ``docker run`` argument introduces a bind/volume/inherited mount.
+def _reject_disallowed_extra_args(extra_args: List[str], profile_name: str) -> None:
+    """Refuse any ``terminal.docker_extra_args`` flag not on ``_EXTRA_ARG_ALLOWLIST``.
 
-    ``terminal.docker_extra_args`` is appended VERBATIM to ``docker run``
-    (docker.py:1368-1401) with only an egress-collision filter (docker.py:636-666,
-    env/network flags — never ``-v``/``--mount``), so a mount flag placed here is a
-    second, unpoliced channel to the fleet host. Mounts have exactly one policed
-    channel — ``docker_volumes``, owned by ``_enforce_mount_composition`` — so any
-    mount flag in extra args is refused. Covers every form docker accepts: the long
-    ``--volume``/``--mount``/``--volumes-from`` flags (space- or ``=``-joined), and the
-    short ``-v`` flag as ``-v``, ``-v=<v>``, glued ``-v<v>``, or bundled behind boolean
-    short flags (``-itv<v>``, ``-iv <v>``) — docker parses shorthand left to right, so
-    ``-v`` still consumes the value after the leading booleans. Non-mount flags
-    (``--network``, ``--shm-size``, ``--cap-drop``, ``--volume-driver``, ``-e``, ``-p``)
-    are not matched, so legitimate extra args pass through untouched."""
-    value = token.strip()
-    if value.split("=", 1)[0] in _MOUNT_FLAGS_LONG:
-        return True
-    if not value.startswith("-") or value.startswith("--"):
-        return False
-    shorthands = value[1:]
-    while shorthands and shorthands[0] in _DOCKER_BOOL_SHORT_FLAGS:
-        shorthands = shorthands[1:]
-    return shorthands.startswith("v")
+    Tokens are walked left to right exactly as the container runtime parses them: a
+    value-taking allowed flag consumes its value (an inline ``=value`` or the next
+    token), and that value is never re-examined as a flag — so a mount flag can only
+    take effect in a flag position, where the allowlist rejects it. A value-taking flag
+    with an empty inline value, a missing value, or a space-separated value that is
+    itself flag-like is refused (fail closed); the last case removes the only path by
+    which a ``-v`` could be swallowed as a value instead of being rejected."""
+    i = 0
+    n = len(extra_args)
+    while i < n:
+        name, sep, inline = extra_args[i].strip().partition("=")
+        arity = _EXTRA_ARG_ALLOWLIST.get(name)
+        if arity is None:
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_extra_args flag {name!r} is not on the "
+                f"mount-safe allowlist (only vetted non-mount flags are permitted; mounts "
+                f"must go through the policed docker_volumes set)"
+            )
+        if arity:
+            if sep:
+                value = inline
+            else:
+                value = extra_args[i + 1].strip() if i + 1 < n else ""
+                if value and not value.startswith("-"):
+                    i += 1
+            if not value or (not sep and value.startswith("-")):
+                raise CompositionError(
+                    f"{profile_name}: terminal.docker_extra_args flag {name!r} must be "
+                    f"followed by a value"
+                )
+        i += 1
 
 
 def _enforce_mount_composition(
@@ -655,8 +686,8 @@ def _enforce_mount_composition(
         )
 
     # docker_volumes is not the only mount channel: terminal.docker_extra_args is
-    # appended verbatim to `docker run` (docker.py:1368-1401), so a mount flag there
-    # would bypass the closed set. Own that channel too — reject any mount-bearing arg.
+    # appended verbatim to `docker run` (docker.py:1368-1401), so a mount/host-exposure
+    # flag there would bypass the closed set. Own that channel too — allowlist it.
     extra_args = _get_dotted(config, "terminal.docker_extra_args")
     if extra_args is not None:
         if not isinstance(extra_args, list):
@@ -670,11 +701,7 @@ def _enforce_mount_composition(
                     f"{profile_name}: terminal.docker_extra_args entries must be strings; "
                     f"got {arg!r}"
                 )
-            if _is_mount_flag(arg):
-                raise CompositionError(
-                    f"{profile_name}: terminal.docker_extra_args may not carry a mount flag "
-                    f"({arg!r}); mounts must go through the policed docker_volumes set"
-                )
+        _reject_disallowed_extra_args(extra_args, profile_name)
 
     ws_root = _require_abs_mount_path(workspace_root, "workspace_root", profile_name)
     ws = ws_root / profile_name / "workspace"

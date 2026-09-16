@@ -109,13 +109,22 @@ the value:
   spec-injected mount is rejected.
 - Any **non-null** `terminal.docker_extra_args` that is not a list of strings
   (absent or `null` means "no extra args", matching the runtime's `extra_args or []`),
-  or any entry that carries a **mount-bearing flag** — `-v`, `--volume`, `--mount`, or
-  `--volumes-from`, in space-separated, `=`-joined, glued (`-v<path>`), or bundled
-  (`-itv<path>`) form. Extra args are appended **verbatim** to `docker run`
-  (`tools/environments/docker.py`) with only an egress filter (never `-v`/`--mount`),
-  so this is a second mount channel to the fleet host; the render owns it too and
-  confines all mounts to the policed `docker_volumes` set. Non-mount flags
-  (`--network`, `--shm-size`, `--cap-drop`, `--volume-driver`) pass through unchanged.
+  or any flag **not on the mount-safe allowlist**. Extra args are appended **verbatim**
+  to `docker run` (`tools/environments/docker.py`) with only an egress filter (never
+  `-v`/`--mount`), so this is a second mount channel to the fleet host. A blocklist of
+  mount flags is incomplete by construction — it must chase every runtime's surface
+  (podman's `--rootfs` boots an arbitrary host directory as the container root; `--tmpfs`
+  adds an out-of-set mount; `--use-api-socket` binds the host daemon socket) — so the
+  render instead **allowlists** only vetted non-mount flags and refuses everything else,
+  closing the channel by construction. Permitted: resource/lifecycle/hardening flags
+  such as `--shm-size`, `--cap-drop`, `--memory`, `--cpus`, `--pids-limit`, `--ulimit`,
+  `--restart`, `--read-only`, `--init`. Refused: every mount flag
+  (`-v`/`--volume`/`--mount`/`--volumes-from`/`--tmpfs`/`--rootfs`), every host-exposure
+  flag (`--device`, `--use-api-socket`, `--privileged`, `--network` — podman's
+  `--network=ns:<path>` joins a host namespace — and `--volume-driver`, which can route
+  image/anonymous volumes outside the closed set), every short flag, and any flag not on
+  the list — mounts have exactly one policed channel, `docker_volumes`. A value-taking
+  allowed flag must be followed by a concrete value.
 - Two install surfaces (or an install surface and the workspace, or an install
   surface and the shared-learnings clone) that target the same container destination.
 

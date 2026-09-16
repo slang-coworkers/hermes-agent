@@ -6,8 +6,9 @@ host path that smuggles a ':' (and thus extra host:container:mode fields); a
 malformed non-list terminal.docker_volumes that an earlier writer would otherwise
 normalize away before the mount-composition check can reject it; a non-canonical
 '//'-prefixed path that evades the string '/workspace' guards; and the second mount
-channel terminal.docker_extra_args, which is appended verbatim to `docker run` and
-must not carry a bind/volume flag. Same loader shape as the acceptance test: the
+channel terminal.docker_extra_args, which is appended verbatim to `docker run` and is
+allowlisted to vetted non-mount flags (every mount/host-exposure flag — including
+podman's --rootfs, --tmpfs, --use-api-socket — and every short flag is refused). Same loader shape as the acceptance test: the
 plugin is loaded through the real discovery path from an isolated HERMES_HOME with
 an empty HERMES_BUNDLED_PLUGINS, then driven through module.compose() on inline
 specs written under tmp_path.
@@ -185,22 +186,37 @@ def test_double_slash_clone_destination_collision_refused(module, tmp_path):
 
 
 @pytest.mark.parametrize("extra", [
-    pytest.param(["-v", "/data/coworkers:/stolen:ro"], id="short-space"),
-    pytest.param(["-v=/data/coworkers:/stolen"], id="short-equals"),
-    pytest.param(["-v/data/coworkers:/stolen"], id="short-glued"),
-    pytest.param(["-itv/data/coworkers:/stolen"], id="short-bundled-glued"),
-    pytest.param(["-iv", "/data/coworkers:/stolen"], id="short-bundled-space"),
-    pytest.param(["--volume", "/data/coworkers:/stolen"], id="long-space"),
-    pytest.param(["--volume=/data/coworkers:/stolen"], id="long-equals"),
+    pytest.param(["-v", "/data/coworkers:/stolen:ro"], id="short-v-space"),
+    pytest.param(["-v=/data/coworkers:/stolen"], id="short-v-equals"),
+    pytest.param(["-v/data/coworkers:/stolen"], id="short-v-glued"),
+    pytest.param(["-itv/data/coworkers:/stolen"], id="short-v-bundled-glued"),
+    pytest.param(["-iv", "/data/coworkers:/stolen"], id="short-v-bundled-space"),
+    pytest.param(["--volume", "/data/coworkers:/stolen"], id="volume-space"),
+    pytest.param(["--volume=/data/coworkers:/stolen"], id="volume-equals"),
     pytest.param(["--mount", "type=bind,source=/data/coworkers,target=/stolen"], id="mount-space"),
     pytest.param(["--mount=type=bind,source=/data/coworkers,target=/stolen"], id="mount-equals"),
     pytest.param(["--volumes-from", "orchestrator-container"], id="volumes-from"),
-    pytest.param(["--network=none", "-v", "/data/coworkers:/stolen"], id="mount-among-safe"),
+    pytest.param(["--rootfs", "/data/coworkers"], id="rootfs-space"),
+    pytest.param(["--rootfs=/data/coworkers"], id="rootfs-equals"),
+    pytest.param(["--tmpfs", "/data/coworkers/fixer/workspace"], id="tmpfs-space"),
+    pytest.param(["--tmpfs=/scratch"], id="tmpfs-equals"),
+    pytest.param(["--use-api-socket"], id="use-api-socket"),
+    pytest.param(["--device", "/dev/sda:/dev/sda"], id="device"),
+    pytest.param(["--privileged"], id="privileged"),
+    pytest.param(["--frobnicate=1"], id="unknown-long-flag"),
+    pytest.param(["-e", "FOO=bar"], id="short-env"),
+    pytest.param(["nginx"], id="bare-positional"),
+    pytest.param(["--network=ns:/proc/1/ns/net"], id="network-ns-hostpath"),
+    pytest.param(["--volume-driver=local"], id="volume-driver"),
+    pytest.param(["--shm-size=1g", "-v", "/data/coworkers:/stolen"], id="mount-after-allowed"),
 ])
-def test_docker_extra_args_mount_flag_refused(module, tmp_path, extra):
-    """Any mount-bearing flag in terminal.docker_extra_args is refused: it would reach
-    `docker run` verbatim (docker.py:1368-1401) and bind a host path outside the closed
-    docker_volumes set, defeating ISO-F13's containment invariant."""
+def test_docker_extra_args_disallowed_flag_refused(module, tmp_path, extra):
+    """Every docker_extra_args flag not on the mount-safe allowlist is refused — mount
+    flags plus podman's --rootfs (an arbitrary host dir as the container root), --tmpfs
+    (an out-of-set mount), --use-api-socket (the host daemon socket), --network=ns:<path>
+    (a host-namespace join), --volume-driver, --device, --privileged, unknown flags, bare
+    positionals, and short flags — all of which reach `docker run` verbatim
+    (docker.py:1368-1401). A mount flag in a later flag position is still caught."""
     spec = _write(tmp_path / "s", _base(types={"fixer": _type(docker_extra_args=extra)}))
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
@@ -217,16 +233,34 @@ def test_docker_extra_args_non_string_entry_refused(module, tmp_path):
     """A non-string docker_extra_args entry fails closed rather than being skipped the way
     docker.py:1371 would silently drop it."""
     spec = _write(tmp_path / "s", _base(
-        types={"fixer": _type(docker_extra_args=["--network=none", 5])},
+        types={"fixer": _type(docker_extra_args=["--shm-size=1g", 5])},
     ))
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
 
 
-def test_docker_extra_args_non_mount_flags_allowed(module, tmp_path):
-    """Only mount channels are policed: legitimate non-mount extra args render unchanged and
-    the closed docker_volumes set is unaffected."""
-    extra = ["--network=none", "--shm-size=1g", "--cap-drop=ALL", "--volume-driver=local"]
+@pytest.mark.parametrize("extra", [
+    pytest.param(["--memory"], id="value-flag-missing-value"),
+    pytest.param(["--memory="], id="value-flag-empty-inline-value"),
+    pytest.param(["--memory", "-v/data/coworkers:/stolen"], id="value-flag-flaglike-value"),
+])
+def test_docker_extra_args_value_flag_needs_concrete_value(module, tmp_path, extra):
+    """A value-taking allowlisted flag must be followed by a concrete, non-flag-like value
+    (inline or space-separated, never empty). The flag-like-value case is why the walker
+    cannot be tricked into swallowing a mount flag ("-v...") as an allowed flag's value
+    instead of rejecting it."""
+    spec = _write(tmp_path / "s", _base(types={"fixer": _type(docker_extra_args=extra)}))
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_extra_args_allowlisted_flags_pass_through(module, tmp_path):
+    """Allowlisted non-mount flags render unchanged — inline =value, space-separated value,
+    and boolean forms alike — and the closed docker_volumes set is unaffected."""
+    extra = [
+        "--shm-size=1g", "--cap-drop", "ALL", "--pids-limit", "512",
+        "--read-only", "--memory=512m", "--ulimit", "nofile=1024:2048",
+    ]
     spec = _write(tmp_path / "s", _base(types={"fixer": _type(docker_extra_args=extra)}))
     rendered = module.compose(str(spec), str(tmp_path / "out"))
     cfg = yaml.safe_load((Path(rendered["fixer"]) / "config.yaml").read_text(encoding="utf-8"))
