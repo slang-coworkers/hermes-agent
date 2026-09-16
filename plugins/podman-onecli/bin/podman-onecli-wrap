@@ -122,9 +122,10 @@ is_value_flag() {
     # token). Used only to find the image boundary — `-e`/`--env`/`-v`/`--volume`
     # are handled specially by validate_launch and are not listed here. Covers
     # every value-taking flag Hermes emits on a long-lived launch
-    # (tools/environments/docker.py) plus common run flags; an UNKNOWN flag is
-    # treated as boolean, which can only stop the scan EARLIER (fail closed),
-    # never later.
+    # (tools/environments/docker.py) plus common run flags. A pre-image option
+    # that is neither this nor is_boolean_flag is REFUSED fail-closed by the
+    # parse, so an unknown value-taking flag cannot consume the image token and
+    # let later pre-image -e/-v escape validation.
     case "$1" in
         --name | --hostname | -h | -w | --workdir | --user | -u | \
         --cpus | --memory | -m | --pids-limit | --shm-size | --storage-opt | \
@@ -133,7 +134,7 @@ is_value_flag() {
         --platform | --device | --ulimit | --sysctl | --dns | --dns-option | \
         --dns-search | --mount | --stop-signal | --stop-timeout | --volumes-from | \
         --group-add | --gpus | --ipc | --pid | --uts | --userns | --cgroupns | \
-        --cgroup-parent | --log-driver | --log-opt | --annotation | --secret | \
+        --cgroup-parent | --log-driver | --log-opt | --annotation | \
         --publish | -p | --expose | --cpuset-cpus | --cpuset-mems | --cpu-shares | \
         --memory-swap | --memory-reservation | --oom-score-adj | --uidmap | \
         --gidmap | --subuidname | --subgidname | --ip | --ip6 | --mac-address | \

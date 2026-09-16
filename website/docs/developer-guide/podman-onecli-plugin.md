@@ -89,6 +89,11 @@ position (after the image) are never counted as controls — and normalises the
 dispatch so alternate invocation forms cannot skip validation: a
 `podman container run|create …` sub-noun is treated as `run`/`create`, and a
 leading global option before the verb (which Hermes never emits) is refused.
+A pre-image `run`/`create` option that the wrapper recognises as neither
+value-taking nor boolean is refused fail-closed (so an unknown value-taking flag
+cannot consume the image token) — an operator adding an exotic flag via
+`terminal.docker_extra_args` must therefore use a form the wrapper knows, and
+`--secret` is refused outright.
 
 Two rules keep host secrets out of the sandbox. **Allowlist:** a name-only `-e
 NAME` is accepted only for a rendered egress/CA name, `NO_PROXY`/`no_proxy`, or a

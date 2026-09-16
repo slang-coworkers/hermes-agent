@@ -572,12 +572,12 @@ def test_wrapper_accepts_loopback_no_proxy(tmp_path):
 
 
 @pytest.mark.linux_only
-def test_wrapper_refuses_unknown_value_flag_before_env(tmp_path):
-    """AC-CRED-F28-1 (fail-closed dispatch): an unrecognised option before the
-    image is refused, so an unknown value-taking flag cannot consume the image
-    token and let a later pre-image `-e SECRET=value` escape the scan into the
-    sandbox and the audit log. `--detach-keys ctrl-x -e API_TOKEN=…` is refused;
-    podman is never invoked and the secret never reaches the log or stderr."""
+def test_wrapper_refuses_detach_keys_value_before_env(tmp_path):
+    """AC-CRED-F28-1 (known value-flag boundary): a KNOWN value-taking flag
+    (`--detach-keys ctrl-x`) has its value consumed as a value, so the image
+    boundary is not shifted and a following pre-image `-e API_TOKEN=value` is
+    still caught by the value-bearing-env rule. Podman is never invoked and the
+    secret never reaches the log or stderr."""
     stub = _record_stub(tmp_path)
     rec = tmp_path / "rec.txt"
     log = tmp_path / "wrapper.log"
@@ -589,8 +589,6 @@ def test_wrapper_refuses_unknown_value_flag_before_env(tmp_path):
     argv = ["run", "-d", "--name", "s"]
     for name in PROXY_NAMES + CA_NAMES:
         argv += ["-e", name]
-    # An unknown value-taking flag whose value looks like a bare positional,
-    # followed by a value-bearing secret env — the exact image-boundary shift.
     argv += ["--detach-keys", "ctrl-x", "-e", "API_TOKEN=sk-live-canary"]
     argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
 
@@ -605,6 +603,38 @@ def test_wrapper_refuses_unknown_value_flag_before_env(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
     logged = log.read_text(encoding="utf-8")
     assert "sk-live-canary" not in logged and "sk-live-canary" not in result.stderr
+
+
+@pytest.mark.linux_only
+def test_wrapper_refuses_unknown_pre_image_option(tmp_path):
+    """AC-CRED-F28-1 (fail-closed dispatch): a pre-image option that is neither a
+    known value-taking nor a known boolean flag is refused outright — an unknown
+    value-taking flag must not be able to consume the image token and let later
+    pre-image `-e`/`-v` escape the scan. `--future-value-flag ctrl-x` is refused;
+    podman is never invoked."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    ca_host = tmp_path / "ca.crt"
+    ca_host.write_text("--CA--", encoding="utf-8")
+
+    argv = ["run", "-d", "--name", "s"]
+    for name in PROXY_NAMES + CA_NAMES:
+        argv += ["-e", name]
+    argv += ["--future-value-flag", "ctrl-x"]  # unknown to both allowlists
+    argv += ["-v", f"{ca_host}:{EXPECTED_CA}:ro", "img", "sleep", "infinity"]
+
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env=_launch_env(tmp_path, stub, rec, log),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert rec.read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.linux_only
