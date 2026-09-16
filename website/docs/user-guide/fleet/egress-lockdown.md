@@ -31,9 +31,15 @@ stock iron-proxy apparatus:
   `ANTHROPIC_API_KEY`) carries a **non-secret placeholder** (`onecli-injects-at-request-time`),
   never a real credential — OneCLI injects the real value at request time. The removed v1
   `HERMES_PROXY_TOKEN_*` swap tokens are forbidden outright.
-- `terminal.docker_volumes` — exactly **one** canonical `<ca_host_path>:<ca_container_path>:ro`
-  read-only mount for the OneCLI CA. The render is idempotent (it dedups and coexists with
-  other `docker_volumes` entries) and refuses a divergent source at the same container path.
+- `terminal.docker_volumes` — the render appends exactly **one** canonical
+  `<ca_host_path>:<ca_container_path>:ro` read-only mount for the OneCLI CA, after ISO-F13's
+  coworker mount composition has built the profile's closed mount set. The render owns that
+  mount: **no** profile may pre-declare a `docker_volumes` entry targeting the CA container
+  path, and no composed mount (e.g. an `install_surface` equal to the CA path) may resolve to
+  it — such a mount is refused. For a coworker, ISO-F13 already rejects any spec-declared
+  `docker_volumes` entry except the shared-learnings clone; the egress pre-pass projects that
+  composition onto a copy of every coworker, so a CA-target mount fails before any profile is
+  written.
 - `terminal.docker_persist_across_processes: false` — no cross-process container reuse (the
   reuse probe uses a `{{.Label …}}` `ps` format broken on podman 3.4.4).
 - `terminal.docker_image`, `terminal.container_memory`, `terminal.container_cpu` — the
@@ -76,8 +82,10 @@ nothing), so no partial fleet lands on disk. The operator-visible messages are o
   the runtime strips env names). Remove it; the render owns it.
 - `docker_forward_env` / `env_passthrough forwards a controlled egress var (<NAME>)` — a
   controlled env name in either host-env forwarding list.
-- `egress collision on the CA mount — a divergent source targets <ca_container_path>` — a
-  `terminal.docker_volumes` entry that mounts a different source at the CA container path.
+- `egress collision on the CA mount — a mount targets <ca_container_path>` — a
+  `terminal.docker_volumes` entry (or a composed mount, e.g. an `install_surface` equal to the
+  CA path) that lands at the CA container path. The render owns the CA mount, so no profile may
+  declare one.
 - `docker_extra_args must not mount at the CA path <ca_container_path>` — ANY
   `-v`/`--volume`/`--mount` in `docker_extra_args` targeting the CA path, canonical or
   divergent (the render owns that mount via `docker_volumes`, so a duplicate is refused too).
@@ -87,8 +95,11 @@ nothing), so no partial fleet lands on disk. The operator-visible messages are o
   unconditionally); a `--network`/`--net` override; or a `--memory`/`-m`/`--cpus` override of the
   pinned resource limits.
 
-Unrelated `docker_env` / `docker_extra_args` entries (a legitimate `LANG`, an unrelated
-`-v /data:/data:ro`) are preserved.
+Unrelated `docker_env` keys (a legitimate `LANG`) and mount-safe allowlisted `docker_extra_args`
+(e.g. `--shm-size 64m`) are preserved. Coworker mounts are **not** carried in `docker_extra_args`
+— ISO-F13's coworker allowlist rejects every `-v`/`--volume`/`--mount` there; declare mounts
+through the fleet's mount surfaces (`workspace_root`, `install_surfaces`, the shared-learnings
+clone) instead.
 
 The `egress:` block itself is validated: a provider name that is malformed or names a reserved
 egress control is refused (`egress.provider_env must not name a reserved egress control`).

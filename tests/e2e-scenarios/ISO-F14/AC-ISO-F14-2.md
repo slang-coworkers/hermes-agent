@@ -18,7 +18,7 @@ P7/APF (ruling pt 4/6).
 
 ## Setup
 - The AC-ISO-F14-1 container is up — **reuse it, do not spawn a second.**
-- **Required testbed prerequisite (ADDENDUM item 9, operator deployment — NOT rendered
+- **Required testbed prerequisite (operator deployment — NOT rendered
   by ISO-F14):** a host egress rule for uid `hermes-sandbox` permitting only
   `172.17.0.1:10255`, and the S6 pre-flight's direct-connect check (item 5) has
   confirmed it (a raw connect to a non-proxy host from the sandbox uid is blocked).

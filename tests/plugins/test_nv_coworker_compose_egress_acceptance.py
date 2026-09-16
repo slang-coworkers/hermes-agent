@@ -79,18 +79,17 @@ def _load(tmp_path, monkeypatch):
     return loaded.module
 
 
-# ISO-F13 #29 (merged into the base, tip fb11fcab) added _enforce_mount_composition
-# (compose.py:657, called at :2396 INSIDE the COWORKER loop only): for coworker roles it OWNS
-# terminal.docker_volumes as a closed set and REQUIRES terminal.container_persistent (bool, no
-# default — compose.py:684) plus a top-level absolute workspace_root (:706). The DEFAULT path
-# (:2414-2428) does NOT go through that gate. _make_spec therefore sets container_persistent on the
-# coworker role (via the spine base config) — required — and also on default_config, where it is
-# harmless (DEFAULT skips the gate); workspace_root is a required top-level key for the coworker.
+# ISO-F13's _enforce_mount_composition (called INSIDE the coworker loop only) OWNS
+# terminal.docker_volumes as a closed set for coworker roles and REQUIRES terminal.container_persistent
+# (an explicit bool, no default) plus a top-level absolute workspace_root. The DEFAULT profile does NOT
+# go through that gate. _make_spec therefore sets container_persistent on the coworker role (via the
+# spine base config) — required — and on default_config too, where it is harmless (DEFAULT skips the
+# gate); workspace_root is a required top-level key for the coworker.
 WORKSPACE_ROOT = "/data/coworkers"
 # ISO-F13's closed set gives a coworker exactly one workspace mount `{ws}:{ws}:rw` where
-# `ws = {workspace_root}/{profile_name}/workspace` (merged compose.py:706-708, :790). The coworker
-# type in this fixture is "worker" (no shared-learnings clone, install_surfaces=[]), so its full
-# docker_volumes after ISO-F14 appends the CA mount must be exactly [WORKER_WORKSPACE_MOUNT, CA_MOUNT].
+# `ws = {workspace_root}/{profile_name}/workspace`. The coworker type in this fixture is "worker"
+# (no shared-learnings clone, install_surfaces=[]), so its full docker_volumes after ISO-F14 appends
+# the CA mount must be exactly [WORKER_WORKSPACE_MOUNT, CA_MOUNT].
 WORKER_WORKSPACE_MOUNT = f"{WORKSPACE_ROOT}/worker/workspace:{WORKSPACE_ROOT}/worker/workspace:rw"
 
 
@@ -108,9 +107,9 @@ def _make_spec(tmp_path, *, egress=DEFAULT_EGRESS, type_config=None, spine_confi
     (spec_dir / "spines").mkdir(parents=True)
     base_config = _with_persistent(spine_config)
     if extra_volumes:
-        # Seed spine docker_volumes with a rogue mount to prove ISO-F13 #29's closed-set owner
-        # (compose.py:657/:745-750) rejects any spec-declared docker_volumes entry except the
-        # shared-learnings clone — so a rogue CA cannot pre-exist at the CA container-path.
+        # Seed spine docker_volumes with a rogue mount to prove ISO-F13's closed-set owner rejects any
+        # spec-declared docker_volumes entry except the shared-learnings clone — so a rogue CA cannot
+        # pre-exist at the CA container-path.
         terminal = dict(base_config.get("terminal") or {})
         terminal["docker_volumes"] = list(terminal.get("docker_volumes") or []) + list(extra_volumes)
         base_config["terminal"] = terminal
@@ -124,8 +123,8 @@ def _make_spec(tmp_path, *, egress=DEFAULT_EGRESS, type_config=None, spine_confi
         "skills_root": "skills",
         "workflows_root": "workflows",
         "overlays_root": "overlays",
-        "workspace_root": WORKSPACE_ROOT,   # ISO-F13 #29: required top-level absolute path
-        "install_surfaces": [],             # ISO-F13 #29: optional, must be a list if present
+        "workspace_root": WORKSPACE_ROOT,   # ISO-F13: required top-level absolute path
+        "install_surfaces": [],             # ISO-F13: optional, must be a list if present
         "spines": {"base": {"source": "spines/base.yaml"}},
         "types": {
             "worker": {"extends": ["base"], "identity": "WORKER", "config": type_config or {}},
@@ -133,8 +132,8 @@ def _make_spec(tmp_path, *, egress=DEFAULT_EGRESS, type_config=None, spine_confi
     }
     if egress is not None:
         spec["egress"] = egress
-    # The DEFAULT profile does NOT pass through _enforce_mount_composition (:2414-2428), so it does
-    # not require container_persistent; set it on default_config defensively/harmlessly anyway.
+    # The DEFAULT profile does NOT pass through _enforce_mount_composition, so it does not require
+    # container_persistent; set it on default_config defensively/harmlessly anyway.
     spec["default_config"] = _with_persistent(default_config)
     spec_path = spec_dir / "coworker-types.yaml"
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
@@ -216,35 +215,27 @@ def test_ac_iso_f14_3(tmp_path, monkeypatch):
         found, cpu = _dig(cfg, "terminal.container_cpu")
         assert found and cpu == CONTAINER_CPU, f"{name}: container_cpu == {cpu!r}, want {CONTAINER_CPU!r}"
 
-    # _enforce_egress must APPEND its CA mount to ISO-F13's coworker closed set, NOT replace it:
-    # an implementation emitting only [CA_MOUNT] would pass the per-profile CA-target check above yet
-    # drop ISO-F13's workspace mount and break cross-row composition. Assert both survive on the
-    # coworker profile (the DEFAULT path has no ISO-F13 mount composition, so this is coworker-only).
+    # The coworker's docker_volumes must be ISO-F13's workspace mount followed by ISO-F14's appended
+    # CA mount — append, not replace, and in that order (DEFAULT has no ISO-F13 mount composition).
     worker_dir = next(d for n, d in rendered.items() if n != "default")
     _, worker_vols = _dig(_config(worker_dir), "terminal.docker_volumes")
     assert worker_vols == [WORKER_WORKSPACE_MOUNT, CA_MOUNT], (
-        f"coworker docker_volumes must be EXACTLY ISO-F13's workspace mount + ISO-F14's appended CA "
-        f"mount — an implementation that replaces the set (drops the workspace mount) or reorders it "
-        f"fails here: {worker_vols!r}"
+        f"coworker docker_volumes must be ISO-F13's workspace mount + ISO-F14's appended CA mount, "
+        f"in that order: {worker_vols!r}"
     )
 
-    # ADDENDUM item 2: proxy.enabled:false must ALSO be in the machine-wide managed fragment
-    # (out_root/managed/config.yaml), which the managed-scope layer deep-merges managed-wins onto
-    # every profile — so the egress topology cannot be overridden per profile.
+    # proxy.enabled:false must ALSO be in the machine-wide managed fragment: the managed scope
+    # deep-merges managed-wins onto every profile, so the egress topology cannot be overridden per profile.
     managed_cfg = _config(tmp_path / "out" / "managed")
     found, managed_proxy = _dig(managed_cfg, "proxy.enabled")
     assert found and managed_proxy is False, f"managed fragment proxy.enabled must be False, got {managed_proxy!r}"
 
-    # ISO-F14's fail-closed egress belt + CA-mount owner boundary, on EVERY profile. ISO-F13 #29
-    # covers COWORKER profiles ONLY: _enforce_mount_composition (compose.py:657, its extra-args
-    # allowlist at :704) is called at :2396 INSIDE the coworker loop, while the DEFAULT path
-    # (:2414-2428) calls neither it nor _enforce_shared_learnings; and it never touches
-    # docker_forward_env / env_passthrough for ANY profile. So ISO-F14 must enforce the egress belt
-    # itself for the DEFAULT profile and for those host-re-injection keys, as a PRE-PASS over every
-    # profile BEFORE any config.yaml is written (all-or-nothing). Each case → CompositionError AND
-    # no partial fleet on disk. (An idempotent "identical CA mount already present → still one" case
-    # is intentionally NOT asserted: no spec profile may pre-declare a docker_volumes CA mount — the
-    # coworker path is sealed by ISO-F13, the DEFAULT path rejected by ISO-F14's belt.)
+    # ISO-F14's fail-closed egress belt + CA-mount owner boundary, on EVERY profile. ISO-F13 covers
+    # COWORKER profiles only (its mount composition + extra-args allowlist run inside the coworker loop),
+    # while the DEFAULT path goes through neither, and ISO-F13 never touches docker_forward_env /
+    # env_passthrough for any profile. So ISO-F14's belt owns those channels and the DEFAULT profile, as a
+    # PRE-PASS over every profile BEFORE any config.yaml is written: each case → CompositionError AND no
+    # partial fleet on disk. No profile may pre-declare a docker_volumes CA mount.
     collisions = {
         # rogue CA mount at the OneCLI CA path — must never shadow the OneCLI CA:
         "spine_rogue_ca": dict(extra_volumes=[f"/tmp/untrusted.crt:{CA_CONTAINER_PATH}:ro"]),  # coworker path (ISO-F13 seal)
@@ -258,8 +249,8 @@ def test_ac_iso_f14_3(tmp_path, monkeypatch):
         # ISO-F14 rejects (a clear fail-closed error) rather than silently force-overwriting:
         "type_docker_env": dict(type_config={"terminal": {"docker_env": {"HTTPS_PROXY": "http://rogue.invalid"}}}),
         "default_docker_env": dict(default_config={"terminal": {"docker_env": {"SSL_CERT_FILE": "/tmp/rogue.pem"}}}),
-        # DEFAULT docker_extra_args — ISO-F13's allowlist is coworker-only (its _reject runs inside
-        # _enforce_mount_composition at :2396), so ISO-F14 must reject these on the DEFAULT path.
+        # DEFAULT docker_extra_args — ISO-F13's allowlist is coworker-only (its reject runs inside
+        # _enforce_mount_composition), so ISO-F14 must reject these on the DEFAULT path.
         # --env-file is rejected UNCONDITIONALLY (its contents cannot be validated offline):
         "default_extra_args_e": dict(default_config={"terminal": {"docker_extra_args": ["-e", "HTTPS_PROXY=http://rogue.invalid"]}}),
         "default_extra_args_env_file": dict(default_config={"terminal": {"docker_extra_args": ["--env-file=/tmp/rogue.env"]}}),
@@ -312,8 +303,8 @@ def _fake_run_factory(calls):
 
 
 def _reset_docker_caches(monkeypatch, docker_mod):
-    # Both probe results are cached process-wide (docker.py:747-748); reset them so BOTH probes
-    # fire in this test. find_docker is patched so no real binary is required.
+    # Both probe results are cached process-wide; reset them so BOTH probes fire in this test.
+    # find_docker is patched so no real binary is required.
     for attr in ("_cgroup_limits_ok", "_storage_opt_ok", "_docker_executable"):
         if hasattr(docker_mod, attr):
             monkeypatch.setattr(docker_mod, attr, None, raising=False)
@@ -392,8 +383,7 @@ def test_ac_iso_f14_4(tmp_path, monkeypatch):
         assert _has_adjacent(spawn, "-e", key), f"spawn missing name-only -e {key}: {spawn!r}"
         assert env[key] not in spawn, f"spawn leaked the VALUE of {key} into argv (must be name-only)"
 
-    # The two probes are fixed argvs (docker.py:778-780, :1852) — assert them exactly so an
-    # implementation that reorders/omits/pads them cannot pass.
+    # The two probes are fixed argvs — assert them exactly (argv order, flags and values).
     cgroup_probes = [c for c in _run_calls(calls) if "--rm" in c]
     assert cgroup_probes, f"cgroup-limits probe not fired: {calls!r}"
     assert cgroup_probes[0][1:] == [

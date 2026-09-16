@@ -1,10 +1,9 @@
 """Non-AC behavior-contract unit tests for the nv-coworker-compose egress writer (ISO-F14).
 
-These complement the two ``pytest:`` acceptance criteria (test_ac_iso_f14_3/_4). They cover
-the fail-closed collision belt (ADR design item 3), late-DEFAULT-only all-or-nothing
-atomicity (which the acceptance test's spine-seeded CA-conflict case does NOT exercise —
-there the first worker raises), the host.docker.internal -> bridge-IP normalization, and the
-non-secret placeholder shape. No network; nothing written under ~/.hermes.
+These complement the two ``pytest:`` acceptance criteria (test_ac_iso_f14_3/_4): the fail-closed
+collision belt, all-or-nothing atomicity across coworker and DEFAULT profiles, the
+host.docker.internal -> bridge-IP normalization, and the non-secret placeholder shape. No network;
+nothing written under ~/.hermes.
 """
 
 import shutil
@@ -52,11 +51,13 @@ def _load(tmp_path, monkeypatch):
     return loaded.module
 
 
-def _make_spec(tmp_path, *, egress=BASE_EGRESS, spine_config=None, default_config=None, name="spec"):
+def _make_spec(tmp_path, *, egress=BASE_EGRESS, spine_config=None, default_config=None,
+               types=None, install_surfaces=None, orchestrator_profile="worker", name="spec"):
     spec_dir = tmp_path / name
     (spec_dir / "spines").mkdir(parents=True)
     base_config = dict(spine_config or {})
-    # ISO-F13 (#29) requires container_persistent set explicitly to a bool per role.
+    # ISO-F13 requires container_persistent set explicitly to a bool per role; the spine base carries
+    # it so every type that extends "base" inherits it.
     terminal = dict(base_config.get("terminal") or {})
     terminal.setdefault("container_persistent", True)
     base_config["terminal"] = terminal
@@ -66,13 +67,13 @@ def _make_spec(tmp_path, *, egress=BASE_EGRESS, spine_config=None, default_confi
     spec = {
         "project": "iso-f14",
         "default_profile": "default",
-        "orchestrator_profile": "worker",
-        # ISO-F13 (#29) mount composition requires an explicit workspace_root (abs, outside the
-        # fleet Hermes root); install_surfaces defaults to none.
+        "orchestrator_profile": orchestrator_profile,
+        # ISO-F13 mount composition requires an explicit workspace_root (abs, outside the fleet
+        # Hermes root); install_surfaces defaults to none.
         "workspace_root": "/data/coworkers",
-        "install_surfaces": [],
+        "install_surfaces": [] if install_surfaces is None else install_surfaces,
         "spines": {"base": {"source": "spines/base.yaml"}},
-        "types": {"worker": {"extends": ["base"], "identity": "WORKER", "config": {}}},
+        "types": types or {"worker": {"extends": ["base"], "identity": "WORKER", "config": {}}},
     }
     if egress is not None:
         spec["egress"] = egress
@@ -99,6 +100,37 @@ def test_late_default_collision_is_atomic(tmp_path, monkeypatch):
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(out))
     assert not list(out.rglob("config.yaml")), "no partial fleet may be written on a late-profile collision"
+
+
+def test_canonical_ca_mount_on_second_coworker_is_atomic(tmp_path, monkeypatch):
+    """A CA mount pre-declared on a SECOND coworker fails the whole render with no partial fleet.
+    ISO-F13 owns each coworker's docker_volumes as a closed set (the render appends the CA mount
+    itself), so the egress pre-pass projects that composition onto a COPY of every coworker and
+    rejects a spec-declared CA mount there — before the first coworker is written, so neither lands."""
+    module = _load(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    ca_mount = f"{CA_HOST_PATH}:{CA_CONTAINER_PATH}:ro"
+    types = {
+        "worker-a": {"extends": ["base"], "identity": "A", "config": {}},
+        "worker-b": {"extends": ["base"], "identity": "B",
+                     "config": {"terminal": {"docker_volumes": [ca_mount]}}},
+    }
+    spec = _make_spec(tmp_path, name="two-coworkers", types=types, orchestrator_profile="worker-a")
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(out))
+    assert not list(out.rglob("config.yaml")), "no coworker may be written when a later coworker declares a CA mount"
+
+
+def test_generated_install_surface_ca_collision_is_atomic(tmp_path, monkeypatch):
+    """An install_surface equal to the CA container path makes ISO-F13 compose a same-path mount at
+    that path — a CA-target mount the render did not author. The egress pre-pass projects mount
+    composition, so the belt catches that generated mount before any profile is written."""
+    module = _load(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    spec = _make_spec(tmp_path, name="surface-ca", install_surfaces=[CA_CONTAINER_PATH])
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(out))
+    assert not list(out.rglob("config.yaml")), "a composition-generated CA-target mount must fail before any write"
 
 
 def test_docker_env_controlled_key_rejected(tmp_path, monkeypatch):
@@ -159,6 +191,24 @@ def test_docker_extra_args_collisions_rejected(tmp_path, monkeypatch, extra):
     spec = _make_spec(tmp_path, name="extra", spine_config={"terminal": {"docker_extra_args": extra}})
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
+
+
+@pytest.mark.parametrize("extra", [
+    ["-v", CA_CONTAINER_PATH],            # separate, target-only
+    [f"--volume={CA_CONTAINER_PATH}"],    # joined, target-only
+    [f"-v{CA_CONTAINER_PATH}"],           # attached, target-only
+])
+def test_default_target_only_ca_volume_rejected(tmp_path, monkeypatch, extra):
+    """A colon-less `-v <ca_path>` mounts an anonymous volume AT the CA path, shadowing the OneCLI CA.
+    The DEFAULT profile skips ISO-F13's docker_extra_args allowlist, so ISO-F14's belt must catch every
+    target-only spelling on that profile, before any config.yaml is written."""
+    module = _load(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    spec = _make_spec(tmp_path, name="default-targetonly",
+                      default_config={"terminal": {"docker_extra_args": extra}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(out))
+    assert not list(out.rglob("config.yaml")), "a target-only CA volume on DEFAULT must fail before any write"
 
 
 @pytest.mark.parametrize("name", ["HTTPS_PROXY", " HTTPS_PROXY ", "NODE_EXTRA_CA_CERTS",

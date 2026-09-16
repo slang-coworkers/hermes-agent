@@ -19,7 +19,7 @@ container; AC-ISO-F14-2 and AC-ISO-F14-5 reuse it (do NOT spawn a second).
 ## Setup
 - The `iso-f14-worker` fixture profile is installed (the tester installs the
   `fixtures:` list before this Setup runs — do NOT re-install it here) and its OneCLI
-  agent has its secrets assigned (CRED-F28 pre-flight, ADDENDUM item 6).
+  agent has its secrets assigned (CRED-F28 pre-flight).
 - `terminal.docker_image` in the fixture is substituted for the actual fleet sandbox
   image (one shipping `bash` + `curl`; `docker.py` execs `bash`).
 - The §4c rootless-podman socket is reachable (`CONTAINER_HOST`, `$PODMAN` v3.4.4). The

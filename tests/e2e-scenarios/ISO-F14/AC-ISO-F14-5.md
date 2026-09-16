@@ -13,7 +13,7 @@ The cgroup limits the render pins survive the wrapper's fail-closed allowlist an
 the kernel: on the same Hermes-spawned sandbox as AC-ISO-F14-1,
 `podman inspect --format '{{.HostConfig.Memory}}'` returns a non-zero value equal to the
 pinned `container_memory` — proving the render's limit was not dropped by a fail-closed
-`_cgroup_limits_ok=False` (ADDENDUM item 4).
+`_cgroup_limits_ok=False`.
 
 ## Setup
 - The AC-ISO-F14-1 container is up — reuse it. Capture its container id/name from

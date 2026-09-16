@@ -616,7 +616,9 @@ def _extra_arg_env_name(tok: str, nxt: Any) -> Optional[str]:
 def _extra_arg_mount_dest(tok: str, nxt: Any) -> Optional[str]:
     """The container destination a ``docker_extra_args`` mount token targets, or None.
     Handles ``-v``/``--volume`` (separate, joined, attached) and ``--mount`` (its
-    ``dst=``/``destination=``/``target=`` field)."""
+    ``dst=``/``destination=``/``target=`` field). A colon-less ``-v`` spec is a
+    target-only anonymous volume whose single field IS the container destination
+    (``-v /p`` mounts an anonymous volume AT ``/p``), so it must not read as "no mount"."""
     spec: Optional[str] = None
     is_mount = False
     if tok in ("-v", "--volume"):
@@ -639,7 +641,9 @@ def _extra_arg_mount_dest(tok: str, nxt: Any) -> Optional[str]:
                 return value.strip()
         return None
     parts = spec.split(":")
-    return parts[1] if len(parts) >= 2 else None
+    if len(parts) == 1:
+        return parts[0]
+    return parts[1]
 
 
 def _consumes_next_extra_arg(tok: str) -> bool:
@@ -760,11 +764,11 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                 f"{profile_name}: terminal.docker_volumes must be a list, "
                 f"got {type(volumes).__name__}")
         for v in volumes:
-            if _targets_ca(v, params["ca_container_path"]) and str(v) != params["ca_mount"]:
+            if _targets_ca(v, params["ca_container_path"]):
                 raise CompositionError(
-                    f"{profile_name}: egress collision on the CA mount — a divergent source targets "
-                    f"{params['ca_container_path']!r}; only the canonical {params['ca_mount']!r} "
-                    f"is allowed")
+                    f"{profile_name}: egress collision on the CA mount — a mount targets "
+                    f"{params['ca_container_path']!r}; the render owns the CA mount, so no profile "
+                    f"may declare one and no composed mount may resolve to that path")
 
     extra = terminal.get("docker_extra_args")
     if extra is not None:
@@ -2715,9 +2719,36 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # specs render unchanged.
     egress_block = data.get("egress")
     egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
+
+    # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never on
+    # the DEFAULT/multiplexer gateway root. Mount composition (ISO-F13) owns each
+    # coworker's docker_volumes. Both are resolved here, before the egress pre-pass,
+    # so the pre-pass can project them onto a copy of every coworker; the Phase-B
+    # write loop reuses the same values.
+    shared_learnings_root = data.get("shared_learnings_root")
+    workspace_root = data.get("workspace_root")
+    install_surfaces = data.get("install_surfaces")
+
     if egress_params is not None:
         for eg_tname, eg_resolved in resolved_by_type.items():
-            _assert_egress_safe(eg_resolved["config"], egress_params, eg_tname)
+            # A coworker's docker_volumes is composed by ISO-F13's _enforce_mount_composition
+            # (plus the shared-learnings clone) in the write loop, so a spec-declared or a
+            # composition-generated CA-target mount only surfaces there. Project both onto a
+            # deep copy and assert against THAT, so such a mount is rejected before any profile
+            # is written; the copy leaves the resolved config untouched for the write loop,
+            # which composes it again.
+            projected = copy.deepcopy(eg_resolved["config"])
+            if shared_learnings_root:
+                _enforce_shared_learnings(
+                    projected, str(shared_learnings_root),
+                    is_orchestrator=(eg_tname == orchestrator_profile),
+                )
+            _enforce_mount_composition(
+                projected, eg_tname, workspace_root, install_surfaces,
+                shared_learnings_root, is_orchestrator=(eg_tname == orchestrator_profile),
+            )
+            _assert_egress_safe(projected, egress_params, eg_tname)
+        # DEFAULT never goes through mount composition, so its raw config IS what is written.
         _assert_egress_safe(default_config, egress_params, default_profile)
 
     session_flags = _resolve_session_mode(default_config, resolved_by_type)
@@ -2725,14 +2756,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # the DEFAULT union, and the profile-keyed veto policy in every profile), so
     # it runs ONCE here — after Phase A resolve, before the per-profile writes.
     _render_mcp_scope(resolved_by_type, default_config, default_profile)
-
-    # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never
-    # on the DEFAULT/multiplexer gateway root. Absent for fleets without shared
-    # learnings, in which case the enforcement is skipped entirely.
-    shared_learnings_root = data.get("shared_learnings_root")
-
-    workspace_root = data.get("workspace_root")
-    install_surfaces = data.get("install_surfaces")
 
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
