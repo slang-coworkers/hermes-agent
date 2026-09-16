@@ -1,0 +1,33 @@
+# CRED-F28 AC-2 fixture (bot B, the ungranted sibling). Identical render to bot
+# A; it is onboarded (identity ensured, empty grant) but never granted a secret
+# set, so its sandbox curl through the proxy must return 401.
+secrets:
+  onecli:
+    enabled: true          # activate the OneCLI SecretSource (off by default)
+proxy:
+  enabled: false
+terminal:
+  backend: docker
+  docker_image: hermes-sandbox:pinned
+  container_memory: 1024
+  container_cpu: 0.5
+  docker_persist_across_processes: false
+  docker_network: true
+  # Per-profile identity needs a per-turn container: an inherited non-empty
+  # shared-container key would collapse distinct profiles onto one sandbox.
+  docker_shared_container_key: ""
+plugins:
+  enabled:
+    - podman-onecli
+  entries:
+    podman-onecli:
+      settings:
+        # OneCLI control-plane base URL; the substrate provides the real value.
+        gateway_api_base_url: "https://onecli.local"
+        # Bootstrap key name; its VALUE lives only in the host env, never here.
+        api_key_env: "ONECLI_API_KEY"
+        # Selective grants per profile ([] = ungranted). Every onboarded profile
+        # must have an entry; both start ungranted for the 401 -> 200 -> 401 proof.
+        profile_secret_sets:
+          cred-f28-bot-a: []
+          cred-f28-bot-b: []
