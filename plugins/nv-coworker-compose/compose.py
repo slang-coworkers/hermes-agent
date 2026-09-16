@@ -2286,7 +2286,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # learnings, in which case the enforcement is skipped entirely.
     shared_learnings_root = data.get("shared_learnings_root")
 
-    # Uniform fleet mount inputs, policed per coworker type below (validated in the enforcer).
     workspace_root = data.get("workspace_root")
     install_surfaces = data.get("install_surfaces")
 
