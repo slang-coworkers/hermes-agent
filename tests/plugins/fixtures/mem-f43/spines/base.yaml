@@ -16,6 +16,7 @@ config:
   skills:
     external_dirs: ["/data/some-other-skills"]
   terminal:
+    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
     backend: "docker"
     docker_image: "hermes-sandbox:pinned"
     docker_mount_cwd_to_workspace: true

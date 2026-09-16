@@ -41,3 +41,7 @@ rooms:
   gov-f23-room:
     name: "GOV-F23 Live"
     members: [gov-f23-worker, gov-f23-orchestrator]
+
+# ISO-F13: mandatory fleet key — workspace root mounted rw per coworker,
+# outside the fleet Hermes root. A spec omitting it now fails closed.
+workspace_root: /data/coworkers

@@ -60,7 +60,8 @@ def _write_spec(spec_dir: Path, spec: dict) -> Path:
             {
                 "identity": "Base.",
                 "invariants": ["Help."],
-                "config": {"curator": {"enabled": False, "backup": {"enabled": False, "keep": 0}}},
+                "config": {"curator": {"enabled": False, "backup": {"enabled": False, "keep": 0}},
+                           "terminal": {"container_persistent": True}},
             },
             sort_keys=False,
         ),
@@ -76,6 +77,7 @@ def _write_spec(spec_dir: Path, spec: dict) -> Path:
 
 def _base_spec(default_config: dict) -> dict:
     return {
+        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},

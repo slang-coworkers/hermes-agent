@@ -14,6 +14,7 @@ config:
   memory: {memory_char_limit: 4000, user_char_limit: 2000}
   skills: {external_dirs: ["/data/shared-skills"]}
   terminal:
+    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
     backend: "docker"
     docker_env: {}
     docker_mount_cwd_to_workspace: true

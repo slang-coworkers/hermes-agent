@@ -77,6 +77,7 @@ FIXER_SCOPE = {
 # --------------------------------------------------------------------------- #
 def _base_spec() -> dict:
     return {
+        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
         "project": "demo",
         "default_profile": "default",
         "orchestrator_profile": "orchestrator",

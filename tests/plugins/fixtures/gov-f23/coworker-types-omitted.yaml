@@ -54,3 +54,7 @@ default_config:
     multiplex_profiles: true
     multiplex_profile_allowlist: ["builder", "reviewer"]
   sessions: {auto_prune: false}
+
+# ISO-F13: mandatory fleet key — workspace root mounted rw per coworker,
+# outside the fleet Hermes root. A spec omitting it now fails closed.
+workspace_root: /data/coworkers

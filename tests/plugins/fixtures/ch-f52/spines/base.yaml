@@ -5,6 +5,8 @@
 # multiplexer profile (authored in coworker-types.yaml's default_config).
 identity: "Slang fleet coworker."
 config:
+  terminal:
+    container_persistent: true  # ISO-F13: explicit per-role sandbox lifetime
   timezone: "Asia/Kolkata"
   sessions:
     auto_prune: false

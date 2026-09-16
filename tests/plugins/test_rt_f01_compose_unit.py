@@ -48,7 +48,8 @@ def _write_spec(spec_dir: Path, spec: dict) -> Path:
     spec_dir.mkdir(parents=True, exist_ok=True)
     (spec_dir / "spines").mkdir(exist_ok=True)
     (spec_dir / "spines" / "base.yaml").write_text(
-        yaml.safe_dump({"identity": "Base.", "invariants": ["Help."], "config": {}}, sort_keys=False),
+        yaml.safe_dump({"identity": "Base.", "invariants": ["Help."],
+                        "config": {"terminal": {"container_persistent": True}}}, sort_keys=False),
         encoding="utf-8",
     )
     wf = spec_dir / "workflows" / "wf"
@@ -61,6 +62,7 @@ def _write_spec(spec_dir: Path, spec: dict) -> Path:
 
 def _spec() -> dict:
     return {
+        "workspace_root": "/data/coworkers",  # ISO-F13: required fleet key
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},
