@@ -34,7 +34,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 
 from . import edges, predicates, stores
 from .aliases import canonicalise
@@ -134,8 +134,10 @@ def _approve(rule_key: str, message: str) -> Dict[str, Any]:
 
 
 def _current_profile() -> str:
-    # Identity is the profile home the process runs in — NOT a plugin-writable
-    # setting — so a worker cannot forge its identity through config.
+    # Identity is the ACTIVE per-turn profile home (get_hermes_home's context-local
+    # override), NOT a plugin-writable setting, so a worker cannot forge its identity
+    # through config. Distinct from the launch profile (get_process_hermes_home), which
+    # the SANDBOX cross-profile check compares against.
     try:
         return Path(get_hermes_home()).name
     except Exception:
@@ -259,6 +261,20 @@ def register(ctx) -> None:
     def _sandbox_block(canon, args):
         if not enforce_sandbox:
             return None
+        # TERMINAL_* stays process-global at this pin (terminal_scope.py absent), so a
+        # non-launch gateway turn would inherit the LAUNCH profile's frozen sandbox
+        # config; refuse before any TERMINAL_* value is trusted. Read live (never
+        # captured at register(), which re-runs on a force reload); get_process_hermes_home
+        # is override-immune so it stays the launch scope even inside a per-turn override.
+        active = get_hermes_home()
+        launch = get_process_hermes_home()
+        if hermes_home_key(active) != hermes_home_key(launch):
+            return _block(
+                f"sandbox: cross-profile refused — active profile {Path(active).name!r} is not "
+                f"the launch profile {Path(launch).name!r}; the process-global terminal.* config "
+                f"belongs to {Path(launch).name!r}, so this gateway turn cannot be sandboxed for "
+                f"{Path(active).name!r} (tool-bearing work runs on the kanban board)"
+            )
         backend = os.getenv("TERMINAL_ENV", "local")
         if backend != expected_backend:
             return _block(
