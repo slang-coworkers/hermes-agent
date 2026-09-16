@@ -474,6 +474,265 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str) -> None:
     _set_dotted(config, "terminal.docker_shared_container_key", "")
 
 
+# ISO-F14 egress lockdown (OPTION A). The render supplies the sandbox's egress
+# posture DIRECTLY (proxy.enabled is false, so the stock iron-proxy apparatus is a
+# no-op at the pin): the OneCLI proxy + CA-bundle env, one read-only CA mount, a
+# pinned image and cgroup limits, and docker_persist_across_processes false. No raw
+# credential is ever written — each provider name carries a non-secret placeholder
+# and OneCLI injects the real value at request time.
+_EGRESS_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+_EGRESS_NO_PROXY_VARS = ("NO_PROXY", "no_proxy")
+_EGRESS_NO_PROXY_VALUE = "127.0.0.1,localhost,::1"
+_EGRESS_CA_BUNDLE_VARS = (
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "HERMES_CA_BUNDLE",
+    "DENO_CERT",
+)
+_EGRESS_PROVIDER_PLACEHOLDER = "onecli-injects-at-request-time"
+# v2 drops the v1 swap-token scheme outright: a HERMES_PROXY_TOKEN_* key anywhere in
+# a spec is an egress collision, never rendered.
+_EGRESS_FORBIDDEN_ENV_PREFIX = "HERMES_PROXY_TOKEN_"
+# podman 3.4.4 has no host.docker.internal mapping, so a proxy address carrying the
+# docker-desktop alias is rewritten to the literal docker0 bridge gateway IP.
+_DOCKER_BRIDGE_HOST = "host.docker.internal"
+_DOCKER_BRIDGE_IP = "172.17.0.1"
+
+
+def _normalize_proxy_addr(addr: str) -> str:
+    return addr.replace(_DOCKER_BRIDGE_HOST, _DOCKER_BRIDGE_IP)
+
+
+def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
+    """Validate + normalise the spec's top-level ``egress:`` block into the
+    parameters ``_enforce_egress`` writes. Fail-closed: a missing or malformed
+    field raises ``CompositionError`` rather than rendering a half-formed egress
+    posture. Every type-check precedes any use so a hostile YAML value raises
+    ``CompositionError``, never a raw ``TypeError``."""
+    if not isinstance(egress, dict):
+        raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
+
+    def _req_str(key: str) -> str:
+        val = egress.get(key)
+        if not isinstance(val, str) or not val.strip():
+            raise CompositionError(f"egress.{key} must be a non-empty string, got {val!r}")
+        return val
+
+    proxy_addr = _req_str("proxy_addr")
+    ca_host_path = _req_str("ca_host_path")
+    ca_container_path = _req_str("ca_container_path")
+    sandbox_image = _req_str("sandbox_image")
+
+    providers = egress.get("provider_env", [])
+    if not isinstance(providers, list):
+        raise CompositionError(
+            f"egress.provider_env must be a list of names, got {type(providers).__name__}")
+    for name in providers:
+        if not isinstance(name, str) or not name.strip():
+            raise CompositionError(
+                f"egress.provider_env entries must be non-empty strings, got {name!r}")
+
+    memory = egress.get("container_memory")
+    if isinstance(memory, bool) or not isinstance(memory, int) or memory <= 0:
+        raise CompositionError(
+            f"egress.container_memory must be a positive integer (MiB), got {memory!r}")
+
+    cpu = egress.get("container_cpu")
+    if isinstance(cpu, bool) or not isinstance(cpu, (int, float)) or cpu <= 0:
+        raise CompositionError(
+            f"egress.container_cpu must be a positive number, got {cpu!r}")
+
+    return {
+        "proxy_url": "http://" + _normalize_proxy_addr(proxy_addr),
+        "ca_host_path": ca_host_path,
+        "ca_container_path": ca_container_path,
+        "ca_mount": f"{ca_host_path}:{ca_container_path}:ro",
+        "provider_env": list(providers),
+        "sandbox_image": sandbox_image,
+        "container_memory": memory,
+        "container_cpu": cpu,
+    }
+
+
+def _targets_ca(entry: Any, ca_container_path: str) -> bool:
+    """True iff a ``docker_volumes`` / ``-v`` entry mounts something AT
+    ``ca_container_path`` — the container-dest field of ``host:container[:opts]``."""
+    parts = str(entry).split(":")
+    return len(parts) >= 2 and parts[1] == ca_container_path
+
+
+def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
+    return (
+        set(_EGRESS_PROXY_VARS)
+        | set(_EGRESS_NO_PROXY_VARS)
+        | set(_EGRESS_CA_BUNDLE_VARS)
+        | set(params["provider_env"])
+    )
+
+
+def _is_controlled_env_name(name: Any, controlled: Set[str]) -> bool:
+    return isinstance(name, str) and (
+        name in controlled or name.startswith(_EGRESS_FORBIDDEN_ENV_PREFIX)
+    )
+
+
+def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
+                                   profile_name: str, controlled: Set[str]) -> None:
+    """Reject a ``docker_extra_args`` list that would inject a competing egress
+    control the render does not own: a controlled env var (``-e``/``--env``), an
+    ``--env-file`` (its contents are opaque at render time — rejected whatever the
+    path), a network override, or a divergent CA ``-v``/``--volume``."""
+    ca_container_path = params["ca_container_path"]
+    ca_mount = params["ca_mount"]
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        nxt = extra[i + 1] if i + 1 < len(extra) else None
+        if isinstance(tok, str):
+            if tok in ("--network", "--net") or tok.startswith(("--network=", "--net=")):
+                raise CompositionError(
+                    f"{profile_name}: egress collision — docker_extra_args must not set the "
+                    f"container network ({tok!r}); the fleet topology is render-owned")
+            if tok.startswith("--env-file"):
+                raise CompositionError(
+                    f"{profile_name}: egress collision — docker_extra_args must not pass "
+                    f"--env-file (its contents can smuggle a controlled egress var)")
+            if tok in ("-e", "--env"):
+                name = str(nxt).split("=", 1)[0] if nxt is not None else ""
+                if _is_controlled_env_name(name, controlled):
+                    raise CompositionError(
+                        f"{profile_name}: egress collision — docker_extra_args sets a "
+                        f"controlled env var ({name!r})")
+                i += 2
+                continue
+            if tok.startswith(("-e=", "--env=")):
+                name = tok.split("=", 1)[1].split("=", 1)[0]
+                if _is_controlled_env_name(name, controlled):
+                    raise CompositionError(
+                        f"{profile_name}: egress collision — docker_extra_args sets a "
+                        f"controlled env var ({name!r})")
+            if tok in ("-v", "--volume"):
+                if nxt is not None and _targets_ca(nxt, ca_container_path) and str(nxt) != ca_mount:
+                    raise CompositionError(
+                        f"{profile_name}: egress collision — docker_extra_args mounts a divergent "
+                        f"source on {ca_container_path!r}")
+                i += 2
+                continue
+            if tok.startswith(("-v=", "--volume=")):
+                val = tok.split("=", 1)[1]
+                if _targets_ca(val, ca_container_path) and val != ca_mount:
+                    raise CompositionError(
+                        f"{profile_name}: egress collision — docker_extra_args mounts a divergent "
+                        f"source on {ca_container_path!r}")
+        i += 1
+
+
+def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_name: str) -> None:
+    """Fail-closed pre-pass (ISO-F14): refuse a resolved profile whose merged
+    inputs would fight the render-owned egress posture, BEFORE any profile is
+    written, so a collision on a late-resolved profile (DEFAULT is validated last)
+    leaves no partial fleet on disk. Pure — mutates nothing; ``_enforce_egress``
+    does the writing in the Phase-B loop once every profile has passed. Every
+    type-check precedes membership so a hostile YAML value raises
+    ``CompositionError``, never a raw ``TypeError``."""
+    terminal = config.get("terminal")
+    if not isinstance(terminal, dict):
+        return
+    controlled = _egress_controlled_names(params)
+
+    env = terminal.get("docker_env")
+    if env is not None:
+        if not isinstance(env, dict):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_env must be a mapping, got {type(env).__name__}")
+        for key in env:
+            if _is_controlled_env_name(key, controlled):
+                raise CompositionError(
+                    f"{profile_name}: egress collision on terminal.docker_env[{key!r}] — the render "
+                    f"owns the egress env; remove it from the spec")
+
+    fwd = terminal.get("docker_forward_env")
+    if fwd is not None:
+        if not isinstance(fwd, list):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_forward_env must be a list, "
+                f"got {type(fwd).__name__}")
+        for name in fwd:
+            if not isinstance(name, str):
+                raise CompositionError(
+                    f"{profile_name}: terminal.docker_forward_env entries must be strings, "
+                    f"got {name!r}")
+            if _is_controlled_env_name(name, controlled):
+                raise CompositionError(
+                    f"{profile_name}: egress collision — docker_forward_env forwards a controlled "
+                    f"egress var ({name!r})")
+
+    volumes = terminal.get("docker_volumes")
+    if volumes is not None:
+        if not isinstance(volumes, list):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_volumes must be a list, "
+                f"got {type(volumes).__name__}")
+        for v in volumes:
+            if _targets_ca(v, params["ca_container_path"]) and str(v) != params["ca_mount"]:
+                raise CompositionError(
+                    f"{profile_name}: egress collision on the CA mount — a divergent source targets "
+                    f"{params['ca_container_path']!r}; only the canonical {params['ca_mount']!r} "
+                    f"is allowed")
+
+    extra = terminal.get("docker_extra_args")
+    if extra is not None:
+        if not isinstance(extra, list):
+            raise CompositionError(
+                f"{profile_name}: terminal.docker_extra_args must be a list, "
+                f"got {type(extra).__name__}")
+        _assert_extra_args_egress_safe(extra, params, profile_name, controlled)
+
+
+def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name: str) -> None:
+    """Force the OPTION-A egress posture onto one profile's ``config`` (ISO-F14),
+    overwriting a declared leaf and inserting an omitted one alike (mirrors
+    ``_enforce_retention``). Runs in the Phase-B write loop after
+    ``_assert_egress_safe`` has cleared every profile, so it never rejects here —
+    the CA-divergence guard below is defensive and unreachable for a spec that
+    passed the pre-pass."""
+    _set_dotted(config, "proxy.enabled", False)
+
+    current_env = _get_dotted(config, "terminal.docker_env")
+    env = dict(current_env) if isinstance(current_env, dict) else {}
+    for var in _EGRESS_PROXY_VARS:
+        env[var] = params["proxy_url"]
+    for var in _EGRESS_NO_PROXY_VARS:
+        env[var] = _EGRESS_NO_PROXY_VALUE
+    for var in _EGRESS_CA_BUNDLE_VARS:
+        env[var] = params["ca_container_path"]
+    for name in params["provider_env"]:
+        env[name] = _EGRESS_PROVIDER_PLACEHOLDER
+    _set_dotted(config, "terminal.docker_env", env)
+
+    _set_dotted(config, "terminal.docker_persist_across_processes", False)
+    _set_dotted(config, "terminal.container_memory", params["container_memory"])
+    _set_dotted(config, "terminal.container_cpu", params["container_cpu"])
+    _set_dotted(config, "terminal.docker_image", params["sandbox_image"])
+
+    ca_container_path = params["ca_container_path"]
+    ca_mount = params["ca_mount"]
+    current_vols = _get_dotted(config, "terminal.docker_volumes")
+    kept: List[Any] = []
+    for v in (current_vols if isinstance(current_vols, list) else []):
+        if _targets_ca(v, ca_container_path):
+            if str(v) != ca_mount:
+                raise CompositionError(
+                    f"{profile_name}: egress collision on the CA mount — a divergent source targets "
+                    f"{ca_container_path!r}")
+            continue  # drop every CA-target entry; exactly one canonical is re-appended below
+        kept.append(v)
+    kept.append(ca_mount)
+    _set_dotted(config, "terminal.docker_volumes", kept)
+
+
 # Container path the shared-learnings clone is mounted at (MEM-F43). Kept OUTSIDE
 # /workspace because tools/environments/docker.py matches ":/workspace" as a
 # substring, so any ":/workspace..." mount would suppress the coworker's auto
@@ -2081,6 +2340,19 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_session_driver(driver_resolved["config"], driver_tname)
     _enforce_session_driver(default_config, default_profile)
 
+    # ISO-F14 egress lockdown, all-or-nothing: validate the egress block once, then
+    # assert EVERY profile is egress-safe here — before Phase B writes anything — so
+    # a collision on a late-resolved profile (DEFAULT is asserted last) raises with
+    # no partial fleet on disk. _enforce_egress does the writing per profile in the
+    # Phase-B loop below. An absent egress block leaves enforcement off, so dev/test
+    # specs render unchanged.
+    egress_block = data.get("egress")
+    egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
+    if egress_params is not None:
+        for eg_tname, eg_resolved in resolved_by_type.items():
+            _assert_egress_safe(eg_resolved["config"], egress_params, eg_tname)
+        _assert_egress_safe(default_config, egress_params, default_profile)
+
     session_flags = _resolve_session_mode(default_config, resolved_by_type)
     # Per-role MCP scope needs the whole fleet's declarations (per-role subsets,
     # the DEFAULT union, and the profile-keyed veto policy in every profile), so
@@ -2113,6 +2385,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _require_canonical_platform_layout(resolved["config"])
         _forbid_coworker_port_binding(resolved["config"], tname)
         _forbid_coworker_webhook_routes(resolved["config"], tname)
+        if egress_params is not None:
+            _enforce_egress(resolved["config"], egress_params, tname)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
@@ -2130,6 +2404,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _enforce_multiplex(default_config, roster)
     _require_canonical_platform_layout(default_config)
     _validate_webhook_routes(default_config, served)
+    if egress_params is not None:
+        _enforce_egress(default_config, egress_params, default_profile)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
@@ -2140,6 +2416,12 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # profile (onboarding installs only the coworker TYPE profiles).
     managed_dir = out_root / _MANAGED_FRAGMENT_DIR
     managed_dir.mkdir(parents=True, exist_ok=True)
-    _write_yaml(managed_dir / "config.yaml", _build_managed_fragment())
+    managed_fragment = _build_managed_fragment()
+    if egress_params is not None:
+        # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
+        # profile at load, so proxy.enabled:false here forces the egress topology
+        # un-overridably even if a per-profile value later diverged.
+        _set_dotted(managed_fragment, "proxy.enabled", False)
+    _write_yaml(managed_dir / "config.yaml", managed_fragment)
 
     return rendered
