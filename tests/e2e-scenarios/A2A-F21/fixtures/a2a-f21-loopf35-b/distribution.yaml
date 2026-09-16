@@ -1,0 +1,8 @@
+name: a2a-f21-loopf35-b
+version: 0.1.0
+description: "A2A-F21 AC-LOOP-F35-5 live scenario — bot B (the message_agent responder). Carries the self-contained providers.coworkers-live block with the remote base_url so the ANTHROPIC_*-sanitised delivery subprocess resolves a provider, and mirrors the F35-ACK ack protocol (the surviving copy is the spec identity, which onboard force-writes into SOUL.md)."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
