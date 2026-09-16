@@ -62,7 +62,11 @@ substitutes the real credential at the `inference-api.nvidia.com` hop):
    (`/hermes-ui-driver` §1a launch; wait for the
    `HERMES_DASHBOARD_READY port=9119|Hermes Web UI` line). Both bots run as profiles
    OF THIS gateway via the multiplexer — there is no second `serve` process, because
-   `message_agent` delivers inside the one gateway.
+   `message_agent` delivers inside the one gateway. The sender turn is driven via the
+   CLI canonical `Bot Chat` path (Step 1), NOT the web composer (which opens a fresh
+   non-`Bot Chat` session where `message_agent` is absent — `tools/bot_mode_dm.py:152`,
+   the round-1 defect); the dashboard is used only to OBSERVE the ack by opening the
+   sender's canonical `Bot Chat` via exact-resume (Step 2).
 3. Write each bot's Bot-Mode identity and materialise its canonical Bot Chat by
    running the plugin's onboard against THIS scenario's spec, over the loopback WS
    (standalone path, so it reaches the running gateway):
@@ -100,55 +104,85 @@ substitutes the real credential at the `inference-api.nvidia.com` hop):
 
 ## Steps
 
-1. Open bot-a's Bot Chat in the dashboard and confirm the active profile is bot-a
-   (the SPA opens the DEFAULT profile by default — select `a2a-f21-loopf35-a` in the
-   profile rail first, `/hermes-ui-driver` §1d, and confirm the composer prompt names
-   bot-a):
+1. **Drive `a2a-f21-loopf35-a`'s sender turn in its canonical `Bot Chat` via the CLI** —
+   the session titled exactly `Bot Chat` is the only one where `message_agent` is injected
+   (`tools/bot_mode_dm.py:152` gates the tool on that title). The web-dashboard composer
+   opens a NEW auto-titled session where `message_agent` is absent (returns
+   `Tool 'message_agent' does not exist`) — that was the round-1 defect; do NOT use it.
    ```bash
-   agent-browser open "http://127.0.0.1:9119/chat"
+   ( source $TB/harness.live.env
+     hermes -p a2a-f21-loopf35-a chat -c "Bot Chat" --create-if-missing -Q \
+       -q "Use message_agent to send a2a-f21-loopf35-b exactly: \"$NONCE please reply\". Then report bot-b's reply back to me." \
+       > $ART/scenario-AC-LOOP-F35-5/sender-cli.log 2>&1 ; echo sender_exit=$? )
+   ```
+   (`-q`/`--query` is the prompt; `-Q` is the boolean quiet flag; `-c "Bot Chat"
+   --create-if-missing` resumes the onboard-created canonical Bot Chat, creating one only
+   if absent.) → expect: `message_agent` delivers to `a2a-f21-loopf35-b` inside the one
+   gateway (never a2a, no second `serve`); bot-b runs a turn and replies `F35-ACK:$NONCE`;
+   that ack round-trips back into `a2a-f21-loopf35-a`'s `Bot Chat` `state.db` as the
+   background-completion notification.
+2. **Observe the ack in the web UI by exact-resume** (this replaces the round-1 composer
+   path, which was the defect). Read `a2a-f21-loopf35-a`'s canonical `Bot Chat` session id
+   from its `state.db` (the session titled exactly `Bot Chat`), then open it BY ID in the
+   dashboard — the by-id resume route renders the hidden canonical session even though the
+   session *list* excludes it (`web_routers/sessions.py:596-616,642-693` apply no hidden
+   filter; `ChatPage.tsx:350-426,1164-1186` → `/api/pty`):
+   ```bash
+   SID=$( source $TB/harness.live.env && python3 -c "import sqlite3, os; d=sqlite3.connect(os.environ['HERMES_HOME']+'/profiles/a2a-f21-loopf35-a/state.db'); r=d.execute(\"select id from sessions where title='Bot Chat' order by started_at desc limit 1\").fetchone(); assert r, 'no Bot Chat session for a2a-f21-loopf35-a'; print(r[0])" )
+   agent-browser open "http://127.0.0.1:9119/chat?profile=a2a-f21-loopf35-a&resume=$SID"
    agent-browser wait --load networkidle
-   agent-browser snapshot -i                     # select a2a-f21-loopf35-a in the rail by @ref, then its Bot Chat
-   agent-browser screenshot $ART/scenario-AC-LOOP-F35-5/step-1.png --full
-   ```
-   → expect: bot-a's Bot Chat is open and the composer is enabled for `a2a-f21-loopf35-a`.
-2. In bot-a's Bot Chat, instruct bot-a to message bot-b via `message_agent`, carrying
-   the nonce (NOT the ack marker), then wait for the DISTINCT ack to return:
-   ```bash
-   agent-browser fill @e<composer> "Use message_agent to send a2a-f21-loopf35-b exactly: \"$NONCE please reply\". Then report bot-b's reply back to me."
-   agent-browser press Enter
-   agent-browser screenshot $ART/scenario-AC-LOOP-F35-5/step-2.png --full
    timeout 600 agent-browser wait --text "F35-ACK:$NONCE"   # bot-b's generated ack, absent from the sender's prompt
+   agent-browser screenshot $ART/scenario-AC-LOOP-F35-5/step-2.png --full
    ```
-   → expect: `message_agent` delivers to `a2a-f21-loopf35-b` inside the one gateway,
-   bot-b runs a turn and replies `F35-ACK:$NONCE`, and that ack returns into bot-a's
-   Bot Chat.
-3. Read bot-a's Bot Chat transcript and confirm bot-b's ack landed back with the sender:
-   ```bash
-   agent-browser snapshot -i
-   agent-browser screenshot $ART/scenario-AC-LOOP-F35-5/step-3.png --full
-   ```
-   → expect: `F35-ACK:$NONCE` is visible in bot-a's Bot Chat.
+   → expect: `a2a-f21-loopf35-a`'s canonical `Bot Chat` transcript renders at
+   `/chat?profile=a2a-f21-loopf35-a&resume=$SID` with `F35-ACK:$NONCE` visible.
 
 ## Pass
 
-The criterion holds when `message_agent` carries the message `a2a-f21-loopf35-a` →
-`a2a-f21-loopf35-b` inside the one gateway (never a2a, no second `serve`), bot-b
-generates `F35-ACK:$NONCE` (the distinct marker, proving bot-b replied), that ack is
-visible in bot-a's Bot Chat UI, bot-b's own `state.db` holds an `assistant` row
-containing `F35-ACK:$NONCE`, AND the §Setup regression oracle showed
-`providers.coworkers-live` survived onboard (proving delivery worked because the
-provider block was not clobbered).
+The criterion holds (BOTH halves, per `/hermes-ui-driver` §1f) when `message_agent`
+carries `a2a-f21-loopf35-a` → `a2a-f21-loopf35-b` inside the one gateway (never a2a, no
+second `serve`), `a2a-f21-loopf35-b` generates `F35-ACK:$NONCE` (the distinct marker
+proving it replied), AND both halves hold:
+
+- **(UI half)** `F35-ACK:$NONCE` renders in `a2a-f21-loopf35-a`'s canonical `Bot Chat` in
+  the web dashboard, opened by the exact-resume route
+  `/chat?profile=a2a-f21-loopf35-a&resume=<its Bot Chat session id>` (Step 2) — a captured
+  `step-2.png` screenshot.
+- **(state half)** `a2a-f21-loopf35-b`'s own `state.db` holds an `assistant` row containing
+  `F35-ACK:$NONCE` AND the ack round-tripped into `a2a-f21-loopf35-a`'s `Bot Chat`
+  `state.db`; and the §Setup regression oracle showed `providers.coworkers-live` survived
+  `hermes onboard` for both bots (proving delivery worked because the provider block was
+  not clobbered).
+
+The sender turn is driven via CLI (Step 1, where `message_agent` injects) and the ack is
+OBSERVED via web exact-resume (Step 2) — never the web composer (the round-1 defect: it
+opens a non-`Bot Chat` session). Neither half may be dropped nor a different surface
+substituted.
 
 ## Evidence
 
-- `step-1.png`, `step-2.png`, `step-3.png` under `$ART/scenario-AC-LOOP-F35-5/`.
-- The post-onboard config-survival read from §Setup step 5 (the regression oracle) —
-  its stdout must show both bots' `providers.coworkers-live` survived with the remote
-  `base_url`.
-- Bot-b actually generated the ack — an `assistant` row in bot-b's own `state.db`
-  containing `F35-ACK:$NONCE` (stdlib sqlite3 — the image has no `sqlite3` CLI):
+- **(UI half)** `step-2.png` under `$ART/scenario-AC-LOOP-F35-5/` — an agent-browser
+  screenshot of `a2a-f21-loopf35-a`'s canonical `Bot Chat` at
+  `/chat?profile=a2a-f21-loopf35-a&resume=<its Bot Chat session id>` showing `F35-ACK:$NONCE`.
+- **(state half)** the post-onboard config-survival read from §Setup step 5 (the regression
+  oracle) — its stdout must show both bots' full `providers.coworkers-live` survived.
+- **(state half)** a `python3 -c` read (stdlib sqlite3 — the image has no `sqlite3` CLI) of
+  BOTH profiles' `state.db`: (a) `a2a-f21-loopf35-b` generated the ack, and (b) the ack
+  round-tripped into `a2a-f21-loopf35-a`'s `Bot Chat` session:
   ```bash
-  python3 -c "import sqlite3, os; d = sqlite3.connect(os.environ['HERMES_HOME'] + '/profiles/a2a-f21-loopf35-b/state.db'); rows=[r for r in d.execute(\"select m.role, substr(m.content,1,160) from messages m where m.role='assistant' and instr(m.content, 'F35-ACK:$NONCE') > 0 order by m.timestamp desc limit 5\")]; assert rows, 'no bot-b assistant F35-ACK:$NONCE row'; [print(r) for r in rows]"
+  python3 -c "
+  import sqlite3, os
+  home = os.environ['HERMES_HOME']
+  db_b = sqlite3.connect(home + '/profiles/a2a-f21-loopf35-b/state.db')
+  rows_b = [r for r in db_b.execute(\"select role, substr(content,1,160) from messages where role='assistant' and instr(content, 'F35-ACK:$NONCE') > 0 order by timestamp desc limit 5\")]
+  assert rows_b, 'no bot-b assistant F35-ACK:$NONCE row'
+  db_a = sqlite3.connect(home + '/profiles/a2a-f21-loopf35-a/state.db')
+  sid = db_a.execute(\"select id from sessions where title='Bot Chat' order by started_at desc limit 1\").fetchone()
+  assert sid, 'no Bot Chat session for a2a-f21-loopf35-a'
+  rows_a = [r for r in db_a.execute(\"select role, substr(content,1,160) from messages where session_id=? and instr(content, 'F35-ACK:$NONCE') > 0 order by timestamp desc limit 5\", (sid[0],))]
+  assert rows_a, 'ack did not round-trip into bot-a Bot Chat session'
+  print('bot-b generated:', rows_b)
+  print('bot-a round-trip:', rows_a)"
   ```
 - The round did not run away — summed across BOTH bots' sessions (sender and recipient
   each make model calls), the model-call count is non-zero and both it and cost stay
