@@ -25,3 +25,4 @@ rooms:
   loop-f35-room:
     name: "LOOP-F35 Live"
     members: [loop-f35-bot-a, loop-f35-bot-b]
+workspace_root: /data/coworkers

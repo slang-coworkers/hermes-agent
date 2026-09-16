@@ -386,9 +386,11 @@ def _write_inline_spec(spec_dir, types, spine):
     (spec_dir / "spines").mkdir(exist_ok=True)
     for sub in ("skills", "workflows", "overlays"):
         (spec_dir / sub).mkdir(exist_ok=True)
+    spine.setdefault("config", {}).setdefault("terminal", {})["container_persistent"] = True
     (spec_dir / "spines" / "base.yaml").write_text(yaml.safe_dump(spine), encoding="utf-8")
     spec = {
         "project": "f33-inline",
+        "workspace_root": "/data/coworkers",
         "default_profile": "default",
         "orchestrator_profile": "orchestrator",
         "spines": {"base": {"source": "spines/base.yaml"}},

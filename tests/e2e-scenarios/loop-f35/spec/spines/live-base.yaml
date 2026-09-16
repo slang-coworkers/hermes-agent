@@ -4,6 +4,8 @@
 # adds the Bot-Mode identity (ui_meta + Bot Chat) without changing the model.
 identity: "LOOP-F35 live base"
 config:
+  terminal:
+    container_persistent: true
   model:
     default: aws/anthropic/bedrock-claude-opus-4-8
   api: https://inference-api.nvidia.com

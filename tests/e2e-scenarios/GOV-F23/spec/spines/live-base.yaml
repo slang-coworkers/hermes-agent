@@ -18,6 +18,7 @@ config:
   timezone: "Asia/Kolkata"
   sessions: {auto_prune: false}
   terminal:
+    container_persistent: true
     backend: "docker"
     docker_mount_cwd_to_workspace: true
     docker_image: "hermes-sandbox:pinned"

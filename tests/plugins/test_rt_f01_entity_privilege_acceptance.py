@@ -61,7 +61,8 @@ def _write_fixture_spec(spec_dir: Path, spec: dict) -> Path:
     (spec_dir / "spines").mkdir(exist_ok=True)
     (spec_dir / "spines" / "base.yaml").write_text(
         yaml.safe_dump(
-            {"identity": "Base coworker.", "invariants": ["Be helpful."], "config": {}},
+            {"identity": "Base coworker.", "invariants": ["Be helpful."],
+             "config": {"terminal": {"container_persistent": True}}},
             sort_keys=False,
         ),
         encoding="utf-8",
@@ -81,6 +82,7 @@ def _clean_spec() -> dict:
     The DEFAULT deliberately OMITS the multiplex keys so the clean render proves the
     'never by assumption' enforcement."""
     return {
+        "workspace_root": "/data/coworkers",
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},

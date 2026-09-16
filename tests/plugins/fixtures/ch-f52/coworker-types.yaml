@@ -80,3 +80,4 @@ default_config:
                 in: [completed]
             prompt: "GitHub check_suite completed on {repository.full_name}: conclusion {check_suite.conclusion}. Investigate the CI failure."
             skills: [github-ci-triage]
+workspace_root: /data/coworkers

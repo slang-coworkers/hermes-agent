@@ -54,3 +54,4 @@ default_config:
     multiplex_profiles: true
     multiplex_profile_allowlist: ["builder", "reviewer"]
   sessions: {auto_prune: false}
+workspace_root: /data/coworkers

@@ -36,3 +36,4 @@ default_config:
     multiplex_profile_allowlist: [orchestrator, reviewer]
   sessions:
     auto_prune: false
+workspace_root: /data/coworkers
