@@ -74,3 +74,4 @@ default_config:
       transport: "fixture-unsafe"
       transport_fallback: "builtin"
   sessions: {auto_prune: false}
+workspace_root: /data/coworkers

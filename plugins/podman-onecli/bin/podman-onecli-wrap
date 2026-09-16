@@ -1,0 +1,451 @@
+#!/bin/sh
+# podman-onecli-wrap (CRED-F28) — the HERMES_DOCKER_BINARY shim for the OneCLI
+# egress topology. It fails closed on a long-lived sandbox launch that is
+# missing the rendered OneCLI proxy env or the read-only CA mount, allowlists
+# Hermes's two capability probes verbatim, forwards every other podman command
+# unchanged, and preserves stdout byte-for-byte (the docker backend parses the
+# container-id line). It never invokes the real podman on a refused launch.
+#
+# Substrate-set environment:
+#   PODMAN_ONECLI_PODMAN          real podman binary (default: podman)
+#   PODMAN_ONECLI_EXPECTED_PROXY  host:port authority the proxy env must carry
+#   PODMAN_ONECLI_EXPECTED_CA     container path the CA must be mounted at (:ro)
+#   PODMAN_ONECLI_EXPECTED_NO_PROXY  loopback bypass list a forwarded NO_PROXY
+#                                    must equal (default 127.0.0.1,localhost,::1)
+#   PODMAN_ONECLI_ALLOWED_ENV     extra name-only -e vars the render forwards
+#                                 (space-delimited; e.g. the provider placeholder
+#                                 keys). The proxy/CA/NO_PROXY names are always
+#                                 allowed; every other -e NAME is refused.
+#   PODMAN_ONECLI_FORBIDDEN_ENV   host-only credential names that must NEVER be
+#                                 forwarded (space-delimited; default
+#                                 ONECLI_API_KEY, the control-plane bootstrap key)
+#   PODMAN_ONECLI_LOG             optional path for launch/refusal audit lines
+# Proxy/CA VALUES arrive by name via the wrapper's own process env (Hermes uses
+# name-only `-e KEY`; the docker client env is os.environ + rendered values).
+
+PODMAN="${PODMAN_ONECLI_PODMAN:-podman}"
+EXPECTED_PROXY="${PODMAN_ONECLI_EXPECTED_PROXY:-}"
+EXPECTED_CA="${PODMAN_ONECLI_EXPECTED_CA:-}"
+EXPECTED_NO_PROXY="${PODMAN_ONECLI_EXPECTED_NO_PROXY:-127.0.0.1,localhost,::1}"
+LOG="${PODMAN_ONECLI_LOG:-}"
+
+PROXY_NAMES="HTTPS_PROXY https_proxy HTTP_PROXY http_proxy"
+CA_NAMES="SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS HERMES_CA_BUNDLE DENO_CERT"
+NO_PROXY_NAMES="NO_PROXY no_proxy"
+# Default-allow set for name-only -e: the rendered egress/CA/no-proxy vars, plus
+# any provider placeholder names the substrate declares. Everything else is
+# refused (a host secret must never ride a name-only -e into the sandbox).
+ALLOWED_ENV="$PROXY_NAMES $CA_NAMES $NO_PROXY_NAMES ${PODMAN_ONECLI_ALLOWED_ENV:-}"
+# Always-refuse set: the OneCLI control-plane bootstrap key lives in the
+# wrapper's own process env, so a name-only `-e ONECLI_API_KEY` would inject it.
+FORBIDDEN_ENV="${PODMAN_ONECLI_FORBIDDEN_ENV:-ONECLI_API_KEY}"
+
+scrub() {
+    # Redact scheme://userinfo@ and any aoc_ bearer token from a line before it
+    # reaches stderr or the audit log. Applied to EVERY emitted line so that no
+    # refusal reason or launch record can leak a proxy value or agent token,
+    # even a malformed one that slips past authority parsing.
+    printf '%s' "$1" | sed -e 's#://[^@ ]*@#://<redacted>@#g' -e 's#aoc_[A-Za-z0-9._-]*#<redacted-token>#g'
+}
+
+log_line() {
+    if [ -n "$LOG" ]; then
+        printf '%s\n' "$(scrub "$1")" >> "$LOG" 2>/dev/null || true
+    fi
+}
+
+refuse() {
+    # $1 = reason; the wrapper never invokes real podman when this is called.
+    _msg="podman-onecli-wrap: refuse — $1"
+    printf '%s\n' "$(scrub "$_msg")" >&2
+    log_line "$_msg"
+    exit 3
+}
+
+require_expected() {
+    [ -n "$EXPECTED_PROXY" ] || refuse "PODMAN_ONECLI_EXPECTED_PROXY not set"
+    [ -n "$EXPECTED_CA" ] || refuse "PODMAN_ONECLI_EXPECTED_CA not set"
+}
+
+has_flag() {
+    _f="$1"
+    shift
+    for _t in "$@"; do
+        [ "$_t" = "$_f" ] && return 0
+    done
+    return 1
+}
+
+in_list() {
+    # $1 = needle, $2 = space-delimited haystack
+    for _x in $2; do
+        [ "$_x" = "$1" ] && return 0
+    done
+    return 1
+}
+
+count_occurrences() {
+    # $1 = name, $2 = space-delimited collected names
+    _c=0
+    for _x in $2; do
+        [ "$_x" = "$1" ] && _c=$((_c + 1))
+    done
+    printf '%s' "$_c"
+}
+
+env_value() {
+    # Resolve the wrapper's process-env value for a fixed protected var name.
+    eval "printf '%s' \"\${$1:-}\""
+}
+
+authority_of() {
+    # Extract host:port from a proxy URL per RFC 3986: isolate the authority
+    # (between scheme:// and the first '/', '?' or '#') BEFORE stripping the
+    # userinfo, so a value like http://evil.example/path@host cannot masquerade
+    # as `host` (the real host there is evil.example). A value without an
+    # http(s):// scheme yields "" — a guaranteed mismatch, so it is refused.
+    _u="$1"
+    case "$_u" in
+        http://*) _u="${_u#http://}" ;;
+        https://*) _u="${_u#https://}" ;;
+        *) printf '%s' ""; return ;;
+    esac
+    _u="${_u%%/*}"    # strip /path
+    _u="${_u%%\?*}"   # strip ?query
+    _u="${_u%%#*}"    # strip #fragment
+    _u="${_u#*@}"     # strip userinfo (drops the aoc_ token)
+    printf '%s' "$_u"
+}
+
+is_value_flag() {
+    # Podman run/create flags that consume a SEPARATED value (the next argv
+    # token). Used only to find the image boundary — `-e`/`--env`/`-v`/`--volume`
+    # are handled specially by validate_launch and are not listed here. Covers
+    # every value-taking flag Hermes emits on a long-lived launch
+    # (tools/environments/docker.py) plus common run flags. A pre-image option
+    # that is neither this nor is_boolean_flag is REFUSED fail-closed by the
+    # parse, so an unknown value-taking flag cannot consume the image token and
+    # let later pre-image -e/-v escape validation.
+    case "$1" in
+        --name | --hostname | -h | -w | --workdir | --user | -u | \
+        --cpus | --memory | -m | --pids-limit | --shm-size | --storage-opt | \
+        --tmpfs | --cap-add | --cap-drop | --security-opt | --add-host | \
+        --label | -l | --network | --net | --entrypoint | --restart | --pull | \
+        --platform | --device | --ulimit | --sysctl | --dns | --dns-option | \
+        --dns-search | --mount | --stop-signal | --stop-timeout | --volumes-from | \
+        --group-add | --gpus | --ipc | --pid | --uts | --userns | --cgroupns | \
+        --cgroup-parent | --log-driver | --log-opt | --annotation | \
+        --publish | -p | --expose | --cpuset-cpus | --cpuset-mems | --cpu-shares | \
+        --memory-swap | --memory-reservation | --oom-score-adj | --uidmap | \
+        --gidmap | --subuidname | --subgidname | --ip | --ip6 | --mac-address | \
+        --network-alias | --sysctl | --health-cmd | --health-interval | \
+        --health-retries | --health-timeout | --health-start-period | --cidfile | \
+        --runtime | --arch | --os | --variant | --timeout | --tz | --umask | \
+        --volume-driver | --pidfile | --conmon-pidfile | --systemd | --detach-keys)
+            return 0 ;;
+    esac
+    return 1
+}
+
+is_boolean_flag() {
+    # Podman run/create flags that take NO value. Any pre-image option that is
+    # neither this nor is_value_flag is refused (fail closed) so an unknown
+    # value-taking flag cannot consume the image token and let later pre-image
+    # `-e`/`-v` arguments escape validation.
+    case "$1" in
+        -d | --detach | --init | --rm | -i | --interactive | -t | --tty | \
+        -it | -ti | -itd | -dit | --privileged | --read-only | --no-healthcheck | \
+        -q | --quiet | --replace | --rmi | --tls-verify | --sig-proxy | \
+        --oom-kill-disable | -P | --publish-all | --no-hosts | --passwd | \
+        --unsetenv-all | --use-imagestore | --group-add-keep-groups)
+            return 0 ;;
+    esac
+    return 1
+}
+
+assert_env_name_allowed() {
+    # $1 = the NAME from a name-only `-e NAME`. Deny the control-plane bootstrap
+    # key (and any operator-declared host-only secret) outright, then enforce the
+    # allowlist: only the rendered egress/CA/NO_PROXY vars and declared provider
+    # placeholders may ride a name-only -e into the sandbox.
+    if in_list "$1" "$FORBIDDEN_ENV"; then
+        refuse "host-only credential '$1' must never be forwarded into a sandbox"
+    fi
+    if ! in_list "$1" "$ALLOWED_ENV"; then
+        refuse "env var '$1' is not in the sandbox allowlist (only rendered egress/CA/NO_PROXY vars and declared provider placeholders may be forwarded)"
+    fi
+}
+
+check_ca_mount() {
+    # $1 = a -v spec. Sets _ca_ok / _ca_bad for a mount targeting EXPECTED_CA.
+    # The mode is parsed option-by-option: a mount is read-only only when it
+    # carries `ro` AND no `rw` (so `ro,rw` is rejected, not treated as ro).
+    _spec="$1"
+    case "$_spec" in
+        *":${EXPECTED_CA}:"*)
+            _mode="${_spec##*:}"
+            _mode_ro=0
+            _mode_rw=0
+            _oldifs="$IFS"
+            IFS=','
+            for _opt in $_mode; do
+                [ "$_opt" = "ro" ] && _mode_ro=1
+                [ "$_opt" = "rw" ] && _mode_rw=1
+            done
+            IFS="$_oldifs"
+            if [ "$_mode_rw" = 1 ] || [ "$_mode_ro" = 0 ]; then
+                _ca_bad=1
+            else
+                _ca_ok=1
+            fi
+            ;;
+        *":${EXPECTED_CA}")
+            _ca_bad=1 ;; # HOST:CONTAINER with no mode = read-write default
+    esac
+}
+
+validate_launch() {
+    # $@ = normalised argv (verb + rest). Parse the podman FLAG region up to the
+    # image (the first bare positional); tokens after the image are the container
+    # command and are NEVER counted toward the proxy/CA/NO_PROXY requirement
+    # (post-image `-e`/`-v` tokens must not be mistaken for controls). Refuses
+    # (exits) on any missing/invalid item.
+    _e_names=" "
+    _ca_ok=0
+    _ca_bad=0
+    _await=""       # "" | e | v | skip  — what the next token is
+    _seen_image=0
+    shift           # drop the verb
+    for _tok in "$@"; do
+        [ "$_seen_image" = 1 ] && continue   # container command — ignore
+        if [ -n "$_await" ]; then
+            case "$_await" in
+                e)
+                    # The token after a bare `-e`/`--env` is the env NAME.
+                    case "$_tok" in
+                        *=*) refuse "value-bearing env argument is forbidden on a long-lived launch (name-only -e only)" ;;
+                        *) assert_env_name_allowed "$_tok"; _e_names="$_e_names$_tok " ;;
+                    esac ;;
+                v) check_ca_mount "$_tok" ;;
+                skip) : ;;   # another flag's value — ignore
+            esac
+            _await=""
+            continue
+        fi
+        case "$_tok" in
+            --env-host | --env-host=*)
+                refuse "host environment passthrough (--env-host) is forbidden on a long-lived launch" ;;
+            --env-file | --env-file=*)
+                refuse "environment files are forbidden on a long-lived launch" ;;
+            --secret | --secret=*)
+                refuse "podman secrets are forbidden on a long-lived launch (no credential value in the sandbox)" ;;
+            -e | --env)
+                _await="e" ;;
+            -v | --volume)
+                _await="v" ;;
+            --volume=* | -v=*)
+                check_ca_mount "${_tok#*=}" ;;
+            -e=* | --env=* | -e?*)
+                # -e=NAME / --env=NAME / -eNAME (compact or attached) all carry or
+                # could carry a value past validation.
+                refuse "only a bare two-token '-e NAME' env argument is allowed on a long-lived launch" ;;
+            --*=*)
+                : ;;   # some --flag=value (e.g. --network=none) — not env/volume
+            -*)
+                # An unknown value-taking flag would consume the image token and
+                # let later pre-image -e/-v escape the scan, so anything not
+                # recognised as value-taking or boolean is refused (fail closed).
+                if is_value_flag "$_tok"; then
+                    _await="skip"
+                elif is_boolean_flag "$_tok"; then
+                    :
+                else
+                    refuse "unsupported option '$_tok' on a long-lived launch"
+                fi ;;
+            *)
+                _seen_image=1 ;;   # first bare positional = the image
+        esac
+    done
+
+    [ "$_ca_bad" = 0 ] || refuse "CA mount to $EXPECTED_CA is not read-only"
+    [ "$_ca_ok" = 1 ] || refuse "missing read-only CA mount to $EXPECTED_CA"
+
+    for _n in $PROXY_NAMES $CA_NAMES; do
+        _c=$(count_occurrences "$_n" "$_e_names")
+        [ "$_c" -ge 1 ] || refuse "missing name-only -e $_n"
+        [ "$_c" -le 1 ] || refuse "duplicate -e $_n"
+    done
+
+    for _n in $PROXY_NAMES; do
+        _val=$(env_value "$_n")
+        [ -n "$_val" ] || refuse "empty proxy value for $_n"
+        _auth=$(authority_of "$_val")
+        [ "$_auth" = "$EXPECTED_PROXY" ] || refuse "proxy authority mismatch for $_n (want '$EXPECTED_PROXY')"
+    done
+
+    for _n in $CA_NAMES; do
+        _val=$(env_value "$_n")
+        [ "$_val" = "$EXPECTED_CA" ] || refuse "CA env $_n does not point at $EXPECTED_CA"
+    done
+
+    # NO_PROXY/no_proxy is never required (the pinned egress render may omit it),
+    # but when the launch forwards it its value must be the expected loopback set
+    # — a broadened or `*` value would let the sandbox bypass the proxy for the
+    # egress target and defeat attribution entirely.
+    for _n in $NO_PROXY_NAMES; do
+        _c=$(count_occurrences "$_n" "$_e_names")
+        [ "$_c" -ge 1 ] || continue           # not forwarded — sandbox never gets it
+        _val=$(env_value "$_n")
+        [ -n "$_val" ] || continue            # forwarded name, unset value — nothing injected
+        [ "$_val" = "$EXPECTED_NO_PROXY" ] || refuse "$_n forwarded to the sandbox is not the expected loopback bypass list"
+    done
+}
+
+exec_launch() {
+    # $@ = normalised argv (verb + rest). Drop --add-host *:host-gateway (podman
+    # 3.4.4 rejects host-gateway; never emitted under OPTION A but dropped as a
+    # belt), inject --label nv.hermes-ppid=$PPID, log the transformed argv, exec.
+    _verb="$1"
+    shift
+    _total=$#
+    _proc=0
+    while [ "$_proc" -lt "$_total" ]; do
+        _cur="$1"
+        shift
+        _proc=$((_proc + 1))
+        if [ "$_cur" = "--add-host" ] && [ "$_proc" -lt "$_total" ]; then
+            case "$1" in
+                *:host-gateway)
+                    shift
+                    _proc=$((_proc + 1))
+                    continue ;;
+            esac
+        fi
+        set -- "$@" "$_cur"
+    done
+    set -- "$_verb" "--label" "nv.hermes-ppid=$PPID" "$@"
+    log_line "launch: $*"
+    exec "$PODMAN" "$@"
+}
+
+rewrite_label_template() {
+    printf '%s' "$1" | sed 's/{{\.Label "\([^"]*\)"}}/{{index .Labels "\1"}}/g'
+}
+
+exec_ps() {
+    # $@ = full argv (verb + rest). Rewrite {{.Label "K"}} -> {{index .Labels "K"}}
+    # in --format so podman 3.4.4 (whose ps has no .Label method) can serve it.
+    _verb="$1"
+    shift
+    _total=$#
+    _proc=0
+    while [ "$_proc" -lt "$_total" ]; do
+        _cur="$1"
+        shift
+        _proc=$((_proc + 1))
+        case "$_cur" in
+            --format=*)
+                _fmt=$(rewrite_label_template "${_cur#--format=}")
+                set -- "$@" "--format=$_fmt"
+                continue ;;
+        esac
+        if [ "$_cur" = "--format" ] && [ "$_proc" -lt "$_total" ]; then
+            _fmt=$(rewrite_label_template "$1")
+            shift
+            _proc=$((_proc + 1))
+            set -- "$@" "--format" "$_fmt"
+            continue
+        fi
+        set -- "$@" "$_cur"
+    done
+    exec "$PODMAN" "$_verb" "$@"
+}
+
+do_sweep() {
+    # Remove hermes-agent=1 containers whose recorded nv.hermes-ppid is dead.
+    _list=$("$PODMAN" ps -a --filter label=hermes-agent=1 \
+        --format '{{.ID}} {{index .Labels "nv.hermes-ppid"}}' 2>/dev/null) || return 0
+    printf '%s\n' "$_list" | while read -r _cid _ppid; do
+        [ -n "$_cid" ] || continue
+        [ -n "$_ppid" ] || continue
+        if ! kill -0 "$_ppid" 2>/dev/null; then
+            "$PODMAN" rm -f "$_cid" >/dev/null 2>&1 || true
+        fi
+    done
+    return 0
+}
+
+is_cgroup_probe() {
+    # $@ = normalised argv (verb + rest). Match ONLY the pinned docker.py probe
+    # shape (tools/environments/docker.py:776-785):
+    #   run --rm --cpus 0.5 --memory 64m --pids-limit 32 <image> sleep 0
+    # Anything else that merely looks like `run --rm` falls through to
+    # validate_launch (fail closed) rather than being allowlisted.
+    shift
+    [ "$#" -eq 10 ] || return 1
+    [ "$1" = "--rm" ] || return 1
+    [ "$2" = "--cpus" ] || return 1
+    [ "$3" = "0.5" ] || return 1
+    [ "$4" = "--memory" ] || return 1
+    [ "$5" = "64m" ] || return 1
+    [ "$6" = "--pids-limit" ] || return 1
+    [ "$7" = "32" ] || return 1
+    [ "$9" = "sleep" ] || return 1
+    [ "${10}" = "0" ] || return 1
+    return 0
+}
+
+is_storage_probe() {
+    # $@ = normalised argv (verb + rest). Exactly: create --storage-opt size=1m hello-world
+    shift
+    [ "$#" -eq 3 ] || return 1
+    [ "$1" = "--storage-opt" ] && [ "$2" = "size=1m" ] && [ "$3" = "hello-world" ]
+}
+
+# --- dispatch ---------------------------------------------------------------
+# Hermes always invokes the verb as the first argument. Normalise the
+# `podman container run|create|…` sub-noun to a bare verb, then refuse any
+# leading global option (`--url`, `--log-level …`, `-r`, …): those are not a
+# shape Hermes emits and can hide a launch behind an unvalidated dispatch.
+verb="${1:-}"
+if [ "$verb" = "container" ]; then
+    shift
+    verb="${1:-}"
+fi
+case "$verb" in
+    "" | -*)
+        refuse "unsupported podman invocation form (expected a subcommand as the first argument, got '${verb:-<none>}')" ;;
+esac
+
+case "$verb" in
+    sweep)
+        shift
+        do_sweep "$@"
+        exit $?
+        ;;
+    run)
+        # A `run` without -d that matches the pinned cgroup probe is the only
+        # allowlisted run; everything else (including any other `run --rm`) is a
+        # long-lived launch and must pass validation.
+        if ! has_flag "-d" "$@" && is_cgroup_probe "$@"; then
+            exec "$PODMAN" "$@"
+        fi
+        require_expected
+        validate_launch "$@"
+        exec_launch "$@"
+        ;;
+    create)
+        if is_storage_probe "$@"; then
+            exec "$PODMAN" "$@"
+        fi
+        require_expected
+        validate_launch "$@"
+        exec_launch "$@"
+        ;;
+    ps)
+        exec_ps "$@"
+        ;;
+    *)
+        exec "$PODMAN" "$@"
+        ;;
+esac

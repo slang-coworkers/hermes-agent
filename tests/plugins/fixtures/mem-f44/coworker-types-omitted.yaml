@@ -53,3 +53,4 @@ default_config:
             secret: "SECRET-PR"
             profile: reviewer
             events: [pull_request]
+workspace_root: /data/coworkers

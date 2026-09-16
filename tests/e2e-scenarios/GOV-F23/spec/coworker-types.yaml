@@ -41,3 +41,4 @@ rooms:
   gov-f23-room:
     name: "GOV-F23 Live"
     members: [gov-f23-worker, gov-f23-orchestrator]
+workspace_root: /data/coworkers

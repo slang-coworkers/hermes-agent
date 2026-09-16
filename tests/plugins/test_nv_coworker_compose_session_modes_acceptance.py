@@ -46,7 +46,8 @@ def _write_fixture_spec(spec_dir: Path, spec: dict) -> Path:
     (spec_dir / "spines").mkdir(exist_ok=True)
     (spec_dir / "spines" / "base.yaml").write_text(
         yaml.safe_dump({"identity": "Base.", "invariants": ["Be helpful."],
-                        "workflows": ["wf"], "config": {}}, sort_keys=False),
+                        "workflows": ["wf"],
+                        "config": {"terminal": {"container_persistent": True}}}, sort_keys=False),
         encoding="utf-8")
     wf = spec_dir / "workflows" / "wf"
     wf.mkdir(parents=True, exist_ok=True)
@@ -59,6 +60,7 @@ def _write_fixture_spec(spec_dir: Path, spec: dict) -> Path:
 
 def _base_spec() -> dict:
     return {
+        "workspace_root": "/data/coworkers",
         "orchestrator_profile": "orchestrator",
         "default_profile": "default",
         "spines": {"base": {"source": "spines/base.yaml"}},

@@ -14,6 +14,7 @@ config:
   checkpoints: {auto_prune: false}
   compression: {in_place: true}
   terminal:
+    container_persistent: true
     backend: "docker"
     docker_image: "hermes-sandbox:pinned"
     docker_mount_cwd_to_workspace: true

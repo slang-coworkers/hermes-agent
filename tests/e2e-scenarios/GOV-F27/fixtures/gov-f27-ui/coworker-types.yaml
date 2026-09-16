@@ -43,3 +43,4 @@ types:
         url: https://onecli.local/mcp/repo
         include: [create_issue, create_pr]
     ui_meta: {title: Fixer, description: "Implementer", shape: square}
+workspace_root: /data/coworkers
