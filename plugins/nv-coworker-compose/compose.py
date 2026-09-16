@@ -24,6 +24,7 @@ import yaml
 
 from gateway.config import Platform, platform_binds_port
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+from hermes_constants import get_default_hermes_root
 
 # Spec-controlled names become directory/file components and profile names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -506,6 +507,198 @@ def _enforce_shared_learnings(config: Dict[str, Any], clone: str, is_orchestrato
     ]
     volumes.append(desired)
     _set_dotted(config, "terminal.docker_volumes", volumes)
+
+
+def _reject_malformed_terminal(config: Dict[str, Any], profile_name: str) -> None:
+    """Fail closed on a non-mapping ``terminal`` or a non-list ``terminal.docker_volumes``.
+
+    Runs in the Phase-A pre-pass BEFORE any enforcer normalizes those values:
+    ``_enforce_session_driver`` would replace a scalar ``terminal`` via ``_set_dotted``,
+    and ``_enforce_shared_learnings`` coerces a non-list ``docker_volumes`` to ``[]`` —
+    either of which would mask malformed spec input from the mount-composition check,
+    so the shape is validated on the raw resolved value first."""
+    terminal = config.get("terminal")
+    if terminal is None:
+        return
+    if not isinstance(terminal, dict):
+        raise CompositionError(
+            f"{profile_name}: terminal must be a mapping; got {type(terminal).__name__}"
+        )
+    if "docker_volumes" in terminal and not isinstance(terminal["docker_volumes"], list):
+        raise CompositionError(
+            f"{profile_name}: terminal.docker_volumes must be a list; "
+            f"got {type(terminal['docker_volumes']).__name__}"
+        )
+
+
+def _require_abs_mount_path(value: Any, label: str, profile_name: str) -> Path:
+    """Validate a spec-declared mount host path before it is interpolated into a
+    ``host:container:mode`` volume string. It must be a non-blank string, contain
+    no ``:`` (which would smuggle extra colon-delimited fields such as a
+    ``:/workspace`` destination), be absolute, and carry no ``..`` component. The
+    content type-check runs before any use, so a non-string YAML value raises
+    ``CompositionError`` rather than a raw ``TypeError``."""
+    if not isinstance(value, str) or not value.strip():
+        raise CompositionError(
+            f"{profile_name}: {label} must be a non-empty path string; got {value!r}"
+        )
+    if ":" in value:
+        raise CompositionError(f"{profile_name}: {label} must not contain ':'; got {value!r}")
+    path = Path(value)
+    if not path.is_absolute():
+        raise CompositionError(f"{profile_name}: {label} must be an absolute path; got {value!r}")
+    if ".." in path.parts:
+        raise CompositionError(f"{profile_name}: {label} must not contain '..'; got {value!r}")
+    return path
+
+
+def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
+    """True when the resolved ``host_path`` equals ``protected_root``, lies under it,
+    or is an ancestor of it — any of which exposes the protected subtree. The fleet
+    Hermes root contains every ``<root>/profiles/<name>`` dir, so this bidirectional
+    check covers "no path under $HERMES_HOME, the profile dir or their parents" in one
+    test. Mirrors tools/path_security.py:15-34 (``resolve()`` follows symlinks and
+    normalizes ``..``; ``relative_to`` detects containment), applied both directions
+    and reimplemented locally to keep the offline renderer free of a core import. An
+    unresolvable path fails closed."""
+    try:
+        resolved = host_path.resolve()
+        root = protected_root.resolve()
+    except OSError:
+        return True
+    if resolved == root:
+        return True
+    try:
+        resolved.relative_to(root)
+        return True
+    except ValueError:
+        pass
+    try:
+        root.relative_to(resolved)
+        return True
+    except ValueError:
+        pass
+    return False
+
+
+def _enforce_mount_composition(
+    config: Dict[str, Any],
+    profile_name: str,
+    workspace_root: Any,
+    install_surfaces: Any,
+    shared_learnings_root: Any,
+    is_orchestrator: bool,
+) -> None:
+    """Render one coworker profile's ``terminal.docker_volumes`` as an explicit,
+    policed, closed set — the single final owner of the key (ISO-F13).
+
+    The set is exactly: the profile's workspace root mounted read-write same-path,
+    the MEM-F43 shared-learnings clone mount when a clone is configured (unchanged
+    role split — rw orchestrator / ro worker), and each declared install surface
+    mounted read-only same-path — and nothing else. Every host path must resolve
+    OUTSIDE the fleet Hermes root ``get_default_hermes_root()`` (which contains every
+    sibling ``<root>/profiles/<name>`` dir), and no completed entry may carry the
+    ``:/workspace`` substring that ``docker.py:998`` reads as an explicit /workspace
+    mount (which would suppress the auto cwd bind). Fails closed: an absent/null/blank
+    ``workspace_root`` or a missing/non-bool ``container_persistent`` is a
+    ``CompositionError``, never a silent default. Also forces
+    ``docker_mount_cwd_to_workspace: true``."""
+    protected_root = get_default_hermes_root()
+
+    # container_persistent: explicit per-role bool, never defaulted or coerced.
+    persistent = _get_dotted(config, "terminal.container_persistent")
+    if not isinstance(persistent, bool):
+        raise CompositionError(
+            f"{profile_name}: terminal.container_persistent must be set explicitly to a "
+            f"bool per role; got {persistent!r}"
+        )
+
+    # workspace_root is a mandatory fleet key: absent / null / blank is refused, never
+    # "skip enforcement" (the fail-closed hinge, AC-ISO-F13-1).
+    ws_root = _require_abs_mount_path(workspace_root, "workspace_root", profile_name)
+    ws = ws_root / profile_name / "workspace"
+
+    if install_surfaces is None:
+        install_surfaces = []
+    if not isinstance(install_surfaces, list):
+        raise CompositionError(
+            f"{profile_name}: install_surfaces must be a list; "
+            f"got {type(install_surfaces).__name__}"
+        )
+    surfaces = [
+        _require_abs_mount_path(surface, "install_surface", profile_name)
+        for surface in install_surfaces
+    ]
+
+    # A same-path mount whose host path begins with /workspace would put ":/workspace"
+    # in its volume string (docker.py:998) and suppress the auto cwd->/workspace bind.
+    for host in [ws, *surfaces]:
+        if str(host).startswith("/workspace"):
+            raise CompositionError(
+                f"{profile_name}: mount host path {str(host)!r} must not begin with "
+                f"'/workspace' (it would suppress docker_mount_cwd_to_workspace)"
+            )
+
+    # The shared-learnings clone (MEM-F43) is the ONLY entry an earlier writer may
+    # legitimately have added. Recompute the permitted mount (recompute-and-compare,
+    # never substring recognition) and refuse unless the current docker_volumes is
+    # exactly that (clone configured) or empty (not) — this rejects any spec-injected
+    # non-clone entry.
+    clone_mount: Optional[str] = None
+    if shared_learnings_root:
+        _require_abs_mount_path(shared_learnings_root, "shared_learnings_root", profile_name)
+        rw_mount = f"{shared_learnings_root}:{WIKI_MOUNT}"
+        clone_mount = rw_mount if is_orchestrator else f"{rw_mount}:ro"
+
+    current = _get_dotted(config, "terminal.docker_volumes")
+    if current is not None and not isinstance(current, list):
+        raise CompositionError(f"{profile_name}: terminal.docker_volumes must be a list")
+    current_list = [str(v).strip() for v in current] if isinstance(current, list) else []
+    expected_pre = [clone_mount] if clone_mount is not None else []
+    if current_list != expected_pre:
+        raise CompositionError(
+            f"{profile_name}: terminal.docker_volumes carries an unexpected entry "
+            f"{current_list!r}; only the shared-learnings mount may pre-exist mount composition"
+        )
+
+    # Containment against the fleet root — descendant OR ancestor exposes the subtree.
+    checked = [("workspace_root", ws)]
+    if shared_learnings_root:
+        checked.append(("shared_learnings_root", Path(str(shared_learnings_root))))
+    checked.extend(("install_surface", surface) for surface in surfaces)
+    for label, host in checked:
+        if _mount_conflicts(host, protected_root):
+            raise CompositionError(
+                f"{profile_name}: {label} {str(host)!r} resolves into or over the fleet "
+                f"Hermes root {str(protected_root)!r}"
+            )
+
+    # Reject duplicate / colliding resolved same-path destinations (advisory hardening:
+    # keeps the closed set free of a redundant or conflicting -v).
+    seen: Dict[str, str] = {}
+    for label, host in [("workspace_root", ws), *[("install_surface", s) for s in surfaces]]:
+        key = str(host.resolve())
+        if key in seen:
+            raise CompositionError(
+                f"{profile_name}: {label} {str(host)!r} collides on resolved destination "
+                f"with an earlier same-path mount ({seen[key]!r})"
+            )
+        seen[key] = str(host)
+
+    # Build the explicit, ordered, closed set: workspace (rw), clone (if any), surfaces (ro).
+    volumes = [f"{ws}:{ws}:rw"]
+    if clone_mount is not None:
+        volumes.append(clone_mount)
+    volumes.extend(f"{surface}:{surface}:ro" for surface in surfaces)
+
+    for entry in volumes:
+        if ":/workspace" in entry:
+            raise CompositionError(
+                f"{profile_name}: composed volume {entry!r} contains ':/workspace'"
+            )
+
+    _set_dotted(config, "terminal.docker_volumes", volumes)
+    _set_dotted(config, "terminal.docker_mount_cwd_to_workspace", True)
 
 
 def _enforce_memory_policy(config: Dict[str, Any]) -> None:
@@ -2078,6 +2271,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # (DEFAULT is resolved and written last) raises before out_root holds any
     # config.yaml — no partial fleet on disk.
     for driver_tname, driver_resolved in resolved_by_type.items():
+        _reject_malformed_terminal(driver_resolved["config"], driver_tname)
         _enforce_session_driver(driver_resolved["config"], driver_tname)
     _enforce_session_driver(default_config, default_profile)
 
@@ -2092,6 +2286,12 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # learnings, in which case the enforcement is skipped entirely.
     shared_learnings_root = data.get("shared_learnings_root")
 
+    # ISO-F13 mount-composition inputs — uniform fleet keys, policed per coworker type
+    # below. workspace_root is required (fail-closed); install_surfaces defaults to []
+    # and is validated in the enforcer.
+    workspace_root = data.get("workspace_root")
+    install_surfaces = data.get("install_surfaces")
+
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
     rendered: Dict[str, str] = {}
@@ -2103,6 +2303,13 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 resolved["config"], str(shared_learnings_root),
                 is_orchestrator=(tname == orchestrator_profile),
             )
+        # ISO-F13: the single, final owner of terminal.docker_volumes — runs after
+        # _enforce_shared_learnings (the only earlier writer) so it composes the closed
+        # policed set on top of the permitted clone mount.
+        _enforce_mount_composition(
+            resolved["config"], tname, workspace_root, install_surfaces,
+            shared_learnings_root, is_orchestrator=(tname == orchestrator_profile),
+        )
         _enforce_memory_policy(resolved["config"])
         _enforce_curator(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
