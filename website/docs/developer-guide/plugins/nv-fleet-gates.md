@@ -38,7 +38,7 @@ managed scope so a per-profile config cannot widen them.
 |---|---|
 | `profile_roles` | map of profile name → role; a profile is the orchestrator when its role is `orchestrator`. Read from the managed-scope merge, so a per-profile override cannot escalate a worker. |
 | `edges_db_path` | absolute path to the **fleet-shared** SQLite edges store (outside any profile home), written by `hermes wire` and read by every profile's predicate. |
-| `enforce_sandbox` | when true, the SANDBOX predicate checks the resolved backend, brings up the container task env, and re-asserts the dangerous-command floor; and the MCP-SCOPE predicate additionally denies any non-`remote` (stdio/unknown-transport) `mcp_*` call. Off by default. |
+| `enforce_sandbox` | when true, the SANDBOX predicate first hard-fails any turn whose active per-turn profile differs from the launch profile (cross-profile refusal, see below), then checks the resolved backend, brings up the container task env, and re-asserts the dangerous-command floor; and the MCP-SCOPE predicate additionally denies any non-`remote` (stdio/unknown-transport) `mcp_*` call. Off by default. |
 | `expected_backend` | the container backend a profile's tool calls must resolve to when `enforce_sandbox` is true. |
 | `mcp_scope` | the full profile-keyed MCP allow-list the compose plugin renders into **every** profile: `{profile: {mcp__<server>__<tool>: transport}}`. The MCP-SCOPE predicate selects the calling profile's entry by identity and denies any `mcp_*` tool absent from it (a profile absent from the map is denied all MCP — fail-closed); under `enforce_sandbox` a non-`remote` transport is also denied. The whole map is copied into each profile because `ctx.get_config` resolves against the active profile home. |
 | `plan_gate` | when true, `write_file`/`patch`/mutating `terminal` are refused until the session has itself created a plan under `.hermes/plans/*.md`. |
@@ -46,8 +46,38 @@ managed scope so a per-profile config cannot widen them.
 | `stage_markers` | the delivery-marker prefixes (`[Fix Report]`, `[Review Verdict]`, …) that make a `message_agent` a gated delivery. |
 | `admin_tools` | the admin-shaped tool names that are orchestrator-only (unioned with a vendored default). |
 
-The caller's identity is resolved from `HERMES_HOME` (the profile the process
-runs in), never from a plugin-writable setting, so a worker cannot forge it.
+The caller's identity is resolved from the **active per-turn profile home** — the
+context-local `get_hermes_home()` the gateway multiplexer scopes each turn to (via
+`set_hermes_home_override`, propagated into the tool-executor worker thread by
+`copy_context()`) — never from a plugin-writable setting, so a worker cannot forge it.
+That active identity is distinct from the **process launch profile**
+(`get_process_hermes_home()`): the override-immune home the gateway was started under,
+whose config was frozen into the process-global `terminal.*` sandbox settings. The
+SANDBOX predicate's cross-profile hard-fail (below) compares the two.
+
+## SANDBOX: cross-profile hard-fail (active profile ≠ launch profile)
+
+When `enforce_sandbox` is true, the SANDBOX predicate's **first** check refuses any
+gateway turn whose **active per-turn profile** differs from the **process launch
+profile**, before any `TERMINAL_ENV` value is trusted:
+
+- **active** — `get_hermes_home()`, the context-local profile the gateway multiplexer
+  scoped this turn to.
+- **launch** — `get_process_hermes_home()`, the override-immune home the gateway was
+  started under.
+
+The two are compared with `hermes_home_key()` (resolve + normcase — collision-free and
+cross-platform), and a mismatch returns a `block` naming both profiles.
+
+The check exists because `terminal.*` is frozen into the **process-global** `TERMINAL_*`
+environment once at gateway startup, from the launch profile's config (there is no
+per-turn terminal scope at this release). A gateway-served tool call for a **non-launch**
+profile would therefore run inside the **launch** profile's container/egress config — a
+silent cross-profile sandbox leak. The hard-fail is the defense-in-depth mitigation:
+tool-bearing work for a non-launch profile is pushed to that profile's own kanban-board
+subprocess, which bridges its own correct `terminal.*` at its own startup. The launch
+profile's own turns (active == launch) are unaffected, and with `enforce_sandbox: false`
+the whole predicate — this check included — is inert.
 
 ## Companion surfaces
 
