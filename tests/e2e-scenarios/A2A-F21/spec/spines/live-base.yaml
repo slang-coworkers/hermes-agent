@@ -1,0 +1,20 @@
+# Scenario-local spine for AC-LOOP-F35-5. Carries the FULL providers.coworkers-live
+# block (not the bare api:/key_env: shape) so it survives `hermes onboard`: the
+# renderer deep-merges this config: and force-installs it as each profile's
+# config.yaml, overwriting whatever the fixtures shipped. Inline api_key (not
+# key_env) so it also survives the recipient's ANTHROPIC_*-sanitised message_agent
+# delivery subprocess. Remote base_url routes through the OneCLI egress proxy.
+identity: "A2A-F21 (LOOP-F35 carried) live base"
+config:
+  model:
+    provider: coworkers-live
+    default: aws/anthropic/bedrock-claude-opus-4-8
+  providers:
+    coworkers-live:
+      base_url: https://inference-api.nvidia.com
+      api_mode: anthropic_messages
+      api_key: dummy-a2a-f21-not-a-real-key
+      default_model: aws/anthropic/bedrock-claude-opus-4-8
+  timezone: Asia/Kolkata
+  sessions:
+    auto_prune: false

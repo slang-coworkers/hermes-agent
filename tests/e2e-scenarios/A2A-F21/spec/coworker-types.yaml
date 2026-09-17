@@ -1,0 +1,35 @@
+# Onboard spec for the AC-LOOP-F35-5 ## Setup. Declares the two bots the fixtures
+# already installed, so `hermes onboard coworker` writes each one's
+# ui_meta['hermes-bots'] (via profiles.configure CAS) and materialises its
+# canonical Bot Chat. The responder's ack protocol lives in its `identity:` below,
+# NOT only in the fixture SOUL.md: onboard force-replaces SOUL.md from the resolved
+# identity, so only a spec identity survives.
+project: a2a-f21-loopf35-live
+default_profile: default
+orchestrator_profile: a2a-f21-loopf35-a
+worker_profile: a2a-f21-loopf35-b
+
+spines:
+  live-base:
+    source: spines/live-base.yaml
+
+types:
+  a2a-f21-loopf35-a:
+    extends: [live-base]
+    identity: "A2A-F21/LOOP-F35 live bot A (sender). When asked, use message_agent to send a2a-f21-loopf35-b the given nonce inside the one gateway, then relay bot B's reply back into this Bot Chat."
+    ui_meta: {title: "Bot A", description: "A2A-F21/LOOP-F35 live message_agent sender", shape: "circle"}
+  a2a-f21-loopf35-b:
+    extends: [live-base]
+    identity: |
+      A2A-F21/LOOP-F35 live responder, reached via message_agent inside the one gateway.
+      When another bot messages you, read the nonce token (the `f35-…` value) from the
+      incoming message and reply in your Bot Chat with exactly `F35-ACK:<nonce>` — the
+      literal prefix `F35-ACK:` followed by that nonce and nothing else on that line.
+      Never write the `F35-ACK:` prefix unless you are acknowledging a nonce you actually
+      received.
+    ui_meta: {title: "Bot B", description: "A2A-F21/LOOP-F35 live message_agent responder", shape: "square"}
+
+rooms:
+  a2a-f21-loopf35-room:
+    name: "A2A-F21 / LOOP-F35 Live"
+    members: [a2a-f21-loopf35-a, a2a-f21-loopf35-b]
