@@ -83,7 +83,9 @@ Environment="PODMAN_ONECLI_PODMAN=/usr/bin/podman"
 Environment="CONTAINER_HOST=unix:///run/user/1001/podman/podman.sock"
 Environment="PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255"
 Environment="PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt"
-Environment="PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY"   # provider placeholder every coworker forwards
+# ANTHROPIC_API_KEY is the provider placeholder every coworker forwards; systemd has no
+# inline comments, so this note stays on its own line above the assignment.
+Environment="PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY"
 EOF
 chmod 0600 "$dropin/10-podman-onecli.conf"
 systemctl --user daemon-reload
