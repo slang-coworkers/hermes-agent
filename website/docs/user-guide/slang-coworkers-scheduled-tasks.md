@@ -76,23 +76,28 @@ Two honest naming deltas:
 - an **ISO timestamp** one-shot.
 
 Each parses to a schedule **dict** whose `kind` is `once`, `interval`, or
-`cron`. Recurring kinds (`interval`/`cron`) re-arm to their next run;
-`compute_next_run` returns the strictly-later next fire, or `None` for a spent
-one-shot (tag: `cron/jobs.py:1390` \| main: `cron/jobs.py:1096`).
-`compute_next_run` applies **no** minimum-interval floor — see the
-[recurrence-guard note](#recurrence-guard).
+`cron`. Recurring kinds (`interval`/`cron`) re-arm to their next run: for a
+**positive** interval or a cron expression, `compute_next_run` returns a
+strictly-later next fire; it returns `None` for a spent one-shot
+(tag: `cron/jobs.py:1390` \| main: `cron/jobs.py:1096`). A degenerate
+zero-length interval (`0m`) is a legal parse whose next fire is the *same*
+instant, because `compute_next_run` applies **no** minimum-interval floor — see
+the [recurrence-guard note](#recurrence-guard).
 
-A recurring schedule is re-armed **inside the fire-claim lock**, so a stale
-re-delivery for the old time cannot re-fire: `claim_job_for_fire` takes
-`_fire_job_lock`, and `_claim_job_for_fire_locked` takes `_jobs_lock()` and
-bumps `next_run_at` via `compute_next_run` then `save_jobs`
-(tag: `cron/jobs.py:3447,3458,3488,3529-3532` \| main: `cron/jobs.py@08b140d14`).
-The pre-dispatch batch form, `advance_next_run`/`advance_next_runs`, is
-at-most-once for recurring jobs and **leaves one-shots unchanged** so they can
-still retry after a crash
-(tag: `cron/jobs.py:3367-3406` \| main: `cron/jobs.py@08b140d14`). Next-run
-times are anchored to the profile's configured timezone (see the fleet's
-timezone handling, SCHED-F34).
+For a positive-interval or cron schedule, the job is re-armed **inside the
+fire-claim lock**, before it runs: `claim_job_for_fire` takes `_fire_job_lock`,
+and `_claim_job_for_fire_locked` takes `_jobs_lock()` and bumps `next_run_at` to
+a later time via `compute_next_run` then `save_jobs`
+(tag: `cron/jobs.py:3447,3458,3488,3529-3532` \| main: `cron/jobs.py@08b140d14`),
+so a re-scan for the old due time no longer finds the job due. The pre-dispatch
+batch form, `advance_next_run`/`advance_next_runs`, gives those interval and
+cron jobs an at-most-once bump before execution and **leaves one-shots
+unchanged** so they can still retry after a crash
+(tag: `cron/jobs.py:3367-3406` \| main: `cron/jobs.py@08b140d14`). A degenerate
+`0m` interval re-arms to the current instant, so it gains no inter-run spacing —
+a legal but pathological input, not a floor Hermes enforces. Next-run times are
+anchored to the profile's configured timezone (see the fleet's timezone
+handling, SCHED-F34).
 
 ## Durability and per-profile ownership
 
@@ -208,8 +213,9 @@ per transaction (main: `cron/notepad.py:26,33-34`), matching `cron/executions.py
 ## Recurrence-guard note {#recurrence-guard}
 
 Hermes core applies **no minimum recurrence interval** today: `parse_schedule`
-accepts `1m` and `* * * * *` (tag: `cron/jobs.py:962-1121` \| main: `cron/jobs.py:733`),
-`compute_next_run` applies no floor (tag: `cron/jobs.py:1390-1449`
+accepts `0m`, `1m` and `* * * * *` (tag: `cron/jobs.py:962-1121` \| main: `cron/jobs.py:733`),
+`compute_next_run` applies no floor — a `0m` interval even computes its next fire
+at the *same* instant (tag: `cron/jobs.py:1390-1449`
 \| main: `cron/jobs.py:1096`), and the cron config block carries no
 minimum-interval key (tag: `hermes_cli/config_defaults.py:2707-2816`
 \| main: `hermes_cli/config_defaults.py@08b140d14`). The fleet's plan is to guard
