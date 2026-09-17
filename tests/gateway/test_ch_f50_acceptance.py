@@ -4,9 +4,13 @@ Proves the four NanoClaw interactive operations (cards, questions, reactions,
 files) already work: native buttons on a button-capable adapter, a numbered-text
 / `/approve` fallback on adapters that cannot render buttons, and interactive
 structured choices on the desktop panel (backed by the headless tui_gateway
-server that `hermes serve` runs). One test function per acceptance-criterion id
-(test_ac_ch_f50_1 .. _8). Behaviour contracts only — no network; SessionDB and
-HERMES_HOME are sandboxed to tmp_path by conftest.
+server that `hermes serve` runs). Questions (`clarify`), the approval card, and
+the desktop `react_to_message` tool are agent-callable; messaging reactions and
+file sends run through the `send_message` transport engine, which is deliberately
+not a model tool (these tests drive that engine directly, the way cron delivery,
+the `hermes send` CLI, and the MCP server do). One test function per
+acceptance-criterion id (test_ac_ch_f50_1 .. _8). Behaviour contracts only — no
+network; SessionDB and HERMES_HOME are sandboxed to tmp_path by conftest.
 """
 
 from __future__ import annotations
@@ -157,10 +161,16 @@ def test_ac_ch_f50_5():
     assert payload["choices"] == ["once", "session", "always", "deny"]
     denied = _approval_request_payload({"smart_denied": True})
     assert denied["choices"] == ["once", "deny"]
+    no_permanent = _approval_request_payload(
+        {"command": "echo hi", "allow_session": True, "allow_permanent": False}
+    )
+    assert no_permanent["choices"] == ["once", "session", "deny"]
+    no_session = _approval_request_payload({"allow_session": False})
+    assert no_session["choices"] == ["once", "deny"]
 
 
 def test_ac_ch_f50_6():
-    """The agent can attach an emoji reaction on a messaging platform via send_message(action=react)."""
+    """The send_message transport engine dispatches an emoji to a messaging adapter's add_reaction via action=react (send_message is not a model tool)."""
     import tools.send_message_tool as smt
     from gateway.config import Platform
 
@@ -226,3 +236,5 @@ async def test_ac_ch_f50_8(tmp_path):
     assert isinstance(result, dict) and "error" in result
     assert "does not implement native" in result["error"]
     assert str(media) not in result["error"]
+    # The inherited base send_document text-notice is never sent to the chat.
+    assert adapter.sent == []

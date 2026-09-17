@@ -6,24 +6,30 @@ description: "How Hermes asks the user multiple-choice questions, presents dange
 
 # Interactive operations: cards, questions, reactions, and files
 
-Hermes agents can do more than send plain text. They can ask the user a
-multiple-choice question, present a dangerous-command approval as an
-interactive card, react to a message with an emoji, and attach a file. All four
-are **native Hermes features** — there is no plugin to install and no tool to
-register. This page documents each operation, the surface it renders on, and
-the fallback used when a surface cannot render buttons.
+Hermes does more than send plain text: it asks the user multiple-choice
+questions, presents dangerous-command approvals as interactive cards, reacts to
+messages with emoji, and delivers file attachments. All four are **native
+Hermes features** — no plugin to install. They differ in *who* invokes them:
+questions (the `clarify` tool), the approval card, and the desktop
+`react_to_message` tool are **agent-callable** in a session, while messaging
+reactions and file attachments run through the internal `send_message`
+**transport engine**, which is deliberately **not** exposed as a model tool — it
+is driven by cron delivery, the `hermes send` CLI, the kanban notifier, and the
+MCP server, not by the model deciding to send on its own. This page documents
+each operation, its invocation path, the surface it renders on, and the fallback
+used when a surface cannot render buttons.
 
 ## Overview
 
 The four interactive operations map onto existing Hermes capabilities as
 follows:
 
-| Operation | How the agent invokes it | Rendered by |
+| Operation | Invocation path | Rendered by |
 |---|---|---|
-| **Question** (multiple choice) | the `clarify` tool | native choice buttons on button-capable adapters; a numbered text list on adapters that cannot render buttons |
-| **Card** (dangerous-command approval) | the approval gate (automatic on a dangerous command) | the policy-allowed subset of Allow-once / Allow-session / Always-allow / Deny — as buttons on button-capable messaging adapters and on the desktop panel, or a `/approve` … `/deny` text card on messaging adapters without buttons |
-| **Reaction** (emoji) | `send_message(action="react", emoji=…)`; the desktop `react_to_message` tool | the adapter's reaction API; reaction metadata on the message row + a desktop event |
-| **File** (attachment) | `send_message` with `MEDIA:<path>` in the message text | the adapter's native document API; a sanitized error on adapters without one |
+| **Question** (multiple choice) | **agent tool** `clarify` | native choice buttons on button-capable adapters; a numbered text list on adapters that cannot render buttons |
+| **Card** (dangerous-command approval) | the approval gate (automatic on a dangerous command; not a tool the agent calls) | the policy-allowed subset of Allow-once / Allow-session / Always-allow / Deny — as buttons on button-capable messaging adapters and on the desktop panel, or a `/approve` … `/deny` text card on messaging adapters without buttons |
+| **Reaction** (emoji) | **agent tool** `react_to_message` (desktop only); messaging reactions via the `send_message` transport engine (`action="react"`) — **not** a model tool | the adapter's `add_reaction` API (messaging); reaction metadata on the message row + a desktop event (desktop) |
+| **File** (attachment) | the `send_message` transport engine (`MEDIA:<path>`) — **not** a model tool | the adapter's native document API; a sanitized error returned to the caller on adapters without one |
 
 Questions and approval cards degrade gracefully: where a surface cannot render
 buttons, the agent still reaches the user through a numbered text list or a
@@ -151,22 +157,27 @@ are independent surfaces sharing one backend
 
 ## Reactions
 
-An agent can attach an emoji reaction to a message on two surfaces.
+Hermes reacts to messages on two surfaces, with different invocation paths.
 
-- **Messaging (the direct analog).** `send_message(action="react", emoji=…)`
-  dispatches the emoji to the live adapter's `add_reaction` method (duck-typed;
-  it requires a running gateway with a connected adapter). `action="unreact"`
-  removes one. This is the platform-native tapback. In the pinned release the
-  Photon adapter is the bundled adapter that implements `add_reaction`; any other
-  adapter exposing the same public `add_reaction` API participates too, while an
-  adapter without it returns an error rather than a reaction.
-- **Desktop.** The separate `react_to_message` tool records the agent's reaction
-  (`author="agent"`) as reaction metadata on the target message row — Hermes
-  stores reactions under the message's `display_metadata` JSON, not a side table,
-  so they survive rewind and compaction — and emits a `message.reaction` desktop
-  event so the reaction shows up in the desktop UI. The tool is exposed only to
-  desktop (GUI) sessions via the `desktop_ui` toolset, and is further gated by the
-  opt-in `display.message_reactions` toggle (default `false`).
+- **Messaging (transport engine, not a model tool).** The `send_message`
+  engine's `action="react"` dispatches an emoji to the live adapter's
+  `add_reaction` method (duck-typed; it requires a running gateway with a
+  connected adapter), and `action="unreact"` removes one — the platform-native
+  tapback. `send_message` is deliberately **not** registered as an agent-callable
+  model tool: the model does not decide on its own to fire cross-platform
+  reactions. This engine is driven instead by cron delivery, the `hermes send`
+  CLI, the kanban notifier, and the MCP server. In the pinned release the Photon
+  adapter is the bundled adapter that implements `add_reaction`; any other adapter
+  exposing the same public `add_reaction` API participates too, while an adapter
+  without it returns an error rather than a reaction.
+- **Desktop (agent-callable).** The `react_to_message` tool is the model-callable
+  reaction — exposed only to desktop (GUI) sessions via the `desktop_ui` toolset
+  and gated by the opt-in `display.message_reactions` toggle (default `false`). It
+  records the agent's reaction (`author="agent"`) as reaction metadata on the
+  target message row — Hermes stores reactions under the message's
+  `display_metadata` JSON, not a side table, so they survive rewind and
+  compaction — and emits a `message.reaction` desktop event so the reaction shows
+  up in the desktop UI.
 
 *Implementation:* tag `v2026.8.31` — messaging `tools/send_message_tool.py:230`
 (react/unreact schema), `:261` (dispatch → `_handle_react`), `:335`–`:361`
@@ -174,7 +185,10 @@ An agent can attach an emoji reaction to a message on two surfaces.
 `add_reaction`); desktop `tools/react_to_message_tool.py:34`
 (`_react_to_message_with_db`), `:90` (handler), `:119`/`:130`
 (`check_react_requirements` reads `display.message_reactions`),
-`toolsets.py:264` (`desktop_ui` toolset); reaction storage under
+`toolsets.py:264` (`desktop_ui` toolset); `send_message` is not in any toolset —
+`toolsets.py:419` ("agents do NOT get an agent-callable send_message tool") and
+the registry note in `tools/send_message_tool.py` ("intentionally NOT registered
+as an agent-callable model tool"); reaction storage under
 `display_metadata` `hermes_state.py:11803` (`REACTIONS_METADATA_KEY`), `:11805`
 (`set_message_reaction`). main — `tools/send_message_tool.py::_handle_react`,
 `tools/react_to_message_tool.py::react_to_message_tool`,
@@ -182,12 +196,14 @@ An agent can attach an emoji reaction to a message on two surfaces.
 
 ## Files
 
-An agent attaches a file by putting `MEDIA:<path>` in the message text it sends
-through `send_message`; adding `[[as_document]]` forces document delivery rather
-than letting the engine pick an image/video/voice method by extension. The media
-send engine delivers the file **natively** — it calls the adapter's
-`send_document` (or `send_image_file` / `send_video` / `send_voice`) — but only
-when the adapter actually **overrides** that method.
+Hermes delivers a file attachment through the `send_message` transport engine: a
+message carrying `MEDIA:<path>` (add `[[as_document]]` to force document delivery
+rather than letting the engine pick an image/video/voice method by extension). As
+with messaging reactions, `send_message` is **not** a model tool — this path is
+driven by cron delivery, the `hermes send` CLI, the kanban notifier, and the MCP
+server, not by the model. The media send engine delivers the file **natively** —
+it calls the adapter's `send_document` (or `send_image_file` / `send_video` /
+`send_voice`) — but only when the adapter actually **overrides** that method.
 
 If the adapter only inherits the base method, the engine refuses to send and
 returns a **sanitized** error that names the missing capability but never the
