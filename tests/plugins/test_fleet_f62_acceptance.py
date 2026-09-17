@@ -3,8 +3,8 @@
 One ``test_ac_fleet_f62_<n>`` per ``pytest:`` acceptance criterion (AC-FLEET-F62-1..4). The
 ``sandbox:``/``live:``/``ui:``/``desktop:`` ids (5-10) and the four carried ids
 (AC-CRED-F28-2, AC-ISO-F14-1/-2/-5) are proven by the ``tests/e2e-scenarios/FLEET-F62/`` files /
-the Playwright spec, not here. ``test_podman_onecli_optional_api_key_bridge_base`` ships the
-base-URL-guard regression proof (its permanent home is tests/plugins/test_podman_onecli_acceptance.py).
+the Playwright spec, not here. The podman-onecli base-URL-guard proof lives in
+tests/plugins/test_podman_onecli_acceptance.py.
 
 Isolation follows tests/hermes_cli/test_plugin_api_compat.py: an EMPTY HERMES_BUNDLED_PLUGINS dir; the
 composed plugin code is copied into the relevant home's plugins/ for discovery, but enablement comes
@@ -490,3 +490,45 @@ def test_render_rejects_unknown_substrate(tmp_path, monkeypatch):
     assert "substrate" in combined and "openshell-not-yet-implemented" in combined
     written = [p.name for p in out.iterdir() if p.is_dir()] if out.exists() else []
     assert not written, f"no distribution may be written on a fail-closed render, found {written}"
+
+
+def _load_compose_module():
+    """Import the nv-coworker-compose `compose` module directly (its `from gateway.config`
+    / `from hermes_cli` imports resolve against REPO_ROOT already on sys.path)."""
+    import importlib.util
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    spec = importlib.util.spec_from_file_location(
+        "_fleet_f62_compose", SRC_PLUGINS / "nv-coworker-compose" / "compose.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    # Register before exec: with `from __future__ import annotations`, dataclasses
+    # resolves field annotations against sys.modules[cls.__module__] at class-creation.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize(
+    "raw, expect",
+    [
+        ({"gateway": {"systemd_watchdog_seconds": 1}}, 30),          # nested below floor -> floored
+        ({"gateway": {"systemd_watchdog_seconds": 90}}, 90),         # nested valid above floor -> kept
+        ({"systemd_watchdog_seconds": 90}, 90),                      # ROOT spelling (loader precedence) honored
+        ({"systemd_watchdog_seconds": 90, "gateway": {"systemd_watchdog_seconds": 5}}, 90),  # root wins over nested
+        ({"gateway": {"systemd_watchdog_seconds": 2_147_483_648}}, 30),  # oversized -> runtime coerces to 0 -> floored
+        ({"gateway": {"systemd_watchdog_seconds": True}}, 30),       # bool is not a valid int -> floored
+        ({}, 30),                                                    # absent -> floored
+    ],
+)
+def test_watchdog_floor_root_precedence_and_coercion(raw, expect):
+    """The DEFAULT watchdog force-writer honors the loader's root>nested precedence, runs
+    the value through the core coercion (bool/oversized/invalid -> disabled), floors any
+    below-floor or coercion-dropped value to 30, keeps a valid >=30 value, and writes only
+    the nested key (popping the root spelling so it cannot override)."""
+    compose = _load_compose_module()
+    cfg = dict(raw)
+    compose._enforce_watchdog_floor(cfg)
+    assert "systemd_watchdog_seconds" not in cfg, "the root spelling must be popped"
+    assert cfg["gateway"]["systemd_watchdog_seconds"] == expect

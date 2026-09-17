@@ -23,7 +23,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import yaml
 
-from gateway.config import Platform, platform_binds_port
+from gateway.config import Platform, coerce_systemd_watchdog_seconds, platform_binds_port
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 from hermes_constants import get_default_hermes_root
 
@@ -430,24 +430,10 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
-# ISO-F15 session-driver seam, made a DATA switch by FLEET-F62. The sandbox
-# SUBSTRATE is a top-level spec field the render resolves ONCE to a descriptor and
-# dispatches on. The descriptor names the ``terminal.backend`` value (which is ALSO
-# the veto's ``expected_backend`` — emitted from this same source so the two cannot
-# drift) and the substrate-specific ``terminal.*`` key prefix that egress and mount
-# composition serialise into. ``podman`` is the only shipped column: backend
-# ``docker`` + keys ``terminal.docker_*``, run through the fleet-global
-# HERMES_DOCKER_BINARY wrapper (deployment config, never rendered here). An absent
-# ``substrate`` defaults to ``podman`` (back-compat: existing specs carry none, so
-# their render is byte-unchanged); an UNKNOWN value fails closed before any
-# distribution is written. Scope: the substrate-specific terminal KEY NAMES are
-# descriptor-driven in the four functions the descriptor threads through; the
-# inherently docker-shaped paths (the ``docker_extra_args`` argv scan, the
-# host.docker.internal bridge rewrite, the shared-learnings mount dest) stay
-# docker-specific and a real ssh/openshell column (P7 OSH-F63/F64, out of this row)
-# extends those too. The sandbox image stays operator-supplied via
-# ``egress.sandbox_image`` (tunable, and preserves the merged ISO-F14 egress
-# contract) rather than baked into the descriptor.
+# The sandbox substrate is a DATA switch: the spec's `substrate` selects one descriptor
+# that keeps the terminal.backend value, the terminal.* key prefix egress/mount write
+# into, and the veto's expected_backend derived from ONE source, so rendered sandbox
+# settings and the veto's expected backend cannot drift.
 @dataclass(frozen=True)
 class _SubstrateDescriptor:
     substrate: str
@@ -1715,13 +1701,19 @@ _SYSTEMD_WATCHDOG_FLOOR = 30
 
 
 def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
-    current = _get_dotted(default_config, "gateway.systemd_watchdog_seconds")
-    keep = (
-        isinstance(current, int)
-        and not isinstance(current, bool)
-        and current >= _SYSTEMD_WATCHDOG_FLOOR
-    )
-    value = current if keep else _SYSTEMD_WATCHDOG_FLOOR
+    # Take the value the loader would resolve: the ROOT spelling wins over the nested
+    # gateway.* one (gateway/config.py from_dict), then run it through the SAME core
+    # coercion the runtime uses so a bool, an out-of-range int (which the runtime would
+    # coerce to 0 = supervision disabled) or a malformed string cannot slip below the
+    # floor. Anything the coercion drops, or a valid value under 30, is raised to 30; a
+    # valid value >= 30 is kept. Both spellings are popped so a surviving root value
+    # cannot override the nested one written back.
+    if "systemd_watchdog_seconds" in default_config:
+        effective = default_config["systemd_watchdog_seconds"]
+    else:
+        effective = _get_dotted(default_config, "gateway.systemd_watchdog_seconds")
+    coerced = coerce_systemd_watchdog_seconds(effective)
+    value = coerced if coerced >= _SYSTEMD_WATCHDOG_FLOOR else _SYSTEMD_WATCHDOG_FLOOR
     default_config.pop("systemd_watchdog_seconds", None)
     nested = default_config.get("gateway")
     if isinstance(nested, dict):

@@ -102,11 +102,15 @@ def _require_secure_base(base: str) -> None:
     parts = urlsplit(base)
     scheme = (parts.scheme or "").lower()
     host = (parts.hostname or "").lower()
+    # Userinfo in the base is refused outright, before any allow branch: a
+    # user:pass@ authority carries a cleartext secret regardless of scheme.
+    if parts.username is not None or parts.password is not None:
+        raise OneCLIError("gateway_api_base_url must not carry userinfo (user:pass@)")
     if scheme == "https":
         return
     if scheme == "http" and host in _LOOPBACK_HOSTS:
         return
-    if scheme == "http" and host and not _api_key() and not parts.username and not parts.password:
+    if scheme == "http" and host and not _api_key():
         origin = f"{host}:{parts.port}" if parts.port is not None else host
         if origin in {o.strip().lower() for o in _INSECURE_NO_AUTH_ORIGINS}:
             return

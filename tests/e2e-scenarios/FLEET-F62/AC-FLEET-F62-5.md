@@ -30,6 +30,10 @@ under `$HERMES_HOME`, with `--memory`/`--pids-limit` present.
 - `PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255`
 - `PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt`
 - `PODMAN_ONECLI_LOG=$TB/podman-calls.log`
+- `PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY` (every rendered coworker forwards
+  `ANTHROPIC_API_KEY` as its provider placeholder, so the wrapper must allowlist it or
+  it rejects the launch as a non-allowlisted env var; `PODMAN_ONECLI_FORBIDDEN_ENV`
+  keeps `ONECLI_API_KEY` host-only by default)
 - `CONTAINER_HOST=<the hermes-sandbox podman socket>`
 
 Routing through the wrapper — never `$PODMAN` directly — is what makes the

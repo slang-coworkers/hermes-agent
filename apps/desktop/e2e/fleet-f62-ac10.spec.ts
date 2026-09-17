@@ -14,14 +14,17 @@ import { startMockServer } from './mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 
-// AC-FLEET-F62-10 (desktop, stub): the Electron app, connected to ONE gateway
-// serving the six installed profiles, shows the Bots roster of exactly the five
-// coworkers with their role metadata and opens the orchestrator's Bot Chat over a
-// single gateway connection. A profile counts as a bot once ui_meta['hermes-bots']
-// is on its profile.yaml (bot_mode_probe), so each coworker is seeded with that key.
-// Room MEMBERSHIP (fleet-room(5) + review-room(3)) is proven in the ui scenario
-// AC-FLEET-F62-9, where the gateway boot seeds rooms; here we assert the group-chat
-// surface is present, the roster, the orchestrator Bot Chat, and one gateway.
+// AC-FLEET-F62-10 (desktop, stub): the Electron app, on ONE gateway serving the fleet,
+// shows the Bots roster of exactly the five coworkers with their role metadata, holds
+// the two standing rooms — fleet-room (5 members) and review-room (3) — and opens the
+// orchestrator's Bot Chat over a single gateway connection. A profile counts as a bot
+// once ui_meta['hermes-bots'] is on its profile.yaml (bot_mode_probe), so each coworker
+// is seeded with the fleet role metadata; the rooms are materialised through the
+// production "New Group Chat" flow with the exact fleet memberships. The coworkers'
+// podman-sandbox terminal/egress config (docker backend, OneCLI proxy) is booted for
+// real in the sandbox scenarios AC-FLEET-F62-5/6, not here — a bare Electron/Playwright
+// harness has no podman host — so this tier uses a working mock provider to drive the
+// Electron roster + room UI.
 
 type Page = MockBackendFixture['page']
 
@@ -43,6 +46,26 @@ async function openBots(page: Page): Promise<void> {
     .first()
   await tab.click()
   await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
+}
+
+/** Create a standing room (group chat) through the production "New bot or group chat"
+ *  → "New Group Chat" flow, selecting exactly `memberTitles`. Asserts the member count
+ *  on the Create button and that the named room tab lands selected. Returns after the
+ *  room exists. */
+async function createRoom(page: Page, groupName: string, memberTitles: readonly string[]): Promise<void> {
+  await page.getByRole('button', { name: 'New bot or group chat' }).click()
+  await page.getByRole('menuitem', { name: 'New Group Chat' }).click()
+  const dialog = page.getByRole('dialog', { name: 'New Group Chat' })
+  for (const title of memberTitles) {
+    await dialog.getByText(title, { exact: true }).locator('xpath=ancestor::label').getByRole('checkbox').click()
+  }
+  await dialog.getByRole('textbox', { name: 'Group name' }).fill(groupName)
+  // The Create button carries the selected member count — this IS the membership assertion.
+  await dialog.getByRole('button', { name: `Create Group (${memberTitles.length})` }).click()
+  await expect(dialog).toBeHidden({ timeout: 30_000 })
+  await expect(
+    page.getByRole('tab', { name: new RegExp(`${groupName}`) }).filter({ visible: true }).first()
+  ).toBeVisible({ timeout: 30_000 })
 }
 
 /** Seed one coworker profile before launch: profile dir + mock provider + a durable
@@ -111,7 +134,7 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster and opens the orchestrator Bot Chat over one gateway', async () => {
+test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two standing rooms, and opens the orchestrator Bot Chat over one gateway', async () => {
   test.setTimeout(300_000)
   const { page, sandbox } = fixture!
 
@@ -137,10 +160,13 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster and open
     expect(raw, `${bot.name} profile.yaml carries its role description`).toContain(bot.description)
   }
 
-  // Step 2 — the group-chat / rooms surface is present (room membership itself is
-  // asserted in the ui scenario AC-FLEET-F62-9, where the gateway boot seeds rooms).
-  await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
-  await page.screenshot({ path: test.info().outputPath('step-2-group-chat-surface.png') })
+  // Step 2 — the two standing rooms with their exact fleet memberships, via the
+  // production New Group Chat flow (the Create button's count is the membership check).
+  await createRoom(page, 'fleet-room', ['Orchestrator', 'Architect', 'Builder', 'Tester', 'Reviewer'])
+  await createRoom(page, 'review-room', ['Builder', 'Tester', 'Reviewer'])
+  await expect(page.getByRole('tab', { name: /fleet-room/ }).filter({ visible: true }).first()).toBeVisible()
+  await expect(page.getByRole('tab', { name: /review-room/ }).filter({ visible: true }).first()).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('step-2-standing-rooms.png') })
 
   // Step 3 — open the orchestrator's Bot Chat; it opens over the single gateway.
   const orchestratorRow = page

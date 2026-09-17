@@ -52,16 +52,29 @@ The render enforces the fleet invariants regardless of what the spec declares:
 ## 2. Install and supervise the one gateway
 
 ```bash
-# Install the six distributions into HERMES_HOME (default = launch/multiplexer).
+# The DEFAULT (launch/multiplexer) profile IS the gateway home: install its rendered
+# config.yaml into HERMES_HOME, or the gateway boots your existing default config with
+# no multiplexing and no watchdog.
+install -D -m 0600 /srv/fleet/render/default/config.yaml "${HERMES_HOME:-$HOME/.hermes}/config.yaml"
+[ -f /srv/fleet/render/default/SOUL.md ] && \
+  install -D -m 0644 /srv/fleet/render/default/SOUL.md "${HERMES_HOME:-$HOME/.hermes}/SOUL.md"
+
+# Install the five coworker distributions as named profiles.
 hermes profile install /srv/fleet/render/orchestrator --name orchestrator -y
 # … architect, builder, tester, reviewer likewise …
-# The default distribution's config.yaml is the launch profile's own config.
 
 # Install the managed fragment so the veto reads the role map.
 sudo install -D -m 0644 /srv/fleet/render/managed/config.yaml /etc/hermes/config.yaml
 # (or point HERMES_MANAGED_DIR at a dir holding it, and invalidate the managed cache)
 
-# Supervise the ONE gateway as a systemd Type=notify service on the DEFAULT home.
+# Supervise the ONE gateway as a systemd Type=notify service on the DEFAULT home. The
+# service unit must carry the podman-onecli wrapper coordinates in its Environment= (the
+# render pins terminal.backend: docker; the wrapper is HERMES_DOCKER_BINARY, deployment
+# config never rendered into a profile):
+#   Environment="HERMES_DOCKER_BINARY=/opt/hermes/plugins/podman-onecli/bin/podman-onecli-wrap"
+#   Environment="PODMAN_ONECLI_PODMAN=/usr/bin/podman" "CONTAINER_HOST=unix:///run/user/1001/podman/podman.sock"
+#   Environment="PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255" "PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt"
+#   Environment="PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY"   # provider placeholder every coworker forwards
 hermes gateway install     # emits Type=notify + WatchdogSec=<n>s + Restart=always …
 systemctl --user enable --now hermes-gateway
 ```

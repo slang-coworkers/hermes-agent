@@ -306,12 +306,9 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
     assert post.ok
 
 
-# --- FLEET-F62: the base-URL guard's keyless exact-origin allowance -----------
-# Permanent home of test_podman_onecli_optional_api_key_bridge_base (delivered in
-# the FLEET-F62 acceptance file, moved here per the ADR §Optional-key
-# reconciliation). Proves the render's config-only edit (§Optional-key) can reach
-# the unauthenticated OneCLI bridge control plane over http:// WHEN no bootstrap
-# key is set, while still protecting a present key and failing closed on 401/403.
+# The base-URL guard's keyless exact-origin allowance: an unauthenticated OneCLI
+# bridge control plane is reachable over http:// only from an allowlisted exact origin
+# WHEN no bootstrap key is set; a present key, userinfo, or a 401/403 still fails closed.
 
 
 class _FakeResp:
@@ -387,10 +384,12 @@ def test_podman_onecli_optional_api_key_bridge_base(tmp_path, monkeypatch, fail_
         oneclient._require_secure_base("http://172.17.0.1:9999")
     with pytest.raises(oneclient.OneCLIError):
         oneclient._require_secure_base("http://10.0.0.5:10256")
-    # userinfo on an otherwise-allowlisted origin is refused outright (a host:port
-    # allowlist must not be satisfied by a URL that also carries a cleartext secret)
+    # userinfo is refused outright on ANY scheme, before every allow branch (a
+    # user:pass@ authority carries a cleartext secret regardless of scheme)
     with pytest.raises(oneclient.OneCLIError):
         oneclient._require_secure_base("http://user:pass@172.17.0.1:10256")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("https://user:pass@example.com")
     # https is always allowed; a loopback http base is still allowed (unchanged)
     oneclient._require_secure_base("https://172.17.0.1:10256")
     oneclient._require_secure_base("http://127.0.0.1:10256")
