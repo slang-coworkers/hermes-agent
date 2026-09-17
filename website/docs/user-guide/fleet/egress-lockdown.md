@@ -89,15 +89,23 @@ nothing), so no partial fleet lands on disk. The operator-visible messages are o
 - `docker_extra_args must not mount at the CA path <ca_container_path>` — ANY
   `-v`/`--volume`/`--mount` in `docker_extra_args` targeting the CA path, canonical or
   divergent (the render owns that mount via `docker_volumes`, so a duplicate is refused too).
-- `docker_extra_args …` — a non-string entry (the backend discards it, shifting the argv into a
-  valid override); a `-e`/`--env` in any form (separate, `--env=`, or attached `-eKEY`) naming a
-  controlled var; an `--env-file` (its contents are opaque at render time, rejected
-  unconditionally); a `--network`/`--net` override; or a `--memory`/`-m`/`--cpus` override of the
-  pinned resource limits.
+- `docker_extra_args flag <FLAG> is not on the mount-safe allowlist` — **every profile's**
+  `docker_extra_args` (the DEFAULT profile included) is default-denied against the mount-safe
+  allowlist: only vetted non-mount flags (`--shm-size`, `--memory`, `--cpus`, `--ulimit`,
+  `--read-only`, `--init`, …) pass, so an engine-socket `-v`, `--tmpfs`, `--use-api-socket`,
+  `--privileged`, `--rootfs`, `--device`, `--cap-add`, or a positional image token is refused —
+  closing a second egress route / isolation & image-pin escape on the DEFAULT profile, whose
+  runtime egress guards are inert under OPTION A.
+- `docker_extra_args …` (egress-specific, on top of the allowlist) — a non-string entry (the
+  backend discards it, shifting the argv into a valid override); a `-e`/`--env` in any form
+  (separate, `--env=`, or attached `-eKEY`) naming a controlled var; an `--env-file` (its contents
+  are opaque at render time, rejected unconditionally); a `--network`/`--net` override; or a
+  `--memory`/`-m`/`--cpus` override of the pinned resource limits (`--memory`/`--cpus` ARE on the
+  allowlist, so the egress belt is what pins them).
 
 Unrelated `docker_env` keys (a legitimate `LANG`) and mount-safe allowlisted `docker_extra_args`
-(e.g. `--shm-size 64m`) are preserved. Coworker mounts are **not** carried in `docker_extra_args`
-— ISO-F13's coworker allowlist rejects every `-v`/`--volume`/`--mount` there; declare mounts
+(e.g. `--shm-size 64m`) are preserved. Mounts are **not** carried in `docker_extra_args` on any
+profile — the allowlist rejects every `-v`/`--volume`/`--mount` there; declare mounts
 through the fleet's mount surfaces (`workspace_root`, `install_surfaces`, the shared-learnings
 clone) instead.
 

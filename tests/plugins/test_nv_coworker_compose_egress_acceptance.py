@@ -256,6 +256,15 @@ def test_ac_iso_f14_3(tmp_path, monkeypatch):
         "default_extra_args_env_file": dict(default_config={"terminal": {"docker_extra_args": ["--env-file=/tmp/rogue.env"]}}),
         "default_extra_args_v_ca": dict(default_config={"terminal": {"docker_extra_args": ["-v", f"/tmp/untrusted.crt:{CA_CONTAINER_PATH}:ro"]}}),
         "default_extra_args_network": dict(default_config={"terminal": {"docker_extra_args": ["--network=host"]}}),
+        # Under OPTION A the DEFAULT belt is the SOLE gate (runtime egress guards inert), and ISO-F13's
+        # allowlist runs only in the coworker loop — so a non-mount-safe flag on the DEFAULT profile is a
+        # second egress route / isolation & image-pin escape unless the belt default-denies it:
+        "default_extra_args_privileged": dict(default_config={"terminal": {"docker_extra_args": ["--privileged"]}}),
+        "default_extra_args_rootfs": dict(default_config={"terminal": {"docker_extra_args": ["--rootfs", "/some/dir"]}}),
+        "default_extra_args_use_api_socket": dict(default_config={"terminal": {"docker_extra_args": ["--use-api-socket"]}}),
+        "default_extra_args_tmpfs_ca": dict(default_config={"terminal": {"docker_extra_args": ["--tmpfs", CA_CONTAINER_PATH]}}),
+        "default_extra_args_engine_socket": dict(default_config={"terminal": {"docker_extra_args": ["-v", "/run/podman/podman.sock:/var/run/docker.sock"]}}),
+        "default_extra_args_positional_image": dict(default_config={"terminal": {"docker_extra_args": ["evil-image:latest"]}}),
     }
     for cname, kwargs in collisions.items():
         out_c = tmp_path / f"out-collide-{cname}"

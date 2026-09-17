@@ -211,6 +211,52 @@ def test_default_target_only_ca_volume_rejected(tmp_path, monkeypatch, extra):
     assert not list(out.rglob("config.yaml")), "a target-only CA volume on DEFAULT must fail before any write"
 
 
+@pytest.mark.parametrize("extra", [
+    ["--privileged"],                                        # isolation escape
+    ["--rootfs", "/some/dir"],                               # image-pin escape (bypasses docker_image)
+    ["--use-api-socket"],                                    # engine API socket exposure
+    ["--tmpfs", CA_CONTAINER_PATH],                          # short-form tmpfs shadowing the CA path
+    ["-v", "/run/podman/podman.sock:/var/run/docker.sock"],  # engine-socket mount = second egress route
+    ["--device", "/dev/kmsg"],                               # host device passthrough
+    ["--cap-add", "SYS_ADMIN"],                              # capability escalation (--cap-drop is allowlisted; add is not)
+    ["evil-image:latest"],                                   # positional image override (defeats the pin)
+])
+def test_default_extra_args_non_allowlisted_rejected(tmp_path, monkeypatch, extra):
+    """Under OPTION A the DEFAULT-profile docker_extra_args belt is the sole gate (runtime egress guards
+    inert; ISO-F13's allowlist runs only in the coworker loop), so it must default-deny every non-mount-safe
+    flag before any config.yaml is written — else a second egress route (engine socket), an isolation escape
+    (--privileged/--use-api-socket/--device/--cap-add), or an image-pin escape (--rootfs/positional image)
+    slips through the DEFAULT profile."""
+    module = _load(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    spec = _make_spec(tmp_path, name="default-escape",
+                      default_config={"terminal": {"docker_extra_args": extra}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(out))
+    assert not list(out.rglob("config.yaml")), "a non-allowlisted DEFAULT docker_extra_args flag must fail before any write"
+
+
+def test_default_allowlisted_extra_arg_allowed(tmp_path, monkeypatch):
+    """The default-deny allowlist still passes a vetted non-mount flag on the DEFAULT profile
+    (no over-blocking): --read-only is on ISO-F13's allowlist, so the render succeeds."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="default-allow",
+                      default_config={"terminal": {"docker_extra_args": ["--read-only"]}})
+    assert module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_default_colon_less_ca_docker_volume_rejected(tmp_path, monkeypatch):
+    """A colon-less docker_volumes entry equal to the CA container path is a target-only spec AT the
+    CA path (its single field is the container dest); the belt rejects it on the DEFAULT profile."""
+    module = _load(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    spec = _make_spec(tmp_path, name="default-colonless-ca",
+                      default_config={"terminal": {"docker_volumes": [CA_CONTAINER_PATH]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(out))
+    assert not list(out.rglob("config.yaml")), "a colon-less CA-path docker_volumes entry must fail before any write"
+
+
 @pytest.mark.parametrize("name", ["HTTPS_PROXY", " HTTPS_PROXY ", "NODE_EXTRA_CA_CERTS",
                                   "HERMES_PROXY_TOKEN_X", "not a name", ""])
 def test_provider_env_reserved_or_malformed_rejected(tmp_path, monkeypatch, name):

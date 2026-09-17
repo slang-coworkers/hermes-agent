@@ -575,9 +575,11 @@ def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
 
 def _targets_ca(entry: Any, ca_container_path: str) -> bool:
     """True iff a ``docker_volumes`` / ``-v`` entry mounts something AT
-    ``ca_container_path`` — the container-dest field of ``host:container[:opts]``."""
+    ``ca_container_path`` — the container-dest field of ``host:container[:opts]``.
+    A colon-less entry is a target-only spec whose single field IS the container dest."""
     parts = str(entry).split(":")
-    return len(parts) >= 2 and parts[1] == ca_container_path
+    dest = parts[1] if len(parts) >= 2 else parts[0]
+    return dest == ca_container_path
 
 
 def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
@@ -668,6 +670,14 @@ def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
         if not isinstance(tok, str):
             raise CompositionError(
                 f"{profile_name}: terminal.docker_extra_args entries must be strings, got {tok!r}")
+    # Default-deny: apply ISO-F13's mount-safe allowlist to EVERY profile. The DEFAULT profile skips
+    # _enforce_mount_composition (which runs the allowlist for coworkers), and under OPTION A
+    # (proxy.enabled:false) the runtime egress guards are inert, so this offline belt is the sole gate
+    # for a DEFAULT profile's docker_extra_args — the allowlist refuses an engine-socket -v, --tmpfs,
+    # --use-api-socket, --privileged, --rootfs, a positional image, and anything else not vetted. The
+    # egress-specific checks below still reject an ALLOWLISTED flag that overrides a managed control
+    # (--memory/--cpus resource pins) or a controlled env name / network.
+    _reject_disallowed_extra_args(extra, profile_name)
     i = 0
     while i < len(extra):
         tok = extra[i]
