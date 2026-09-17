@@ -11,9 +11,10 @@ group's Claude Code and Codex JSONL logs into a hierarchical HTML archive
 <id>` listed a session's messages from the CLI; and `/upload-trace` pushed a
 transcript to an external viewer.
 
-Every one of these is already **native Hermes** behaviour, and for the HTML
-archive and the redacted, fail-closed HF upload it is stronger than the
-NanoClaw equivalent. This row therefore **adopts** the native surface — there
+Every one of these is already **native Hermes** behaviour. The HTML export is a
+single self-contained document (not a served group hierarchy on `:8080`), and
+the HF trace upload is redacted by default and fail-closed. This row therefore
+**adopts** the native surface — there
 is **no slang-coworkers plugin and no core patch** — and this page maps the
 three NanoClaw verbs onto the Hermes verbs that replace them. The hermetic
 acceptance test `tests/hermes_cli/test_obs_f47_transcript_viewing_acceptance.py`
@@ -158,7 +159,8 @@ but out of scope here.
 
 The hermetic acceptance test
 `tests/hermes_cli/test_obs_f47_transcript_viewing_acceptance.py` proves the
-load-bearing behaviours: multi-format export, the collapsible-by-default HTML
-archive and its multi-session switcher, `--redact` scrubbing, FTS5
+load-bearing behaviours: multi-format export, the single-document HTML archive
+with tool-call arguments collapsed by default and its multi-session switcher,
+`--redact` scrubbing, FTS5
 `session_search`, the fail-closed HF trace export, the `/save` renderer, and
 this page's verb mapping.
