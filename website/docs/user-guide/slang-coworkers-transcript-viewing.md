@@ -21,8 +21,8 @@ proves the load-bearing behaviours.
 
 All `file:line` references are relative to the pinned release tree
 (`NousResearch/hermes-agent`, tag `v2026.8.31` @ `29112bef`). Each mapping row
-carries the `tag:` line and, where the symbol also exists on upstream `main`, a
-`main:` line. The transcript renderer modules (`session_export_html.py`,
+carries the `tag:` line and, where the symbol also exists on the fork's
+`origin/main`, a `main:` line. The transcript renderer modules (`session_export_html.py`,
 `session_export_md.py`, `session_export.py`, `tools/session_search_tool.py`,
 `agent/trace_upload.py`) are line-stable between the pinned tag and `main`;
 `main:` line numbers here are verified against `slang-coworkers/hermes-agent`
@@ -36,14 +36,15 @@ documented [separately below](#the-native-save-verb)):
 
 | NanoClaw verb | Hermes verb | Citation (tag: / main:) |
 |---|---|---|
-| `/show-transcript` HTML archive (groups → sessions → transcripts, served on `:8080`) | `hermes sessions export --format html` produces one HTML document with inline application CSS/JS and a multi-session sidebar; tool-call arguments are **collapsible** and collapsed by default, tool results render inline. Renderer `generate_html_export` (multi-session archive `generate_multi_session_html_export`). | tag: `hermes_cli/session_export_html.py:868` `generate_html_export` · main: `hermes_cli/session_export_html.py:868` `generate_html_export` |
+| `/show-transcript` HTML archive (groups → sessions → transcripts, served on `:8080`) | `hermes sessions export --format html transcript.html` produces one HTML document with inline application CSS/JS and a multi-session sidebar; tool-call arguments are **collapsible** and collapsed by default, tool results render inline. Renderer `generate_html_export` (multi-session archive `generate_multi_session_html_export`). | tag: `hermes_cli/session_export_html.py:868` `generate_html_export` · main: `hermes_cli/session_export_html.py:868` `generate_html_export` |
 | `ncl sessions messages <id>` | The Sessions REST API (`GET /api/sessions`, `GET /api/sessions/{id}/messages`, `PATCH /api/sessions/{id}`), the dashboard Sessions page, and the in-agent `session_search` tool over FTS5. | tag: `tools/session_search_tool.py:1082` `session_search` · main: `tools/session_search_tool.py:1082` `session_search` |
 | `/upload-trace` | `hermes sessions export --format trace --upload` emits Claude Code JSONL for the HF Agent Trace Viewer, **private** by default, redacted by default and fail-closed. Primitive `build_trace_jsonl`. | tag: `agent/trace_upload.py:135` `build_trace_jsonl` · main: `agent/trace_upload.py:135` `build_trace_jsonl` |
 
 ## `show-transcript` → the HTML session archive
 
-`hermes sessions export --format html` is the `/show-transcript` archive
-analogue. `generate_html_export`
+`hermes sessions export --format html transcript.html` is the
+`/show-transcript` archive analogue (the output path is required for
+`--format html` — `hermes_cli/sessions_cmd.py:507`). `generate_html_export`
 (`hermes_cli/session_export_html.py:868`) renders a session to **one** HTML
 document: the application CSS and JS are inlined, so the file needs no local
 asset directory. It is not entirely asset-free — the template links Google Fonts
@@ -95,8 +96,9 @@ fail-closed**:
   **not** upload and does **not** re-raise, so a redactor failure can never leak.
 - `--no-redact` (`hermes_cli/main.py:14245`) is an explicit, reviewed opt-out;
   `--public` opts out of privacy. See
-  `website/docs/user-guide/sessions.md:403` (`--upload`, `HF_TOKEN`,
-  "secret-redacted by default … private unless `--public`").
+  `website/docs/user-guide/sessions.md:403` (`--upload`, `HF_TOKEN`) and
+  `website/docs/user-guide/sessions.md:416`
+  ("secret-redacted by default … `--upload` is private unless `--public`").
 
 ## The native `/save` verb
 
@@ -126,7 +128,7 @@ multi-session Markdown exports come from `render_sessions_export`
 `--redact` deep-copies the session and scrubs every message and tool-call
 argument via `agent.redact.redact_sensitive_text(force=True)`, wired through
 `redact_session_data` (`hermes_cli/session_export_md.py:219`, applied at
-`hermes_cli/sessions_cmd.py:433`). Trace exports force this redaction on by
+`hermes_cli/sessions_cmd.py:435`). Trace exports force this redaction on by
 default (see the `--format trace` section above); the other formats redact only
 when `--redact` is passed.
 
