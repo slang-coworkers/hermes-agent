@@ -12,8 +12,9 @@ group's Claude Code and Codex JSONL logs into a hierarchical HTML archive
 transcript to an external viewer.
 
 Every one of these is already **native Hermes** behaviour. The HTML export is a
-single self-contained document (not a served group hierarchy on `:8080`), and
-the HF trace upload is redacted by default and fail-closed. This row therefore
+single HTML document with inline application CSS/JS and remote web fonts (not a
+served group hierarchy on `:8080`), and the HF trace upload is redacted by
+default and fail-closed. This row therefore
 **adopts** the native surface — there
 is **no slang-coworkers plugin and no core patch** — and this page maps the
 three NanoClaw verbs onto the Hermes verbs that replace them. The hermetic
@@ -50,7 +51,7 @@ documented [separately below](#the-native-save-verb)):
 document: the application CSS and JS are inlined, so the file needs no local
 asset directory. It is not entirely asset-free — the template links Google Fonts
 remotely under its Content-Security-Policy
-(`hermes_cli/session_export_html.py:30`, `style-src … https://fonts.googleapis.com; font-src https://fonts.gstatic.com`) — so treat it as a single self-contained document that fetches web fonts, not an offline bundle.
+(`hermes_cli/session_export_html.py:30`, `style-src … https://fonts.googleapis.com; font-src https://fonts.gstatic.com`) — so treat it as one HTML document that fetches web fonts, not an offline bundle.
 
 Tool-call arguments are **collapsed by default**: the
 `.tool-call-content` block is styled `display: none`
