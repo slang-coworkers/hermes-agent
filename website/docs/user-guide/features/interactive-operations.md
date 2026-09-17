@@ -110,10 +110,15 @@ Reply `/approve` to execute this one operation, `/approve session` to approve th
    desktop app runs the headless `hermes serve` backend (a JSON-RPC/WebSocket
    gateway, not a UI). On this surface the approval is **not** rendered through a
    platform adapter at all: the tui_gateway emits an `approval.request` event
-   carrying structured `choices` — `["once", "session", "always", "deny"]`, or
-   `["once", "deny"]` when the command is smart-denied — and the app renders those
-   as Run / Allow-session / Always-allow / Reject buttons that resolve through the
-   `approval.respond` RPC. The `hermes dashboard` web UI is a **separate** surface
+   carrying structured `choices`, built from the same policy: `once` and `deny`
+   are always present, `session` is added when session approval is eligible and
+   the prompt is not smart-denied, and `always` is added only when `session` is
+   present and permanent approval is eligible too — so the set is
+   `["once", "session", "always", "deny"]` at full eligibility,
+   `["once", "session", "deny"]` without permanent approval, and `["once", "deny"]`
+   when session is ineligible or the command is smart-denied. The app renders the
+   corresponding Run / Allow-session / Always-allow / Reject buttons, which resolve
+   through the `approval.respond` RPC. The `hermes dashboard` web UI is a **separate** surface
    (the desktop app spawns `serve`, never `dashboard`, and neither launches the
    other): its Chat tab embeds `hermes --tui` over a `/api/pty` WebSocket, and
    that embedded terminal — driven by the same tui_gateway backend — presents the
@@ -194,9 +199,11 @@ Live adapter does not implement native document delivery; media file 1/1 was not
 
 This is deliberate: the base `send_document` on `BasePlatformAdapter` produces a
 text notice, but the send engine rejects the inherited method rather than
-invoking it, so an unsupported adapter fails **closed** — the **agent** (the
-tool's caller) receives the sanitized error, and no message is sent to the
-destination chat at all, so the file's local path is never leaked.
+invoking it, so an unsupported attachment fails **closed** — the **agent** (the
+tool's caller) receives the sanitized error, and the inherited attachment-failure
+notice is never sent to the chat. Any accompanying message text may already have
+been delivered, but the media file's local path is never exposed by this
+fallback.
 
 *Implementation:* tag `v2026.8.31` — `tools/send_message_tool.py:238`
 (`MEDIA:` schema), `:854` (`_send_live_adapter_media`, called `:1010`),
