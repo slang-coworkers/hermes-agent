@@ -14,10 +14,12 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import yaml
 
 from agent.secret_sources.base import ErrorKind
 from agent.secret_sources.registry import get_source
@@ -302,3 +304,102 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
 
     post = source.fetch({}, profile)
     assert post.ok
+
+
+# --- FLEET-F62: the base-URL guard's keyless exact-origin allowance -----------
+# Permanent home of test_podman_onecli_optional_api_key_bridge_base (delivered in
+# the FLEET-F62 acceptance file, moved here per the ADR §Optional-key
+# reconciliation). Proves the render's config-only edit (§Optional-key) can reach
+# the unauthenticated OneCLI bridge control plane over http:// WHEN no bootstrap
+# key is set, while still protecting a present key and failing closed on 401/403.
+
+
+class _FakeResp:
+    def __init__(self, code, body=b"{}"):
+        self._code, self._body = code, body
+
+    def getcode(self):
+        return self._code
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _load_podman_onecli(tmp_path, monkeypatch, origins):
+    """Load podman-onecli through the real discovery path with the bridge base +
+    allowlist in config.yaml, so register(ctx) -> ctx.get_config -> configure(...)
+    actually runs (proving the plumbing, not just the guard function)."""
+    home = tmp_path / "poh"
+    (home / "plugins").mkdir(parents=True)
+    shutil.copytree(PLUGIN_SRC, home / "plugins" / "podman-onecli",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "plugins": {"enabled": ["podman-onecli"], "entries": {"podman-onecli": {"settings": {
+            "gateway_api_base_url": "http://172.17.0.1:10256",
+            "insecure_no_auth_origins": origins,
+            "api_key_env": "ONECLI_API_KEY",
+        }}}},
+    }), encoding="utf-8")
+    bundled = tmp_path / "poh-bundled"
+    bundled.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins["podman-onecli"]
+    assert loaded.enabled and loaded.error is None
+    oneclient = getattr(loaded.module, "oneclient", None) or sys.modules.get("oneclient")
+    assert oneclient is not None, "podman-onecli __init__ must expose its oneclient module"
+    return oneclient
+
+
+@pytest.mark.parametrize("fail_status", [401, 403])
+def test_podman_onecli_optional_api_key_bridge_base(tmp_path, monkeypatch, fail_status):
+    """The podman-onecli base-URL guard, configured through register(ctx)->configure(),
+    permits http:// only to an allowlisted EXACT origin when no bootstrap key is set,
+    still protects a present key, rejects userinfo, and fails closed on 401/403. The
+    exact-origin bound (not host-only) is deliberate: get_container_config returns the
+    aoc_ proxy token as userinfo, so a host-only allowlist would leak it on any other
+    port of the same host."""
+    oneclient = _load_podman_onecli(tmp_path, monkeypatch, ["172.17.0.1:10256"])
+
+    oneclient._require_secure_base("http://172.17.0.1:10256")
+    captured = {}
+
+    def _capture(req, timeout=30):
+        captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        return _FakeResp(200)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", _capture)
+    oneclient.get_container_config(agent="architect")
+    assert "authorization" not in captured["headers"], "no key set => no Authorization header"
+
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:9999")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://10.0.0.5:10256")
+    # userinfo on an otherwise-allowlisted origin is refused outright (a host:port
+    # allowlist must not be satisfied by a URL that also carries a cleartext secret)
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://user:pass@172.17.0.1:10256")
+    # https is always allowed; a loopback http base is still allowed (unchanged)
+    oneclient._require_secure_base("https://172.17.0.1:10256")
+    oneclient._require_secure_base("http://127.0.0.1:10256")
+
+    monkeypatch.setenv("ONECLI_API_KEY", "aoc_secret")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:10256")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", lambda req, timeout=30: _FakeResp(fail_status))
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient.get_container_config(agent="architect")
