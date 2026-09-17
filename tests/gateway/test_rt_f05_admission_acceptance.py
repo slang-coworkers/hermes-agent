@@ -245,7 +245,7 @@ async def test_ac_rt_f05_6():
 
 @pytest.mark.asyncio
 async def test_ac_rt_f05_7(store):
-    """Accepted difference: the triggering message is never captured for replay — its body is not persisted with the pending request and approval sends nothing further."""
+    """Accepted difference: the triggering message is never captured for replay — routing the marked DM drops it and its body is retained neither in the pending record nor, after approval, in the approved record or the approval return."""
     config = GatewayConfig(platforms={Platform.WHATSAPP: PlatformConfig(enabled=True)})
     runner, adapter = _handle_runner(Platform.WHATSAPP, config, pairing_store=store)
     marker = "REPLAY-MARKER-9f3c2a"
@@ -259,9 +259,10 @@ async def test_ac_rt_f05_7(store):
         )
     )
     assert result is None
-    sends_after_inbound = adapter.send.await_count
-    raw_pending = store._pending_path("whatsapp").read_text(encoding="utf-8")
-    assert marker not in raw_pending
+    assert marker not in store._pending_path("whatsapp").read_text(encoding="utf-8")
+
     request_id = store.list_pending("whatsapp")[0]["request_id"]
-    assert store.approve_request("whatsapp", request_id) is not None
-    assert adapter.send.await_count == sends_after_inbound
+    approved = store.approve_request("whatsapp", request_id)
+    assert approved is not None
+    assert marker not in repr(approved)
+    assert marker not in store._approved_path("whatsapp").read_text(encoding="utf-8")
