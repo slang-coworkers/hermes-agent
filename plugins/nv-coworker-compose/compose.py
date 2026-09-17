@@ -16,6 +16,7 @@ import copy
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -429,50 +430,110 @@ def _enforce_retention(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
-# ISO-F15 session-driver seam: the built-in "docker" backend is the ONLY terminal
-# backend the fleet permits — it yields a per-profile-labelled podman container via
-# the fleet-global HERMES_DOCKER_BINARY wrapper (deployment config, never rendered
-# here). "local" and every other backend are banned fleet-wide.
-_SESSION_DRIVER_BACKEND = "docker"
+# ISO-F15 session-driver seam, made a DATA switch by FLEET-F62. The sandbox
+# SUBSTRATE is a top-level spec field the render resolves ONCE to a descriptor and
+# dispatches on. The descriptor names the ``terminal.backend`` value (which is ALSO
+# the veto's ``expected_backend`` — emitted from this same source so the two cannot
+# drift) and the substrate-specific ``terminal.*`` key prefix that egress and mount
+# composition serialise into. ``podman`` is the only shipped column: backend
+# ``docker`` + keys ``terminal.docker_*``, run through the fleet-global
+# HERMES_DOCKER_BINARY wrapper (deployment config, never rendered here). An absent
+# ``substrate`` defaults to ``podman`` (back-compat: existing specs carry none, so
+# their render is byte-unchanged); an UNKNOWN value fails closed before any
+# distribution is written. Scope: the substrate-specific terminal KEY NAMES are
+# descriptor-driven in the four functions the descriptor threads through; the
+# inherently docker-shaped paths (the ``docker_extra_args`` argv scan, the
+# host.docker.internal bridge rewrite, the shared-learnings mount dest) stay
+# docker-specific and a real ssh/openshell column (P7 OSH-F63/F64, out of this row)
+# extends those too. The sandbox image stays operator-supplied via
+# ``egress.sandbox_image`` (tunable, and preserves the merged ISO-F14 egress
+# contract) rather than baked into the descriptor.
+@dataclass(frozen=True)
+class _SubstrateDescriptor:
+    substrate: str
+    backend: str          # terminal.backend value; the veto's expected_backend is this same value
+    terminal_prefix: str  # substrate-specific terminal.* key prefix (podman -> "docker")
+
+    def key(self, leaf: str) -> str:
+        """Dotted config key a substrate-specific terminal leaf serialises into."""
+        return f"terminal.{self.terminal_prefix}_{leaf}"
+
+    def leaf(self, name: str) -> str:
+        """Bare terminal.<leaf> name (for a ``terminal.get(...)`` membership check)."""
+        return f"{self.terminal_prefix}_{name}"
 
 
-def _enforce_session_driver(config: Dict[str, Any], profile_name: str) -> None:
+_DEFAULT_SUBSTRATE = "podman"
+_SUBSTRATE_DESCRIPTORS: Dict[str, _SubstrateDescriptor] = {
+    "podman": _SubstrateDescriptor(substrate="podman", backend="docker", terminal_prefix="docker"),
+}
+_FLEET_GATES_PLUGIN = "nv-fleet-gates"
+_FLEET_GATES_SETTINGS = "plugins.entries.nv-fleet-gates.settings"
+
+
+def _resolve_substrate(data: Dict[str, Any]) -> _SubstrateDescriptor:
+    """Resolve the fleet spec's ``substrate`` DATA field to its descriptor.
+
+    Absent -> ``podman`` (back-compat). A known value -> its descriptor. An unknown
+    value -> ``CompositionError`` (fail closed). Called at the TOP of ``compose``,
+    before any distribution is written, so an unknown substrate leaves no partial
+    fleet on disk."""
+    raw = data.get("substrate", _DEFAULT_SUBSTRATE)
+    if isinstance(raw, str) and raw in _SUBSTRATE_DESCRIPTORS:
+        return _SUBSTRATE_DESCRIPTORS[raw]
+    known = ", ".join(sorted(_SUBSTRATE_DESCRIPTORS))
+    raise CompositionError(
+        f"unknown substrate {raw!r}: the fleet render supports [{known}]; a new "
+        f"substrate is a new _SUBSTRATE_DESCRIPTORS entry plus its spec/fixtures"
+    )
+
+
+def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
+                            descriptor: _SubstrateDescriptor) -> None:
     """Force the fleet session-driver invariants onto one profile's ``config``
     (ISO-F15), rejecting any spec that fights them.
 
-    ``terminal.backend`` is forced to ``"docker"``: an omitted key is written
-    (overriding the stock ``local`` default) and an explicit ``"docker"`` is
-    kept, but any other value — any other string or any non-string — raises
-    ``CompositionError``. ``terminal.docker_shared_container_key`` is forced to
-    the empty string: only an omitted key or the exact string ``""`` is accepted;
-    every other value is refused the same way, including falsey non-strings
-    (``False``/``0``/``[]``/``{}``/``None``) that the config->env bridge would
-    serialise to a NON-empty env string and so collapse per-profile container
-    identity to one shared container. The content type-check runs before any
-    comparison, so a non-string YAML value raises ``CompositionError`` rather
-    than a raw ``TypeError``.
+    ``terminal.backend`` is forced to ``descriptor.backend``: an omitted key is
+    written (overriding the stock ``local`` default) and an explicit matching value
+    is kept, but any other value — any other string or any non-string — raises
+    ``CompositionError``. The substrate's shared-container-key
+    (``terminal.<prefix>_shared_container_key``) is forced to the empty string: only
+    an omitted key or the exact string ``""`` is accepted; every other value is
+    refused the same way, including falsey non-strings (``False``/``0``/``[]``/
+    ``{}``/``None``) that the config->env bridge would serialise to a NON-empty env
+    string and so collapse per-profile container identity to one shared container.
+    The content type-check runs before any comparison, so a non-string YAML value
+    raises ``CompositionError`` rather than a raw ``TypeError``. FLEET-F62 also
+    derives the veto's ``expected_backend`` from ``descriptor.backend`` here — the
+    SAME source that writes ``terminal.backend`` — so a worker cannot make the veto
+    compare against a value it chose; emitted only for a profile that enables the
+    veto, so a non-fleet spec gets no orphan settings block.
     """
+    backend = descriptor.backend
+    shared_key_leaf = descriptor.leaf("shared_container_key")
     terminal = config.get("terminal")
     if isinstance(terminal, dict):
         if "backend" in terminal and not (
             isinstance(terminal["backend"], str)
-            and terminal["backend"] == _SESSION_DRIVER_BACKEND
+            and terminal["backend"] == backend
         ):
             raise CompositionError(
-                f"{profile_name}: terminal.backend must be 'docker' "
-                f"(the fleet's per-profile podman sandbox backend); "
+                f"{profile_name}: terminal.backend must be {backend!r} "
+                f"(the fleet's per-profile {descriptor.substrate} sandbox backend); "
                 f"got {terminal['backend']!r}"
             )
-        if "docker_shared_container_key" in terminal and not (
-            isinstance(terminal["docker_shared_container_key"], str)
-            and terminal["docker_shared_container_key"] == ""
+        if shared_key_leaf in terminal and not (
+            isinstance(terminal[shared_key_leaf], str)
+            and terminal[shared_key_leaf] == ""
         ):
             raise CompositionError(
-                f"{profile_name}: terminal.docker_shared_container_key must be "
-                f"empty; got {terminal['docker_shared_container_key']!r}"
+                f"{profile_name}: terminal.{shared_key_leaf} must be "
+                f"empty; got {terminal[shared_key_leaf]!r}"
             )
-    _set_dotted(config, "terminal.backend", _SESSION_DRIVER_BACKEND)
-    _set_dotted(config, "terminal.docker_shared_container_key", "")
+    _set_dotted(config, "terminal.backend", backend)
+    _set_dotted(config, descriptor.key("shared_container_key"), "")
+    if _FLEET_GATES_PLUGIN in ((config.get("plugins") or {}).get("enabled") or []):
+        _set_dotted(config, f"{_FLEET_GATES_SETTINGS}.expected_backend", backend)
 
 
 # ISO-F14 egress lockdown (OPTION A). The render supplies the sandbox's egress
@@ -713,20 +774,22 @@ def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
         i += 2 if _consumes_next_extra_arg(tok) else 1
 
 
-def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_name: str) -> None:
+def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_name: str,
+                        descriptor: _SubstrateDescriptor) -> None:
     """Fail-closed pre-pass (ISO-F14): refuse a resolved profile whose merged
     inputs would fight the render-owned egress posture, BEFORE any profile is
     written, so a collision on a late-resolved profile (DEFAULT is validated last)
     leaves no partial fleet on disk. Pure — mutates nothing; ``_enforce_egress``
     does the writing in the Phase-B loop once every profile has passed. Every
     type-check precedes membership so a hostile YAML value raises
-    ``CompositionError``, never a raw ``TypeError``."""
+    ``CompositionError``, never a raw ``TypeError``. The substrate-specific terminal
+    key names (env/forward_env/volumes/extra_args) come from ``descriptor``."""
     terminal = config.get("terminal")
     if not isinstance(terminal, dict):
         return
     controlled = _egress_controlled_names(params)
 
-    env = terminal.get("docker_env")
+    env = terminal.get(descriptor.leaf("env"))
     if env is not None:
         if not isinstance(env, dict):
             raise CompositionError(
@@ -737,7 +800,7 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                     f"{profile_name}: egress collision on terminal.docker_env[{key!r}] — the render "
                     f"owns the egress env; remove it from the spec")
 
-    fwd = terminal.get("docker_forward_env")
+    fwd = terminal.get(descriptor.leaf("forward_env"))
     if fwd is not None:
         if not isinstance(fwd, list):
             raise CompositionError(
@@ -767,7 +830,7 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                     f"{profile_name}: egress collision — env_passthrough forwards a controlled "
                     f"egress var ({name!r})")
 
-    volumes = terminal.get("docker_volumes")
+    volumes = terminal.get(descriptor.leaf("volumes"))
     if volumes is not None:
         if not isinstance(volumes, list):
             raise CompositionError(
@@ -780,7 +843,7 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                     f"{params['ca_container_path']!r}; the render owns the CA mount, so no profile "
                     f"may declare one and no composed mount may resolve to that path")
 
-    extra = terminal.get("docker_extra_args")
+    extra = terminal.get(descriptor.leaf("extra_args"))
     if extra is not None:
         if not isinstance(extra, list):
             raise CompositionError(
@@ -789,16 +852,19 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
         _assert_extra_args_egress_safe(extra, params, profile_name, controlled)
 
 
-def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name: str) -> None:
+def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name: str,
+                    descriptor: _SubstrateDescriptor) -> None:
     """Force the OPTION-A egress posture onto one profile's ``config`` (ISO-F14),
     overwriting a declared leaf and inserting an omitted one alike (mirrors
     ``_enforce_retention``). Runs in the Phase-B write loop after
     ``_assert_egress_safe`` has cleared every profile, so it never rejects here —
     the CA-divergence guard below is defensive and unreachable for a spec that
-    passed the pre-pass."""
+    passed the pre-pass. The substrate-specific terminal key names (env/image/
+    persist/volumes) come from ``descriptor``; ``container_memory``/``container_cpu``
+    are backend-neutral resource pins and stay literal."""
     _set_dotted(config, "proxy.enabled", False)
 
-    current_env = _get_dotted(config, "terminal.docker_env")
+    current_env = _get_dotted(config, descriptor.key("env"))
     env = dict(current_env) if isinstance(current_env, dict) else {}
     for var in _EGRESS_PROXY_VARS:
         env[var] = params["proxy_url"]
@@ -808,16 +874,16 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
         env[var] = params["ca_container_path"]
     for name in params["provider_env"]:
         env[name] = _EGRESS_PROVIDER_PLACEHOLDER
-    _set_dotted(config, "terminal.docker_env", env)
+    _set_dotted(config, descriptor.key("env"), env)
 
-    _set_dotted(config, "terminal.docker_persist_across_processes", False)
+    _set_dotted(config, descriptor.key("persist_across_processes"), False)
     _set_dotted(config, "terminal.container_memory", params["container_memory"])
     _set_dotted(config, "terminal.container_cpu", params["container_cpu"])
-    _set_dotted(config, "terminal.docker_image", params["sandbox_image"])
+    _set_dotted(config, descriptor.key("image"), params["sandbox_image"])
 
     ca_container_path = params["ca_container_path"]
     ca_mount = params["ca_mount"]
-    current_vols = _get_dotted(config, "terminal.docker_volumes")
+    current_vols = _get_dotted(config, descriptor.key("volumes"))
     kept: List[Any] = []
     for v in (current_vols if isinstance(current_vols, list) else []):
         if _targets_ca(v, ca_container_path):
@@ -828,7 +894,7 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
             continue  # drop every CA-target entry; exactly one canonical is re-appended below
         kept.append(v)
     kept.append(ca_mount)
-    _set_dotted(config, "terminal.docker_volumes", kept)
+    _set_dotted(config, descriptor.key("volumes"), kept)
 
 
 # Container path the shared-learnings clone is mounted at (MEM-F43). Kept OUTSIDE
@@ -1017,6 +1083,7 @@ def _enforce_mount_composition(
     install_surfaces: Any,
     shared_learnings_root: Any,
     is_orchestrator: bool,
+    descriptor: _SubstrateDescriptor,
 ) -> None:
     """Render one coworker profile's ``terminal.docker_volumes`` as an explicit,
     policed, closed set — the single final owner of the key (ISO-F13).
@@ -1044,7 +1111,7 @@ def _enforce_mount_composition(
     # docker_volumes is not the only mount channel: terminal.docker_extra_args is
     # appended verbatim to `docker run` (docker.py:1368-1401), so a mount/host-exposure
     # flag there would bypass the closed set. Own that channel too — allowlist it.
-    extra_args = _get_dotted(config, "terminal.docker_extra_args")
+    extra_args = _get_dotted(config, descriptor.key("extra_args"))
     if extra_args is not None:
         if not isinstance(extra_args, list):
             raise CompositionError(
@@ -1094,7 +1161,7 @@ def _enforce_mount_composition(
         rw_mount = f"{shared_learnings_root}:{WIKI_MOUNT}"
         clone_mount = rw_mount if is_orchestrator else f"{rw_mount}:ro"
 
-    current = _get_dotted(config, "terminal.docker_volumes")
+    current = _get_dotted(config, descriptor.key("volumes"))
     if current is not None and not isinstance(current, list):
         raise CompositionError(f"{profile_name}: terminal.docker_volumes must be a list")
     current_list = [str(v).strip() for v in current] if isinstance(current, list) else []
@@ -1143,8 +1210,8 @@ def _enforce_mount_composition(
                 f"{profile_name}: composed volume {entry!r} contains ':/workspace'"
             )
 
-    _set_dotted(config, "terminal.docker_volumes", volumes)
-    _set_dotted(config, "terminal.docker_mount_cwd_to_workspace", True)
+    _set_dotted(config, descriptor.key("volumes"), volumes)
+    _set_dotted(config, descriptor.key("mount_cwd_to_workspace"), True)
 
 
 def _enforce_memory_policy(config: Dict[str, Any]) -> None:
@@ -1280,15 +1347,22 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
 
 
-def _build_managed_fragment() -> Dict[str, Any]:
-    """Build the machine-wide managed-scope approvals fragment (the eight
-    fleet-uniform keys, override-or-insert via ``_set_dotted``). The operator
-    installs this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
+def _build_managed_fragment(profile_roles: Dict[str, str]) -> Dict[str, Any]:
+    """Build the machine-wide managed-scope fragment: the eight fleet-uniform
+    approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
+    this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
     ``/etc/hermes/config.yaml``); native ``_load_config_impl`` deep-merges it
-    (managed-wins) onto every profile."""
+    (managed-wins) onto every profile.
+
+    ``profile_roles`` ({profile: "orchestrator"|"worker"}) is emitted into the
+    nv-fleet-gates settings at the MANAGED scope, not per-profile config, because the
+    veto's fleet-admin gate reads the role from there — a worker must not be able to
+    rewrite its own role by editing its own config (nv-fleet-gates prefers the managed
+    map over the per-profile fallback)."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
+    _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
     return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
@@ -1625,6 +1699,34 @@ def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> Non
             nested.pop(key, None)
     _set_dotted(default_config, "gateway.multiplex_profiles", True)
     _set_dotted(default_config, "gateway.multiplex_profile_allowlist", roster)
+
+
+# Supervision floor (FLEET-F62). The DEFAULT multiplexer gateway runs as a
+# systemd Type=notify service, which emits WatchdogSec (and Type=notify, not
+# Type=simple) ONLY when gateway.systemd_watchdog_seconds > 0
+# (hermes_cli/gateway.py). An absent/0/below-floor value would ship no watchdog (or
+# one too tight), so the render FLOORS it to >= 30s on the DEFAULT profile: a spec
+# value that is not an int, or an int below the floor, is forced to the floor; a
+# higher int is kept. Root and nested spellings are both popped first (core reads
+# the root spelling with precedence over gateway.*), then only the canonical nested
+# key is written — the same pop-both shape as _enforce_multiplex, so a hostile root
+# value cannot defeat the floor.
+_SYSTEMD_WATCHDOG_FLOOR = 30
+
+
+def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
+    current = _get_dotted(default_config, "gateway.systemd_watchdog_seconds")
+    keep = (
+        isinstance(current, int)
+        and not isinstance(current, bool)
+        and current >= _SYSTEMD_WATCHDOG_FLOOR
+    )
+    value = current if keep else _SYSTEMD_WATCHDOG_FLOOR
+    default_config.pop("systemd_watchdog_seconds", None)
+    nested = default_config.get("gateway")
+    if isinstance(nested, dict):
+        nested.pop("systemd_watchdog_seconds", None)
+    _set_dotted(default_config, "gateway.systemd_watchdog_seconds", value)
 
 
 def _resolve_session_mode(
@@ -2678,6 +2780,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     spec_dir = spec_path.parent
     data = load_spec(spec)
 
+    # Resolve the sandbox substrate BEFORE any output dir / spine read, so an unknown
+    # value fails closed naming the value with no partial fleet on disk.
+    descriptor = _resolve_substrate(data)
+
     out_root = Path(out)
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -2718,8 +2824,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # config.yaml — no partial fleet on disk.
     for driver_tname, driver_resolved in resolved_by_type.items():
         _reject_malformed_terminal(driver_resolved["config"], driver_tname)
-        _enforce_session_driver(driver_resolved["config"], driver_tname)
-    _enforce_session_driver(default_config, default_profile)
+        _enforce_session_driver(driver_resolved["config"], driver_tname, descriptor)
+    _enforce_session_driver(default_config, default_profile, descriptor)
 
     # ISO-F14 egress lockdown, all-or-nothing: validate the egress block once, then
     # assert EVERY profile is egress-safe here — before Phase B writes anything — so
@@ -2756,10 +2862,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
             _enforce_mount_composition(
                 projected, eg_tname, workspace_root, install_surfaces,
                 shared_learnings_root, is_orchestrator=(eg_tname == orchestrator_profile),
+                descriptor=descriptor,
             )
-            _assert_egress_safe(projected, egress_params, eg_tname)
+            _assert_egress_safe(projected, egress_params, eg_tname, descriptor)
         # DEFAULT never goes through mount composition, so its raw config IS what is written.
-        _assert_egress_safe(default_config, egress_params, default_profile)
+        _assert_egress_safe(default_config, egress_params, default_profile, descriptor)
 
     session_flags = _resolve_session_mode(default_config, resolved_by_type)
     # Per-role MCP scope needs the whole fleet's declarations (per-role subsets,
@@ -2784,6 +2891,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_mount_composition(
             resolved["config"], tname, workspace_root, install_surfaces,
             shared_learnings_root, is_orchestrator=(tname == orchestrator_profile),
+            descriptor=descriptor,
         )
         _enforce_memory_policy(resolved["config"])
         _enforce_curator(resolved["config"])
@@ -2796,7 +2904,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _forbid_coworker_port_binding(resolved["config"], tname)
         _forbid_coworker_webhook_routes(resolved["config"], tname)
         if egress_params is not None:
-            _enforce_egress(resolved["config"], egress_params, tname)
+            _enforce_egress(resolved["config"], egress_params, tname, descriptor)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         rendered[tname] = str(pdir)
@@ -2812,10 +2920,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _render_engage(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
     _enforce_multiplex(default_config, roster)
+    _enforce_watchdog_floor(default_config)
     _require_canonical_platform_layout(default_config)
     _validate_webhook_routes(default_config, served)
     if egress_params is not None:
-        _enforce_egress(default_config, egress_params, default_profile)
+        _enforce_egress(default_config, egress_params, default_profile, descriptor)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
@@ -2826,7 +2935,14 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # profile (onboarding installs only the coworker TYPE profiles).
     managed_dir = out_root / _MANAGED_FRAGMENT_DIR
     managed_dir.mkdir(parents=True, exist_ok=True)
-    managed_fragment = _build_managed_fragment()
+    # FLEET-F62: the security-critical fleet role map lives at the operator-owned
+    # managed scope (nv-fleet-gates reads it there), so a worker cannot rewrite its
+    # own role via per-profile config.
+    profile_roles_map = {
+        tname: ("orchestrator" if tname == orchestrator_profile else "worker")
+        for tname in roster
+    }
+    managed_fragment = _build_managed_fragment(profile_roles_map)
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology
