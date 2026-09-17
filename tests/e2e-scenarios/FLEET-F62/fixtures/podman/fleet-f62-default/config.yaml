@@ -1,0 +1,108 @@
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-fleet-f62-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+terminal:
+  container_persistent: true
+  backend: docker
+  docker_shared_container_key: ''
+  docker_env:
+    HTTPS_PROXY: http://172.17.0.1:10255
+    https_proxy: http://172.17.0.1:10255
+    HTTP_PROXY: http://172.17.0.1:10255
+    http_proxy: http://172.17.0.1:10255
+    NO_PROXY: 127.0.0.1,localhost,::1
+    no_proxy: 127.0.0.1,localhost,::1
+    SSL_CERT_FILE: /etc/ssl/certs/hermes-egress-ca.crt
+    REQUESTS_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    CURL_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    NODE_EXTRA_CA_CERTS: /etc/ssl/certs/hermes-egress-ca.crt
+    HERMES_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    DENO_CERT: /etc/ssl/certs/hermes-egress-ca.crt
+    ANTHROPIC_API_KEY: onecli-injects-at-request-time
+  docker_persist_across_processes: false
+  container_memory: 1024
+  container_cpu: 0.5
+  docker_image: localhost/hermes-sandbox:pinned
+  docker_volumes:
+  - /opt/onecli/ca.crt:/etc/ssl/certs/hermes-egress-ca.crt:ro
+secrets:
+  onecli:
+    enabled: false
+plugins:
+  enabled:
+  - nv-coworker-compose
+  - nv-fleet-gates
+  - podman-onecli
+  entries:
+    nv-fleet-gates:
+      settings:
+        enforce_sandbox: true
+        edges_db_path: /tmp/hermes-fleet/edges.db
+        admin_tools:
+        - onboard_coworker
+        - onboard_project
+        - create_agent
+        expected_backend: docker
+        mcp_scope:
+          orchestrator: {}
+          architect: {}
+          builder: {}
+          tester: {}
+          reviewer: {}
+          default: {}
+    podman-onecli:
+      settings:
+        gateway_api_base_url: http://172.17.0.1:10256
+        insecure_no_auth_origins:
+        - 172.17.0.1:10256
+        api_key_env: ONECLI_API_KEY
+gateway:
+  multiplex_profiles: true
+  multiplex_profile_allowlist:
+  - orchestrator
+  - architect
+  - builder
+  - tester
+  - reviewer
+  systemd_watchdog_seconds: 30
+sessions:
+  auto_prune: false
+  auto_archive: true
+compression:
+  in_place: true
+checkpoints:
+  auto_prune: false
+memory:
+  memory_char_limit: 4000
+  user_char_limit: 2000
+  write_approval: false
+curator:
+  enabled: true
+  backup:
+    enabled: true
+    keep: 5
+command_allowlist: []
+approvals:
+  deny:
+  - git *push* --forc*
+  - git *push* -f
+  - git *push* -f *
+  - git *push* -f[!- ]*
+  - git *push* -[!- ]f*
+  - git *push* -[!- ][!- ]f*
+  - git push* *+*
+  - git -*push* *+*
+  - git tag *
+  - git -* tag *
+  - gh release *
+  - gh -* release *
+group_sessions_per_user: true
+thread_sessions_per_user: false
+proxy:
+  enabled: false

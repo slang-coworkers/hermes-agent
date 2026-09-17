@@ -1,0 +1,12 @@
+name: default
+version: 0.1.0
+description: Composed Hermes multiplexer (DEFAULT) profile
+distribution_owned:
+- SOUL.md
+- config.yaml
+- mcp.json
+- skills
+- cron
+- distribution.yaml
+- skill-bundles
+- .env.template

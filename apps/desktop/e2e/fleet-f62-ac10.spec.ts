@@ -1,0 +1,161 @@
+import fs from 'node:fs'
+import path from 'node:path'
+
+import {
+  buildAppEnv,
+  createSandbox,
+  launchDesktop,
+  type MockBackendFixture,
+  waitForAppReady,
+  writeEnvFile,
+  writeMockProviderConfig
+} from './fixtures'
+import { startMockServer } from './mock-server'
+import { RealSessionBuilder } from './real-session-builder'
+import { expect, test } from './test'
+
+// AC-FLEET-F62-10 (desktop, stub): the Electron app, connected to ONE gateway
+// serving the six installed profiles, shows the Bots roster of exactly the five
+// coworkers with their role metadata and opens the orchestrator's Bot Chat over a
+// single gateway connection. A profile counts as a bot once ui_meta['hermes-bots']
+// is on its profile.yaml (bot_mode_probe), so each coworker is seeded with that key.
+// Room MEMBERSHIP (fleet-room(5) + review-room(3)) is proven in the ui scenario
+// AC-FLEET-F62-9, where the gateway boot seeds rooms; here we assert the group-chat
+// surface is present, the roster, the orchestrator Bot Chat, and one gateway.
+
+type Page = MockBackendFixture['page']
+
+// Role metadata mirrors the fleet spec's types.<role>.ui_meta.
+const COWORKERS = [
+  { name: 'orchestrator', title: 'Orchestrator', description: 'Fleet orchestrator (elevated)', shape: 'circle' },
+  { name: 'architect', title: 'Architect', description: 'Fleet architect', shape: 'square' },
+  { name: 'builder', title: 'Builder', description: 'Fleet builder', shape: 'square' },
+  { name: 'tester', title: 'Tester', description: 'Fleet tester', shape: 'square' },
+  { name: 'reviewer', title: 'Reviewer', description: 'Fleet reviewer', shape: 'square' }
+] as const
+
+let fixture: MockBackendFixture | null = null
+
+async function openBots(page: Page): Promise<void> {
+  const tab = page
+    .getByRole('button', { name: 'Bots', exact: true })
+    .or(page.getByRole('tab', { name: 'Bots', exact: true }))
+    .first()
+  await tab.click()
+  await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
+}
+
+/** Seed one coworker profile before launch: profile dir + mock provider + a durable
+ *  canonical "Bot Chat", plus ui_meta['hermes-bots'] on profile.yaml so the roster
+ *  renders it as a bot with its title + avatar. */
+async function seedCoworker(
+  hermesHome: string,
+  mockUrl: string,
+  bot: { name: string; title: string; description: string; shape: string }
+): Promise<void> {
+  const dir = path.join(hermesHome, 'profiles', bot.name)
+  fs.mkdirSync(dir, { recursive: true })
+  writeMockProviderConfig(dir, mockUrl)
+  writeEnvFile(dir)
+
+  const builder = await RealSessionBuilder.start(dir)
+  try {
+    await builder.createSession({ title: 'Bot Chat', turns: [`Hello ${bot.name}`] })
+  } finally {
+    await builder.close()
+  }
+
+  const profileYaml = path.join(dir, 'profile.yaml')
+  let existing: Record<string, unknown> = {}
+  if (fs.existsSync(profileYaml)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(profileYaml, 'utf8')) as Record<string, unknown>
+    } catch {
+      existing = {}
+    }
+  }
+  const uiMeta = { ...((existing.ui_meta as Record<string, unknown>) ?? {}) }
+  uiMeta['hermes-bots'] = { title: bot.title, description: bot.description, shape: bot.shape }
+  fs.writeFileSync(profileYaml, JSON.stringify({ ...existing, ui_meta: uiMeta }, null, 2), 'utf8')
+}
+
+test.beforeAll(async () => {
+  const mock = await startMockServer()
+  const sandbox = createSandbox('fleet-f62-ac10')
+  // The DEFAULT (launch) profile is the multiplexer host; the five coworkers are the
+  // served secondaries. All six live in ONE HERMES_HOME behind ONE gateway.
+  writeMockProviderConfig(sandbox.hermesHome, mock.url)
+  writeEnvFile(sandbox.hermesHome)
+  for (const bot of COWORKERS) {
+    await seedCoworker(sandbox.hermesHome, mock.url, bot)
+  }
+
+  const { app, page } = await launchDesktop(buildAppEnv(sandbox))
+  fixture = {
+    app,
+    page,
+    mock,
+    mockUrl: mock.url,
+    sandbox,
+    cleanup: async () => {
+      await app.close().catch(() => undefined)
+      await mock.close()
+      sandbox.cleanup()
+    }
+  }
+  await waitForAppReady(fixture, 120_000)
+})
+
+test.afterAll(async () => {
+  await fixture?.cleanup()
+  fixture = null
+})
+
+test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster and opens the orchestrator Bot Chat over one gateway', async () => {
+  test.setTimeout(300_000)
+  const { page, sandbox } = fixture!
+
+  // Step 1 — Bots roster: exactly the five coworkers, each with its role metadata.
+  await openBots(page)
+  await page.screenshot({ path: test.info().outputPath('step-1-bots-roster.png') })
+  for (const bot of COWORKERS) {
+    const row = page
+      .getByRole('button', { name: new RegExp(`^${bot.title}\\b`, 'i') })
+      .filter({ visible: true })
+      .first()
+    await expect(row, `roster row for ${bot.name} (${bot.title}) is rendered`).toBeVisible({ timeout: 30_000 })
+    await expect(
+      row.locator(`[data-bot-face="${bot.name}"]`),
+      `avatar element for ${bot.name} is present next to its title`
+    ).toBeVisible()
+  }
+  // Role descriptions are carried on profile.yaml (bot-row renders title+avatar, not
+  // description), so assert each coworker's rendered role metadata there.
+  for (const bot of COWORKERS) {
+    const raw = fs.readFileSync(path.join(sandbox.hermesHome, 'profiles', bot.name, 'profile.yaml'), 'utf8')
+    expect(raw, `${bot.name} profile.yaml carries its role title`).toContain(bot.title)
+    expect(raw, `${bot.name} profile.yaml carries its role description`).toContain(bot.description)
+  }
+
+  // Step 2 — the group-chat / rooms surface is present (room membership itself is
+  // asserted in the ui scenario AC-FLEET-F62-9, where the gateway boot seeds rooms).
+  await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('step-2-group-chat-surface.png') })
+
+  // Step 3 — open the orchestrator's Bot Chat; it opens over the single gateway.
+  const orchestratorRow = page
+    .getByRole('button', { name: /^Orchestrator\b/i })
+    .filter({ visible: true })
+    .first()
+  await orchestratorRow.click()
+  await expect(
+    page.getByRole('tab', { name: /Bot Chat/ }).filter({ visible: true }).first()
+  ).toBeVisible({ timeout: 30_000 })
+  await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
+
+  // One gateway for the whole app: the fixture launches a single local backend and
+  // waitForAppReady gated on the one gateway becoming ready; the statusbar reads it.
+  await expect(
+    page.locator('[data-slot="statusbar"]').getByText('ready', { exact: true })
+  ).toBeVisible({ timeout: 60_000 })
+})

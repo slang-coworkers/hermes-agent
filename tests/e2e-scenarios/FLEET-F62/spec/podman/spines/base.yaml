@@ -1,0 +1,46 @@
+# FLEET-F62 fleet spine (podman column). Every coworker `extends: [base]`, and the
+# render merges this config into the DEFAULT profile too. The FULL providers block
+# lives here (inline dummy api_key, remote base_url routed through the OneCLI egress
+# proxy) so it survives `hermes onboard coworker`, which force-installs config.yaml
+# from the resolved spine — a bare `api:`/`key_env:` shape or the canonical `nvidia`
+# provider would 404/401 behind the proxy. plugins.enabled + the nv-fleet-gates and
+# podman-onecli settings are declared once here (the SCHED-F33 declare-in-spine
+# pattern) so every coworker carries them; the render derives expected_backend and
+# emits the managed-scope profile_roles map itself.
+identity: "FLEET-F62 fleet base"
+config:
+  model:
+    provider: coworkers-live
+    default: aws/anthropic/bedrock-claude-opus-4-8
+  providers:
+    coworkers-live:
+      base_url: https://inference-api.nvidia.com
+      api_mode: anthropic_messages
+      api_key: dummy-fleet-f62-not-a-real-key
+      default_model: aws/anthropic/bedrock-claude-opus-4-8
+  timezone: Asia/Kolkata
+  terminal:
+    container_persistent: true
+  secrets:
+    onecli:
+      enabled: true
+  plugins:
+    enabled:
+      - nv-coworker-compose
+      - nv-fleet-gates
+      - podman-onecli
+    entries:
+      nv-fleet-gates:
+        settings:
+          enforce_sandbox: true
+          edges_db_path: /tmp/hermes-fleet/edges.db
+          admin_tools:
+            - onboard_coworker
+            - onboard_project
+            - create_agent
+      podman-onecli:
+        settings:
+          gateway_api_base_url: http://172.17.0.1:10256
+          insecure_no_auth_origins:
+            - "172.17.0.1:10256"
+          api_key_env: ONECLI_API_KEY
