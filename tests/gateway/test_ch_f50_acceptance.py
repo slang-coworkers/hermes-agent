@@ -4,11 +4,12 @@ Proves the four NanoClaw interactive operations (cards, questions, reactions,
 files) already work: native buttons on a button-capable adapter, a numbered-text
 / `/approve` fallback on adapters that cannot render buttons, and interactive
 structured choices on the desktop panel (backed by the headless tui_gateway
-server that `hermes serve` runs). Questions (`clarify`), the approval card, and
-the desktop `react_to_message` tool are agent-callable; messaging reactions and
-file sends run through the `send_message` transport engine, which is deliberately
-not a model tool (these tests drive that engine directly, the way cron delivery,
-the `hermes send` CLI, and the MCP server do). One test function per
+server that `hermes serve` runs). Questions (`clarify`) and the desktop
+`react_to_message` tool are agent-callable; approval cards are raised
+automatically by the approval gate; messaging reactions and file sends run
+through the `send_message` transport engine, which is deliberately not a model
+tool (these tests drive that engine directly, the way cron delivery, the
+`hermes send` CLI, and the MCP server do). One test function per
 acceptance-criterion id (test_ac_ch_f50_1 .. _8). Behaviour contracts only — no
 network; SessionDB and HERMES_HOME are sandboxed to tmp_path by conftest.
 """

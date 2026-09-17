@@ -9,13 +9,14 @@ description: "How Hermes asks the user multiple-choice questions, presents dange
 Hermes does more than send plain text: it asks the user multiple-choice
 questions, presents dangerous-command approvals as interactive cards, reacts to
 messages with emoji, and delivers file attachments. All four are **native
-Hermes features** — no plugin to install. They differ in *who* invokes them:
-questions (the `clarify` tool), the approval card, and the desktop
-`react_to_message` tool are **agent-callable** in a session, while messaging
-reactions and file attachments run through the internal `send_message`
-**transport engine**, which is deliberately **not** exposed as a model tool — it
-is driven by cron delivery, the `hermes send` CLI, the kanban notifier, and the
-MCP server, not by the model deciding to send on its own. This page documents
+Hermes features** — no plugin to install. Their invocation paths differ:
+questions (the `clarify` tool) and the desktop `react_to_message` tool are
+**agent-callable** in a session; approval cards are raised automatically by the
+approval gate when an agent attempts a dangerous command; and messaging reactions
+and file attachments run through the internal `send_message` **transport
+engine**, which is deliberately **not** exposed as a model tool — it is driven by
+cron delivery, the `hermes send` CLI, the kanban notifier, and the MCP server,
+not by the model deciding to send on its own. This page documents
 each operation, its invocation path, the surface it renders on, and the fallback
 used when a surface cannot render buttons.
 
@@ -32,7 +33,7 @@ follows:
 | **File** (attachment) | the `send_message` transport engine (`MEDIA:<path>`) — **not** a model tool | the adapter's native document API; a sanitized error returned to the caller on adapters without one |
 
 Questions and approval cards degrade gracefully: where a surface cannot render
-buttons, the agent still reaches the user through a numbered text list or a
+buttons, Hermes still reaches the user through a numbered text list or a
 slash-command card, and the reply is captured and resolved exactly as a button
 click would be. Messaging reactions and file attachments have no text fallback —
 they require native adapter support and otherwise return an error (the desktop
@@ -215,11 +216,10 @@ Live adapter does not implement native document delivery; media file 1/1 was not
 
 This is deliberate: the base `send_document` on `BasePlatformAdapter` produces a
 text notice, but the send engine rejects the inherited method rather than
-invoking it, so an unsupported attachment fails **closed** — the **agent** (the
-tool's caller) receives the sanitized error, and the inherited attachment-failure
-notice is never sent to the chat. Any accompanying message text may already have
-been delivered, but the media file's local path is never exposed by this
-fallback.
+invoking it, so an unsupported attachment fails **closed** — the caller receives
+the sanitized error, and the inherited attachment-failure notice is never sent to
+the chat. Any accompanying message text may already have been delivered, but the
+media file's local path is never exposed by this fallback.
 
 *Implementation:* tag `v2026.8.31` — `tools/send_message_tool.py:238`
 (`MEDIA:` schema), `:854` (`_send_live_adapter_media`, called `:1010`),
