@@ -1,17 +1,4 @@
-"""Acceptance test for SCHED-F32 — Durable scheduled tasks with cron recurrence and run logs.
-
-ADOPT / adopt-native row: Hermes cron already satisfies the requirement, so this test
-imports and CALLS the real cron API and asserts the adopt behaviour. It PASSES on the
-stock v2026.8.31 tree (see the ADR ## Green-on-stock section) — the plugin
-fail-before/pass-after asymmetry does not apply because there is no plugin. Non-vacuity
-comes from calling real code (never reading source as text) and asserting differential
-invariants over the PERSISTED store, ledger and output files, not frozen constants.
-
-Ships as: tests/cron/test_sched_f32_acceptance.py
-Run only via scripts/run_tests.sh (never bare pytest). All writes stay under tmp_path.
-
-Pin: tag v2026.8.31, commit 29112bef099274229cadff79cdff7bf7b99c4b77.
-"""
+"""Acceptance tests for SCHED-F32 — durable scheduled-task recurrence, per-profile persistence, and run logs."""
 
 from __future__ import annotations
 
@@ -69,9 +56,9 @@ def test_ac_sched_f32_1(tmp_path, monkeypatch):
     with monkeypatch.context() as clock_patch:
         clock_patch.setattr("cron.jobs._hermes_now", lambda: clock["now"])
         with use_cron_store(home):
-            for i, recurring in enumerate(("every 30m", "*/30 * * * *")):
+            for index, recurring in enumerate(("every 30m", "*/30 * * * *")):
                 clock["now"] = base
-                jid = create_job(prompt="p", schedule=recurring, name=f"rearm-{i}")["id"]
+                jid = create_job(prompt="p", schedule=recurring, name=f"rearm-{index}")["id"]
                 due0 = get_job(jid)["next_run_at"]
                 clock["now"] = base + timedelta(hours=1)
                 advance_next_run(jid)
@@ -149,6 +136,5 @@ def test_ac_sched_f32_3(tmp_path, monkeypatch):
     with use_cron_store(home):
         output_file = save_job_output("job-1", "run output")
     assert output_file.read_text(encoding="utf-8") == "run output"
-    assert output_file.parent.name == "job-1"
-    assert output_file.parent.parent.name == "output"
-    assert home.resolve() in output_file.resolve().parents
+    assert output_file.suffix == ".md"
+    assert output_file.resolve().parent == (home / "cron" / "output" / "job-1").resolve()
