@@ -14,9 +14,11 @@ questions (the `clarify` tool) and the desktop `react_to_message` tool are
 **agent-callable** in a session; approval cards are raised automatically by the
 approval gate when an agent attempts a dangerous command; and messaging reactions
 and file attachments run through the internal `send_message` **transport
-engine**, which is deliberately **not** exposed as a model tool — it is driven by
-cron delivery, the `hermes send` CLI, the kanban notifier, and the MCP server,
-not by the model deciding to send on its own. This page documents
+engine**, which is deliberately **not** exposed as a model tool. Its outbound
+message sends are driven by cron delivery, the `hermes send` CLI, and the opt-in
+MCP server — not by the model. (The kanban notifier delivers by calling platform
+adapters directly, not through this engine; and no internal caller fires the
+engine's `action="react"` path — see Reactions.) This page documents
 each operation, its invocation path, the surface it renders on, and the fallback
 used when a surface cannot render buttons.
 
@@ -166,11 +168,16 @@ Hermes reacts to messages on two surfaces, with different invocation paths.
   connected adapter), and `action="unreact"` removes one — the platform-native
   tapback. `send_message` is deliberately **not** registered as an agent-callable
   model tool: the model does not decide on its own to fire cross-platform
-  reactions. This engine is driven instead by cron delivery, the `hermes send`
-  CLI, the kanban notifier, and the MCP server. In the pinned release the Photon
-  adapter is the bundled adapter that implements `add_reaction`; any other adapter
-  exposing the same public `add_reaction` API participates too, while an adapter
-  without it returns an error rather than a reaction.
+  reactions. The engine's outbound message sends are driven by cron delivery, the
+  `hermes send` CLI, and the opt-in MCP server — **not** the kanban notifier,
+  which delivers by calling platform adapters directly. The `action="react"` path
+  has no internal production caller (those drivers send messages, not reactions),
+  so on stock Hermes it is reached only through the engine's dispatch — as the
+  acceptance test exercises it — while the model-callable reaction is the desktop
+  `react_to_message` tool. In the pinned release the Photon adapter is the bundled
+  adapter that implements `add_reaction`; any other adapter exposing the same
+  public `add_reaction` API participates too, while an adapter without it returns
+  an error rather than a reaction.
 - **Desktop (agent-callable).** The `react_to_message` tool is the model-callable
   reaction — exposed only to desktop (GUI) sessions via the `desktop_ui` toolset
   and gated by the opt-in `display.message_reactions` toggle (default `false`). It
@@ -189,7 +196,10 @@ Hermes reacts to messages on two surfaces, with different invocation paths.
 `toolsets.py:264` (`desktop_ui` toolset); `send_message` is not in any toolset —
 `toolsets.py:419` ("agents do NOT get an agent-callable send_message tool") and
 the registry note in `tools/send_message_tool.py` ("intentionally NOT registered
-as an agent-callable model tool"); reaction storage under
+as an agent-callable model tool"); engine drivers use `action="send"` — cron
+`cron/scheduler.py` (`_send_to_platform`), `hermes send` `hermes_cli/send_cmd.py`,
+MCP `mcp_serve.py`; the kanban notifier bypasses the engine with direct adapter
+calls `gateway/kanban_watchers.py:743`,`:1261`,`:1265`; reaction storage under
 `display_metadata` `hermes_state.py:11803` (`REACTIONS_METADATA_KEY`), `:11805`
 (`set_message_reaction`). main — `tools/send_message_tool.py::_handle_react`,
 `tools/react_to_message_tool.py::react_to_message_tool`,
@@ -200,9 +210,11 @@ as an agent-callable model tool"); reaction storage under
 Hermes delivers a file attachment through the `send_message` transport engine: a
 message carrying `MEDIA:<path>` (add `[[as_document]]` to force document delivery
 rather than letting the engine pick an image/video/voice method by extension). As
-with messaging reactions, `send_message` is **not** a model tool — this path is
-driven by cron delivery, the `hermes send` CLI, the kanban notifier, and the MCP
-server, not by the model. The media send engine delivers the file **natively** —
+with messaging reactions, `send_message` is **not** a model tool — its outbound
+sends are driven by cron delivery, the `hermes send` CLI, and the opt-in MCP
+server (the kanban notifier delivers by calling platform adapters directly, not
+through this engine), not by the model. The media send engine delivers the file
+**natively** —
 it calls the adapter's `send_document` (or `send_image_file` / `send_video` /
 `send_voice`) — but only when the adapter actually **overrides** that method.
 
