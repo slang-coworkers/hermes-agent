@@ -196,10 +196,12 @@ Hermes reacts to messages on two surfaces, with different invocation paths.
 `toolsets.py:264` (`desktop_ui` toolset); `send_message` is not in any toolset —
 `toolsets.py:419` ("agents do NOT get an agent-callable send_message tool") and
 the registry note in `tools/send_message_tool.py` ("intentionally NOT registered
-as an agent-callable model tool"); engine drivers use `action="send"` — cron
-`cron/scheduler.py` (`_send_to_platform`), `hermes send` `hermes_cli/send_cmd.py`,
-MCP `mcp_serve.py`; the kanban notifier bypasses the engine with direct adapter
-calls `gateway/kanban_watchers.py:743`,`:1261`,`:1265`; reaction storage under
+as an agent-callable model tool"); the engine's outbound-message callers send
+rather than react — cron calls the engine's `_send_to_platform` directly
+(`cron/scheduler.py:3829`,`:3858`), while `hermes send` and MCP go through
+`send_message_tool` with `action="send"` (`hermes_cli/send_cmd.py:384`,`:389`;
+`mcp_serve.py:922`); the kanban notifier bypasses the engine with direct adapter
+calls `gateway/kanban_watchers.py:743`,`:1249`,`:1261`,`:1265`; reaction storage under
 `display_metadata` `hermes_state.py:11803` (`REACTIONS_METADATA_KEY`), `:11805`
 (`set_message_reaction`). main — `tools/send_message_tool.py::_handle_react`,
 `tools/react_to_message_tool.py::react_to_message_tool`,

@@ -171,7 +171,7 @@ def test_ac_ch_f50_5():
 
 
 def test_ac_ch_f50_6():
-    """The send_message transport engine dispatches an emoji to a messaging adapter's add_reaction via action=react (send_message is not a model tool)."""
+    """Hermes dispatches an emoji reaction to a messaging adapter's add_reaction via the send_message transport engine (not an agent-callable tool)."""
     import tools.send_message_tool as smt
     from gateway.config import Platform
 
