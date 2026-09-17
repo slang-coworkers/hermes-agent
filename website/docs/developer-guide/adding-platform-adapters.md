@@ -785,3 +785,35 @@ async def disconnect(self):
 | `weixin.py` | Long-poll + CDN | High | Media handling, encryption |
 | `plugins/platforms/wecom/callback_adapter.py` | Callback/webhook | Medium | HTTP server, AES crypto, multi-app |
 | `plugins/platforms/irc/adapter.py` | Long-poll + IRC protocol | High | Full-featured plugin adapter with scoped token lock |
+
+## NanoClaw parity: channel adapter registry & Chat SDK bridge
+
+NanoClaw registered channel adapters by name — each adapter declaring `supportsThreads`, `defaults`, `subscribe`, and `openDM` — and wrapped Discord, Slack, Telegram, WhatsApp, Teams, Linear, GitHub, iMessage, Webex, Resend, and Matrix behind a Node "Chat SDK bridge". Hermes provides the same *registry shape* natively: a name-keyed platform registry (`platform_registry`), a zero-core-edit plugin registration surface (`ctx.register_platform`), and a base adapter class (`BasePlatformAdapter`) that supplies the capability fallbacks NanoClaw negotiated per flag. Hermes does **not** port the Node bridge itself — in Hermes a new channel is a `kind: platform` plugin subclassing `BasePlatformAdapter` (see [Plugin Path](#plugin-path-recommended) above), not a bridge entry.
+
+Citations below use a dual `tag:` / `main:` form: `tag:` coordinates are relative to the pinned release tree (`v2026.8.31` @ `29112bef`); `main:` coordinates are relative to upstream `main` @ `08b140d14`, where the runner's adapter-connect / message-handler wiring was split out of `gateway/run.py` into `gateway/run_adapters.py`.
+
+### Mapping
+
+| NanoClaw concept | Hermes surface | tag: (`v2026.8.31` @ `29112bef`) | main: (`08b140d14`) |
+|---|---|---|---|
+| Adapter-by-name registry | `PlatformEntry` / the `platform_registry` singleton (register and look up by `name`) | `gateway/platform_registry.py:63`, `:698` | `gateway/platform_registry.py:42`, `:387` |
+| Adapter self-registration, zero core edits | `ctx.register_platform` from a `kind: platform` plugin | `hermes_cli/plugins.py:2928`; kind at `:683` | `hermes_cli/plugins.py:770` |
+| Declared capabilities & `defaults` | `BasePlatformAdapter` capability flags (declared, overridable) + `PlatformConfig` | `gateway/platforms/base.py:3031`, `:3050`; `gateway/config.py:647` | `gateway/platforms/base.py:1858`, `:1863`; `gateway/config.py:387` |
+| `supportsThreads` | `BasePlatformAdapter.create_handoff_thread` + `_thread_metadata_for_source` | `gateway/platforms/base.py:4213`, `:134` | `gateway/platforms/base.py:2492` |
+| `subscribe` (start receiving) | `BasePlatformAdapter.connect` + `set_message_handler`, wired by the gateway runner | `gateway/platforms/base.py:4159`, `:3821`; `gateway/run.py:8321`, `:13886` | `gateway/platforms/base.py` (`connect`, `set_message_handler`); `gateway/run_adapters.py:148`, `:1039` |
+| `openDM` | no registry-level `openDM`; `send` / `send_private_notice`, DM addressed by `chat_id` | `gateway/platforms/base.py:4184`, `:4542` | `gateway/platforms/base.py` (`send`, `send_private_notice`) |
+| Per-flag Chat SDK text fallbacks | base `send_clarify` numbered-text fallback, inherited by every adapter | `gateway/platforms/base.py:4468` | `gateway/platforms/base.py:2591` |
+| Bridge wraps N platforms (each a subclass) | e.g. `TelegramAdapter(BasePlatformAdapter)`, itself a `kind: platform` plugin | `plugins/platforms/telegram/adapter.py:604`; `plugins/platforms/telegram/plugin.yaml:3` | `plugins/platforms/telegram/adapter.py:368` |
+| Built-in cli/dashboard channels | `hermes chat` (CLI), the web dashboard Chat tab from `hermes dashboard`, and the `hermes desktop` app — `hermes serve` is the headless backend only | `website/docs/reference/cli-commands.md:41,95-97` | `website/docs/reference/cli-commands.md:41,95-97` |
+
+### Zero core edits
+
+Adding a channel to Hermes is a plugin, not a core patch. As the tip at the top of this page states, you "Drop a plugin directory into `~/.hermes/plugins/` — zero core code changes needed" (`website/docs/developer-guide/adding-platform-adapters.md:11`). `ctx.register_platform` builds a `PlatformEntry(source="plugin", …)` and calls `platform_registry.register(…)` for you (`hermes_cli/plugins.py:2928`), so once the plugin is enabled in `plugins.enabled`, loading it wires the adapter into the gateway — the [Plugin Path](#plugin-path-recommended) section above is the end-to-end how-to. At startup the gateway runner checks `platform_registry` first and only falls through to the legacy built-in chain on a miss (`gateway/run.py:17350`, `:17373`).
+
+### Scope & non-goals
+
+- **Multi-bot dimension → one bot = one profile.** NanoClaw's per-`instance` dimension (a `Dict[Platform, PlatformConfig]` per bot) is not ported as an `instance` axis; in Hermes each bot is a separate profile with its own `platform_registry` scope. (The per-`instance` axis was withdrawn from this port's baseline as a core change.)
+- **Built-in cli/dashboard channels → native surfaces.** NanoClaw's built-in `cli` and `dashboard` channels map to `hermes chat` (CLI), the `hermes desktop` Electron app, and the web dashboard Chat tab served by `hermes dashboard`. `hermes serve` is the headless backend (it powers the desktop app and remote backends) and does not serve the browser UI (`website/docs/reference/cli-commands.md:41,95-97`).
+- **The Node Chat SDK bridge itself is not ported.** Hermes's native `platform_registry` + `BasePlatformAdapter` contract is the equivalent; a new channel is a `kind: platform` plugin, never a bridge entry.
+- **Channels NanoClaw wrapped that Hermes does not yet ship** — Linear, Webex, Resend, Dial, DeltaChat, Emacs, and the Go binding — are intentionally unported. Each is a future `kind: platform` plugin subclassing `BasePlatformAdapter`.
+- **Port-binding platforms** (for example `webhook` and `api_server` — `PORT_BINDING_PLATFORM_VALUES` holds 9, `gateway/config.py:437`) may run only on the default multiplexer profile (`gateway/run.py:16667`).
