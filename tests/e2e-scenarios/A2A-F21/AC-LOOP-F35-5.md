@@ -172,7 +172,9 @@ substitutes the real credential at the `inference-api.nvidia.com` hop):
    and Step 2 screenshots) is the sole session `-c "Bot Chat"` can resolve to, holds the session alive
    while continuously draining the pty, and STOPS when `F35-ACK:$NONCE` lands in that session's
    `state.db` (bound to `$SID`, `active=1`, `id>` a pre-send baseline — never a stale row), then sends
-   `/exit` for a clean exit. It exits 0 only when the ack round-tripped AND the REPL clean-exited.
+   `/exit` (best-effort graceful exit). It exits 0 when the ack round-tripped AND the child process
+   reached exit 0 by any means — a submitted `/exit`, else EOF/Ctrl-D (Amendment 6 no longer requires
+   a clean `/exit` specifically; only child rc 0).
 
 ```bash
 ( source $TB/harness.live.env
@@ -309,7 +311,8 @@ try:
         if proc.poll() is not None:
             break
 finally:
-    # Ctrl-D / SIGTERM / SIGKILL are failure cleanup only; each phase is bounded by `hard`.
+    # /exit is best-effort; EOF is accepted when the child exits with status 0.
+    # SIGTERM/SIGKILL are bounded last-resort reaps; the final child rc controls PASS/FAIL.
     if proc is not None and proc.poll() is None and master is not None:
         try:
             os.write(master, b"\x04")
@@ -353,17 +356,18 @@ if metapath:
     except OSError:
         pass
 sys.stderr.write("DRIVE marker=%d clean_exit=%d child_rc=%s\n" % (int(found), int(clean_exit), child_rc))
-sys.exit(0 if (found and clean_exit) else 1)
+sys.exit(0 if (found and child_rc == 0) else 1)
 PYDRIVE
   rc=$?; echo "sender_drive_exit=$rc"; exit "$rc" )
 ```
 
    → expect `sender_drive_exit=0`: `message_agent` delivered to `a2a-f21-loopf35-b` inside the one
    gateway (never a2a, no second `serve`); bot-b ran a turn and replied `F35-ACK:$NONCE`; the
-   interactive drain surfaced that reply into `a2a-f21-loopf35-a`'s `Bot Chat` `state.db` and the REPL
-   clean-exited. A non-zero `sender_drive_exit` means the ack never round-tripped or the session did
-   not clean-exit — STOP, do not run Step 2, and record per §Env fallback (exit 2 = a pre-launch guard
-   tripped: ambiguous `Bot Chat` title or a prompt that leaked the marker).
+   interactive drain surfaced that reply into `a2a-f21-loopf35-a`'s `Bot Chat` `state.db` and the child
+   reached exit 0 (by any means — a submitted `/exit`, else EOF/Ctrl-D; Amendment 6). A non-zero
+   `sender_drive_exit` means the ack never round-tripped or the child process did not exit with status
+   0 — STOP, do not run Step 2, and record per §Env fallback (exit 2 = a pre-launch guard tripped:
+   ambiguous `Bot Chat` title or a prompt that leaked the marker).
 2. **Observe the round-tripped ack in the web UI by exact-resume** — run this ONLY after Step 1
    reported `sender_drive_exit=0`. Reuse the exact `$SID` the PREFLIGHT (Setup step 6) exported and
    the driver bound to (the session titled exactly `Bot Chat`, `hidden=1`); do NOT re-derive it, so
@@ -404,7 +408,8 @@ generates `F35-ACK:$NONCE` (the distinct marker proving it replied), and ALL THR
 carrying the SAME `$NONCE`:
 
 - **(1) sender-side completion evidence (Step 1)** — the interactive drive process has a captured
-  pid, exits 0 on its clean `/exit` (`drive-a.meta` shows `exit=0`), and its PTY transcript
+  pid, exits 0 (`drive-a.meta` shows `exit=0` — the child process exit code, reached by any means
+  incl. EOF; **Amendment 6 waived the earlier "on its clean `/exit`" conjunct**), and its PTY transcript
   `drive-a.log` contains the exact `F35-ACK:$NONCE` (the ack surfaced in the sender's own live turn).
 - **(2) retained recipient UI (Step 3)** — a `step-3.png` screenshot of `a2a-f21-loopf35-b`'s
   canonical `Bot Chat` (exact-resume `/chat?profile=a2a-f21-loopf35-b&resume=$SID_B`) showing the
@@ -424,12 +429,18 @@ session — the round-1 defect). Neither tester nor builder may drop an item, su
 surface, or pass on `state.db` alone; the bar is judged as written. **This is the LAST counted round
 the operator will grant (round 3/3); there is no round 4.**
 
+**Amendment 6 (operator A-narrowed, 2026-09-17):** round 3 @83be5feb PROVED the round-trip (step-2/step-3,
+same nonce), so item (1)'s "clean `/exit`" conjunct is WAIVED — item (1) now = pid + exit-0 (child rc,
+`drive-a.meta`) + ACK-in-`drive-a.log`. The round-trip and both UI items STAY; nothing else is dropped.
+The tester RE-ATTESTS the existing @83be5feb run against this bar — no new live round.
+
 ## Evidence
 
 - **(1) sender-side completion evidence** — `drive-a.log` (the Step-1 PTY transcript) and its
   `drive-a.meta` sidecar under `$ART/scenario-AC-LOOP-F35-5/`: `drive-a.meta` MUST record `exit=0`
-  and `drive-a.log` MUST contain the exact `F35-ACK:$NONCE` (the ack surfaced in the sender's own
-  live turn). Assert both:
+  (the child process exit code, reached by any means incl. EOF — **Amendment 6**, not the driver's
+  `clean_exit` self-check) and `drive-a.log` MUST contain the exact `F35-ACK:$NONCE` (the ack surfaced
+  in the sender's own live turn). Assert both:
   ```bash
   D=$ART/scenario-AC-LOOP-F35-5
   grep -Eq '^pid=[1-9][0-9]*$' "$D/drive-a.meta" || { echo "drive-a.meta did not record a captured pid:"; cat "$D/drive-a.meta"; exit 1; }
