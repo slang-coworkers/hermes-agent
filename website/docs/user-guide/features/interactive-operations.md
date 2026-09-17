@@ -21,7 +21,7 @@ follows:
 | Operation | How the agent invokes it | Rendered by |
 |---|---|---|
 | **Question** (multiple choice) | the `clarify` tool | native choice buttons on button-capable adapters; a numbered text list on adapters that cannot render buttons |
-| **Card** (dangerous-command approval) | the approval gate (automatic on a dangerous command) | Allow-once / Allow-session / Always-allow / Deny buttons on button-capable messaging adapters; interactive buttons on the desktop panel; a `/approve` … `/deny` text card on messaging adapters without buttons |
+| **Card** (dangerous-command approval) | the approval gate (automatic on a dangerous command) | the policy-allowed subset of Allow-once / Allow-session / Always-allow / Deny — as buttons on button-capable messaging adapters and on the desktop panel, or a `/approve` … `/deny` text card on messaging adapters without buttons |
 | **Reaction** (emoji) | `send_message(action="react", emoji=…)`; the desktop `react_to_message` tool | the adapter's reaction API; reaction metadata on the message row + a desktop event |
 | **File** (attachment) | `send_message` with `MEDIA:<path>` in the message text | the adapter's native document API; a sanitized error on adapters without one |
 
@@ -77,20 +77,24 @@ the clarify timeout in `tools/clarify_gateway.py`. main —
 ## Cards (approvals)
 
 When the agent tries to run a dangerous command, Hermes presents an **approval
-card** offering four actions: **Allow once**, **Allow for the session**,
-**Always allow**, and **Deny**. `Allow once` re-prompts the next time the same
-command appears; `session` and `always` suppress the prompt for the rest of the
-session or permanently. The card renders on three surfaces.
+card**. The full set of actions is **Allow once**, **Allow for the session**,
+**Always allow**, and **Deny**, but the card only ever shows the
+**policy-allowed subset**: `Always allow` is omitted when permanent approval is
+not eligible (leaving once / session / deny), and a smart-denied prompt (an owner
+override for a single operation) offers just **Allow once** and **Deny**.
+`Allow once` re-prompts the next time the same command appears; `session` and
+`always` suppress the prompt for the rest of the session or permanently. The card
+renders on three surfaces.
 
 1. **Button-capable messaging adapters.** When the messaging adapter in front of
-   the agent implements a structured approval renderer, the gateway shows four
-   buttons (Allow-once / Allow-session / Always-allow / Deny). Telegram and Slack
-   are examples.
+   the agent implements a structured approval renderer, the gateway shows one
+   button per allowed action (up to four: Allow-once / Allow-session /
+   Always-allow / Deny). Telegram and Slack are examples.
 
 2. **Messaging adapters without buttons.** The gateway falls back to a plain-text
-   card that carries the command, the reason, and the slash-command
-   instructions. The command prefix is the adapter's own (`/` by default, `!` on
-   Slack and Matrix):
+   card that carries the command, the reason, and the slash-command instructions
+   (the example below shows a command eligible for all four actions). The command
+   prefix is the adapter's own (`/` by default, `!` on Slack and Matrix):
 
 ````text
 ⚠️ **Dangerous command requires approval:**
@@ -190,9 +194,9 @@ Live adapter does not implement native document delivery; media file 1/1 was not
 
 This is deliberate: the base `send_document` on `BasePlatformAdapter` produces a
 text notice, but the send engine rejects the inherited method rather than
-invoking it, so an unsupported adapter fails **closed** — the user is told the
-delivery is not supported, and the local path of the file is never leaked into a
-chat.
+invoking it, so an unsupported adapter fails **closed** — the **agent** (the
+tool's caller) receives the sanitized error, and no message is sent to the
+destination chat at all, so the file's local path is never leaked.
 
 *Implementation:* tag `v2026.8.31` — `tools/send_message_tool.py:238`
 (`MEDIA:` schema), `:854` (`_send_live_adapter_media`, called `:1010`),
