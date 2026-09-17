@@ -67,16 +67,31 @@ hermes profile install /srv/fleet/render/orchestrator --name orchestrator -y
 sudo install -D -m 0644 /srv/fleet/render/managed/config.yaml /etc/hermes/config.yaml
 # (or point HERMES_MANAGED_DIR at a dir holding it, and invalidate the managed cache)
 
-# Supervise the ONE gateway as a systemd Type=notify service on the DEFAULT home. The
-# service unit must carry the podman-onecli wrapper coordinates in its Environment= (the
-# render pins terminal.backend: docker; the wrapper is HERMES_DOCKER_BINARY, deployment
-# config never rendered into a profile):
-#   Environment="HERMES_DOCKER_BINARY=/opt/hermes/plugins/podman-onecli/bin/podman-onecli-wrap"
-#   Environment="PODMAN_ONECLI_PODMAN=/usr/bin/podman" "CONTAINER_HOST=unix:///run/user/1001/podman/podman.sock"
-#   Environment="PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255" "PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt"
-#   Environment="PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY"   # provider placeholder every coworker forwards
+# Supervise the ONE gateway as a systemd Type=notify service on the DEFAULT home.
 hermes gateway install     # emits Type=notify + WatchdogSec=<n>s + Restart=always …
+
+# `hermes gateway install` emits a FIXED Environment= set (HOME/USER/PATH/VIRTUAL_ENV/
+# HERMES_HOME/HERMES_SUPERVISED_CHILD) and passes no other vars through, so the
+# podman-onecli wrapper coordinates — deployment config, never rendered into a profile —
+# are applied as a systemd drop-in override, not expected on the generated unit:
+dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/hermes-gateway.service.d"   # system unit: /etc/systemd/system/hermes-gateway.service.d
+install -d -m 0700 "$dropin"
+cat > "$dropin/10-podman-onecli.conf" <<'EOF'
+[Service]
+Environment="HERMES_DOCKER_BINARY=/opt/hermes/plugins/podman-onecli/bin/podman-onecli-wrap"
+Environment="PODMAN_ONECLI_PODMAN=/usr/bin/podman"
+Environment="CONTAINER_HOST=unix:///run/user/1001/podman/podman.sock"
+Environment="PODMAN_ONECLI_EXPECTED_PROXY=172.17.0.1:10255"
+Environment="PODMAN_ONECLI_EXPECTED_CA=/etc/ssl/certs/hermes-egress-ca.crt"
+Environment="PODMAN_ONECLI_ALLOWED_ENV=ANTHROPIC_API_KEY"   # provider placeholder every coworker forwards
+EOF
+chmod 0600 "$dropin/10-podman-onecli.conf"
+systemctl --user daemon-reload
 systemctl --user enable --now hermes-gateway
+
+# Confirm the wrapper coordinates actually landed on the running unit (expect 6):
+systemctl --user cat hermes-gateway.service | \
+  grep -cE '^Environment="(HERMES_DOCKER_BINARY|PODMAN_ONECLI_[A-Z_]+|CONTAINER_HOST)='
 ```
 
 `reconcile_profile_gateways` (with `GATEWAY_MULTIPLEX_PROFILES=1`) starts **only** the

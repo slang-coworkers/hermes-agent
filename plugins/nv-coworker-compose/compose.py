@@ -1691,9 +1691,10 @@ def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> Non
 # systemd Type=notify service, which emits WatchdogSec (and Type=notify, not
 # Type=simple) ONLY when gateway.systemd_watchdog_seconds > 0
 # (hermes_cli/gateway.py). An absent/0/below-floor value would ship no watchdog (or
-# one too tight), so the render FLOORS it to >= 30s on the DEFAULT profile: a spec
-# value that is not an int, or an int below the floor, is forced to the floor; a
-# higher int is kept. Root and nested spellings are both popped first (core reads
+# one too tight), so the render FLOORS it to >= 30s on the DEFAULT profile: a value the
+# core coercer drops (bool, out-of-range, malformed string, absent/0) or a coerced value
+# below the floor is forced to the floor; a coerced value >= 30 — an int or a valid
+# decimal string like "90" — is kept. Root and nested spellings are both popped first (core reads
 # the root spelling with precedence over gateway.*), then only the canonical nested
 # key is written — the same pop-both shape as _enforce_multiplex, so a hostile root
 # value cannot defeat the floor.

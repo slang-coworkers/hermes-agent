@@ -14,17 +14,10 @@ import { startMockServer } from './mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 
-// AC-FLEET-F62-10 (desktop, stub): the Electron app, on ONE gateway serving the fleet,
-// shows the Bots roster of exactly the five coworkers with their role metadata, holds
-// the two standing rooms — fleet-room (5 members) and review-room (3) — and opens the
-// orchestrator's Bot Chat over a single gateway connection. A profile counts as a bot
-// once ui_meta['hermes-bots'] is on its profile.yaml (bot_mode_probe), so each coworker
-// is seeded with the fleet role metadata; the rooms are materialised through the
-// production "New Group Chat" flow with the exact fleet memberships. The coworkers'
-// podman-sandbox terminal/egress config (docker backend, OneCLI proxy) is booted for
-// real in the sandbox scenarios AC-FLEET-F62-5/6, not here — a bare Electron/Playwright
-// harness has no podman host — so this tier uses a working mock provider to drive the
-// Electron roster + room UI.
+// AC-FLEET-F62-10 (desktop, stub). Scope boundary: the coworkers' podman sandbox
+// (docker backend + OneCLI egress) is booted for real in AC-FLEET-F62-5/6; a bare
+// Electron/Playwright harness has no podman host, so this tier drives only the roster
+// and room UI behind a mock provider.
 
 type Page = MockBackendFixture['page']
 
@@ -48,10 +41,7 @@ async function openBots(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
 }
 
-/** Create a standing room (group chat) through the production "New bot or group chat"
- *  → "New Group Chat" flow, selecting exactly `memberTitles`. Asserts the member count
- *  on the Create button and that the named room tab lands selected. Returns after the
- *  room exists. */
+/** Create a room through the production New Group Chat flow, selecting `memberTitles`. */
 async function createRoom(page: Page, groupName: string, memberTitles: readonly string[]): Promise<void> {
   await page.getByRole('button', { name: 'New bot or group chat' }).click()
   await page.getByRole('menuitem', { name: 'New Group Chat' }).click()
@@ -60,7 +50,7 @@ async function createRoom(page: Page, groupName: string, memberTitles: readonly 
     await dialog.getByText(title, { exact: true }).locator('xpath=ancestor::label').getByRole('checkbox').click()
   }
   await dialog.getByRole('textbox', { name: 'Group name' }).fill(groupName)
-  // The Create button carries the selected member count — this IS the membership assertion.
+  // The Create button's count is the selected-member count, so the exact label asserts membership.
   await dialog.getByRole('button', { name: `Create Group (${memberTitles.length})` }).click()
   await expect(dialog).toBeHidden({ timeout: 30_000 })
   await expect(
@@ -152,6 +142,16 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two
       `avatar element for ${bot.name} is present next to its title`
     ).toBeVisible()
   }
+  // Exactly the five coworkers render as bots — no unexpected sixth, and the
+  // launch/multiplexer 'default' profile (no ui_meta['hermes-bots']) must not appear.
+  // data-bot-face tags each rendered avatar by profile name; dedupe because the
+  // auto-selected bot's face may also render in the workspace header.
+  const faceNames = await page
+    .locator('[data-bot-face]')
+    .evaluateAll(nodes => Array.from(new Set(nodes.map(n => n.getAttribute('data-bot-face')).filter(Boolean))))
+  expect(faceNames.slice().sort(), 'roster shows exactly the five coworkers, no other profile').toEqual(
+    COWORKERS.map(bot => bot.name).slice().sort()
+  )
   // Role descriptions are carried on profile.yaml (bot-row renders title+avatar, not
   // description), so assert each coworker's rendered role metadata there.
   for (const bot of COWORKERS) {
@@ -160,8 +160,7 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two
     expect(raw, `${bot.name} profile.yaml carries its role description`).toContain(bot.description)
   }
 
-  // Step 2 — the two standing rooms with their exact fleet memberships, via the
-  // production New Group Chat flow (the Create button's count is the membership check).
+  // Step 2 — the two standing rooms, via the production New Group Chat flow.
   await createRoom(page, 'fleet-room', ['Orchestrator', 'Architect', 'Builder', 'Tester', 'Reviewer'])
   await createRoom(page, 'review-room', ['Builder', 'Tester', 'Reviewer'])
   await expect(page.getByRole('tab', { name: /fleet-room/ }).filter({ visible: true }).first()).toBeVisible()
