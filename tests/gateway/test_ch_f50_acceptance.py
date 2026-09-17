@@ -146,7 +146,10 @@ def test_ac_ch_f50_4():
 
 def test_ac_ch_f50_5():
     """The desktop-panel approval payload (tui_gateway backend) carries interactive structured choices."""
-    from tui_gateway.server import _approval_request_payload
+    # Importing tui_gateway.server kicks off a background update check that shells
+    # out to `git fetch`; stub it so this stays hermetic (no network on import).
+    with patch("hermes_cli.banner.prefetch_update_check"):
+        from tui_gateway.server import _approval_request_payload
 
     payload = _approval_request_payload(
         {"command": "echo hi", "allow_session": True, "allow_permanent": True}

@@ -61,9 +61,9 @@ answer. It supports up to **four** predefined choices per question
 The fifth "Other" control is a property of the button/GUI renderers, not of the
 base text fallback — the numbered list already accepts free prose, so no extra
 option is needed. A configurable clarify timeout bounds the wait; a value of
-`<= 0` means "wait indefinitely" and a timeout returns a canonical
-"use your best judgement" sentinel to the agent rather than blocking forever.
-This timeout is the equivalent of a question's answer deadline.
+`<= 0` means "wait indefinitely" and a timeout returns a no-response result so
+the agent can proceed on its own judgement rather than blocking forever. This
+timeout is the equivalent of a question's answer deadline.
 
 *Implementation:* tag `v2026.8.31` — `tools/clarify_tool.py:23` (`MAX_CHOICES`),
 `:26` (`MAX_QUESTIONS`), `:329` (`clarify_tool`); base numbered-text fallback +
