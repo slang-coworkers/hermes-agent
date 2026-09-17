@@ -28,8 +28,9 @@ follows:
 Questions and approval cards degrade gracefully: where a surface cannot render
 buttons, the agent still reaches the user through a numbered text list or a
 slash-command card, and the reply is captured and resolved exactly as a button
-click would be. Reactions and file attachments have no text fallback — they
-require native adapter support and otherwise return an error (see below).
+click would be. Messaging reactions and file attachments have no text fallback —
+they require native adapter support and otherwise return an error (the desktop
+`react_to_message` path is separate and DB-backed; see below).
 
 ## Questions (clarify)
 
@@ -67,7 +68,7 @@ This timeout is the equivalent of a question's answer deadline.
 *Implementation:* tag `v2026.8.31` — `tools/clarify_tool.py:23` (`MAX_CHOICES`),
 `:26` (`MAX_QUESTIONS`), `:329` (`clarify_tool`); base numbered-text fallback +
 `mark_awaiting_text` at `gateway/platforms/base.py:4468`–`:4540`; native choice
-buttons come from an adapter override, e.g. `gateway/relay/adapter.py`
+buttons come from an adapter override, e.g. `gateway/relay/adapter.py:3000`–`:3049`
 (`RelayAdapter.send_clarify` — one option per choice plus an `other` control);
 the clarify timeout in `tools/clarify_gateway.py`. main —
 `tools/clarify_tool.py::clarify_tool`,
@@ -165,8 +166,8 @@ An agent can attach an emoji reaction to a message on two surfaces.
 (`_react_to_message_with_db`), `:90` (handler), `:119`/`:130`
 (`check_react_requirements` reads `display.message_reactions`),
 `toolsets.py:264` (`desktop_ui` toolset); reaction storage under
-`display_metadata` `hermes_state.py:11805` (`set_message_reaction`,
-`REACTIONS_METADATA_KEY`). main — `tools/send_message_tool.py::_handle_react`,
+`display_metadata` `hermes_state.py:11803` (`REACTIONS_METADATA_KEY`), `:11805`
+(`set_message_reaction`). main — `tools/send_message_tool.py::_handle_react`,
 `tools/react_to_message_tool.py::react_to_message_tool`,
 `hermes_state.py::SessionDB.set_message_reaction`.
 
@@ -210,10 +211,13 @@ native buttons by overriding `send_clarify` or `send_exec_approval`, and the
 resolution path is identical whether the answer came from a button or from typed
 text.
 
-Reactions and file attachments are different: they have **no** text fallback and
-require native adapter support (`add_reaction`, `send_document`). On an adapter
-that lacks it, a reaction returns an error and a file send fails closed with the
-sanitized message shown above — the interaction is not degraded to text.
+Messaging reactions and file attachments are different: they have **no** text
+fallback and require native adapter support (`add_reaction`, `send_document`). On
+an adapter that lacks it, a messaging reaction returns an error and a file send
+fails closed with the sanitized message shown above — the interaction is not
+degraded to text. The desktop `react_to_message` path is independent: it writes
+reaction metadata to the session database and never goes through a messaging
+adapter.
 
 ## Known limitation (upstream ask)
 
