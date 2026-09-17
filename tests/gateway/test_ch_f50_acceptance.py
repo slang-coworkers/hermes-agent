@@ -187,7 +187,7 @@ async def test_ac_ch_f50_7(tmp_path):
     from tools.send_message_tool import _send_live_adapter_media
 
     media = tmp_path / "report.pdf"
-    media.write_text("x")
+    media.write_text("x", encoding="utf-8")
 
     class _DocAdapter:
         def __init__(self):
@@ -214,7 +214,7 @@ async def test_ac_ch_f50_8(tmp_path):
     from tools.send_message_tool import _send_live_adapter_media
 
     media = tmp_path / "secret.bin"
-    media.write_text("x")
+    media.write_text("x", encoding="utf-8")
 
     adapter = _FallbackAdapter()
     result = await _send_live_adapter_media(
