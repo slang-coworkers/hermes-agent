@@ -22,12 +22,14 @@ follows:
 |---|---|---|
 | **Question** (multiple choice) | the `clarify` tool | native choice buttons on button-capable adapters; a numbered text list on adapters that cannot render buttons |
 | **Card** (dangerous-command approval) | the approval gate (automatic on a dangerous command) | Allow-once / Allow-session / Always-allow / Deny buttons on button-capable messaging adapters; interactive buttons on the desktop panel; a `/approve` … `/deny` text card on messaging adapters without buttons |
-| **Reaction** (emoji) | `send_message(action="react", emoji=…)`; the desktop `react_to_message` tool | the adapter's reaction API; a session-DB reaction row + a desktop event |
+| **Reaction** (emoji) | `send_message(action="react", emoji=…)`; the desktop `react_to_message` tool | the adapter's reaction API; reaction metadata on the message row + a desktop event |
 | **File** (attachment) | `send_message` with `MEDIA:<path>` in the message text | the adapter's native document API; a sanitized error on adapters without one |
 
-Each operation degrades gracefully: where a surface cannot render buttons, the
-agent still reaches the user through a numbered text list or a slash-command
-card, and the reply is captured and resolved exactly as a button click would be.
+Questions and approval cards degrade gracefully: where a surface cannot render
+buttons, the agent still reaches the user through a numbered text list or a
+slash-command card, and the reply is captured and resolved exactly as a button
+click would be. Reactions and file attachments have no text fallback — they
+require native adapter support and otherwise return an error (see below).
 
 ## Questions (clarify)
 
@@ -64,8 +66,11 @@ This timeout is the equivalent of a question's answer deadline.
 
 *Implementation:* tag `v2026.8.31` — `tools/clarify_tool.py:23` (`MAX_CHOICES`),
 `:26` (`MAX_QUESTIONS`), `:329` (`clarify_tool`); base numbered-text fallback +
-`mark_awaiting_text` at `gateway/platforms/base.py:4468`–`:4540`; the clarify
-timeout in `tools/clarify_gateway.py`. main — `tools/clarify_tool.py::clarify_tool`,
+`mark_awaiting_text` at `gateway/platforms/base.py:4468`–`:4540`; native choice
+buttons come from an adapter override, e.g. `gateway/relay/adapter.py`
+(`RelayAdapter.send_clarify` — one option per choice plus an `other` control);
+the clarify timeout in `tools/clarify_gateway.py`. main —
+`tools/clarify_tool.py::clarify_tool`,
 `gateway/platforms/base.py::BasePlatformAdapter.send_clarify`.
 
 ## Cards (approvals)
@@ -97,16 +102,18 @@ Reply `/approve` to execute this one operation, `/approve session` to approve th
 ````
 
 3. **The desktop panel — interactive, not text-plus-command.** The Hermes
-   desktop app and the `hermes dashboard` web SPA are backed by the headless
-   tui_gateway server that `hermes serve` runs (`hermes serve` is a backend, not
-   a UI). On this surface the approval is **not** rendered through a platform
-   adapter at all: the tui_gateway emits an `approval.request` event carrying
-   structured `choices` — `["once", "session", "always", "deny"]`, or
-   `["once", "deny"]` when the command is smart-denied — and the desktop UI
-   renders those as Run / Allow-session / Always-allow / Reject buttons that
-   resolve through the `approval.respond` RPC. The panel is therefore fully
-   interactive; there is no "text plus a typed command" step on the desktop
-   surface.
+   desktop app runs the headless `hermes serve` backend (a JSON-RPC/WebSocket
+   gateway, not a UI). On this surface the approval is **not** rendered through a
+   platform adapter at all: the tui_gateway emits an `approval.request` event
+   carrying structured `choices` — `["once", "session", "always", "deny"]`, or
+   `["once", "deny"]` when the command is smart-denied — and the app renders those
+   as Run / Allow-session / Always-allow / Reject buttons that resolve through the
+   `approval.respond` RPC. The `hermes dashboard` web UI is a **separate** surface
+   (the desktop app spawns `serve`, never `dashboard`, and neither launches the
+   other): its Chat tab embeds `hermes --tui` over a `/api/pty` WebSocket, and
+   that embedded terminal — driven by the same tui_gateway backend — presents the
+   same approval interactively for in-terminal selection. Either way the panel is
+   fully interactive; there is no "text plus a typed command" step.
 
 Plain (non-desktop) API-server sessions instead follow the
 `approvals.unattended_mode` setting, and the `/v1/runs` streaming API carries its
@@ -124,7 +131,10 @@ resolved by the `approval.respond` RPC `tui_gateway/methods_prompt.py:1853`;
 desktop button UI `apps/desktop/src/components/assistant-ui/tool/approval.tsx:156`,
 `:204`–`:247`; `hermes serve` → tui_gateway `hermes_cli/main.py:12188`;
 api_server `approvals.unattended_mode` `hermes_cli/config_defaults.py:2562`,
-`/v1/runs` event `gateway/platforms/api_server_runs.py:746`. main —
+`/v1/runs` event `gateway/platforms/api_server_runs.py:746`; dashboard and serve
+are independent surfaces sharing one backend
+`hermes_cli/subcommands/dashboard.py:87`–`:95`, and the web dashboard embeds
+`hermes --tui` over `/api/pty` `web/src/pages/ChatPage.tsx:2`. main —
 `gateway/run.py::_format_exec_approval_fallback`,
 `tui_gateway/server.py::_approval_request_payload`,
 `tui_gateway/methods_prompt.py` (RPC route `"approval.respond"`).
@@ -136,13 +146,17 @@ An agent can attach an emoji reaction to a message on two surfaces.
 - **Messaging (the direct analog).** `send_message(action="react", emoji=…)`
   dispatches the emoji to the live adapter's `add_reaction` method (duck-typed;
   it requires a running gateway with a connected adapter). `action="unreact"`
-  removes one. This is the platform-native tapback — the reaction appears on the
-  message in Telegram, Slack, and any adapter that implements `add_reaction`.
-- **Desktop.** The separate `react_to_message` tool writes an `author="agent"`
-  reaction row to the session database and emits a `message.reaction` desktop
-  event, so the reaction shows up in the desktop UI. It is a no-op on plain chat
-  surfaces and is gated by the opt-in `display.message_reactions` config flag
-  (default `false`); enable it only when running the desktop app.
+  removes one. This is the platform-native tapback. In the pinned release the
+  Photon adapter is the bundled adapter that implements `add_reaction`; any other
+  adapter exposing the same public `add_reaction` API participates too, while an
+  adapter without it returns an error rather than a reaction.
+- **Desktop.** The separate `react_to_message` tool records the agent's reaction
+  (`author="agent"`) as reaction metadata on the target message row — Hermes
+  stores reactions under the message's `display_metadata` JSON, not a side table,
+  so they survive rewind and compaction — and emits a `message.reaction` desktop
+  event so the reaction shows up in the desktop UI. The tool is exposed only to
+  desktop (GUI) sessions via the `desktop_ui` toolset, and is further gated by the
+  opt-in `display.message_reactions` toggle (default `false`).
 
 *Implementation:* tag `v2026.8.31` — messaging `tools/send_message_tool.py:230`
 (react/unreact schema), `:261` (dispatch → `_handle_react`), `:335`–`:361`
@@ -150,9 +164,11 @@ An agent can attach an emoji reaction to a message on two surfaces.
 `add_reaction`); desktop `tools/react_to_message_tool.py:34`
 (`_react_to_message_with_db`), `:90` (handler), `:119`/`:130`
 (`check_react_requirements` reads `display.message_reactions`),
-`toolsets.py:264` (`desktop_ui` toolset). main —
-`tools/send_message_tool.py::_handle_react`,
-`tools/react_to_message_tool.py::react_to_message_tool`.
+`toolsets.py:264` (`desktop_ui` toolset); reaction storage under
+`display_metadata` `hermes_state.py:11805` (`set_message_reaction`,
+`REACTIONS_METADATA_KEY`). main — `tools/send_message_tool.py::_handle_react`,
+`tools/react_to_message_tool.py::react_to_message_tool`,
+`hermes_state.py::SessionDB.set_message_reaction`.
 
 ## Files
 
@@ -188,20 +204,24 @@ chat.
 The text fallbacks on the messaging surface — the numbered choice list for
 questions and the `/approve` … `/deny` card for approvals — are **documented,
 supported behaviour, not a bug or a missing feature**. Every platform, however
-limited, can present the interaction and capture the reply: a number, the option
-text, free prose, or a slash command. The desktop panel is the interactive
-surface; the messaging text fallback is the universal one. An adapter is free to
-upgrade any of these to native buttons by overriding the relevant method
-(`send_clarify`, `send_exec_approval`, `add_reaction`, `send_document`), and the
+limited, can present a question or an approval and capture the reply: a number,
+the option text, free prose, or a slash command. An adapter can upgrade these to
+native buttons by overriding `send_clarify` or `send_exec_approval`, and the
 resolution path is identical whether the answer came from a button or from typed
 text.
+
+Reactions and file attachments are different: they have **no** text fallback and
+require native adapter support (`add_reaction`, `send_document`). On an adapter
+that lacks it, a reaction returns an error and a file send fails closed with the
+sanitized message shown above — the interaction is not degraded to text.
 
 ## Known limitation (upstream ask)
 
 Parked **clarify questions** are held only in in-memory registries — the
 messaging clarify registry and the tui_gateway clarify registry that backs the
-desktop panel. A client that disconnects and reconnects to a **still-running**
-gateway is replayed the pending question (the registry stays authoritative), but
+desktop panel. A desktop or TUI client that disconnects and reconnects to a
+**still-running** gateway is replayed the pending question by the tui_gateway
+registry (it stays authoritative), but
 there is **no cross-restart persistence**: if the gateway process restarts while
 a clarify question is parked, the in-memory registry is cleared, the question is
 lost, and there is no rehydration path. This is scoped to clarify **questions**;
