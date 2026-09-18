@@ -284,6 +284,11 @@ Usage and cost analytics computed from session history. Select a time period (7,
 - **Daily breakdown table** — date, session count, input tokens, output tokens, cache hit rate, and cost for each day
 - **Per-model breakdown** — table showing each model used, its session count, token usage, and estimated cost
 
+For how these costs are accrued, what each view includes (session-level rollups,
+with auxiliary ledger rows merged into the per-model and by-task breakdowns), and
+the authoritative reconciliation the fleet's cost enforcement uses, see
+[Cost accounting](./cost-accounting.md).
+
 ### Cron
 
 Create and manage scheduled cron jobs that run agent prompts on a recurring schedule.
