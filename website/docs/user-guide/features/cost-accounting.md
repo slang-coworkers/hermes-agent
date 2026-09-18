@@ -9,13 +9,15 @@ description: "Where per-coworker cost comes from, why it is durable, and why Nan
 
 An operator or contributor asking "where does per-coworker cost come from, is it
 durable, and why did we delete NanoClaw's cost machinery?" gets one answer:
-**Hermes's native accounting and pricing are the base of record.** Every API
-call's token usage and its priced dollar cost are accrued per call — main loop,
+**Hermes's native accounting and pricing are the base of record.** Every
+response that reports usage is accrued at the call — across the main loop,
 auxiliary models, mixture-of-agents advisors, subagents, and codex-native runs —
-and persisted into a durable, route-grained token-bin ledger that is
-**re-priceable without re-scanning transcripts**. Because Hermes already does
-this, the slang-coworkers fleet **adopts it as-is**: there is no cost plugin and
-no core patch. NanoClaw's transcript scan, its verbatim LiteLLM rate table, and
+persisting its tokens (and, when the route resolves a price, its dollar cost)
+into a durable, route-grained token-bin ledger that is **re-priceable without
+re-scanning transcripts**. A response with no usable usage is not accrued, and an
+unpriced call adds no dollar amount rather than a real price. Because Hermes
+already does this, the slang-coworkers fleet **adopts it as-is**: there is no cost
+plugin and no core patch. NanoClaw's transcript scan, its verbatim LiteLLM rate table, and
 `cost-thresholds.json` are **deleted, not ported** — the native ledger plus the
 versioned pricing engine supersede all three.
 
@@ -23,7 +25,8 @@ The fleet runs the pinned release **`v2026.8.31`** (commit `29112bef`).
 
 ## How to read the citations
 
-Every citation is `file:line` **relative to the release tree**, in the form
+Every `tag:` citation is `file:line` **relative to the release tree** (the
+`main:` companion references upstream `main`, a different tree), in the form
 `tag: <path>:<line> | main: <path>:<line>`:
 
 - **`tag:`** is the pinned release `v2026.8.31` (commit `29112bef`) — what the
@@ -43,8 +46,17 @@ the main-loop response-usage accrual is **inline** on the pin
 
 ## Native accounting is the base of record
 
-Cost is accrued **per API call, for every provider**, at the point the call
-returns:
+Cost is accrued **from each response that reports usage**, at the point the call
+returns. Two coverage facts the page is careful about: a response with **no
+usable usage is not accrued** (main loop is gated on `response.usage`,
+tag: `agent/conversation_loop.py:4233`; aux returns early on absent or all-zero
+usage, tag: `agent/aux_accounting.py:99-111`), and an **unpriced** call adds
+nothing to the running dollar total (`amount_usd is None`,
+tag: `agent/conversation_loop.py:4443`; an unresolved route returns `unknown`,
+tag: `agent/usage_pricing.py:1468-1469`) — on the main-loop and Codex paths its
+ledger row is recorded `estimated_cost_usd=0.0` with `cost_status="unknown"`,
+while auxiliary rows leave `cost_status`/`cost_source` NULL (see below). The
+accrual points:
 
 - **Main loop** — the response-usage accrual is inline in the conversation loop:
   it prices the call with `estimate_usage_cost`, folds the amount into the
@@ -71,7 +83,8 @@ change what "a session's cost" means:
 - **(a) A subagent's durable cost lives on the child session, not the parent.**
   A subagent runs as its own session with a dedicated `SessionDB` opened on the
   **parent's** `db_path` (tag: `tools/delegate_tool.py:2049-2058`) and
-  `parent_session_id=<parent>` (tag: `:2096,3669`), so its calls persist under
+  `parent_session_id=<parent>` (tag: `:2096`; the same id is passed to the
+  `subagent_stop` hook at `:3669`), so its calls persist under
   the *child* session's `session_model_usage` rows. The parent receives only an
   **in-memory** rollup of the children's cost for its returned usage/footer
   (tag: `tools/delegate_tool.py:3683-3700`); no production writer persists that
@@ -126,8 +139,10 @@ Dollar cost comes from `agent.usage_pricing`, a **versioned** engine:
   stored on the ledger row in the `session_model_usage` columns
   `cost_status` / `cost_source` (tag: `hermes_state_common.py:498-499`). An
   unpriced model prices to `amount_usd = None` and reads as `$0` in a dollar
-  **sum**, but its row is still tagged `unknown` — the provenance the fleet's
-  cost cap needs to fail *closed* rather than silently bill `$0`.
+  **sum**, but on the main-loop and Codex write paths its row is still tagged
+  `unknown` — the provenance the fleet's cost cap needs to fail *closed* rather
+  than silently bill `$0`. (Auxiliary rows are the exception — they leave the
+  provenance NULL; see the honest edges below.)
 
 Two honest edges of the parity, both recorded as an upstream ask under
 [Known limitations](#known-limitations--upstream-ask):
@@ -167,16 +182,22 @@ not from the ledger tables directly:
 
 - the dashboard **Analytics** page is served by **`/api/analytics/usage`**
   (`_get_usage_analytics` tag: `hermes_cli/web_server.py:15810`; route `:15882`);
-  its summary cards and daily chart are session-level rollups read from the
-  `sessions` table, the by-task breakdown reads the `session_model_usage` ledger,
-  and the per-model breakdown is a `sessions` base with auxiliary ledger rows
-  merged in add-only (`_aux_usage_rows` tag: `hermes_cli/web_server.py:15701-15727`);
+  the page renders the daily chart and the per-model breakdown — session-level
+  rollups from the `sessions` table, with auxiliary ledger rows merged into the
+  per-model breakdown add-only (`_merge_aux_into_by_model`
+  tag: `hermes_cli/web_server.py:15849`, over `_aux_usage_rows` `:15701-15727`).
+  The endpoint payload also carries a `by_task` aggregate over
+  `session_model_usage`, which the current Analytics page does not render;
 - the separate **Models** page is served by **`/api/analytics/models`**
   (`_get_models_analytics` tag: `hermes_cli/web_server.py:15894`; route `:16070`)
   — a distinct route, not the Analytics page (see [the web dashboard](./web-dashboard.md#analytics));
-- the cross-profile **all-profiles sidebar** sums each profile's
-  `SessionDB.usage_totals()` into `profiles_usage` / `totalCostUsd`
-  (tag: `hermes_cli/web_routers/profiles.py:494,539,614`).
+- the cross-profile **all-profiles sidebar** exposes each profile's
+  `SessionDB.usage_totals()` as `profiles_usage`
+  (tag: `hermes_cli/web_routers/profiles.py:494,539`); the per-project
+  `totalCostUsd` is a **separate** figure — summed from the loaded session rows
+  (tag: `tui_gateway/project_tree.py:553`) and merged across profiles in the
+  `/api/profiles/projects/tree` endpoint (tag: `hermes_cli/web_routers/profiles.py:614,621`),
+  not computed by `usage_totals()`.
 
 The **`/usage` slash command** is a different surface: it shows the current
 session's **tokens**, rate limits, and Nous credits — **not** local dollar cost
@@ -214,8 +235,8 @@ reconciled read is spelled out:
   auxiliary spend** (which never writes a summary row) and **non-root subagent
   sessions**.
 - **`InsightsEngine.generate()`** is ledger-first and aux-inclusive in the
-  simple case (its overview `estimated_cost` is the per-model breakdown over
-  `session_model_usage`, tag: `agent/insights.py:528-535,684-739`), but it
+  simple case (its overview `estimated_cost` sums the per-model breakdown over
+  `session_model_usage`, tag: `agent/insights.py:522-523,684-739`), but it
   computes its residual as `max(0, summary − Σusage)` with aux **inside**
   `Σusage`; on a session carrying **both** an `absolute=True` residual **and**
   aux spend it folds the aux into the residual subtraction and undercounts, and
@@ -243,13 +264,15 @@ required for the invariant this page pins:
    reprice needs per-call (or era-partitioned) usage rows
    carrying the pricing identity and timestamp — not merely a version string on
    the aggregate row.
-2. **An authoritative, ledger-based, aux-inclusive fleet aggregate.** A
-   cross-profile aggregate already exists — the all-profiles sidebar sums each
-   profile's `usage_totals()` (tag: `hermes_cli/web_routers/profiles.py:494,539,614,622`)
-   — but it is **summary-based** (root `sessions` rows, aux-excluding,
-   tag: `hermes_state.py:10825`). The ask is a fleet total that sums the
-   `session_model_usage` **ledger** so the single-panel figure matches the
-   enforcement figure COST-F29 reads.
+2. **An authoritative, ledger-based, aux-inclusive fleet aggregate.** The
+   cross-profile `profiles_usage` figure is each profile's `usage_totals()`
+   (tag: `hermes_cli/web_routers/profiles.py:494,539`), which is **summary-based**
+   (root `sessions` rows, aux-excluding, tag: `hermes_state.py:10825`); the
+   sidebar's per-project `totalCostUsd` is a separate, window-limited sum over the
+   loaded session rows (tag: `tui_gateway/project_tree.py:553`). Neither is a
+   ledger-based, aux- and subagent-inclusive fleet total. The ask is a fleet
+   aggregate that sums the `session_model_usage` **ledger** so the single-panel
+   figure matches the enforcement figure COST-F29 reads.
 
 ## Verifying the adopt claim
 
@@ -302,12 +325,14 @@ no specific line re-resolved.
 - tag: `agent/aux_accounting.py:71`(record_aux_usage),`116`(estimate_usage_cost call),`124`(record_auxiliary_usage write — tokens + estimated_cost_usd only) | main: `agent/aux_accounting.py:45`(record_aux_usage),`79`(estimate call),`84`(record_auxiliary_usage call).
 - tag: `agent/usage_pricing.py:61`(CostStatus vocabulary),`62-70`(CostSource vocabulary),`74`(CanonicalUsage),`120`(PricingEntry; pricing_version `:128`; no effective-date range),`221-364`(anthropic-pricing-2026-05 snapshot),`1186,1290`(_lookup_official_docs_pricing),`1263`(get_pricing_entry — route-specific resolution),`1448`(estimate_usage_cost),`1547`(has_known_pricing) | main: `agent/usage_pricing.py:94`(PricingEntry),`427`(get_pricing_entry),`537`(estimate_usage_cost); other lines `agent/usage_pricing.py@08b140d14`.
 - tag: `agent/conversation_loop.py:4239-4255,4420-4505`(MoA advisor+aggregator combined, persisted under agent model/provider),`4436-4454`(inline main-loop response-usage accrual) | main: `agent/turn_usage.py:66,217,227`(record_response_usage — main-loop),`41-63,209-249`(_fold_moa_usage + MoA aggregator pricing/persistence).
-- tag: `tools/delegate_tool.py:2049-2058`(subagent dedicated SessionDB on the parent db_path),`2096,3669`(parent_session_id),`3309-3323,3653-3700`(subagent accrual + children's cost rolled into the parent's in-memory total only) | main: `tools/delegate_tool_results.py:345-390`(_fire_subagent_stop_hooks rollup); other lines `tools/delegate_tool.py@08b140d14`.
+- tag: `tools/delegate_tool.py:2049-2058`(subagent dedicated SessionDB on the parent db_path),`2096`(child parent_session_id assignment; the `subagent_stop` hook passes the same id at `:3669`),`3309-3323,3653-3700`(subagent accrual + children's cost rolled into the parent's in-memory total only) | main: `tools/delegate_tool_results.py:345-390`(_fire_subagent_stop_hooks rollup); other lines `tools/delegate_tool.py@08b140d14`.
 - tag: `run_agent.py:2064-2073`(_persist_and_drain flushes queued per-call deltas only — no rolled-up child amount on the parent summary) | main: `run_agent.py@08b140d14`.
 - tag: `agent/codex_runtime.py:203-211`(codex-native accrual) | main: `agent/codex_runtime.py:134-139`.
-- tag: `agent/insights.py:97`(InsightsEngine),`528-535`(overview estimated_cost over the per-model breakdown),`684-739`(per-session SUM + `max(0, summary − Σusage)` residual) | main: `agent/insights.py@08b140d14`.
-- tag: `hermes_cli/web_server.py:15701-15727`(_aux_usage_rows — task-dimension session_model_usage rows),`15810`(_get_usage_analytics; route `:15882` /api/analytics/usage — Analytics page: daily/totals from `sessions`, by_task from the ledger, by_model = `sessions` base + aux merged),`15894`(_get_models_analytics; route `:16070` /api/analytics/models — Models page) | main: `hermes_cli/web_server.py@08b140d14`.
-- tag: `hermes_cli/web_routers/profiles.py:494,539`(profiles_usage via per-profile usage_totals),`614,622`(totalCostUsd merge in /api/profiles/projects/tree) | main: `hermes_cli/web_routers/profiles.py@08b140d14`.
+- tag: `agent/insights.py:97`(InsightsEngine),`522-523`(overview cost = Σ per-model breakdown),`684-739`(per-session SUM + `max(0, summary − Σusage)` residual) | main: `agent/insights.py@08b140d14`.
+- tag: `hermes_cli/web_server.py:15701-15727`(_aux_usage_rows — task-dimension session_model_usage rows),`15810`(_get_usage_analytics; route `:15882` /api/analytics/usage — Analytics page: daily/totals from `sessions`; by_model = `sessions` base + aux merged via `_merge_aux_into_by_model` `:15849`; `by_task` is an API-payload aggregate, not a rendered view),`15894`(_get_models_analytics; route `:16070` /api/analytics/models — Models page) | main: `hermes_cli/web_server.py@08b140d14`.
+- tag: `web/src/pages/AnalyticsPage.tsx:579-581`(Analytics page renders DailyTable/ModelTable/SkillTable — no by_task view); `web/src/lib/api.ts:2145`(AnalyticsResponse has daily/by_model/totals/skills, no by_task) | main: `web/src/@08b140d14`.
+- tag: `hermes_cli/web_routers/profiles.py:494,539`(profiles_usage ← per-profile usage_totals),`614,621`(totalCostUsd merged in /api/profiles/projects/tree — a separate figure, not usage_totals) | main: `hermes_cli/web_routers/profiles.py@08b140d14`.
+- tag: `tui_gateway/project_tree.py:553`(per-project totalCostUsd = Σ _session_cost over the loaded sessions) | main: `tui_gateway/project_tree.py@08b140d14`.
 - tag: `cli.py:14250-14315`(/usage slash — session tokens + rate limits + Nous credits, not dollar cost) | main: `cli.py@08b140d14`.
 
 See also [the web dashboard's Analytics page](./web-dashboard.md#analytics) for

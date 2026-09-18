@@ -285,8 +285,8 @@ Usage and cost analytics computed from session history. Select a time period (7,
 - **Per-model breakdown** — table showing each model used, its session count, token usage, and estimated cost
 
 For how these costs are accrued, what each view includes (session-level rollups,
-with auxiliary ledger rows merged into the per-model and by-task breakdowns), and
-the authoritative reconciliation the fleet's cost enforcement uses, see
+with auxiliary ledger rows merged into the rendered Per-model breakdown), and the
+authoritative reconciliation the fleet's cost enforcement uses, see
 [Cost accounting](./cost-accounting.md).
 
 ### Cron
