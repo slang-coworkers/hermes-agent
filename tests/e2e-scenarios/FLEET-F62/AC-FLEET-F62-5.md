@@ -44,8 +44,14 @@ bypasses the fail-closed allowlist and proves nothing.
 
 - Install the six into a temp `HERMES_HOME`; `sudo install` the managed fragment (or
   export `HERMES_MANAGED_DIR`) so nv-fleet-gates reads the fleet role map.
-- Confirm the podman socket + the `localhost/hermes-sandbox:pinned` image (operator
-  step 4). `$PODMAN` = the `podman-remote-static` 3.4.4 binary.
+- **Create the testbed-scratch bind sources** (§ Deployment item 1, option B — the fixture
+  spec's `workspace_root`/`shared_learnings_root` base; self-provisioned, no operator host
+  dirs). As the sandbox uid (1001), outside `$HERMES_HOME`/profile dirs:
+  `mkdir -p /tmp/hermes-fleet-mounts/{orchestrator,architect,builder,tester,reviewer}/workspace /tmp/hermes-fleet-mounts/shared-learnings/skills`.
+- Confirm the five operator-provisioned OneCLI identities have container-configs
+  (§ Deployment item 2; secret grants stay scenario-staged, not pre-granted here).
+- Confirm the podman socket + the `localhost/hermes-sandbox:pinned` image (§ Deployment
+  item 4). `$PODMAN` = the `podman-remote-static` 3.4.4 binary.
 - The `message_agent` delivery runner is host-local by design and is EXEMPT from
   this per-profile sandbox proof (named as such).
 

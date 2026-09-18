@@ -212,11 +212,10 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster (launch 
   ).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
 
-  // Step 4 — the Kanban board renders over the same single gateway (re-tiered from AC-9;
-  // the web SPA has no /kanban route). The desktop Kanban plugin ships defaultEnabled:false
-  // (plugin.tsx:84) and contributes its /kanban route + sidebar nav only once enabled, so
-  // seed the persisted enable decision (plugins-store.ts:32) and reload — discoverBundledPlugins
-  // re-runs at module init (controller.tsx:447), reads localStorage, and registers the route.
+  // Step 4 — the Kanban board renders over the same single gateway. The desktop Kanban
+  // plugin is opt-in (ships disabled), so persist its enable decision and reload: plugin
+  // discovery re-runs at module init and registers its /kanban route + sidebar entry only
+  // when the persisted decision enables it.
   await page.evaluate(() =>
     window.localStorage.setItem('hermes.desktop.pluginDecisions.v2', JSON.stringify({ kanban: true }))
   )
