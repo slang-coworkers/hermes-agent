@@ -90,7 +90,7 @@ The seam contract is proven by `tests/hermes_cli/test_router_seams_acceptance.py
 - **AC-RT-F09-3** — `on_session_start` / `on_session_end` / `on_session_reset` are each reached through the shared dispatch entry `lifecycle.invoke_hook`, observing their session ids.
 - **AC-RT-F09-4** — the colon-named gateway event bus and the plugin `on_session_start` hook are separate buses: emitting `session:start` on a `HookRegistry` never fires the plugin callback.
 
-Because Hermes already provides these seams, that test **passes on the stock release tree** (the adopt-row asymmetry) — it is an executable record of the seam contract and a regression guard, not a fail-on-base control. The fail-on-base negative control for this change is a separate, non-AC doc-contract test, `tests/hermes_cli/test_rt_f09_doc_contract.py`, which asserts this page exists and cites the seam surface — the five `VALID_HOOKS` names and the emit sites `gateway/run.py:18141` and `hermes_cli/plugins.py:6831` — plus the four `AC-RT-F09-<n>` ids: absent on the base tree, present here.
+Because Hermes already provides these seams, that test **passes on the stock release tree** (the adopt-row asymmetry) — it is an executable record of the seam contract and a regression guard, not a fail-on-base control. The fail-on-base negative control for this change is a separate, non-AC doc-contract test, `tests/hermes_cli/test_rt_f09_doc_contract.py`, which asserts this page exists and cites the seam surface — the five `VALID_HOOKS` names, the `pre_gateway_dispatch` emit site `gateway/run.py:18141`, and the `pre_tool_call` production dispatch site `hermes_cli/plugins.py:6831` — plus the four `AC-RT-F09-<n>` ids: absent on the base tree, present here.
 
 ## References
 
