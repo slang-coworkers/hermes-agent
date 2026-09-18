@@ -3,7 +3,7 @@
 Hermetic behaviour contracts for the native Hermes lifecycle-control surface at
 tag v2026.8.31: the profile-aware ESTOP kill switch (engage/resume, per-bot and
 fleet-wide, notice-not-queue); the race-free restart path (GatewayRunner.request_restart
-drains active work then exits with EX_TEMPFAIL) with resume_pending re-arming
+drains active work, then stop() exits with EX_TEMPFAIL on the via_service path) with resume_pending re-arming
 interrupted sessions; and the on_wake mapping — native kanban worker recovery
 (dispatch_once reclaims a stale card, _default_spawn respawns the same task) — with
 deliver_wake the separate creator-session wake path whose internal turn is exempt

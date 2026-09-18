@@ -31,7 +31,7 @@ the tag, so a `main:` path can differ from its `tag:` path (noted per mapping).
 | NanoClaw behaviour | Hermes surface | Citation (tag: / main:) |
 |---|---|---|
 | **Paused kill switch** — `hermes -p <bot> pause`/`resume` (and in-band `/pause`) halt new work without killing what is already running | Profile-aware ESTOP sentinel: `is_engaged()` gates new gateway turns, cron fires and kanban spawns, and `paused_reply()` answers a paused inbound with a notice; in-flight and internal work are never touched | tag: `agent/estop.py:93` `is_engaged` · main: `agent/estop.py:52` `is_engaged` |
-| **Race-free restart** — drain in-flight work, then exit for an external supervisor to restart the process | `GatewayRunner.request_restart` marks draining and defers `stop()` until the active turn finishes, then `stop()` exits with `GATEWAY_SERVICE_RESTART_EXIT_CODE` (`EX_TEMPFAIL`, 75); the `resume_pending` marker re-arms interrupted sessions on the next boot | tag: `gateway/run.py:12447` `request_restart` · main: `gateway/run_shutdown.py:1518` `request_restart` |
+| **Race-free restart** — drain in-flight work, then exit for an external supervisor to restart the process | `GatewayRunner.request_restart` refuses new turns and waits (up to `restart_after_turn_timeout`) for in-flight work to reach zero; `stop()` then runs its own drain and, only on the `via_service` supervisor path, exits with `GATEWAY_SERVICE_RESTART_EXIT_CODE` (`EX_TEMPFAIL`, 75); the `resume_pending` marker re-arms interrupted sessions on the next boot | tag: `gateway/run.py:12447` `request_restart` · main: `gateway/run_shutdown.py:1518` `request_restart` |
 | **on_wake message** — re-delivered to a worker on every (re)spawn so it re-reads its task | Native kanban worker recovery: `dispatch_once` reclaims a stale/crashed card and the real `_default_spawn` respawns a worker on the **same** durable task id, and `KANBAN_GUIDANCE`/`build_worker_context` make it re-read its card and prior attempts on respawn | tag: `hermes_cli/kanban_db.py:10720` `_default_spawn` · main: `hermes_cli/kanban_db_dispatch.py:2513` `_default_spawn` |
 
 ## Paused kill switch → the ESTOP sentinel
@@ -65,18 +65,25 @@ never touches in-flight or internal work (see *Wake and in-flight work* below).
 ## Race-free restart → drain-then-exit under a supervisor
 
 `GatewayRunner.request_restart` (tag `gateway/run.py:12447` · main
-`gateway/run_shutdown.py:1518`) marks the runner draining and defers `stop()`
-until in-flight work finishes. That wait is **bounded** by a configurable drain
-timeout (`agent.restart_drain_timeout`): a turn that finishes inside the window is
-never cut off, but if the timeout expires `stop()` marks the still-running
-sessions `resume_pending` and interrupts them (tag `gateway/run.py:16180`, the
-drain-timeout branch; `_interrupt_running_agents` tag `gateway/run.py:11400`; main
-`gateway/run_shutdown.py:1716`) rather than hanging the restart. When the drain
-finishes, `stop()` assigns `GATEWAY_SERVICE_RESTART_EXIT_CODE` — `os.EX_TEMPFAIL`
-(75) — (constant tag `gateway/restart.py:11` · main `gateway/restart.py:10`;
-assigned in `stop()` tag `gateway/run.py:16507` · main
-`gateway/run_shutdown.py:1930`) so an external service manager restarts the
-process. Hermes recognises that it is running under such a supervisor from the
+`gateway/run_shutdown.py:1518`) drains in-flight work before exiting, in **two
+distinct phases governed by two distinct timeouts** (the #77184 split; docstring
+tag `gateway/run.py:12354`-`12367` · main `gateway/run_shutdown.py:1484`). First,
+`request_restart` refuses new turns and waits for active agent/cron/api work to
+reach zero, bounded by `agent.restart_after_turn_timeout` (tag
+`gateway/run.py:12383` · main `gateway/run_shutdown.py:1474`); if that cap expires
+it proceeds to `stop()` anyway. Then `stop()` runs its **own** drain, bounded by
+the separate `agent.restart_drain_timeout` (tag `gateway/run.py:16097` · main
+`gateway/run_shutdown.py:1982`); if that drain expires, `stop()` marks the
+still-running sessions `resume_pending` and interrupts them (tag
+`gateway/run.py:16180`, the drain-timeout branch; `_interrupt_running_agents` tag
+`gateway/run.py:11400`; main `gateway/run_shutdown.py:1716`) rather than hanging.
+Only on the external-supervisor path — the guard `if self._restart_requested and
+self._restart_via_service:` (tag `gateway/run.py:16500` · main
+`gateway/run_shutdown.py:1928`) — does `stop()` assign
+`GATEWAY_SERVICE_RESTART_EXIT_CODE`, `os.EX_TEMPFAIL` (75) (constant tag
+`gateway/restart.py:11` · main `gateway/restart.py:10`; assigned tag
+`gateway/run.py:16507` · main `gateway/run_shutdown.py:1930`) so an external
+service manager restarts the process. Hermes recognises that it is running under such a supervisor from the
 environment via `EXTERNAL_GATEWAY_SUPERVISOR_ENV` / `is_gateway_supervisor_process`
 (tag `gateway/restart.py:22` / `:66` · main `gateway/restart.py:34` / `:77`); both
 the constant and the check live in `restart.py`. The CLI self-restart path is
