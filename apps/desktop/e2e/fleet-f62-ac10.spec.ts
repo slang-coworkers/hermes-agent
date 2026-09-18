@@ -48,6 +48,19 @@ async function openBots(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'New bot or group chat' })).toBeVisible()
 }
 
+// The Kanban nav renders inside the Sessions pane, which stays hidden after openBots()
+// activated the Bots pane; bring Sessions forward so the nav enters the accessibility tree.
+async function activateSessions(page: Page): Promise<void> {
+  const tab = page
+    .getByRole('button', { name: 'sessions', exact: true })
+    .or(page.getByRole('tab', { name: 'sessions', exact: true }))
+    .first()
+  await tab.click()
+  await expect(
+    page.locator('[data-tour="sessions-sidebar"]').filter({ visible: true }).first()
+  ).toBeVisible({ timeout: 30_000 })
+}
+
 /** Create a room through the production New Group Chat flow, selecting `memberTitles`. */
 async function createRoom(page: Page, groupName: string, memberTitles: readonly string[]): Promise<void> {
   await page.getByRole('button', { name: 'New bot or group chat' }).click()
@@ -236,6 +249,7 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
     (async () => {
       await enableKanban.click()
       await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
+      await activateSessions(page)
       const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
       await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
       await kanbanNav.click()

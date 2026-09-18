@@ -105,6 +105,25 @@ Linux uses systemd (`Type=notify`, `WatchdogSec`, `Restart=always`,
 `KeepAlive`. The base profile is always served under the literal name `default`, never
 its `-p` name.
 
+### Shared-filesystem `$HERMES_HOME` for a remote rootless podman daemon
+
+When the podman daemon runs rootless as a **separate host user over a socket** (the
+fleet's sandbox topology), a `-v host:container` bind **source resolves on the server's
+filesystem, not the gateway's**. `DockerEnvironment` emits `$HERMES_HOME`-relative bind
+sources — the per-profile sandbox `home`/`workspace` via `get_sandbox_dir()`
+(`tools/environments/docker.py:1016-1030`), the cache mounts
+(`tools/credential_files.py:437-470`), the local skills mount (`:247-273`) — none
+config-gated, and there is no remote-daemon source-root remap. So the gateway user's
+`$HERMES_HOME` must resolve at the **same absolute path** on both the gateway and the
+rootless-podman-server user (a shared / ACL'd filesystem, both uids rwx), and
+`TERMINAL_SANDBOX_DIR` must be left **unset** so the sandbox dirs stay under that shared
+`$HERMES_HOME`. Put `$HERMES_HOME` on the shared path (e.g. an ACL-shared
+`/var/lib/hermes/fleet/home`), not a gateway-only home; a home the podman-server user
+cannot see fails `podman run` with an exit-125 `statfs` on the first sandbox bind. The
+operator-provisioned `docker_volumes` sources (`/data/hermes-fleet/<role>/workspace`,
+`/opt/hermes-fleet/shared-learnings`, `/opt/onecli/ca.crt`; §§1, 3) live outside
+`$HERMES_HOME` and are provisioned server-side directly.
+
 ## 3. Per-profile OneCLI identity + credential-free sandboxes
 
 The podman sandbox reaches the network only through the fleet's OneCLI egress proxy.
