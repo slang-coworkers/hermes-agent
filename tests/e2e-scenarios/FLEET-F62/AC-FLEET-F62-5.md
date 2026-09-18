@@ -44,10 +44,12 @@ bypasses the fail-closed allowlist and proves nothing.
 
 - Install the six into a temp `HERMES_HOME`; `sudo install` the managed fragment (or
   export `HERMES_MANAGED_DIR`) so nv-fleet-gates reads the fleet role map.
-- **Create the testbed-scratch bind sources** (§ Deployment item 1, option B — the fixture
-  spec's `workspace_root`/`shared_learnings_root` base; self-provisioned, no operator host
-  dirs). As the sandbox uid (1001), outside `$HERMES_HOME`/profile dirs:
-  `mkdir -p /tmp/hermes-fleet-mounts/{orchestrator,architect,builder,tester,reviewer}/workspace /tmp/hermes-fleet-mounts/shared-learnings/skills`.
+- **Confirm the operator-provisioned SERVER-side bind sources** exist per § Deployment item 1:
+  `/data/hermes-fleet/<role>/workspace` (rw, one per coworker) + `/opt/hermes-fleet/shared-learnings`
+  (ro) on the podman host, uid-1001-accessible (the fixture spec's `workspace_root`/`shared_learnings_root`
+  point at them). This testbed's podman is remote/rootless, so `-v host:container` sources resolve on the
+  SERVER (`hermes-sandbox`) — do NOT `mkdir` them tester-side; a missing server-side dir is an exit-125
+  statfs = `FAIL(env)`.
 - Confirm the five operator-provisioned OneCLI identities have container-configs
   (§ Deployment item 2; secret grants stay scenario-staged, not pre-granted here).
 - Confirm the podman socket + the `localhost/hermes-sandbox:pinned` image (§ Deployment

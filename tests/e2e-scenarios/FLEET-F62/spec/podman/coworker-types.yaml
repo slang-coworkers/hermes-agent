@@ -14,14 +14,9 @@ orchestrator_profile: orchestrator
 skills_root: skills
 workflows_root: workflows
 overlays_root: overlays
-# Testbed-scratch bind-source base (FLEET-F62 § Deployment item 1, option B): a
-# sandbox-uid(1001)-writable path OUTSIDE $HERMES_HOME/profile dirs that the AC-5/6
-# ## Setup creates, so the sandbox bind sources are self-provisioning (no operator host
-# dirs). Production deployments use /data/hermes-fleet + /opt/hermes-fleet/shared-learnings
-# per the runbook; the plugin reads the base from here and appends the fixed suffixes.
-workspace_root: /tmp/hermes-fleet-mounts
+workspace_root: /data/hermes-fleet
 install_surfaces: []
-shared_learnings_root: /tmp/hermes-fleet-mounts/shared-learnings
+shared_learnings_root: /opt/hermes-fleet/shared-learnings
 
 egress:
   proxy_addr: "172.17.0.1:10255"

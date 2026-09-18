@@ -15,8 +15,8 @@ terminal:
   env_passthrough:
   - WIKI_PATH
   docker_volumes:
-  - /tmp/hermes-fleet-mounts/reviewer/workspace:/tmp/hermes-fleet-mounts/reviewer/workspace:rw
-  - /tmp/hermes-fleet-mounts/shared-learnings:/mnt/shared-learnings:ro
+  - /data/hermes-fleet/reviewer/workspace:/data/hermes-fleet/reviewer/workspace:rw
+  - /opt/hermes-fleet/shared-learnings:/mnt/shared-learnings:ro
   - /opt/onecli/ca.crt:/etc/ssl/certs/hermes-egress-ca.crt:ro
   docker_mount_cwd_to_workspace: true
   docker_env:
@@ -80,7 +80,7 @@ checkpoints:
   auto_prune: false
 skills:
   external_dirs:
-  - /tmp/hermes-fleet-mounts/shared-learnings/skills
+  - /opt/hermes-fleet/shared-learnings/skills
 memory:
   memory_char_limit: 4000
   user_char_limit: 2000
