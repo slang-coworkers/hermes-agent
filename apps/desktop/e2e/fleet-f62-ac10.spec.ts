@@ -92,6 +92,30 @@ async function seedCoworker(
   fs.writeFileSync(profileYaml, JSON.stringify({ ...existing, ui_meta: uiMeta }, null, 2), 'utf8')
 }
 
+/** Seed the launch/`default` host's profile.yaml with ui_meta['hermes-bots'].hidden:true so
+ *  the desktop roster drops it from the VISIBLE set — the criterion's exactly-five is about
+ *  coworkers, and the launch host is not one. isBotHidden reads the hidden flag off the merged
+ *  meta, which mergeServerMeta lifts from ui_meta['hermes-bots'] (profile-ops.ts:238-252 →
+ *  hidden-bots.ts:25-27 → roster-pane.tsx:336-337). ui_meta is RPC/fixture-owned, not
+ *  distribution-rendered, so the fixture seeds it exactly as the operator would via
+ *  profiles.configure. */
+function seedDefaultHidden(hermesHome: string): void {
+  const profileYaml = path.join(hermesHome, 'profile.yaml')
+  let existing: Record<string, unknown> = {}
+  if (fs.existsSync(profileYaml)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(profileYaml, 'utf8')) as Record<string, unknown>
+    } catch {
+      existing = {}
+    }
+  }
+  const uiMeta = { ...((existing.ui_meta as Record<string, unknown>) ?? {}) }
+  const bots = { ...((uiMeta['hermes-bots'] as Record<string, unknown>) ?? {}) }
+  bots.hidden = true
+  uiMeta['hermes-bots'] = bots
+  fs.writeFileSync(profileYaml, JSON.stringify({ ...existing, ui_meta: uiMeta }, null, 2), 'utf8')
+}
+
 test.beforeAll(async () => {
   const mock = await startMockServer()
   const sandbox = createSandbox('fleet-f62-ac10')
@@ -102,6 +126,9 @@ test.beforeAll(async () => {
   for (const bot of COWORKERS) {
     await seedCoworker(sandbox.hermesHome, mock.url, bot)
   }
+  // The launch/multiplexer host renders as the `default` roster row; hide it so the
+  // visible coworker roster is exactly the five (AC-10 option i, ADR § Deployment item 3).
+  seedDefaultHidden(sandbox.hermesHome)
 
   const { app, page } = await launchDesktop(buildAppEnv(sandbox))
   fixture = {
@@ -124,8 +151,8 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two standing rooms, and opens the orchestrator Bot Chat over one gateway', async () => {
-  test.setTimeout(300_000)
+test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster (launch default hidden), the two standing rooms, the orchestrator Bot Chat, and the Kanban board over one gateway', async () => {
+  test.setTimeout(420_000) // step 4 adds a full app reload + re-ready; stay under the 10-min tier cap
   const { page, sandbox } = fixture!
 
   // Step 1 — Bots roster: exactly the five coworkers, each with its role metadata.
@@ -142,8 +169,15 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two
       `avatar element for ${bot.name} is present next to its title`
     ).toBeVisible()
   }
-  // Exactly the five coworkers render as bots — no unexpected sixth, and the
-  // launch/multiplexer 'default' profile (no ui_meta['hermes-bots']) must not appear.
+  // The operator-hidden launch `default` host must be ABSENT from the visible roster.
+  // mergeServerMeta lifts ui_meta['hermes-bots'].hidden onto the meta snapshot only in a
+  // post-paint effect (profile-ops.ts:238-252), so this auto-retrying assertion waits for
+  // the default face to drop before the exact-count check below (which does not retry).
+  await expect(
+    page.locator('[data-bot-face="default"]'),
+    'launch default host is hidden from the visible roster'
+  ).toHaveCount(0)
+  // Exactly the five coworkers render as bots — no unexpected sixth and no launch host.
   // data-bot-face tags each rendered avatar by profile name; dedupe because the
   // auto-selected bot's face may also render in the workspace header.
   const faceNames = await page
@@ -177,6 +211,26 @@ test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster, the two
     page.getByRole('tab', { name: /Bot Chat/ }).filter({ visible: true }).first()
   ).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
+
+  // Step 4 — the Kanban board renders over the same single gateway (re-tiered from AC-9;
+  // the web SPA has no /kanban route). The desktop Kanban plugin ships defaultEnabled:false
+  // (plugin.tsx:84) and contributes its /kanban route + sidebar nav only once enabled, so
+  // seed the persisted enable decision (plugins-store.ts:32) and reload — discoverBundledPlugins
+  // re-runs at module init (controller.tsx:447), reads localStorage, and registers the route.
+  await page.evaluate(() =>
+    window.localStorage.setItem('hermes.desktop.pluginDecisions.v2', JSON.stringify({ kanban: true }))
+  )
+  await page.reload()
+  await waitForAppReady(fixture!, 120_000)
+  await page.getByRole('button', { name: 'Kanban' }).click()
+  // The board page always renders its <h1>Kanban</h1> header (board.tsx:1331); the
+  // "No tasks on this board" empty-state paints only after the bundled gateway plugin's
+  // /api/plugins/kanban/board returns 200 (board.tsx:1378-1388) — proving it loaded over the
+  // one connection, not the ErrorState. (Scope to the level-1 heading: the nav row and the
+  // board-switcher button are also labelled "Kanban".)
+  await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
+  await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })
 
   // One gateway for the whole app: the fixture launches a single local backend and
   // waitForAppReady gated on the one gateway becoming ready; the statusbar reads it.
