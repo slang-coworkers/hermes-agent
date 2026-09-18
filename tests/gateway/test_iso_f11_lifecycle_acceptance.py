@@ -15,7 +15,7 @@ import pytest
 
 
 def test_ac_iso_f11_1(tmp_path):
-    """Reserving a (scope, key) with a fixed fingerprint admits exactly one run; the
+    """AC-ISO-F11-1: Reserving a (scope, key) with a fixed fingerprint admits exactly one run; the
     reservation survives a process restart (a fresh store on the same DB file resolves
     reused)."""
     from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
@@ -66,7 +66,7 @@ def _status(conn, tid):
 
 
 def test_ac_iso_f11_2(kanban_conn):
-    """Under a real two-connection race exactly one claim wins (atomic CAS, not
+    """AC-ISO-F11-2: Under a real two-connection race exactly one claim wins (atomic CAS, not
     check-then-update); heartbeat_claim extends the live claim only for the winning
     claimer."""
     kb, conn = kanban_conn
@@ -124,7 +124,7 @@ def test_ac_iso_f11_2(kanban_conn):
 
 
 def test_ac_iso_f11_3(kanban_conn, monkeypatch):
-    """An expired claim is reclaimed by release_stale_claims (task returns to ready);
+    """AC-ISO-F11-3: An expired claim is reclaimed by release_stale_claims (task returns to ready);
     a host-local running task whose worker PID is not alive is reclaimed by
     detect_crashed_workers."""
     import hermes_cli.kanban_db as kb_mod
@@ -144,14 +144,23 @@ def test_ac_iso_f11_3(kanban_conn, monkeypatch):
     assert _status(conn, reclaim) == "ready"
     assert _status(conn, fresh) == "running"
 
-    # detect_crashed_workers only inspects host-local claims and honors a launch grace
+    # detect_crashed_workers only inspects host-local claims and honors a launch grace.
+    # Differential control: a LIVE host-local worker must survive — dropping the
+    # _pid_alive guard (kanban_db.py:8924) would reclaim it and duplicate live work.
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    live_pid, dead_pid = 11111, 98765
+    alive = kb.create_task(conn, title="lifecycle-3-alive", assignee="w")
+    assert kb.claim_task(conn, alive) is not None     # default claimer => host-local lock
+    kb._set_worker_pid(conn, alive, live_pid)
     crashed = kb.create_task(conn, title="lifecycle-3-crash", assignee="w")
-    assert kb.claim_task(conn, crashed) is not None   # default claimer => host-local lock
-    kb._set_worker_pid(conn, crashed, 98765)
-    monkeypatch.setattr(kb_mod, "_pid_alive", lambda pid: False)
-    assert crashed in kb.detect_crashed_workers(conn)
+    assert kb.claim_task(conn, crashed) is not None
+    kb._set_worker_pid(conn, crashed, dead_pid)
+    monkeypatch.setattr(kb_mod, "_pid_alive", lambda pid: pid == live_pid)
+    reclaimed = kb.detect_crashed_workers(conn)
+    assert crashed in reclaimed
+    assert alive not in reclaimed
     assert _status(conn, crashed) == "ready"
+    assert _status(conn, alive) == "running"
 
 
 def _ob_state(dl, oid):
@@ -165,8 +174,19 @@ def _ob_state(dl, oid):
         conn.close()
 
 
+def _ob_attempts(dl, oid):
+    conn = dl._connect()
+    try:
+        row = conn.execute(
+            "SELECT attempts FROM delivery_obligations WHERE obligation_id=?", (oid,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def test_ac_iso_f11_4(tmp_path, monkeypatch):
-    """The delivery ledger drives pending->attempting->delivered, bounds retries at
+    """AC-ISO-F11-4: The delivery ledger drives pending->attempting->delivered, bounds retries at
     MAX_ATTEMPTS, and on recovery actually prepends RECOVERED_MARKER to an in-flight
     obligation while redelivering a never-started one plainly."""
     from unittest.mock import AsyncMock, MagicMock
@@ -227,6 +247,11 @@ def test_ac_iso_f11_4(tmp_path, monkeypatch):
     # a successful recovered send must ack the ledger (delivered), or it would replay forever
     assert _ob_state(dl, "ob-attempt") == "delivered"
     assert _ob_state(dl, "ob-pending") == "delivered"
+    # the sweep incremented attempts 0->1 for each reclaimed obligation; a no-increment
+    # mutant (attempts=attempts, delivery_ledger.py:370-376) leaves them at 0 and a
+    # permanently-failing target would be reclaimed and redelivered forever, never abandoned
+    assert _ob_attempts(dl, "ob-attempt") == 1
+    assert _ob_attempts(dl, "ob-pending") == 1
 
 
 def _make_store(tmp_path):
@@ -245,7 +270,7 @@ def _make_store(tmp_path):
 
 
 def test_ac_iso_f11_5(tmp_path):
-    """Restart safety: a turn interrupted by a restart is recovered across process
+    """AC-ISO-F11-5: Restart safety: a turn interrupted by a restart is recovered across process
     boundaries (a fresh store on the same state.db promotes the durable active-turn
     marker to resume_pending), and the per-session turn lease serializes turns and
     fails closed when the session is already held."""
@@ -279,6 +304,11 @@ def test_ac_iso_f11_5(tmp_path):
         registry = SessionTurnLeaseRegistry()
         holder = await registry.acquire("sess-x", owner_key="key-a", generation=1, timeout=1)
         assert holder is not None
+        # per-session scope: an unrelated session acquires immediately while sess-x is held;
+        # a global-lease mutant (all ids -> one shared lock) would block here and time out
+        other = await registry.acquire("sess-y", owner_key="key-c", generation=1, timeout=0.5)
+        assert other is not None
+        assert registry.release(other) is True
         with pytest.raises(TurnLeaseTimeoutError):
             await registry.acquire("sess-x", owner_key="key-b", generation=1, timeout=0.02)
         assert registry.release(holder) is True
@@ -291,7 +321,7 @@ def test_ac_iso_f11_5(tmp_path):
 
 
 def test_ac_iso_f11_6():
-    """The webhook platform drops an already-seen delivery id within the idempotency
+    """AC-ISO-F11-6: The webhook platform drops an already-seen delivery id within the idempotency
     TTL and admits it again once the TTL has elapsed."""
     from gateway.config import PlatformConfig
     from gateway.platforms.webhook import WebhookAdapter
@@ -306,7 +336,7 @@ def test_ac_iso_f11_6():
 
 
 def test_ac_iso_f11_7(kanban_conn):
-    """create_task with a repeated idempotency_key returns the existing task id rather
+    """AC-ISO-F11-7: create_task with a repeated idempotency_key returns the existing task id rather
     than creating a duplicate; a distinct key creates a distinct task."""
     kb, conn = kanban_conn
 
@@ -320,7 +350,7 @@ def test_ac_iso_f11_7(kanban_conn):
 
 
 def test_ac_iso_f11_8(kanban_conn):
-    """check_respawn_guard defers a respawn behind a machine-readable reason when the
+    """AC-ISO-F11-8: check_respawn_guard defers a respawn behind a machine-readable reason when the
     last failure is an auth blocker, and permits it (None) for a clean task;
     _retry_status_for_run resolves a normal run to 'ready' and a review-lane run to
     'review'."""
@@ -355,9 +385,9 @@ class _Proc:
 
 
 def test_ac_iso_f11_9(tmp_path, monkeypatch):
-    """Bot-to-bot delivery retries exactly once for a transient (retryable) failure and
-    does not retry a non-retryable one; the retry decision is keyed on a machine-readable
-    failure reason."""
+    """AC-ISO-F11-9: Bot-to-bot delivery retries exactly once for a transient (retryable)
+    failure and does not retry a non-retryable one; the retry decision is keyed on a
+    machine-readable failure code, not on string-matching at the call site."""
     from tools import bot_failure_reasons as bfr
     from tools import bot_mode_dm
 
@@ -366,29 +396,40 @@ def test_ac_iso_f11_9(tmp_path, monkeypatch):
     assert bfr.retry_action(bfr.classify_agent_error("server error - overloaded")) != bfr.RETRY_NONE
     assert bfr.retry_action(bfr.classify_agent_error("No LLM provider configured")) == bfr.RETRY_NONE
 
+    # _run_delivery imports classify_agent_error inside the function, so patch its source
+    # module; opaque stderr tokens (matching no substring rule) force it to key on the code.
+    def _fake_classify(text):
+        if "XX_TRANSIENT_XX" in text:
+            return bfr.PROVIDER_SERVER_ERROR   # AUTO_RETRYABLE -> retry_action != RETRY_NONE
+        if "XX_FATAL_XX" in text:
+            return bfr.MISSING_CONFIG          # not retryable -> retry_action == RETRY_NONE
+        return bfr.UNKNOWN
+
+    monkeypatch.setattr(bfr, "classify_agent_error", _fake_classify)
+
     dm = tmp_path / "dm-transient.txt"
-    dm.write_text("hello")
+    dm.write_text("hello", encoding="utf-8")
     calls = []
 
     def _fake_run(argv, **kw):
         calls.append(list(argv))
         if len(calls) == 1:
-            return _Proc(1, stderr="server error - overloaded")
+            return _Proc(1, stderr="XX_TRANSIENT_XX")
         return _Proc(0, stdout="the reply text")
 
     monkeypatch.setattr(bot_mode_dm.subprocess, "run", _fake_run)
     rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm), stdin_file=False)
     assert rc == 0
-    assert len(calls) == 2
+    assert len(calls) == 2                         # retried once on the CODE (opaque stderr)
     assert calls[0] == calls[1]                    # the retry replays the same session, not a new one
 
     dm2 = tmp_path / "dm-fatal.txt"
-    dm2.write_text("hello")
+    dm2.write_text("hello", encoding="utf-8")
     calls2 = []
 
     def _fake_run2(argv, **kw):
         calls2.append(list(argv))
-        return _Proc(1, stderr="No LLM provider configured")
+        return _Proc(1, stderr="XX_FATAL_XX")
 
     monkeypatch.setattr(bot_mode_dm.subprocess, "run", _fake_run2)
     rc2 = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm2), stdin_file=False)
@@ -396,12 +437,12 @@ def test_ac_iso_f11_9(tmp_path, monkeypatch):
     assert len(calls2) == 1
 
     dm3 = tmp_path / "dm-transient-exhausted.txt"
-    dm3.write_text("hello")
+    dm3.write_text("hello", encoding="utf-8")
     exhausted = []
 
     def _always_transient(argv, **kw):
         exhausted.append(list(argv))
-        return _Proc(1, stderr="server error - overloaded")
+        return _Proc(1, stderr="XX_TRANSIENT_XX")
 
     monkeypatch.setattr(bot_mode_dm.subprocess, "run", _always_transient)
     rc3 = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm3), stdin_file=False)
