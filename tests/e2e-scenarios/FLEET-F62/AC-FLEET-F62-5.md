@@ -75,15 +75,26 @@ bypasses the fail-closed allowlist and proves nothing.
   for the ACTUAL rendered mount set: for EVERY bind SOURCE at every bind site (auto-cwd
   `docker.py:1003`, credential, skills, CA, `docker_extra_args`, and the persistent
   `$HERMES_HOME` binds `docker.py:1016-1030`) assert the source RESOLVES server-side (NO
-  `statfs`/exit-125 in the podman log) and the spawn is rootless (`cat /proc/1/uid_map` ==
-  `0 1001 1`). **This is an ENV-READINESS gate ONLY — it makes NO sandbox-policy judgment.**
-  A failure here — a bind source not server-visible (statfs/125), a missing socket/image, a
-  permission error — is a `FAIL(env)` surfaced BEFORE the counted rows, never a counted
-  defect. The mount-POLICY allowlist (cross-profile exclusion, per-mount rendered mode,
-  `--memory`/`--pids-limit`) is asserted SOLELY in the COUNTED step 3, so a real isolation
-  regression — e.g. another profile's `$HERMES_HOME` mounted in, which RESOLVES on the shared
-  fs and thus PASSES this env preflight — is caught there as a COUNTED product defect, never
-  mislabeled `FAIL(env)`.
+  `statfs`/exit-125 in the podman log) and the container actually spawned (socket reachable,
+  image present, no permission error). **Independently validate the operator-provisioned
+  rootless daemon (§ Deployment item 4) with a RAW substrate canary:** using the
+  operator-supplied `$PODMAN` + `CONTAINER_HOST` DIRECTLY — never `HERMES_DOCKER_BINARY`/the
+  wrapper and with no Hermes render — `$PODMAN run --rm --entrypoint cat
+  localhost/hermes-sandbox:pinned /proc/1/uid_map` must contain the line `0 1001 1`, else
+  `FAIL(env)`. This proves ONLY that the provisioned daemon/socket is rootless under uid 1001
+  (a wrong `CONTAINER_HOST` → a rootful or wrong-uid daemon is an operator misprovision — env,
+  not product). **The WRAPPER-MEDIATED Hermes sandbox's `uid_map` is NOT inspected in the
+  preflight** — it stays a COUNTED AC-5 step-1 assertion. **This is an ENV-READINESS gate
+  ONLY — it makes NO sandbox-ISOLATION judgment on the Hermes-configured spawn.** A failure
+  here — a bind source not server-visible (statfs/125), a missing socket/image, a permission
+  error, or the raw-daemon canary not showing `0 1001 1` — is a `FAIL(env)` surfaced BEFORE
+  the counted rows, never a counted defect. The wrapper-mediated `uid_map == 0 1001 1`
+  (step 1, also asserted by AC-7 / AC-CRED-F28-2 / AC-ISO-F14-1) and the mount-policy allowlist
+  (cross-profile exclusion, per-mount rendered mode, `--memory`/`--pids-limit`; step 3) are
+  COUNTED, so a rootful wrapper-mediated spawn on a correctly-provisioned daemon or a
+  cross-profile `$HERMES_HOME` bind (which RESOLVES on the shared fs and thus PASSES this env
+  preflight) is caught in those counted rows as a COUNTED product defect, never mislabeled
+  `FAIL(env)`.
 - The `message_agent` delivery runner is host-local by design and is EXEMPT from
   this per-profile sandbox proof (named as such).
 
@@ -92,7 +103,10 @@ bypasses the fail-closed allowlist and proves nothing.
 1. For each of the five coworker profiles, issue one sandboxed terminal call as that
    profile's own process (`hermes -p <profile> chat -q "cat /proc/1/uid_map"` or a
    direct `tools.terminal_tool` call under that `HERMES_HOME`; the § Common substrate env
-   applies, incl. `TERMINAL_CWD=/root`) → expect: stdout contains `0 1001 1`.
+   applies, incl. `TERMINAL_CWD=/root`) → expect: stdout contains `0 1001 1`. This is the
+   WRAPPER-MEDIATED Hermes spawn's rootless `uid_map` — the COUNTED isolation criterion (a
+   rootful spawn here is a counted product defect), distinct from the preflight's raw-daemon
+   env canary.
 2. `$PODMAN ps -a --filter label=hermes-agent=1` → expect: exactly one container per
    profile, five distinct `hermes-profile=<name>` labels.
 3. `$PODMAN inspect <each>` → expect: the resolved mount set == the fleet-RENDERED
