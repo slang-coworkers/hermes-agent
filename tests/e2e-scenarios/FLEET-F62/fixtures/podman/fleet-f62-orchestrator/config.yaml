@@ -68,6 +68,12 @@ plugins:
         insecure_no_auth_origins:
         - 172.17.0.1:10256
         api_key_env: ONECLI_API_KEY
+        profile_secret_sets:
+          orchestrator: []
+          architect: []
+          builder: []
+          tester: []
+          reviewer: []
     nv-coworker-compose:
       settings:
         orchestrator_profile: orchestrator

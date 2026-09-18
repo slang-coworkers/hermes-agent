@@ -108,20 +108,27 @@ its `-p` name.
 ## 3. Per-profile OneCLI identity + credential-free sandboxes
 
 The podman sandbox reaches the network only through the fleet's OneCLI egress proxy.
-The per-profile OneCLI identity is provisioned per coworker (onboard installs the
-distributions; it does **not** provision identities):
+`hermes onboard coworker` installs the distributions but does **not** provision OneCLI
+identities; each per-profile identity + container-config is provisioned by
+`hermes onecli-onboard`, which reads
+`plugins.entries.podman-onecli.settings.profile_secret_sets` (declared in the spine) to
+decide the grant. An empty list `[]` onboards the identity WITHOUT a secret, so the agent
+starts ungranted:
 
 ```bash
 HERMES_HOME=$HOME/.hermes/profiles/architect hermes onecli-onboard --profile architect
-onecli agents set-secrets architect ANTHROPIC_API_KEY   # selective grant
 ```
 
-Verify each identity has a container-config before booting the sandbox/live tiers — the
-probe is `GET /v1/container-config?agent=<id>` (a "not configured" response means the
-`onecli-onboard` above did not complete against the control plane). **Grant order
-matters for the acceptance run:** the `AC-CRED-F28-2` check requires its two profiles
-(architect, builder) UNGRANTED at entry, so grant the full fleet the inference secret
-only AFTER that check has run (the scenario files encode this ordering).
+Verify the container-config resolved with the probe `GET /v1/container-config?agent=<id>`
+(a "not configured" response means the onboard did not complete against the control
+plane). **Grant the inference secret as a SEPARATE, later step — never at onboard —
+because grant order matters for the acceptance run:** `AC-CRED-F28-2` requires its two
+profiles (architect, builder) UNGRANTED at entry, so grant the full fleet only AFTER that
+check has run (the scenario files encode this ordering):
+
+```bash
+onecli agents set-secrets architect ANTHROPIC_API_KEY   # staged by the scenarios, post-AC-CRED-F28-2
+```
 
 Each sandbox then carries only proxy swap tokens and the read-only CA mount — no real
 provider credential. A `curl` through the proxy reaches the model API; a direct

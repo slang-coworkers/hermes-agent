@@ -44,3 +44,13 @@ config:
           insecure_no_auth_origins:
             - "172.17.0.1:10256"
           api_key_env: ONECLI_API_KEY
+          # onecli-onboard requires a profile_secret_sets entry per profile it onboards
+          # (cli.py:53); [] onboards the identity + container-config but grants NO secret,
+          # so architect/builder start ungranted for AC-CRED-F28-2's 401->200->401 states.
+          # Grants are staged by the scenarios (onecli agents set-secrets), never here.
+          profile_secret_sets:
+            orchestrator: []
+            architect: []
+            builder: []
+            tester: []
+            reviewer: []

@@ -35,8 +35,6 @@ const COWORKERS = [
 
 let fixture: MockBackendFixture | null = null
 
-/** Escape a string for literal use inside a RegExp (titles are plain words, but the
- *  accessible-name match is built dynamically). */
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -216,32 +214,34 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
   ).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
 
-  // Step 4 — enable the opt-in Kanban plugin through the PRODUCT's Settings ▸ Plugins
-  // toggle (setPluginEnabled, plugins-store.ts:111; the Switch's accessible name flips
-  // "Enable Kanban" -> "Disable Kanban", plugins-settings.tsx:328-335 + en.ts:416-417),
-  // NOT a post-load localStorage write + reload (round 2 showed the nav did not render
-  // after that path). Then require the bundled gateway kanban plugin's board endpoint to
-  // answer 200 before asserting the board renders over the same one gateway.
+  // Step 4 — enable the opt-in Kanban plugin through the product's Settings ▸ Plugins
+  // Switch (plugins-settings.tsx:328-335; the Switch name flips "Enable Kanban" ->
+  // "Disable Kanban") and render its board. Arm the board-response listener BEFORE
+  // activation: enabling mounts the sidebar KanbanCount, which fetches the same
+  // boardKey(slug,false) the board page uses and the query client holds fresh for 60s
+  // (query-client.ts:10), so a listener armed only around the nav click could miss the
+  // single real request and hang.
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
   })
   const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })
-  await enableKanban.click()
-  await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
-
-  const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
-  await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
-  // Arm the response wait BEFORE the nav click so the request cannot be missed, and
-  // require an exact-path 200 (board.tsx:1378-1388 paints the empty state only then).
   const [boardResp] = await Promise.all([
     page.waitForResponse(
-      r => /\/api\/plugins\/kanban\/board(\?|$)/.test(r.url()) && r.status() === 200,
-      { timeout: 30_000 }
+      response =>
+        response.request().method() === 'GET' &&
+        /\/api\/plugins\/kanban\/board(?:\?|$)/.test(response.url()),
+      { timeout: 60_000 }
     ),
-    kanbanNav.click()
+    (async () => {
+      await enableKanban.click()
+      await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
+      const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
+      await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
+      await kanbanNav.click()
+    })()
   ])
-  expect(boardResp.ok(), 'GET /api/plugins/kanban/board returned 200').toBeTruthy()
+  expect(boardResp.status(), 'GET /api/plugins/kanban/board returned 200').toBe(200)
   await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
   await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })
