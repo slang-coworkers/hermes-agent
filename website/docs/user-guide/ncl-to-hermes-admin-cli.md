@@ -77,8 +77,8 @@ service, which takes an initial **membership** roster. There is **no** built-in
 has no stock in-tree client transport caller: the **desktop** app's group chat
 is a renderer-owned `profiles.configure` / `ui_meta` projection rather than a
 `groups.*` caller, and neither the **dashboard** nor the CLI administers rooms
-over this RPC. This is the OPS-F58 **P8** upstream ask (tracked upstream as
-**UA-23**).
+over this RPC. This is the OPS-F58 **P8** upstream ask (recorded as **UA-23** for
+the Orchestrator to file upstream, plan decision 2).
 
 Evidence at the pinned tag `v2026.8.31` (`29112bef`):
 
@@ -110,7 +110,7 @@ Evidence at the pinned tag `v2026.8.31` (`29112bef`):
   `RoomConflictError("room_id already exists with different state")`) — so there
   is no membership-mutation path even over the RPC.
 
-**The ask (filed upstream; nothing built here).** Add a built-in `hermes rooms`
+**The ask (recorded as UA-23 for upstream filing by the Orchestrator/operator per plan decision 2; nothing built here).** Add a built-in `hermes rooms`
 (or `groups`) subcommand **over the existing authenticated `groups.*`
 control/service layer** for list / create / state / rename / disband, **plus a
 generic validated membership-mutation operation** on that layer — never a direct
