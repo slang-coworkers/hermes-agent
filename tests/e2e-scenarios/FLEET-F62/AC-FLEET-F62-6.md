@@ -29,10 +29,14 @@ wrapper, `PODMAN_ONECLI_*` coordinates). Shares AC-FLEET-F62-5's fleet-boot spaw
 ## Setup (after the fixtures are installed)
 
 - Same fleet-boot spawns as AC-FLEET-F62-5.
-- The operator uid-1001 egress rule (step 5) is present for the `--noproxy` clause
-  (proven `direct 000` on the box).
-- The five OneCLI identities are onboarded selective with ONLY the inference secret
-  (`hermes onecli-onboard --profile <p>` then `onecli agents set-secrets`, step 6).
+- The operator uid-1001 egress rule is present for the `--noproxy` clause (proven
+  `direct 000` on the box).
+- Per § Deployment item 2's grant ordering, AC-CRED-F28-2 has ALREADY run its
+  ungranted checks FIRST, so ALL FIVE identities are now granted the inference secret:
+  each identity has a container-config (probe `GET /v1/container-config?agent=<id>`; a
+  "not configured" is a `FAIL(env)`) and the grant (`onecli agents set-secrets`) has been
+  applied to all five after AC-CRED-F28-2 passed. Step 2 below is therefore a
+  deterministic `200`, not a masked `401`.
 
 ## Steps
 
@@ -41,7 +45,8 @@ wrapper, `PODMAN_ONECLI_*` coordinates). Shares AC-FLEET-F62-5's fleet-boot spaw
    key in `plugin_strip_env_keys() ∪ _ALWAYS_STRIP_KEYS` carries a real value (only
    `HERMES_PROXY_TOKEN_*` swap tokens / placeholders).
 2. `curl` via the proxy to `https://inference-api.nvidia.com/v1/models` → expect: 200
-   (granted) or 401 (ungranted), never a TLS error.
+   (all five granted per § Deployment item 2 ordering); never a 401 (a 401 = failed grant
+   setup) and never a TLS error.
 3. `curl --noproxy '*' https://inference-api.nvidia.com/v1/models` → expect:
    http_code 000 / refused (a 401/403 here is a FAIL).
 4. `curl` the control plane 172.17.0.1:10256 AND the tenant API 172.17.0.1:10254 from

@@ -34,7 +34,13 @@ reconciliation and the FLEET-F62 exact-origin base-URL edit); the render sets
 
 - Two coworker profiles (A=architect, B=builder) rendered with distinct OneCLI
   identities.
-- `onecli agents` for the five exist selective with only the inference secret.
+- **This scenario runs FIRST, before any fleet-wide grant** (§ Deployment item 2
+  ordering). The five OneCLI identities EXIST with a container-config — the operator
+  onboarded them (probe `GET /v1/container-config?agent=<id>`; a "not configured" here is
+  a `FAIL(env)`) — but A and B start UNGRANTED (no inference secret). This scenario stages
+  A's grant itself in step 2; the other four are granted only AFTER it passes, before
+  AC-FLEET-F62-6 and the AC-7/8 live pipeline. Do NOT pre-grant any identity here — the
+  401-before-grant states below require A and B ungranted at entry.
 
 ## Steps
 

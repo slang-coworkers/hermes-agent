@@ -21,16 +21,25 @@ import { expect, test } from './test'
 
 type Page = MockBackendFixture['page']
 
-// Role metadata mirrors the fleet spec's types.<role>.ui_meta.
+// Each coworker profile's directory name is its @handle; `title` is the role title
+// the app must render from the profile's configured top-level `display_name`
+// (labels.ts:42-44) — non-handle-derivable, so it cannot come from the title-cased
+// profile-name fallback (labels.ts:61-63).
 const COWORKERS = [
-  { name: 'orchestrator', title: 'Orchestrator', description: 'Fleet orchestrator (elevated)', shape: 'circle' },
-  { name: 'architect', title: 'Architect', description: 'Fleet architect', shape: 'square' },
-  { name: 'builder', title: 'Builder', description: 'Fleet builder', shape: 'square' },
-  { name: 'tester', title: 'Tester', description: 'Fleet tester', shape: 'square' },
-  { name: 'reviewer', title: 'Reviewer', description: 'Fleet reviewer', shape: 'square' }
+  { name: 'orchestrator', title: 'Fleet Orchestrator' },
+  { name: 'architect', title: 'Systems Architect' },
+  { name: 'builder', title: 'Implementation Builder' },
+  { name: 'tester', title: 'Verification Tester' },
+  { name: 'reviewer', title: 'Release Reviewer' }
 ] as const
 
 let fixture: MockBackendFixture | null = null
+
+/** Escape a string for literal use inside a RegExp (titles are plain words, but the
+ *  accessible-name match is built dynamically). */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 
 async function openBots(page: Page): Promise<void> {
   const tab = page
@@ -59,12 +68,14 @@ async function createRoom(page: Page, groupName: string, memberTitles: readonly 
 }
 
 /** Seed one coworker profile before launch: profile dir + mock provider + a durable
- *  canonical "Bot Chat", plus ui_meta['hermes-bots'] on profile.yaml so the roster
- *  renders it as a bot with its title + avatar. */
+ *  canonical "Bot Chat", plus a TOP-LEVEL `display_name` on its profile.yaml so the
+ *  roster renders its role title (labels.ts:42-44 reads bot.display_name; no
+ *  ui_meta['hermes-bots'].title is set, so the title is proven to come from the
+ *  configured display_name, not the title-cased handle fallback). */
 async function seedCoworker(
   hermesHome: string,
   mockUrl: string,
-  bot: { name: string; title: string; description: string; shape: string }
+  bot: { name: string; title: string }
 ): Promise<void> {
   const dir = path.join(hermesHome, 'profiles', bot.name)
   fs.mkdirSync(dir, { recursive: true })
@@ -78,42 +89,39 @@ async function seedCoworker(
     await builder.close()
   }
 
-  const profileYaml = path.join(dir, 'profile.yaml')
-  let existing: Record<string, unknown> = {}
-  if (fs.existsSync(profileYaml)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(profileYaml, 'utf8')) as Record<string, unknown>
-    } catch {
-      existing = {}
-    }
-  }
-  const uiMeta = { ...((existing.ui_meta as Record<string, unknown>) ?? {}) }
-  uiMeta['hermes-bots'] = { title: bot.title, description: bot.description, shape: bot.shape }
-  fs.writeFileSync(profileYaml, JSON.stringify({ ...existing, ui_meta: uiMeta }, null, 2), 'utf8')
+  writeProfileYaml(path.join(dir, 'profile.yaml'), { display_name: bot.title })
 }
 
-/** Seed the launch/`default` host's profile.yaml with ui_meta['hermes-bots'].hidden:true so
- *  the desktop roster drops it from the VISIBLE set — the criterion's exactly-five is about
- *  coworkers, and the launch host is not one. isBotHidden reads the hidden flag off the merged
- *  meta, which mergeServerMeta lifts from ui_meta['hermes-bots'] (profile-ops.ts:238-252 →
- *  hidden-bots.ts:25-27 → roster-pane.tsx:336-337). ui_meta is RPC/fixture-owned, not
- *  distribution-rendered, so the fixture seeds it exactly as the operator would via
- *  profiles.configure. */
+/** Seed the launch/`default` host's TOP-LEVEL profile.yaml (Hermes treats $HERMES_HOME
+ *  itself as the `default` profile and IGNORES $HERMES_HOME/profiles/default —
+ *  profiles.py:1035,:1068) with ui_meta['hermes-bots'].hidden:true so the desktop roster
+ *  drops it from the VISIBLE set (isBotHidden reads the merged hidden flag lifted from
+ *  profile.yaml's ui_meta — methods_profiles.py:297-306 → hidden-bots.ts:25-27 →
+ *  roster-pane.tsx:336-337). The criterion's exactly-five is about coworkers; the launch
+ *  host is not one. */
 function seedDefaultHidden(hermesHome: string): void {
   const profileYaml = path.join(hermesHome, 'profile.yaml')
-  let existing: Record<string, unknown> = {}
-  if (fs.existsSync(profileYaml)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(profileYaml, 'utf8')) as Record<string, unknown>
-    } catch {
-      existing = {}
-    }
-  }
+  const existing = readProfileYaml(profileYaml)
   const uiMeta = { ...((existing.ui_meta as Record<string, unknown>) ?? {}) }
   const bots = { ...((uiMeta['hermes-bots'] as Record<string, unknown>) ?? {}) }
   bots.hidden = true
   uiMeta['hermes-bots'] = bots
-  fs.writeFileSync(profileYaml, JSON.stringify({ ...existing, ui_meta: uiMeta }, null, 2), 'utf8')
+  writeProfileYaml(profileYaml, { ...existing, ui_meta: uiMeta })
+}
+
+/** profile.yaml is YAML, and any JSON object is valid YAML, so JSON round-trips through
+ *  yaml.safe_load on the gateway side. Merge onto any existing content. */
+function readProfileYaml(file: string): Record<string, unknown> {
+  if (!fs.existsSync(file)) return {}
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function writeProfileYaml(file: string, data: Record<string, unknown>): void {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8')
 }
 
 test.beforeAll(async () => {
@@ -151,89 +159,94 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('AC-FLEET-F62-10: the desktop app renders the five-coworker roster (launch default hidden), the two standing rooms, the orchestrator Bot Chat, and the Kanban board over one gateway', async () => {
-  test.setTimeout(420_000) // step 4 adds a full app reload + re-ready; stay under the 10-min tier cap
-  const { page, sandbox } = fixture!
+test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster (launch default hidden), each row bound 1:1 to its role title + @handle, the two standing rooms, the orchestrator Bot Chat, and the Kanban board over one gateway', async () => {
+  test.setTimeout(420_000) // step 4 adds a Settings toggle + Kanban board fetch; stay under the 10-min tier cap
+  const { page } = fixture!
 
-  // Step 1 — Bots roster: exactly the five coworkers, each with its role metadata.
+  // Step 1 — Bots roster: exactly the five coworkers, each row bound 1:1 to its role
+  // title and @handle, launch `default` host hidden.
   await openBots(page)
   await page.screenshot({ path: test.info().outputPath('step-1-bots-roster.png') })
-  for (const bot of COWORKERS) {
-    const row = page
-      .getByRole('button', { name: new RegExp(`^${bot.title}\\b`, 'i') })
-      .filter({ visible: true })
-      .first()
-    await expect(row, `roster row for ${bot.name} (${bot.title}) is rendered`).toBeVisible({ timeout: 30_000 })
-    await expect(
-      row.locator(`[data-bot-face="${bot.name}"]`),
-      `avatar element for ${bot.name} is present next to its title`
-    ).toBeVisible()
-  }
-  // The operator-hidden launch `default` host must be ABSENT from the visible roster.
-  // mergeServerMeta lifts ui_meta['hermes-bots'].hidden onto the meta snapshot only in a
-  // post-paint effect (profile-ops.ts:238-252), so this auto-retrying assertion waits for
-  // the default face to drop before the exact-count check below (which does not retry).
+
+  // The operator-hidden launch `default` host must be ABSENT from the roster.
   await expect(
     page.locator('[data-bot-face="default"]'),
     'launch default host is hidden from the visible roster'
   ).toHaveCount(0)
-  // Exactly the five coworkers render as bots — no unexpected sixth and no launch host.
-  // data-bot-face tags each rendered avatar by profile name; dedupe because the
-  // auto-selected bot's face may also render in the workspace header.
-  const faceNames = await page
-    .locator('[data-bot-face]')
-    .evaluateAll(nodes => Array.from(new Set(nodes.map(n => n.getAttribute('data-bot-face')).filter(Boolean))))
-  expect(faceNames.slice().sort(), 'roster shows exactly the five coworkers, no other profile').toEqual(
-    COWORKERS.map(bot => bot.name).slice().sort()
-  )
-  // Role descriptions are carried on profile.yaml (bot-row renders title+avatar, not
-  // description), so assert each coworker's rendered role metadata there.
+
+  // Row-scoped 1:1 title<->handle binding. The row button's accessible name is the
+  // composite rowTooltip `<display_name> · @<handle> · <gateway> · <status>`
+  // (bot-row.tsx:179-181,211-212), so anchoring on `^<title> · @<handle>` binds each
+  // configured display_name to ITS handle; the `(?: ·|$)` boundary rejects a
+  // prefix-of-a-longer-title match and tolerates the trailing gateway/status segments.
+  // A global getByText(title) + a separate @handle check could BOTH pass with the title
+  // on the wrong row, so this locates one unique row per handle and asserts its whole name.
   for (const bot of COWORKERS) {
-    const raw = fs.readFileSync(path.join(sandbox.hermesHome, 'profiles', bot.name, 'profile.yaml'), 'utf8')
-    expect(raw, `${bot.name} profile.yaml carries its role title`).toContain(bot.title)
-    expect(raw, `${bot.name} profile.yaml carries its role description`).toContain(bot.description)
+    const nameRe = new RegExp('^' + escapeRegex(bot.title) + ' · @' + escapeRegex(bot.name) + '(?: ·|$)')
+    const row = page.getByRole('button', { name: nameRe })
+    await expect(row, `exactly one roster row named "${bot.title} · @${bot.name}"`).toHaveCount(1)
+    await expect(
+      row.locator(`[data-bot-face="${bot.name}"]`),
+      `the ${bot.name} row carries its own avatar face`
+    ).toHaveCount(1)
   }
 
+  // Exactly five coworker rows and no unexpected sixth: every roster row button's
+  // accessible name carries the ` · @<handle>` segment, so counting that pattern counts
+  // the bot rows (the "New bot or group chat" button and room tabs do not match it).
+  await expect(
+    page.getByRole('button', { name: /·\s@/ }),
+    'the visible roster is exactly the five coworkers'
+  ).toHaveCount(COWORKERS.length)
+
   // Step 2 — the two standing rooms, via the production New Group Chat flow.
-  await createRoom(page, 'fleet-room', ['Orchestrator', 'Architect', 'Builder', 'Tester', 'Reviewer'])
-  await createRoom(page, 'review-room', ['Builder', 'Tester', 'Reviewer'])
+  await createRoom(page, 'fleet-room', COWORKERS.map(b => b.title))
+  await createRoom(page, 'review-room', ['Implementation Builder', 'Verification Tester', 'Release Reviewer'])
   await expect(page.getByRole('tab', { name: /fleet-room/ }).filter({ visible: true }).first()).toBeVisible()
   await expect(page.getByRole('tab', { name: /review-room/ }).filter({ visible: true }).first()).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('step-2-standing-rooms.png') })
 
   // Step 3 — open the orchestrator's Bot Chat; it opens over the single gateway.
-  const orchestratorRow = page
-    .getByRole('button', { name: /^Orchestrator\b/i })
-    .filter({ visible: true })
-    .first()
+  const orchestratorRow = page.getByRole('button', {
+    name: new RegExp('^' + escapeRegex('Fleet Orchestrator') + ' · @orchestrator(?: ·|$)')
+  })
   await orchestratorRow.click()
   await expect(
     page.getByRole('tab', { name: /Bot Chat/ }).filter({ visible: true }).first()
   ).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
 
-  // Step 4 — the Kanban board renders over the same single gateway. The desktop Kanban
-  // plugin is opt-in (ships disabled), so persist its enable decision and reload: plugin
-  // discovery re-runs at module init and registers its /kanban route + sidebar entry only
-  // when the persisted decision enables it.
-  await page.evaluate(() =>
-    window.localStorage.setItem('hermes.desktop.pluginDecisions.v2', JSON.stringify({ kanban: true }))
-  )
-  await page.reload()
-  await waitForAppReady(fixture!, 120_000)
-  await page.getByRole('button', { name: 'Kanban' }).click()
-  // The board page always renders its <h1>Kanban</h1> header (board.tsx:1331); the
-  // "No tasks on this board" empty-state paints only after the bundled gateway plugin's
-  // /api/plugins/kanban/board returns 200 (board.tsx:1378-1388) — proving it loaded over the
-  // one connection, not the ErrorState. (Scope to the level-1 heading: the nav row and the
-  // board-switcher button are also labelled "Kanban".)
+  // Step 4 — enable the opt-in Kanban plugin through the PRODUCT's Settings ▸ Plugins
+  // toggle (setPluginEnabled, plugins-store.ts:111; the Switch's accessible name flips
+  // "Enable Kanban" -> "Disable Kanban", plugins-settings.tsx:328-335 + en.ts:416-417),
+  // NOT a post-load localStorage write + reload (round 2 showed the nav did not render
+  // after that path). Then require the bundled gateway kanban plugin's board endpoint to
+  // answer 200 before asserting the board renders over the same one gateway.
+  await page.evaluate(() => {
+    window.location.hash = '/settings?tab=plugins'
+  })
+  const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
+  await expect(enableKanban).toBeVisible({ timeout: 30_000 })
+  await enableKanban.click()
+  await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
+
+  const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
+  await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
+  // Arm the response wait BEFORE the nav click so the request cannot be missed, and
+  // require an exact-path 200 (board.tsx:1378-1388 paints the empty state only then).
+  const [boardResp] = await Promise.all([
+    page.waitForResponse(
+      r => /\/api\/plugins\/kanban\/board(\?|$)/.test(r.url()) && r.status() === 200,
+      { timeout: 30_000 }
+    ),
+    kanbanNav.click()
+  ])
+  expect(boardResp.ok(), 'GET /api/plugins/kanban/board returned 200').toBeTruthy()
   await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
   await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })
 
-  // One gateway for the whole app: the fixture launches a single local backend and
-  // waitForAppReady gated on the one gateway becoming ready; the statusbar reads it.
-  await expect(
-    page.locator('[data-slot="statusbar"]').getByText('ready', { exact: true })
-  ).toBeVisible({ timeout: 60_000 })
+  // Single-gateway invariant: the fixture launches exactly ONE local backend
+  // (buildAppEnv(sandbox)), waitForAppReady gated on that one gateway, and the Kanban
+  // board 200 above is served by that same gateway — there is no second port anywhere.
 })

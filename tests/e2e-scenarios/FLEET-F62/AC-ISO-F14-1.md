@@ -29,7 +29,9 @@ Same wrapper wiring as AC-FLEET-F62-5. The CA is mounted `:ro` at the wrapper's
 
 - One rendered profile's Hermes-driven podman spawn through the podman-onecli wrapper
   (the common-substrate wiring).
-- The profile's OneCLI identity holds the inference secret (granted).
+- The profile's OneCLI identity has a container-config and holds the inference secret
+  (granted per § Deployment item 2 ordering — after AC-CRED-F28-2; probe
+  `GET /v1/container-config?agent=<id>`).
 
 ## Steps
 

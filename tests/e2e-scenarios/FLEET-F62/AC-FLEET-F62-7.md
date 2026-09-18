@@ -33,10 +33,12 @@ the fixture — the proxy injects the real key). Bounded `LIVE_MODEL_CALLS_MAX=4
 
 - ONE gateway boots on the DEFAULT home serving default + the five (`systemctl --user
   start` or the testbed's gateway launch); confirm ONE `/api/health`, no second port.
-- The five OneCLI identities exist selective with the inference secret (per
-  AC-FLEET-F62-6 setup). The DASHBOARD SPA opens the DEFAULT profile's chat regardless
-  of `-p`, so any step that talks to a named coworker first selects it in the profile
-  combobox.
+- The five OneCLI identities have a container-config and are ALL granted the inference
+  secret BEFORE any live model call (§ Deployment item 2 ordering — AC-CRED-F28-2 ran
+  its ungranted checks FIRST, then all five were granted; probe
+  `GET /v1/container-config?agent=<id>`), else the pipeline 401s. The DASHBOARD SPA opens
+  the DEFAULT profile's chat regardless of `-p`, so any step that talks to a named
+  coworker first selects it in the profile combobox.
 - `LIVE_MODEL_CALLS_MAX=40` / `LIVE_BUDGET_USD=5`.
 
 ## Steps

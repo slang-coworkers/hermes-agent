@@ -116,6 +116,13 @@ HERMES_HOME=$HOME/.hermes/profiles/architect hermes onecli-onboard --profile arc
 onecli agents set-secrets architect ANTHROPIC_API_KEY   # selective grant
 ```
 
+Verify each identity has a container-config before booting the sandbox/live tiers — the
+probe is `GET /v1/container-config?agent=<id>` (a "not configured" response means the
+`onecli-onboard` above did not complete against the control plane). **Grant order
+matters for the acceptance run:** the `AC-CRED-F28-2` check requires its two profiles
+(architect, builder) UNGRANTED at entry, so grant the full fleet the inference secret
+only AFTER that check has run (the scenario files encode this ordering).
+
 Each sandbox then carries only proxy swap tokens and the read-only CA mount — no real
 provider credential. A `curl` through the proxy reaches the model API; a direct
 `--noproxy` call is refused at connect (the operator uid-1001 egress rule); the OneCLI
