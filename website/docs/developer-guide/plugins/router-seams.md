@@ -83,7 +83,14 @@ Router-seam callbacks follow the same additive contract as every plugin hook:
 
 ## Proof
 
-`tests/hermes_cli/test_router_seams_acceptance.py` is a hermetic acceptance test that loads a fixture plugin through the real discovery path, makes it the active manager, and drives the **production** dispatch paths — the gateway pipeline `GatewayRunner._handle_message` (interceptor, AC-RT-F09-1), `_dispatch_pre_tool_call_hooks` (gate, AC-RT-F09-2), and `lifecycle.invoke_hook` (lifecycle observers, AC-RT-F09-3) — plus the bus-separation check (AC-RT-F09-4). Because Hermes already provides these seams, the test **passes on the stock release tree**; it stands as an executable record of the seam contract and a regression guard.
+The seam contract is proven by `tests/hermes_cli/test_router_seams_acceptance.py`, a hermetic acceptance test that loads a fixture plugin through the real discovery path, makes it the active manager, and drives the **production** dispatch paths. It carries one test per acceptance criterion:
+
+- **AC-RT-F09-1** — the gateway pipeline (`GatewayRunner._handle_message`) invokes `pre_gateway_dispatch` and honours its `skip` directive, short-circuiting before authorization and agent dispatch.
+- **AC-RT-F09-2** — the production single-fire tool gate (`_dispatch_pre_tool_call_hooks`) returns the plugin's `pre_tool_call` block message.
+- **AC-RT-F09-3** — `on_session_start` / `on_session_end` / `on_session_reset` are each reached through the shared dispatch entry `lifecycle.invoke_hook`, observing their session ids.
+- **AC-RT-F09-4** — the colon-named gateway event bus and the plugin `on_session_start` hook are separate buses: emitting `session:start` on a `HookRegistry` never fires the plugin callback.
+
+Because Hermes already provides these seams, that test **passes on the stock release tree** (the adopt-row asymmetry) — it is an executable record of the seam contract and a regression guard, not a fail-on-base control. The fail-on-base negative control for this change is a separate, non-AC doc-contract test, `tests/hermes_cli/test_rt_f09_doc_contract.py`, which asserts this page exists and cites the seam surface — the five `VALID_HOOKS` names and the emit sites `gateway/run.py:18141` and `hermes_cli/plugins.py:6831` — plus the four `AC-RT-F09-<n>` ids: absent on the base tree, present here.
 
 ## References
 
@@ -99,4 +106,4 @@ Release tree `/workspace/extra/hermes-release` @ **v2026.8.31** (commit `29112be
 - Colon-named event bus: `gateway/hooks.py:1-19` (handler `:7`, `HOOKS_DIR :51`); tag: `gateway/hooks.py:11` \| main: `gateway/hooks.py:5`; `session:start` emit without `chat_id` `gateway/run.py:20589-20594`, tag: `gateway/run.py:20589` \| main: `gateway/run_turn.py:379-384`
 - Authorization (not a seam): `gateway/run.py:18184` source-authorization gate, main: `gateway/run_inbound.py:185`; `gateway/authz_mixin.py:488` (main `:473`), `:966` (main `:546`); `gateway/slash_access.py`
 - Catalog: [Event Hooks](/user-guide/features/hooks) — Plugin Hooks `:361`, shipped catalog `:435`, `pre_gateway_dispatch :1168-1229` (tag: `:1170` \| main: `:1170`), `pre_tool_call :529`, `on_session_start :886`, `on_session_end :927`, `on_session_reset :1018`; [Build a Plugin](/developer-guide/plugins)
-- Proof: `tests/hermes_cli/test_router_seams_acceptance.py`
+- Proof: `tests/hermes_cli/test_router_seams_acceptance.py` (seam contract, AC-RT-F09-1..4); `tests/hermes_cli/test_rt_f09_doc_contract.py` (fail-on-base negative control for this page)
