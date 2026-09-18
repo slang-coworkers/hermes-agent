@@ -246,3 +246,18 @@ Closing that gap would take a single additive gateway hook — a post-dispatch c
 per inbound turn on both the classified-result and raised-exception paths, carrying the original
 event and an outcome — which is an upstream request, not something this page's mechanisms
 provide. Until then, treat inbound-turn retry as a gateway / kanban concern, not a plugin one.
+
+## Acceptance-criteria traceability
+
+Each mechanism above is proven by a hermetic acceptance test in
+`tests/gateway/test_iso_f11_lifecycle_acceptance.py` (one `test_ac_iso_f11_<n>` per id):
+
+- `AC-ISO-F11-1` — durable request idempotency (`RunIdempotencyStore.reserve`/`lookup`)
+- `AC-ISO-F11-2` — first-claim-wins ownership + heartbeat (`claim_task`, `heartbeat_claim`)
+- `AC-ISO-F11-3` — stale + crashed-worker reclaim (`release_stale_claims`, `detect_crashed_workers`)
+- `AC-ISO-F11-4` — outbound at-least-once + recovered marker (`delivery_ledger`, `RECOVERED_MARKER`)
+- `AC-ISO-F11-5` — restart recovery + per-session turn lease (`recover_interrupted_turns`, `SessionTurnLeaseRegistry`)
+- `AC-ISO-F11-6` — inbound webhook delivery-id dedup (`_record_delivery_id`)
+- `AC-ISO-F11-7` — kanban idempotency-key dedup (`create_task`)
+- `AC-ISO-F11-8` — respawn guard reason + retry phase (`check_respawn_guard`, `_retry_status_for_run`)
+- `AC-ISO-F11-9` — bot-to-bot single retry keyed on a machine-readable code (`_run_delivery`)

@@ -1,10 +1,11 @@
 """ISO-F11 — Idempotent claim/ack lifecycle with retry (ADOPT-row acceptance test).
 
-Drives the native Hermes lifecycle mechanisms directly (no plugin, no PluginManager);
-because Hermes already provides them, the file passes on the stock v2026.8.31 tree.
-Non-vacuity is carried by each function's differential assertion — one that a plausible
-regression would flip. Hermetic — each test roots its own tmp DB; no network, no live
-gateway, nothing written under ~/.hermes.
+The nine test_ac_iso_f11_<n> tests exercise native Hermes lifecycle mechanisms directly
+(no plugin, no PluginManager) and pass on the stock v2026.8.31 tree, with non-vacuity
+carried by each function's differential assertion. test_iso_f11_doc_contract independently
+verifies the documentation deliverable and is not an acceptance criterion. Tests use
+temporary storage or in-memory state; the documentation control reads only its
+in-repository page. No network, no live gateway, no ~/.hermes writes.
 """
 
 import asyncio
@@ -449,3 +450,28 @@ def test_ac_iso_f11_9(tmp_path, monkeypatch):
     assert rc3 == 1
     assert len(exhausted) == 2
     assert exhausted[0] == exhausted[1]
+
+
+def test_iso_f11_doc_contract():
+    """Verify the ISO-F11 documentation deliverable; not an acceptance criterion (no 10th AC)."""
+    from pathlib import Path
+
+    # repo root: tests/gateway/<this file> -> parents[2]
+    doc = (Path(__file__).resolve().parents[2]
+           / "website" / "docs" / "user-guide" / "features" / "idempotent-lifecycle.md")
+
+    assert doc.is_file(), f"ISO-F11 doc page missing (own-diff fail-on-base control): {doc}"
+    text = doc.read_text(encoding="utf-8")
+
+    assert "tag:" in text, "doc page carries no tag: citation marker"
+    assert "main:" in text, "doc page carries no main: citation marker"
+    for surface in (
+        "claim_task", "heartbeat_claim", "release_stale_claims", "detect_crashed_workers",
+        "check_respawn_guard", "_retry_status_for_run", "RunIdempotencyStore",
+        "_record_delivery_id", "delivery_ledger", "RECOVERED_MARKER",
+        "SessionTurnLeaseRegistry", "recover_interrupted_turns", "_run_delivery",
+    ):
+        assert surface in text, f"doc page does not cite the Hermes surface {surface!r}"
+
+    for n in range(1, 10):
+        assert f"AC-ISO-F11-{n}" in text, f"doc page missing traceability id AC-ISO-F11-{n}"
