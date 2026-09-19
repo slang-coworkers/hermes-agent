@@ -126,10 +126,15 @@ item below is owned by a separate piece of work; this page describes per-profile
   source is `config.yaml`'s `mcp_servers` (plus a portable Agent-Plugin's `mcp.json`).
   A distribution-root `mcp.json` is copied as opaque payload; it is not read at
   runtime. Put runtime MCP servers under `mcp_servers` in `config.yaml`.
-- **Per-profile credentials are not shipped by a distribution.** `install` / `update`
-  copy the `providers.*` config block but never a profile's `.env`. A freshly
-  installed profile therefore cannot authenticate a provider call until its
-  per-profile credential is supplied.
+- **A distribution copies `config.yaml` verbatim — keep secrets out of it.** `install`
+  (and `update --force-config`) copy `config.yaml` byte-for-byte, including the whole
+  `providers.*` block, and the runtime will honor an **inline** `providers.<name>.api_key`
+  when no `key_env` is set. So a credential written directly into `config.yaml` **would**
+  ship with the distribution. Keep provider secrets in the profile's `.env` — which
+  `install` / `update` never copy — and reference them from `config.yaml` via `key_env`
+  (or a `${ENV}` placeholder); never inline a key. Only `.env`-style credentials are
+  excluded from a distribution, so a freshly installed profile cannot authenticate a
+  provider call until its per-profile `.env` credential is supplied.
 - **`hermes profile install` has no `--ref` flag.** Pinning a distribution to an exact
   commit rests on source-branch immutability, not a recorded SHA.
 

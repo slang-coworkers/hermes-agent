@@ -253,7 +253,7 @@ research-bot/
 ├── distribution.yaml            # required
 ├── SOUL.md                      # strongly recommended
 ├── config.yaml                  # model, provider, tool defaults
-├── mcp.json                     # MCP server connections
+├── mcp.json                     # copied MCP metadata; not read at runtime (see note above)
 ├── skills/
 │   ├── arxiv-search/SKILL.md
 │   ├── paper-summarization/SKILL.md
