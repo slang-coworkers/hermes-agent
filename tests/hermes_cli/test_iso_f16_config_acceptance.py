@@ -170,3 +170,50 @@ def test_ac_iso_f16_5(tmp_path):
         assert cleared.reasoning_effort is None
     finally:
         conn.close()
+
+
+def test_iso_f16_model_normalization_canonicalizes_raw_form(tmp_path, monkeypatch):
+    """The loader canonicalizes a raw-form model:{name, provider} to model.default/provider.
+
+    Strengthens the "through the loader's normalization" clause of AC-ISO-F16-1: the two
+    committed fixtures use the already-canonical model:{default, provider} form, which is a
+    no-op for _normalize_root_model_keys (config.py:3202-3209), so this drives the
+    canonicalization path directly (name -> default, alias dropped).
+    """
+    home = tmp_path / "iso-f16-rawform"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n  name: raw-model-id\n  provider: raw-prov\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cfg = load_config()
+    assert cfg["model"]["default"] == "raw-model-id"
+    assert cfg["model"]["provider"] == "raw-prov"
+    assert "name" not in cfg["model"]
+
+
+def test_iso_f16_per_profile_resolution_is_path_keyed_not_size_keyed(tmp_path, monkeypatch):
+    """Two profiles whose config.yaml files are the SAME byte length but different content
+    each resolve their own model — the loader keys resolution by full config path, so a
+    size-based cache regression cannot make one profile read another profile's values.
+    """
+    a = tmp_path / "iso-f16-cache-a"
+    b = tmp_path / "iso-f16-cache-b"
+    a.mkdir()
+    b.mkdir()
+    (a / "config.yaml").write_text(
+        "model:\n  default: aaaaaaaa\n  provider: pa\n", encoding="utf-8"
+    )
+    (b / "config.yaml").write_text(
+        "model:\n  default: bbbbbbbb\n  provider: pb\n", encoding="utf-8"
+    )
+    assert (a / "config.yaml").stat().st_size == (b / "config.yaml").stat().st_size
+
+    monkeypatch.setenv("HERMES_HOME", str(a))
+    cfg_a = load_config()
+    monkeypatch.setenv("HERMES_HOME", str(b))
+    cfg_b = load_config()
+
+    assert cfg_a["model"]["default"] == "aaaaaaaa"
+    assert cfg_b["model"]["default"] == "bbbbbbbb"
+    assert cfg_a["model"]["default"] != cfg_b["model"]["default"]

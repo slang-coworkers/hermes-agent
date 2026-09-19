@@ -2,9 +2,10 @@
 #
 # Disjoint from the sibling worker fixture so the acceptance test proves that a
 # coworker's runtime config resolves from THIS profile's own config.yaml with no
-# shared/global runner. Every value is a literal (no ${ENV}) so load_config()'s
-# resolved output equals this file. This is a reference fixture, not a live
-# profile: endpoints are *.example.invalid and carry no credentials.
+# shared/global runner. Every value is a literal (no ${ENV}) so the explicitly
+# configured values resolve unchanged (load_config() also merges built-in defaults).
+# This is a reference fixture, not a live profile: endpoints are *.example.invalid
+# and carry no credentials.
 model:
   default: orchestrator-frontier
   provider: orch-gateway
