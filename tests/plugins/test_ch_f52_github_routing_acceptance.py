@@ -4,9 +4,9 @@ The canonical GitHub ingress route set is authored into the DEFAULT (multiplexer
 default_config and rendered by nv-coworker-compose into platforms.webhook.extra.routes; the built-in
 WebhookAdapter routes each signed delivery to its bound profile. This suite proves (a) the rendered
 route contract against the ADR-pinned CANONICAL_ROUTES and (b) end-to-end routing by feeding the
-RENDERED routes into the core adapter, so a config key that no reader consumes cannot pass. No new
-plugin/render code exists; the canonical route fixture is the CONFIGURE deliverable under test. It is
-a conformance test for that new fixture on already-capable core (the runbook is reviewed separately).
+RENDERED routes into the core adapter, so a config key that no reader consumes cannot pass. The
+canonical route fixture and the CI-gate route scripts are CONFIGURE artifacts rendered by
+nv-coworker-compose onto already-capable core; the runbook is reviewed separately.
 """
 
 import asyncio
@@ -55,7 +55,7 @@ CANONICAL_ROUTES = {
                      "action_admits": ["submitted"], "sentinel": "slang-coworkers/repo-review"},
     # LOOP-F40: check_gate.py promotes the current-head card on a CI success
     # ([SILENT]) and returns the payload on a non-success, so the fixer prompt
-    # still dispatches on red — the route keeps its prompt AND gains the script.
+    # still dispatches on red — the route carries both its prompt and the script.
     "gh-check-suite": {"profile": "fixer", "events": ["check_suite"],
                        "action_admits": ["completed"], "sentinel": "slang-coworkers/repo-check",
                        "script": "check_gate.py"},
@@ -283,8 +283,8 @@ async def test_ac_ch_f52_5(tmp_path, monkeypatch):
 async def test_ac_ch_f52_6(tmp_path, monkeypatch, name, event, action):
     """A signed delivery for a bare prompt route POSTed to its bound /p/<profile>/ endpoint
     dispatches exactly one run to the expected profile (pull_request_review -> fixer) with the route
-    prompt rendered over the payload. (The pull_request and check_suite routes are LOOP-F40 gated
-    routes now — their dispatch behaviour is test_ac_ch_f52_6_gated.)"""
+    prompt rendered over the payload. (The CI-gated pull_request and check_suite routes are covered by
+    test_ac_ch_f52_6_gated.)"""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     route = routes[name]
     profile = CANONICAL_ROUTES[name]["profile"]

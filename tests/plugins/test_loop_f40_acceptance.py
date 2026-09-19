@@ -424,6 +424,15 @@ def _pr_event_at(action, head_sha, updated_at, pr=PR):
     return ev
 
 
+def _recompute(kanban_db_path):
+    """Run the dispatcher's recompute_ready, which auto-promotes any blocked card
+    that is not sticky-blocked — the pass a CI-gate card must survive while red."""
+    from hermes_cli import kanban_db as kdb
+
+    with kdb.connect_closing(db_path=Path(kanban_db_path)) as c:
+        kdb.recompute_ready(c)
+
+
 def test_loop_f40_out_of_order_pr_guard(tmp_path, monkeypatch):
     """Supplementary (no AC id): a delayed/out-of-order pull_request delivery — an
     older pull_request.updated_at for a superseded head — must not reset the current
@@ -484,6 +493,9 @@ def test_loop_f40_check_failure_after_success_demotes(tmp_path, monkeypatch):
     keep, payload_out = check.evaluate(payload_in, gate_db_path=gate_db, kanban_db_path=kanban_db)
     assert keep is True and payload_out == payload_in
     assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
+    # the demoted card is sticky-blocked: recompute_ready must NOT re-promote it.
+    _recompute(kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
 
     check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
     assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
@@ -520,8 +532,54 @@ def test_loop_f40_ready_retire_is_crash_safe(tmp_path, monkeypatch):
     # demoted to blocked BEFORE the archive attempt — safe, not left running.
     assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
     assert calls["n"] == 1
+    # the interrupted retire left a STICKY blocked card: recompute_ready must not
+    # promote it back to ready before the retry archives it.
+    _recompute(kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
 
     monkeypatch.setattr(kdb, "archive_task", real_archive)
     gate.evaluate(_pr_event("synchronize", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
     assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
     assert _card_by_key(kanban_db, _key(SHA_B)) == ("blocked", REVIEWER)
+
+
+def test_loop_f40_parked_card_survives_recompute_ready(tmp_path, monkeypatch):
+    """Supplementary (no AC id): a parked CI-gate card is sticky-blocked, so the
+    dispatcher's recompute_ready does not auto-promote it while CI is red; after a
+    check_suite success it is ready and a later recompute_ready leaves it ready."""
+    rendered, default_dir = _render(tmp_path, monkeypatch)
+    gate_db = str(tmp_path / "gate.db")
+    kanban_db = str(tmp_path / "kanban.db")
+    gate = _load_script(default_dir, "pr_ci_gate.py")
+    check = _load_script(default_dir, "check_gate.py")
+
+    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    _recompute(kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
+
+    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
+    _recompute(kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
+
+
+def test_loop_f40_out_of_order_check_before_pr_survives_prune(tmp_path, monkeypatch):
+    """Supplementary (no AC id): a check_suite success recorded for a FUTURE head
+    (before its pull_request event) survives an intervening pull_request delivery for
+    the current head — the green-row prune drops only the superseded head's row, so
+    the future head is still promoted on creation."""
+    rendered, default_dir = _render(tmp_path, monkeypatch)
+    gate_db = str(tmp_path / "gate.db")
+    kanban_db = str(tmp_path / "kanban.db")
+    gate = _load_script(default_dir, "pr_ci_gate.py")
+    check = _load_script(default_dir, "check_gate.py")
+
+    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    check.evaluate(_check_suite("success", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    # an intervening delivery for the still-current head A must not delete B's green.
+    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:01:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:02:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "ready"

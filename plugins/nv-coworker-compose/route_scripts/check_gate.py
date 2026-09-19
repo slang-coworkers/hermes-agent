@@ -107,13 +107,20 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                     kanban_db.unblock_task(kconn, task_id)
                 for task_id in to_reblock:
                     # Only an unclaimed ready card is demoted; a running/done card
-                    # (a review already in flight or finished) is left alone.
+                    # (a review already in flight or finished) is left alone. The
+                    # sticky `blocked` event is required so recompute_ready does
+                    # not immediately re-promote the demoted (parent-less) card.
                     with kanban_db.write_txn(kconn):
-                        kconn.execute(
+                        cas = kconn.execute(
                             "UPDATE tasks SET status = 'blocked' "
                             "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
                             (task_id,),
                         )
+                        if cas.rowcount == 1:
+                            kanban_db._append_event(
+                                kconn, task_id, "blocked",
+                                {"reason": "loop-f40: CI regressed", "kind": "transient"},
+                            )
         gate.execute("COMMIT")
     except Exception:
         gate.execute("ROLLBACK")

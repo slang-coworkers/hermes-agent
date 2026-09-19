@@ -30,6 +30,30 @@ def _key(repo: str, pr: int, head_sha: str) -> str:
     return f"loop-f40-review:{repo}#{pr}:{head_sha}"
 
 
+def _sticky_block(kconn, task_id: str, reason: str) -> None:
+    """Append a sticky `blocked` event (the caller already holds a write_txn).
+
+    A `blocked` status with no `blocked` task event is auto-recoverable, so the
+    dispatcher's recompute_ready promotes it to `ready`. A `blocked` event makes
+    it sticky until an `unblocked` event (unblock_task) fires.
+    """
+    from hermes_cli.kanban_db import _append_event
+
+    _append_event(kconn, task_id, "blocked", {"reason": reason, "kind": "transient"})
+
+
+def _ensure_sticky_block(kconn, task_id: str, reason: str) -> None:
+    """Make a blocked card sticky in its own write_txn (used right after create)."""
+    from hermes_cli.kanban_db import _has_sticky_block, write_txn
+
+    with write_txn(kconn):
+        row = kconn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row and row[0] == "blocked" and not _has_sticky_block(kconn, task_id):
+            _sticky_block(kconn, task_id, reason)
+
+
 def _open_gate(gate_db_path) -> sqlite3.Connection:
     # isolation_level=None + explicit BEGIN IMMEDIATE gives us the write lock
     # up front so concurrent duplicate deliveries serialize on this DB across
@@ -102,31 +126,43 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
             # A re-sync to a new head retires the superseded head's still-open
             # card, because the ordinary dispatcher spawns EVERY ready card with
             # no head predicate — a stale ready card would review the wrong head.
-            if prior_head and prior_head != head_sha and prior_task:
-                st = kconn.execute(
-                    "SELECT status FROM tasks WHERE id = ?", (prior_task,)
-                ).fetchone()
-                status = st[0] if st else None
-                if status == "blocked":
-                    # The dispatcher only claims `ready`, never `blocked`, so
-                    # archiving a blocked card cannot race a spawn.
-                    kanban_db.archive_task(kconn, prior_task)
-                elif status == "ready":
-                    # Atomically demote ready->blocked guarded on it still being
-                    # unclaimed, THEN archive. If the dispatcher claimed it first
-                    # (now running) the CAS matches nothing and it is left
-                    # running. Crash-safe: the intermediate state is `blocked`
-                    # (never dispatched), and a delivery retry finishes the
-                    # retirement — unlike a claim->running->archive path, which
-                    # would strand a stale `running` card on a crash.
-                    with kanban_db.write_txn(kconn):
-                        cas = kconn.execute(
-                            "UPDATE tasks SET status = 'blocked' "
-                            "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
-                            (prior_task,),
-                        )
-                    if cas.rowcount == 1:
+            if prior_head and prior_head != head_sha:
+                # The superseded head's green is now dead — drop only that head's
+                # row (never other heads': a green may be recorded ahead of its
+                # own PR event for a still-future head).
+                gate.execute(
+                    "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha = ?",
+                    (repo, pr, prior_head),
+                )
+                if prior_task:
+                    st = kconn.execute(
+                        "SELECT status FROM tasks WHERE id = ?", (prior_task,)
+                    ).fetchone()
+                    status = st[0] if st else None
+                    if status == "blocked":
+                        # The dispatcher only claims `ready`, never `blocked`, so
+                        # archiving a blocked card cannot race a spawn.
                         kanban_db.archive_task(kconn, prior_task)
+                    elif status == "ready":
+                        # Atomically demote ready->blocked guarded on it still
+                        # being unclaimed AND make that blocked state sticky, THEN
+                        # archive. If the dispatcher claimed it first (now running)
+                        # the CAS matches nothing and it is left running.
+                        # Crash-safe: an interrupted retire leaves a *sticky*
+                        # blocked card (recompute_ready will not auto-promote it,
+                        # unlike a bare blocked row), and a delivery retry finishes
+                        # the retirement — a claim->running->archive path would
+                        # instead strand a stale `running` card on a crash.
+                        with kanban_db.write_txn(kconn):
+                            cas = kconn.execute(
+                                "UPDATE tasks SET status = 'blocked' "
+                                "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
+                                (prior_task,),
+                            )
+                            if cas.rowcount == 1:
+                                _sticky_block(kconn, prior_task, "loop-f40: head superseded")
+                        if cas.rowcount == 1:
+                            kanban_db.archive_task(kconn, prior_task)
 
             key = _key(repo, pr, head_sha)
             # create_task with an idempotency_key returns the existing
@@ -139,6 +175,12 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                 idempotency_key=key,
                 initial_status="blocked",
             )
+            # A create_task blocked card carries no `blocked` task event, so the
+            # dispatcher's recompute_ready treats it as auto-recoverable and
+            # promotes it straight to `ready` — defeating the CI gate. Make the
+            # parked card sticky-blocked so it stays parked until check_gate's
+            # unblock_task (which emits `unblocked`) releases it on CI-green.
+            _ensure_sticky_block(kconn, task_id, "loop-f40: awaiting CI green")
 
             gate.execute(
                 "INSERT INTO pr_gate (repo, pr, latest_head_sha, current_task_id, "
@@ -149,13 +191,6 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                 "pr_updated_at = excluded.pr_updated_at, "
                 "updated_at = excluded.updated_at",
                 (repo, pr, head_sha, task_id, pr_updated_at, int(time.time())),
-            )
-
-            # Drop green rows for superseded heads of this PR so the store stays
-            # bounded; the current head's green (if recorded out of order) stays.
-            gate.execute(
-                "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha != ?",
-                (repo, pr, head_sha),
             )
 
             # Out-of-order: a check_suite success for this head already landed
