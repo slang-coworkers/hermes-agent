@@ -32,7 +32,7 @@ def _open_gate(gate_db_path) -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pr_gate ("
         "repo TEXT, pr INTEGER, latest_head_sha TEXT, current_task_id TEXT, "
-        "pr_updated_at TEXT, updated_at INTEGER, PRIMARY KEY (repo, pr))"
+        "updated_at INTEGER, PRIMARY KEY (repo, pr))"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS green ("
@@ -70,7 +70,6 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
 
     gate = _open_gate(gate_db_path)
     to_unblock: list[str] = []
-    to_reblock: list[str] = []
     try:
         gate.execute("BEGIN IMMEDIATE")
         for pr in pr_numbers:
@@ -91,36 +90,18 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                 if latest == head_sha and task_id:
                     to_unblock.append(task_id)
             else:
-                # A non-success for this exact head invalidates any earlier green
-                # (success -> failure -> PR must leave the card blocked).
+                # A non-success for this exact head invalidates any earlier green,
+                # so a card created later for this head is not promoted on creation
+                # (success -> failure -> PR must leave the card blocked). Returning
+                # the payload wakes the fixer; the reviewer card is not un-promoted.
                 gate.execute(
                     "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha = ?",
                     (repo, pr, head_sha),
                 )
-                # CI regressed for the current head after an earlier green: the
-                # reviewer must not stay dispatchable, so un-promote the card.
-                if latest == head_sha and task_id:
-                    to_reblock.append(task_id)
-        if to_unblock or to_reblock:
+        if to_unblock:
             with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
                 for task_id in to_unblock:
                     kanban_db.unblock_task(kconn, task_id)
-                for task_id in to_reblock:
-                    # Only an unclaimed ready card is demoted; a running/done card
-                    # (a review already in flight or finished) is left alone. The
-                    # sticky `blocked` event is required so recompute_ready does
-                    # not immediately re-promote the demoted (parent-less) card.
-                    with kanban_db.write_txn(kconn):
-                        cas = kconn.execute(
-                            "UPDATE tasks SET status = 'blocked' "
-                            "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
-                            (task_id,),
-                        )
-                        if cas.rowcount == 1:
-                            kanban_db._append_event(
-                                kconn, task_id, "blocked",
-                                {"reason": "loop-f40: CI regressed", "kind": "transient"},
-                            )
         gate.execute("COMMIT")
     except Exception:
         gate.execute("ROLLBACK")

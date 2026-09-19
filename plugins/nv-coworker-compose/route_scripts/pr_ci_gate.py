@@ -69,7 +69,7 @@ def _open_gate(gate_db_path) -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pr_gate ("
         "repo TEXT, pr INTEGER, latest_head_sha TEXT, current_task_id TEXT, "
-        "pr_updated_at TEXT, updated_at INTEGER, PRIMARY KEY (repo, pr))"
+        "updated_at INTEGER, PRIMARY KEY (repo, pr))"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS green ("
@@ -84,8 +84,7 @@ def _extract(payload: dict):
     pr = pr_obj.get("number", payload.get("number"))
     head_sha = ((pr_obj.get("head") or {}).get("sha")) or ""
     action = payload.get("action") or ""
-    pr_updated_at = pr_obj.get("updated_at") or None
-    return repo, pr, head_sha, action, pr_updated_at
+    return repo, pr, head_sha, action
 
 
 def evaluate(payload, *, gate_db_path, kanban_db_path):
@@ -94,7 +93,7 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
     Returns the webhook ``(should_continue, transformed)`` tuple — always
     ``(False, None)``: a pull_request delivery never dispatches a run itself.
     """
-    repo, pr, head_sha, action, pr_updated_at = _extract(payload)
+    repo, pr, head_sha, action = _extract(payload)
     if not repo or pr is None or not head_sha or action not in _PR_ACTIONS:
         return False, None
 
@@ -104,23 +103,11 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
     try:
         gate.execute("BEGIN IMMEDIATE")
         row = gate.execute(
-            "SELECT latest_head_sha, current_task_id, pr_updated_at "
-            "FROM pr_gate WHERE repo = ? AND pr = ?",
+            "SELECT latest_head_sha, current_task_id FROM pr_gate WHERE repo = ? AND pr = ?",
             (repo, pr),
         ).fetchone()
         prior_head = row[0] if row else None
         prior_task = row[1] if row else None
-        stored_updated_at = row[2] if row else None
-
-        # Best-effort ordering guard: real GitHub pull_request payloads carry an
-        # ISO8601 `updated_at`; any strictly-older one is an out-of-order or
-        # redelivered stale event and must be dropped without mutating — so it
-        # can neither reset the head nor roll the stored timestamp backward (a
-        # rollback would let a later stale different-head event slip through).
-        # Payloads without the field fall back to last-write-wins.
-        if pr_updated_at and stored_updated_at and pr_updated_at < stored_updated_at:
-            gate.execute("COMMIT")
-            return False, None
 
         with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
             # A re-sync to a new head retires the superseded head's still-open
@@ -135,45 +122,40 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                     (repo, pr, prior_head),
                 )
                 if prior_task:
-                    st = kconn.execute(
-                        "SELECT status FROM tasks WHERE id = ?", (prior_task,)
-                    ).fetchone()
-                    status = st[0] if st else None
-                    if status == "blocked":
-                        # The dispatcher only claims `ready`, never `blocked`, so
-                        # archiving a blocked card cannot race a spawn.
-                        kanban_db.archive_task(kconn, prior_task)
-                    elif status == "ready":
-                        # Atomically demote ready->blocked guarded on it still
-                        # being unclaimed AND make that blocked state sticky, THEN
-                        # archive. If the dispatcher claimed it first (now running)
-                        # the CAS matches nothing and it is left running.
-                        # Crash-safe: an interrupted retire leaves a *sticky*
-                        # blocked card (recompute_ready will not auto-promote it,
-                        # unlike a bare blocked row), and a delivery retry finishes
-                        # the retirement — a claim->running->archive path would
-                        # instead strand a stale `running` card on a crash.
-                        with kanban_db.write_txn(kconn):
-                            cas = kconn.execute(
-                                "UPDATE tasks SET status = 'blocked' "
-                                "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
-                                (prior_task,),
-                            )
-                            if cas.rowcount == 1:
-                                _sticky_block(kconn, prior_task, "loop-f40: head superseded")
-                        if cas.rowcount == 1:
-                            kanban_db.archive_task(kconn, prior_task)
+                    # Retire the prior card with ONE status-guarded UPDATE (the
+                    # column clears mirror kanban_db.archive_task). A
+                    # read-status-then-archive_task form is a TOCTOU: archive_task
+                    # archives any non-archived state, so the dispatcher claiming
+                    # the card (ready->running) between the read and the archive
+                    # would archive a live worker. As a single guarded UPDATE it
+                    # serializes with the dispatcher's own guarded claim
+                    # (UPDATE ... status='running' WHERE status='ready' AND
+                    # claim_lock IS NULL) under SQLite single-writer: whichever
+                    # commits first wins, so a running/done card is never archived
+                    # and a still-blocked/ready superseded head always is.
+                    with kanban_db.write_txn(kconn):
+                        kconn.execute(
+                            "UPDATE tasks SET status = 'archived', "
+                            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                            "WHERE id = ? AND status IN ('blocked', 'ready')",
+                            (prior_task,),
+                        )
 
             key = _key(repo, pr, head_sha)
             # create_task with an idempotency_key returns the existing
             # NON-archived card's id, so a duplicate delivery makes no new card
             # and a resync back to a previously-archived head makes a fresh one.
+            # skills=["sdlc-review"] rides on the card so the ordinary-lane spawn
+            # surfaces `--skills sdlc-review` on the reviewer run (the ordinary
+            # ready lane does not auto-load the review skill; only the native
+            # review lane force-appends it).
             task_id = kanban_db.create_task(
                 kconn,
                 title=f"Review {repo}#{pr} @ {head_sha[:12]}",
                 assignee=REVIEWER_ASSIGNEE,
                 idempotency_key=key,
                 initial_status="blocked",
+                skills=["sdlc-review"],
             )
             # A create_task blocked card carries no `blocked` task event, so the
             # dispatcher's recompute_ready treats it as auto-recoverable and
@@ -184,13 +166,12 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
 
             gate.execute(
                 "INSERT INTO pr_gate (repo, pr, latest_head_sha, current_task_id, "
-                "pr_updated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "updated_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(repo, pr) DO UPDATE SET "
                 "latest_head_sha = excluded.latest_head_sha, "
                 "current_task_id = excluded.current_task_id, "
-                "pr_updated_at = excluded.pr_updated_at, "
                 "updated_at = excluded.updated_at",
-                (repo, pr, head_sha, task_id, pr_updated_at, int(time.time())),
+                (repo, pr, head_sha, task_id, int(time.time())),
             )
 
             # Out-of-order: a check_suite success for this head already landed

@@ -15,10 +15,10 @@ criterion's observable behaviour.
 One test function per pytest: criterion, named test_ac_loop_f40_1 .. test_ac_loop_f40_4.
 AC-LOOP-F40-5 is live: (tests/e2e-scenarios/LOOP-F40/AC-LOOP-F40-5.md) — no function here.
 
-Fails on the stock v2026.8.31 tree / the pre-PR base (compose renders no gated PR route,
-no check_gate/pr_ci_gate scripts, no gh-pr-review-invite route). Behavior contract, not
-snapshot: no model lists / version literals / enumeration counts; never reads plugin
-source; no network; nothing under ~/.hermes.
+Acceptance asymmetry: when the plugin is absent the render produces none of these
+routes/scripts, so the assertions raise (KeyError/AssertionError); when it is present they
+pass. Behavior contract, not snapshot: no model lists / version literals / enumeration
+counts; never reads plugin source; no network; nothing under ~/.hermes.
 """
 from __future__ import annotations
 
@@ -205,6 +205,8 @@ def test_ac_loop_f40_1(tmp_path, monkeypatch):
     assert "{issue.number}" in str(extra.get("pr_number", ""))
     fields = {f.get("field") for f in (invite.get("filters") or []) if isinstance(f, dict)}
     assert "issue.pull_request" in fields  # never fire on a plain issue comment
+    # the invoked reviewer must be able to shell the read-only `gh pr diff`; the webhook
+    # default toolset `hermes-webhook` has no `terminal`, so the route grants it explicitly.
     assert set(invite.get("toolsets") or []) == {"terminal", "hermes-webhook"}
 
     secrets = [r["secret"] for r in routes.values()]
@@ -215,7 +217,7 @@ def test_ac_loop_f40_1(tmp_path, monkeypatch):
     import yaml
 
     dist = yaml.safe_load((default_dir / "distribution.yaml").read_text(encoding="utf-8"))
-    owned = dist.get("distribution_owned") or dist.get("owned") or []
+    owned = dist.get("distribution_owned") or []
     assert "scripts" in owned
 
     for name, r in routes.items():
@@ -261,10 +263,22 @@ def _card_count(kanban_db_path, key):
         con.close()
 
 
+def _card_skills_raw(kanban_db_path, key):
+    con = sqlite3.connect(kanban_db_path)
+    try:
+        row = con.execute(
+            "SELECT skills FROM tasks WHERE idempotency_key = ?", (key,)
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
 def test_ac_loop_f40_2(tmp_path, monkeypatch):
     """pr_ci_gate on a pull_request `opened` records pr_gate.latest_head_sha and the created
     card's real task_id (pr_gate.current_task_id == tasks.id), upserts a per-head blocked
-    review card (assignee == reviewer), and returns [SILENT]; two workers released
+    review card (assignee == reviewer) carrying sdlc-review in its skills (so the ordinary
+    lane spawn loads the review skill), and returns [SILENT]; two workers released
     simultaneously against the same head both terminate and leave exactly one card."""
     import threading
 
@@ -276,6 +290,8 @@ def test_ac_loop_f40_2(tmp_path, monkeypatch):
     keep, _ = gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
     assert keep is False
     assert _card_by_key(kanban_db, _key(SHA_A)) == ("blocked", REVIEWER)
+    # the card must carry sdlc-review so the ordinary-lane spawn emits --skills for the reviewer.
+    assert "sdlc-review" in (_card_skills_raw(kanban_db, _key(SHA_A)) or "")
 
     latest = _latest(gate_db)
     assert latest is not None and latest[0] == SHA_A
@@ -338,6 +354,14 @@ def test_ac_loop_f40_3(tmp_path, monkeypatch):
     check.evaluate(_check_suite("success", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
     assert _card_by_key(kanban_db, _key(SHA_B))[0] == "ready"
 
+    # a prior-head card that is still BLOCKED (re-synced before CI turns green) is retired too.
+    sha_i, sha_j = "3" * 40, "4" * 40
+    gate.evaluate(_pr_event("opened", sha_i, pr=55), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#55:{sha_i}")[0] == "blocked"
+    gate.evaluate(_pr_event("synchronize", sha_j, pr=55), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#55:{sha_i}")[0] == "archived"
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#55:{sha_j}")[0] == "blocked"
+
     # a check_suite success delivered before its pull_request event (out-of-order webhooks):
     # the green head is recorded, and the later pull_request event promotes on card creation.
     sha_c = "c" * 40
@@ -384,7 +408,7 @@ def test_ac_loop_f40_3(tmp_path, monkeypatch):
         ).fetchall()]
     finally:
         con.close()
-    assert prs == [PR, 77, 88, 99, 111]
+    assert prs == [PR, 55, 77, 88, 99, 111]
 
 
 def _set_status(kanban_db_path, key, status):
@@ -418,168 +442,33 @@ def test_ac_loop_f40_4(tmp_path, monkeypatch):
     assert matches(_comment("cc @slang-reviewer-evil not you")) is False
 
 
-def _pr_event_at(action, head_sha, updated_at, pr=PR):
-    ev = _pr_event(action, head_sha, pr=pr)
-    ev["pull_request"]["updated_at"] = updated_at
-    return ev
-
-
-def _recompute(kanban_db_path):
-    """Run the dispatcher's recompute_ready, which auto-promotes any blocked card
-    that is not sticky-blocked — the pass a CI-gate card must survive while red."""
-    from hermes_cli import kanban_db as kdb
-
-    with kdb.connect_closing(db_path=Path(kanban_db_path)) as c:
-        kdb.recompute_ready(c)
-
-
-def test_loop_f40_out_of_order_pr_guard(tmp_path, monkeypatch):
-    """Supplementary (no AC id): a delayed/out-of-order pull_request delivery — an
-    older pull_request.updated_at for a superseded head — must not reset the current
-    head or retire the current card. Real GitHub payloads carry updated_at; the AC
-    payloads omit it and keep last-write-wins, so this best-effort guard is inert for
-    AC-2/AC-3 and only bites a genuinely stale redelivery."""
-    rendered, default_dir = _render(tmp_path, monkeypatch)
-    gate_db = str(tmp_path / "gate.db")
-    kanban_db = str(tmp_path / "kanban.db")
-    gate = _load_script(default_dir, "pr_ci_gate.py")
-
-    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:05:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
-    assert _card_by_key(kanban_db, _key(SHA_B)) == ("blocked", REVIEWER)
-    assert _latest(gate_db)[0] == SHA_B
-
-    # a DELAYED redelivery of the older opened(A) is ignored: head stays B, card B
-    # still blocked, no fresh card A created, archived A stays archived.
-    keep, _ = gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
-                            gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert keep is False
-    assert _latest(gate_db)[0] == SHA_B
-    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "blocked"
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
-
-    # a stale SAME-head redelivery (B@01, older than the stored B@05) must not roll
-    # the stored timestamp backward — otherwise a later stale different-head event
-    # (A@03) would slip past the guard and hijack the current head.
-    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:01:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:03:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _latest(gate_db)[0] == SHA_B
-    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "blocked"
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
-
-
-def test_loop_f40_check_failure_after_success_demotes(tmp_path, monkeypatch):
-    """Supplementary (no AC id): a non-success check_suite for the current head after
-    an earlier success demotes the promoted (ready, unclaimed) card back to blocked so
-    the reviewer is not dispatchable while CI is red, returns the exact input payload
-    (fixer wake), and a later success re-promotes it."""
-    rendered, default_dir = _render(tmp_path, monkeypatch)
-    gate_db = str(tmp_path / "gate.db")
-    kanban_db = str(tmp_path / "kanban.db")
-    gate = _load_script(default_dir, "pr_ci_gate.py")
-    check = _load_script(default_dir, "check_gate.py")
-
-    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    keep, _ = check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert keep is False
-    assert _card_by_key(kanban_db, _key(SHA_A)) == ("ready", REVIEWER)
-
-    payload_in = _check_suite("failure", SHA_A)
-    keep, payload_out = check.evaluate(payload_in, gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert keep is True and payload_out == payload_in
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
-    # the demoted card is sticky-blocked: recompute_ready must NOT re-promote it.
-    _recompute(kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
-
-    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
-
-
-def test_loop_f40_ready_retire_is_crash_safe(tmp_path, monkeypatch):
-    """Supplementary (no AC id): if archiving a re-synced ready card fails mid-retire,
-    the card is left `blocked` (never `running`, so the dispatcher cannot spawn a
-    stale-head reviewer); a delivery retry finishes the retirement by archiving it."""
-    import pytest
-
-    from hermes_cli import kanban_db as kdb
+def test_pr_ci_gate_subprocess_contract(tmp_path, monkeypatch):
+    """Production path (not just the imported evaluate): the rendered pr_ci_gate.py, run as a
+    subprocess the way the webhook adapter runs it (stdin JSON, HERMES_HOME/HERMES_KANBAN_DB
+    in env), resolves its own stores, prints [SILENT] on stdout, and parks the blocked card —
+    proving the __main__ shim + path resolution, so a broken shim cannot pass on evaluate()
+    coverage alone."""
+    import json as _json
+    import os
+    import subprocess
+    import sys
 
     rendered, default_dir = _render(tmp_path, monkeypatch)
-    gate_db = str(tmp_path / "gate.db")
-    kanban_db = str(tmp_path / "kanban.db")
-    gate = _load_script(default_dir, "pr_ci_gate.py")
-    check = _load_script(default_dir, "check_gate.py")
+    script = default_dir / "scripts" / "pr_ci_gate.py"
+    assert script.is_file()
 
-    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A)) == ("ready", REVIEWER)
-
-    calls = {"n": 0}
-    real_archive = kdb.archive_task
-
-    def _boom(conn, task_id):
-        calls["n"] += 1
-        raise RuntimeError("injected archive failure")
-
-    monkeypatch.setattr(kdb, "archive_task", _boom)
-    with pytest.raises(RuntimeError):
-        gate.evaluate(_pr_event("synchronize", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    # demoted to blocked BEFORE the archive attempt — safe, not left running.
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
-    assert calls["n"] == 1
-    # the interrupted retire left a STICKY blocked card: recompute_ready must not
-    # promote it back to ready before the retry archives it.
-    _recompute(kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
-
-    monkeypatch.setattr(kdb, "archive_task", real_archive)
-    gate.evaluate(_pr_event("synchronize", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
-    assert _card_by_key(kanban_db, _key(SHA_B)) == ("blocked", REVIEWER)
-
-
-def test_loop_f40_parked_card_survives_recompute_ready(tmp_path, monkeypatch):
-    """Supplementary (no AC id): a parked CI-gate card is sticky-blocked, so the
-    dispatcher's recompute_ready does not auto-promote it while CI is red; after a
-    check_suite success it is ready and a later recompute_ready leaves it ready."""
-    rendered, default_dir = _render(tmp_path, monkeypatch)
-    gate_db = str(tmp_path / "gate.db")
-    kanban_db = str(tmp_path / "kanban.db")
-    gate = _load_script(default_dir, "pr_ci_gate.py")
-    check = _load_script(default_dir, "check_gate.py")
-
-    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    _recompute(kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
-
-    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
-    _recompute(kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
-
-
-def test_loop_f40_out_of_order_check_before_pr_survives_prune(tmp_path, monkeypatch):
-    """Supplementary (no AC id): a check_suite success recorded for a FUTURE head
-    (before its pull_request event) survives an intervening pull_request delivery for
-    the current head — the green-row prune drops only the superseded head's row, so
-    the future head is still promoted on creation."""
-    rendered, default_dir = _render(tmp_path, monkeypatch)
-    gate_db = str(tmp_path / "gate.db")
-    kanban_db = str(tmp_path / "kanban.db")
-    gate = _load_script(default_dir, "pr_ci_gate.py")
-    check = _load_script(default_dir, "check_gate.py")
-
-    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    check.evaluate(_check_suite("success", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
-    # an intervening delivery for the still-current head A must not delete B's green.
-    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:01:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:02:00Z"),
-                  gate_db_path=gate_db, kanban_db_path=kanban_db)
-    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "ready"
+    kanban_db = tmp_path / "kanban.db"
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(tmp_path / "home")  # gate DB resolves under plugin-data here
+    env["HERMES_KANBAN_DB"] = str(kanban_db)     # kanban resolver honours this pin first
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        input=_json.dumps(_pr_event("opened", SHA_A)),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[SILENT]"
+    assert _card_by_key(str(kanban_db), _key(SHA_A)) == ("blocked", REVIEWER)
