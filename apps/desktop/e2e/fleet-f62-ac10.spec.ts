@@ -4,6 +4,8 @@ import {
   COWORKERS,
   driveFleetF62Nav,
   type FleetF62NavCheckpoints,
+  kanbanBoardGroup,
+  kanbanTile,
   rowNameRegex
 } from './fleet-f62-ac10.helpers'
 import { expect, test } from './test'
@@ -21,6 +23,11 @@ test.describe.configure({ retries: 0 })
 let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
+  // Boot seeds six profiles then waits up to waitForAppReady(120s); the config's
+  // default 90s hook timeout can't cover that on a cold container, so raise it to the
+  // sibling fleet-boot budget (fleet-profile-rail.spec.ts:234). Hook-scoped only — the
+  // counted test body keeps its own timeout and retries:0.
+  test.setTimeout(240_000)
   fixture = await bootFleetDesktop('fleet-f62-ac10')
 })
 
@@ -70,13 +77,18 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
       await expect(page.getByRole('tab', { name: /review-room/ }).filter({ visible: true }).first()).toBeVisible()
     },
 
-    // Step 4 — the Kanban board renders over the single gateway connection. The board's
-    // data fetch is ctx.rest (IPC-tunneled to the gateway, not a renderer HTTP GET), so
-    // the empty-state content proves a successful fetch — a failed fetch shows an error,
-    // not "No tasks on this board".
+    // Step 4 — the Kanban board renders over the single gateway connection, docked as its
+    // own route-tile (openRouteTile('/kanban','right')) beside main. The data fetch is
+    // ctx.rest (IPC-tunneled to the gateway, not a renderer HTTP GET), so assert rendered
+    // content scoped to the board's tree-group. The board-wide empty state "No tasks on
+    // this board" (k.noTasks, board.tsx:1378-1382) renders ONLY after fetchBoard resolves
+    // with total===0 — proving the board loaded its data over the one gateway rather than
+    // the ErrorState branch. (k.empty="Empty" is a per-lane overlay, never a board-wide state.)
     afterKanbanBoard: async page => {
-      await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
-      await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
+      await expect(kanbanTile(page)).toBeVisible({ timeout: 30_000 })
+      const board = kanbanBoardGroup(page)
+      await expect(board.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
+      await expect(board.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
     }
   }
 
@@ -84,5 +96,5 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
 
   // Single-gateway invariant: bootFleetDesktop launches exactly ONE local backend
   // (buildAppEnv(sandbox)), waitForAppReady gated on that one gateway, and the Kanban
-  // board 200 above is served by that same gateway — there is no second port anywhere.
+  // board rendered above is served by that same gateway — there is no second port anywhere.
 })

@@ -62,6 +62,22 @@ export interface FleetF62NavCheckpoints {
   afterKanbanBoard?: (page: Page) => Promise<void>
 }
 
+// ─── Kanban board locators (shared by the driver + both specs' checkpoints) ──
+
+// The route-tile's tab: `openRouteTile('/kanban','right')` docks a pane whose id
+// is `route-tile:/kanban` (pane-mirror.ts `prefix:'route-tile'` + `key:t=>t.path`),
+// carried as `data-tree-tab` on the tab element (tree-group.tsx:469,541).
+export const kanbanTile = (page: Page) => page.locator('[data-tree-tab="route-tile:/kanban"]')
+
+// The leaf tree-group holding that tab; the same group renders the board pane
+// body, so board content scopes to it. Only tree-group.tsx emits
+// `data-tree-group` (tree-split.tsx renders split panels, not groups), so
+// `.filter({has: tile})` resolves the one board group. Hidden pane layers carry
+// `data-pane-hidden` with `visibility:hidden` (pane-visibility.ts:18), which
+// `toBeVisible()` already excludes — no explicit `:not([data-pane-hidden])` needed.
+export const kanbanBoardGroup = (page: Page) =>
+  page.locator('[data-tree-group]').filter({ has: kanbanTile(page) }).first()
+
 // ─── Seeding (identical fixture for both specs) ──────────────────────────
 
 /** profile.yaml is YAML, and any JSON object is valid YAML, so JSON round-trips through
@@ -260,7 +276,8 @@ async function activateSessions(page: Page): Promise<void> {
 }
 
 /** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
- *  dismiss the Settings overlay, bring the Sessions pane forward, then open the board. */
+ *  dismiss the Settings overlay, bring the Sessions pane forward, then dock the board
+ *  via the split affordance. */
 async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
@@ -273,19 +290,29 @@ async function openKanbanBoard(page: Page): Promise<void> {
   await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
   await dismissSettingsOverlay(page)
   await activateSessions(page)
-  // Open the board by dispatching the click event directly on the nav row rather than a
-  // real pointer click. These top sidebar rows sit under the titlebar
-  // [-webkit-app-region:drag] strip, and on Linux/WSLg (xvfb) the drag region wins
-  // hit-testing and swallows a real click (sidebar/index.tsx:1493). A synthetic click
-  // bypasses hit-testing yet still fires the row's onNavigate → navigateToWorkspacePage,
-  // which BOTH routes to /kanban and fronts the workspace pane — a bare
-  // location.hash='/kanban' routes but leaves the workspace pane un-fronted, so the board
-  // stays hidden. The board is a full-page route whose <h1> "Kanban" mounts unconditionally
-  // (board.tsx:1330).
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
-  await kanbanNav.dispatchEvent('click')
-  await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 60_000 })
+  // Surface the board via the product's split affordance, NOT the left-click nav:
+  // left-click routes through navigateToWorkspacePage→revealWorkspacePane, which leaves
+  // the board present-but-aria-hidden when a Bot Chat session-tile holds the main zone
+  // (bug #72602, routes.ts:223-234). Right-click the nav row → context menu (aria-label
+  // "Kanban") → "Open in split" → "Right" → openRouteTile('/kanban','right') docks the
+  // board route-tile in its own visible split zone (sidebar/index.tsx:1556-1573,
+  // split-submenu.tsx:62-91, store/route-tiles.ts:40).
+  await kanbanNav.click({ button: 'right' })
+  const menu = page.getByRole('menu', { name: 'Kanban' })
+  await expect(menu).toBeVisible({ timeout: 30_000 })
+  await menu.getByRole('menuitem', { name: 'Open in split' }).hover()
+  const rightSplit = page.getByRole('menuitem', { name: 'Right', exact: true })
+  await expect(rightSplit).toBeVisible({ timeout: 30_000 })
+  await rightSplit.click()
+  // Reachability = the route-tile docks and the board mounts. The data fetch is ctx.rest
+  // over the Electron IPC bridge (NOT a renderer HTTP GET), so assert rendered content,
+  // never page.waitForResponse('/api/plugins/kanban/board').
+  await expect(kanbanTile(page)).toBeVisible({ timeout: 60_000 })
+  await expect(kanbanBoardGroup(page).getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({
+    timeout: 60_000
+  })
 }
 
 /** Drive the full counted-order FLEET-F62 desktop navigation, taking one screenshot per
