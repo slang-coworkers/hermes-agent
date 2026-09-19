@@ -451,3 +451,77 @@ def test_loop_f40_out_of_order_pr_guard(tmp_path, monkeypatch):
     assert _latest(gate_db)[0] == SHA_B
     assert _card_by_key(kanban_db, _key(SHA_B))[0] == "blocked"
     assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
+
+    # a stale SAME-head redelivery (B@01, older than the stored B@05) must not roll
+    # the stored timestamp backward — otherwise a later stale different-head event
+    # (A@03) would slip past the guard and hijack the current head.
+    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:01:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:03:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _latest(gate_db)[0] == SHA_B
+    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "blocked"
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
+
+
+def test_loop_f40_check_failure_after_success_demotes(tmp_path, monkeypatch):
+    """Supplementary (no AC id): a non-success check_suite for the current head after
+    an earlier success demotes the promoted (ready, unclaimed) card back to blocked so
+    the reviewer is not dispatchable while CI is red, returns the exact input payload
+    (fixer wake), and a later success re-promotes it."""
+    rendered, default_dir = _render(tmp_path, monkeypatch)
+    gate_db = str(tmp_path / "gate.db")
+    kanban_db = str(tmp_path / "kanban.db")
+    gate = _load_script(default_dir, "pr_ci_gate.py")
+    check = _load_script(default_dir, "check_gate.py")
+
+    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    keep, _ = check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert keep is False
+    assert _card_by_key(kanban_db, _key(SHA_A)) == ("ready", REVIEWER)
+
+    payload_in = _check_suite("failure", SHA_A)
+    keep, payload_out = check.evaluate(payload_in, gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert keep is True and payload_out == payload_in
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
+
+    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "ready"
+
+
+def test_loop_f40_ready_retire_is_crash_safe(tmp_path, monkeypatch):
+    """Supplementary (no AC id): if archiving a re-synced ready card fails mid-retire,
+    the card is left `blocked` (never `running`, so the dispatcher cannot spawn a
+    stale-head reviewer); a delivery retry finishes the retirement by archiving it."""
+    import pytest
+
+    from hermes_cli import kanban_db as kdb
+
+    rendered, default_dir = _render(tmp_path, monkeypatch)
+    gate_db = str(tmp_path / "gate.db")
+    kanban_db = str(tmp_path / "kanban.db")
+    gate = _load_script(default_dir, "pr_ci_gate.py")
+    check = _load_script(default_dir, "check_gate.py")
+
+    gate.evaluate(_pr_event("opened", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    check.evaluate(_check_suite("success", SHA_A), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A)) == ("ready", REVIEWER)
+
+    calls = {"n": 0}
+    real_archive = kdb.archive_task
+
+    def _boom(conn, task_id):
+        calls["n"] += 1
+        raise RuntimeError("injected archive failure")
+
+    monkeypatch.setattr(kdb, "archive_task", _boom)
+    with pytest.raises(RuntimeError):
+        gate.evaluate(_pr_event("synchronize", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    # demoted to blocked BEFORE the archive attempt — safe, not left running.
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "blocked"
+    assert calls["n"] == 1
+
+    monkeypatch.setattr(kdb, "archive_task", real_archive)
+    gate.evaluate(_pr_event("synchronize", SHA_B), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
+    assert _card_by_key(kanban_db, _key(SHA_B)) == ("blocked", REVIEWER)

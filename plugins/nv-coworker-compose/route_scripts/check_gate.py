@@ -25,7 +25,9 @@ def _open_gate(gate_db_path) -> sqlite3.Connection:
     # be the first to open the store (a check_suite success can arrive before
     # its pull_request event), so both must create the same tables.
     conn = sqlite3.connect(str(gate_db_path), timeout=30, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
+    from hermes_state import apply_wal_with_fallback
+
+    apply_wal_with_fallback(conn, db_label="loop-f40-ci-gate.db")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pr_gate ("
@@ -68,6 +70,7 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
 
     gate = _open_gate(gate_db_path)
     to_unblock: list[str] = []
+    to_reblock: list[str] = []
     try:
         gate.execute("BEGIN IMMEDIATE")
         for pr in pr_numbers:
@@ -94,10 +97,23 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                     "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha = ?",
                     (repo, pr, head_sha),
                 )
-        if to_unblock:
+                # CI regressed for the current head after an earlier green: the
+                # reviewer must not stay dispatchable, so un-promote the card.
+                if latest == head_sha and task_id:
+                    to_reblock.append(task_id)
+        if to_unblock or to_reblock:
             with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
                 for task_id in to_unblock:
                     kanban_db.unblock_task(kconn, task_id)
+                for task_id in to_reblock:
+                    # Only an unclaimed ready card is demoted; a running/done card
+                    # (a review already in flight or finished) is left alone.
+                    with kanban_db.write_txn(kconn):
+                        kconn.execute(
+                            "UPDATE tasks SET status = 'blocked' "
+                            "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
+                            (task_id,),
+                        )
         gate.execute("COMMIT")
     except Exception:
         gate.execute("ROLLBACK")

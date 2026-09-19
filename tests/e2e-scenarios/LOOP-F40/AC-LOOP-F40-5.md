@@ -57,7 +57,7 @@ and no `.env` key write are needed.
                - {field: issue.pull_request, exists: true}
                - {field: comment.user.type, equals: "User"}
                - {field: comment.user.login, not_equals: "slang-reviewer[bot]"}
-               - {field: comment.body, regex: "(?<![A-Za-z0-9-])@slang-reviewer(?![A-Za-z0-9-])"}
+               - {field: comment.body, regex: "(?i)(?<![A-Za-z0-9-])@slang-reviewer(?![A-Za-z0-9-])"}
              prompt: "A human invited a review on {repository.full_name} PR #{issue.number}: {comment.body}. Read the change with `gh pr diff {issue.number} --repo {repository.full_name}` and post a concise, actionable review."
              skills: [sdlc-review]
              toolsets: [terminal, hermes-webhook]

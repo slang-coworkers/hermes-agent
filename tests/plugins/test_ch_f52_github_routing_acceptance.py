@@ -214,19 +214,19 @@ def test_ac_ch_f52_1(tmp_path, monkeypatch):
 @pytest.mark.parametrize("name", ["gh-pull-request", "gh-pr-review", "gh-check-suite"])
 def test_ac_ch_f52_2(tmp_path, monkeypatch, name):
     """The rendered DEFAULT-profile config declares pull-request -> reviewer and review + check ->
-    fixer, each with its own non-empty secret and its exact events + action filter. Post-LOOP-F40,
-    gh-pull-request is a gated route (script pr_ci_gate.py, no prompt); gh-check-suite carries both
-    check_gate.py and its fixer-wake prompt; gh-pr-review stays a bare prompt route."""
+    fixer, each with its own non-empty secret and its exact events + action filter. gh-pull-request
+    is a gated route (script pr_ci_gate.py, no prompt); gh-check-suite carries check_gate.py and its
+    fixer-wake prompt; gh-pr-review is a bare prompt route."""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     _assert_route_contract(routes, name)
 
 
 # ─────────────────────────── AC-CH-F52-3 ───────────────────────────
 def test_ac_ch_f52_3(tmp_path, monkeypatch):
-    """No AUTONOMOUS O1 ingress route uses deliver: github_comment. LOOP-F40 narrowly supersedes
-    this for the single human-invited gh-pr-review-invite route (authorized by the human's mention,
-    a declarative route filter); every other route stays barred — attributable autonomous post-backs
-    are the owning bot's own gated gh."""
+    """No AUTONOMOUS O1 ingress route uses deliver: github_comment. The single human-invited
+    gh-pr-review-invite route is the sole exception (authorized by the human's mention, a declarative
+    route filter); every other route is barred — attributable autonomous post-backs are the owning
+    bot's own gated gh."""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     offenders = [name for name, r in routes.items() if r.get("deliver") == "github_comment"]
     assert offenders == ["gh-pr-review-invite"]
@@ -235,7 +235,7 @@ def test_ac_ch_f52_3(tmp_path, monkeypatch):
 # ─────────────────────────── AC-CH-F52-4 ───────────────────────────
 def test_ac_ch_f52_4(tmp_path, monkeypatch):
     """The DEFAULT ingress is complete and isolated: the rendered route-name set equals exactly the
-    five canonical routes, their secrets are pairwise distinct, the DEFAULT webhook platform is
+    six canonical routes, their secrets are pairwise distinct, the DEFAULT webhook platform is
     enabled, and no coworker profile declares a webhook route or enables the webhook platform."""
     rendered, routes = _rendered_default_routes(tmp_path, monkeypatch)
     assert set(routes) == set(CANONICAL_ROUTES)
@@ -303,34 +303,43 @@ async def test_ac_ch_f52_6(tmp_path, monkeypatch, name, event, action):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name,event,profile", [
-    ("gh-pull-request", "pull_request", "reviewer"),
-    ("gh-check-suite", "check_suite", "fixer"),
+@pytest.mark.parametrize("name,event,action,conclusion,profile,expect_dispatch", [
+    ("gh-pull-request", "pull_request", "opened", None, "reviewer", False),
+    ("gh-check-suite", "check_suite", "completed", "failure", "fixer", True),
 ])
-async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, profile):
-    """LOOP-F40: the CI-gated routes carry a route script and do NOT dispatch a run on the event.
-    With the gate script unresolvable in this hermetic HERMES_HOME/scripts, a signed, filter-passing
-    delivery is ignored with reason 'script' and produces no dispatch — proving the route gates on
-    its script rather than falling back to an immediate prompt dispatch (the park/promote gate logic
-    itself is proven in test_loop_f40_acceptance)."""
-    _, routes = _rendered_default_routes(tmp_path, monkeypatch)
+async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, action, conclusion, profile, expect_dispatch):
+    """The two CI-gated routes run their rendered route script (installed at $HERMES_HOME/scripts)
+    end-to-end through the adapter subprocess: a pull_request delivery parks a card and stays silent
+    (200 ignored, no dispatch); a failed check_suite delivery returns the payload and dispatches the
+    fixer (202, one run). This exercises the __main__ shim; the park/promote gate state transitions
+    are proven directly in test_loop_f40_acceptance."""
+    import os
+    import shutil as _sh
+
+    rendered, routes = _rendered_default_routes(tmp_path, monkeypatch)
     route = routes[name]
     assert route.get("script")  # the CI-gate script is what makes this route gated
+    # Install the rendered scripts where the webhook resolver looks them up.
+    _sh.copytree(Path(rendered[DEFAULT_PROFILE]) / "scripts", Path(os.environ["HERMES_HOME"]) / "scripts")
     sentinel = CANONICAL_ROUTES[name]["sentinel"]
     app, captured = _multiplex_app(monkeypatch, tmp_path, routes)
-    payload = {"action": "completed" if event == "check_suite" else "opened",
-               "repository": {"full_name": sentinel},
-               "pull_request": {"number": 7, "head": {"sha": "f" * 40}},
-               "check_suite": {"conclusion": "failure", "head_sha": "f" * 40,
-                               "pull_requests": [{"number": 7}]}}
+    payload = {"action": action, "repository": {"full_name": sentinel},
+               "pull_request": {"number": 4242, "head": {"sha": "a" * 40}},
+               "check_suite": {"conclusion": conclusion, "head_sha": "a" * 40,
+                               "pull_requests": [{"number": 4242}]}}
     body = json.dumps(payload).encode()
     async with TestClient(TestServer(app)) as cli:
         resp = await _post(cli, f"/p/{profile}/webhooks/{name}", body, event, route["secret"], delivery=f"gated-{name}")
-        assert resp.status == 200
-        js = await resp.json()
-        assert js.get("status") == "ignored" and js.get("reason") == "script"
-        await asyncio.sleep(0.05)
-    assert captured == []
+        if expect_dispatch:
+            assert resp.status == 202
+            await _await_dispatch(captured, 1)
+            assert len(captured) == 1
+            assert captured[0].source.profile == profile
+        else:
+            assert resp.status == 200
+            assert (await resp.json()).get("status") == "ignored"
+            await asyncio.sleep(0.05)
+            assert captured == []
 
 
 # ─────────────────────────── AC-CH-F52-7 ───────────────────────────

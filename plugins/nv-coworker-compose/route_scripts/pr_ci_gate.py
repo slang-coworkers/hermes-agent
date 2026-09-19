@@ -35,7 +35,12 @@ def _open_gate(gate_db_path) -> sqlite3.Connection:
     # up front so concurrent duplicate deliveries serialize on this DB across
     # the whole read-decide-mutate section (the caller owns the transaction).
     conn = sqlite3.connect(str(gate_db_path), timeout=30, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Use Hermes's WAL helper rather than a raw pragma: it falls back to DELETE
+    # on WAL-incompatible filesystems and on SQLite builds carrying the
+    # WAL-reset corruption bug (the same safeguard kanban_db uses).
+    from hermes_state import apply_wal_with_fallback
+
+    apply_wal_with_fallback(conn, db_label="loop-f40-ci-gate.db")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pr_gate ("
@@ -84,15 +89,12 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
         stored_updated_at = row[2] if row else None
 
         # Best-effort ordering guard: real GitHub pull_request payloads carry an
-        # ISO8601 `updated_at`; a strictly-older one is an out-of-order or
-        # redelivered stale event and must not reset the head or retire the
-        # current card. Payloads without the field fall back to last-write-wins.
-        if (
-            pr_updated_at
-            and stored_updated_at
-            and pr_updated_at < stored_updated_at
-            and head_sha != prior_head
-        ):
+        # ISO8601 `updated_at`; any strictly-older one is an out-of-order or
+        # redelivered stale event and must be dropped without mutating — so it
+        # can neither reset the head nor roll the stored timestamp backward (a
+        # rollback would let a later stale different-head event slip through).
+        # Payloads without the field fall back to last-write-wins.
+        if pr_updated_at and stored_updated_at and pr_updated_at < stored_updated_at:
             gate.execute("COMMIT")
             return False, None
 
@@ -110,12 +112,20 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                     # archiving a blocked card cannot race a spawn.
                     kanban_db.archive_task(kconn, prior_task)
                 elif status == "ready":
-                    # Take it out of the ready lane atomically; archive only if
-                    # we won the claim. If the dispatcher already claimed it
-                    # (now running), leave it — a running review is preserved.
-                    if kanban_db.claim_task(
-                        kconn, prior_task, claimer="loop-f40-retire"
-                    ) is not None:
+                    # Atomically demote ready->blocked guarded on it still being
+                    # unclaimed, THEN archive. If the dispatcher claimed it first
+                    # (now running) the CAS matches nothing and it is left
+                    # running. Crash-safe: the intermediate state is `blocked`
+                    # (never dispatched), and a delivery retry finishes the
+                    # retirement — unlike a claim->running->archive path, which
+                    # would strand a stale `running` card on a crash.
+                    with kanban_db.write_txn(kconn):
+                        cas = kconn.execute(
+                            "UPDATE tasks SET status = 'blocked' "
+                            "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
+                            (prior_task,),
+                        )
+                    if cas.rowcount == 1:
                         kanban_db.archive_task(kconn, prior_task)
 
             key = _key(repo, pr, head_sha)
@@ -139,6 +149,13 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                 "pr_updated_at = excluded.pr_updated_at, "
                 "updated_at = excluded.updated_at",
                 (repo, pr, head_sha, task_id, pr_updated_at, int(time.time())),
+            )
+
+            # Drop green rows for superseded heads of this PR so the store stays
+            # bounded; the current head's green (if recorded out of order) stays.
+            gate.execute(
+                "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha != ?",
+                (repo, pr, head_sha),
             )
 
             # Out-of-order: a check_suite success for this head already landed

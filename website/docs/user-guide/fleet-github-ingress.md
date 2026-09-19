@@ -205,10 +205,13 @@ coworker` installs **coworker** profiles only; it does not deploy the DEFAULT
 `$HERMES_HOME` and restart the gateway. The compose renderer declares `scripts` in
 the DEFAULT profile's `distribution.yaml` `distribution_owned` set, so
 `hermes profile install` copies `scripts/` into `$HERMES_HOME/scripts/`, where the
-webhook adapter's script resolver looks up a route's `script:` by name. The DEFAULT
-profile owns `scripts/` **wholesale** — keep any custom operator scripts under a
-different path (or merge them in by hand after install), since a re-install
-overwrites the owned `scripts/` entries.
+webhook adapter's script resolver looks up a route's `script:` by name. `scripts/`
+is a distribution-owned **directory**, exactly like the already-owned `skills/`,
+`cron/`, and `skill-bundles/`: an install/update replaces an owned directory
+wholesale (`_copy_dist_payload` rmtree-then-copytree, `hermes_cli/profile_distribution.py`).
+So the DEFAULT (multiplexer) profile owns its `scripts/` dir end-to-end — keep any
+custom operator scripts outside it (or re-add them after an install), the same
+rule that already applies to `skills/` and `cron/`.
 
 ## Endpoints
 
