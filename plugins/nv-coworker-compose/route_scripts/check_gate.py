@@ -20,19 +20,27 @@ import sys
 from pathlib import Path
 
 
-def _open_gate(gate_db_path) -> sqlite3.Connection:
-    # Schema is kept byte-identical to pr_ci_gate._open_gate: either script may
-    # be the first to open the store (a check_suite success can arrive before
-    # its pull_request event), so both must create the same tables.
-    conn = sqlite3.connect(str(gate_db_path), timeout=30, isolation_level=None)
-    from hermes_state import apply_wal_with_fallback
+def _open_gate(gate_db_path=None) -> sqlite3.Connection:
+    # Store resolution + schema are kept identical to pr_ci_gate._open_gate:
+    # either script may be the first to open the store (a check_suite success can
+    # arrive before its pull_request event), so both resolve the same production
+    # path via plugin_db and create the same tables. The caller owns transactions
+    # (isolation_level=None + explicit BEGIN IMMEDIATE).
+    if gate_db_path is None:
+        from plugins.plugin_storage import plugin_db
 
-    apply_wal_with_fallback(conn, db_label="loop-f40-ci-gate.db")
+        conn = plugin_db("nv-coworker-compose", "loop-f40-ci-gate.db")
+    else:
+        conn = sqlite3.connect(str(gate_db_path), timeout=30)
+        from hermes_state import apply_wal_with_fallback
+
+        apply_wal_with_fallback(conn, db_label="loop-f40-ci-gate.db")
+    conn.isolation_level = None
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pr_gate ("
         "repo TEXT, pr INTEGER, latest_head_sha TEXT, current_task_id TEXT, "
-        "updated_at INTEGER, PRIMARY KEY (repo, pr))"
+        "pr_updated_at TEXT, updated_at INTEGER, PRIMARY KEY (repo, pr))"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS green ("
@@ -54,7 +62,33 @@ def _extract(payload: dict):
     return repo, head_sha, conclusion, pr_numbers
 
 
-def evaluate(payload, *, gate_db_path, kanban_db_path):
+def _demote(kconn, task_id: str) -> None:
+    """Re-block a ready, unclaimed review card when CI goes red on the current head.
+
+    Guarded so it no-ops if the dispatcher already claimed the card (ready->running) or it
+    finished (running/done): the running review completes and the Orchestrator's merge gate
+    catches the red. Serializes with claim_task's own guarded ready->running UPDATE under
+    SQLite single-writer, exactly like the archive-on-resync. Writes the same sticky
+    `blocked` event create_task writes so recompute_ready cannot auto-re-promote the
+    parentless blocked card (kanban_db.py:4614). The caller holds no outer kanban txn, so
+    this opens its own write_txn.
+    """
+    from hermes_cli.kanban_db import _append_event, write_txn
+
+    with write_txn(kconn):
+        cur = kconn.execute(
+            "UPDATE tasks SET status = 'blocked' "
+            "WHERE id = ? AND status = 'ready' AND claim_lock IS NULL",
+            (task_id,),
+        )
+        if cur.rowcount == 1:
+            _append_event(
+                kconn, task_id, "blocked",
+                {"reason": "loop-f40: CI red for current head", "kind": "transient"},
+            )
+
+
+def evaluate(payload, *, gate_db_path=None, kanban_db_path):
     """Promote the current-head card on CI success; wake the fixer on failure.
 
     Returns the webhook ``(should_continue, transformed)`` tuple: ``(False,
@@ -70,6 +104,7 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
 
     gate = _open_gate(gate_db_path)
     to_unblock: list[str] = []
+    to_demote: list[str] = []
     try:
         gate.execute("BEGIN IMMEDIATE")
         for pr in pr_numbers:
@@ -93,15 +128,22 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
                 # A non-success for this exact head invalidates any earlier green,
                 # so a card created later for this head is not promoted on creation
                 # (success -> failure -> PR must leave the card blocked). Returning
-                # the payload wakes the fixer; the reviewer card is not un-promoted.
+                # the payload wakes the fixer.
                 gate.execute(
                     "DELETE FROM green WHERE repo = ? AND pr = ? AND head_sha = ?",
                     (repo, pr, head_sha),
                 )
-        if to_unblock:
+                # And if a card for the CURRENT head was already promoted on an earlier
+                # success(H) and is still unclaimed, un-queue it (demote ready->blocked):
+                # CI just went red on the head it would review.
+                if latest == head_sha and task_id:
+                    to_demote.append(task_id)
+        if to_unblock or to_demote:
             with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
                 for task_id in to_unblock:
                     kanban_db.unblock_task(kconn, task_id)
+                for task_id in to_demote:
+                    _demote(kconn, task_id)
         gate.execute("COMMIT")
     except Exception:
         gate.execute("ROLLBACK")
@@ -110,12 +152,6 @@ def evaluate(payload, *, gate_db_path, kanban_db_path):
         gate.close()
 
     return (not success), (None if success else payload)
-
-
-def _default_gate_db_path() -> str:
-    from plugins.plugin_storage import plugin_data_dir
-
-    return str(plugin_data_dir("nv-coworker-compose") / "loop-f40-ci-gate.db")
 
 
 def _default_kanban_db_path() -> str:
@@ -136,7 +172,7 @@ def _main() -> None:
         return
     keep, transformed = evaluate(
         payload,
-        gate_db_path=_default_gate_db_path(),
+        gate_db_path=None,  # production: plugin_db("nv-coworker-compose", "loop-f40-ci-gate.db")
         kanban_db_path=_default_kanban_db_path(),
     )
     print(json.dumps(transformed) if keep and transformed is not None else "[SILENT]")

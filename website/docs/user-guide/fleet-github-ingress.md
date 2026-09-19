@@ -123,19 +123,25 @@ serialization — not delivery de-dup — is what makes the gate idempotent.
   returns `[SILENT]` — no dispatch. If a `check_suite` success for `H` already
   arrived (recorded in `green`), it promotes the new card immediately (out-of-order
   webhooks). **Re-arm per head:** when the PR re-syncs to a new head, the prior
-  head's card is retired so the dispatcher cannot review a stale head — a `blocked`
-  card is archived directly, a `ready` card is *atomically claimed then archived*
-  (if the dispatcher already claimed it, it is left running), and a card already
-  `running`/`done` is preserved (its review is in flight or finished).
+  head's card is retired so the dispatcher cannot review a stale head — a single
+  status-guarded `UPDATE` archives it only while it is `blocked` or `ready`, which
+  serializes with the dispatcher's own guarded claim (`ready → running`) under
+  SQLite single-writer, so a card the dispatcher already claimed (`running`) or a
+  finished one (`done`) is left untouched (its review is in flight or done).
 - **`check_gate.py`** (on `gh-check-suite`) — for a `completed` suite at head `H`:
   on `conclusion == success` it records `H` in `green` and, if `H` is the PR's
   current head, promotes that head's card `blocked → ready` (the ordinary kanban
   dispatcher then spawns `hermes -p reviewer chat -q` in the reviewer's sandbox),
   staying `[SILENT]`. A **stale-head** success (H is not the current head) does not
   promote. A **non-success** deletes any earlier `green` for that exact head (so a
-  `success → failure → PR` sequence leaves the card blocked) and **returns the
-  payload**, which wakes the fixer through this route's prompt. The route is thus
-  silent on green (no needless fixer wake) and wakes the fixer only on red.
+  `success → failure → PR` sequence leaves the card blocked), and — if `H` is the PR's
+  current head and its card was already promoted on an earlier `success(H)` but not yet
+  claimed — **demotes that card `ready → blocked`** (a status-guarded `UPDATE` that no-ops
+  once the dispatcher has claimed it, so a running review finishes under the Orchestrator's
+  merge gate; a sticky-block event keeps `recompute_ready` from re-promoting it), upholding
+  "review only on green for the current head". It then **returns the payload**, which wakes
+  the fixer through this route's prompt. The route is thus silent on green (no needless
+  fixer wake) and wakes the fixer only on red.
 
 **Single-authoritative-`check_suite` assumption.** The gate treats
 `check_suite.conclusion == success` as the aggregate CI-green signal — GitHub's

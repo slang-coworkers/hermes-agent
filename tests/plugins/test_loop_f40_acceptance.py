@@ -133,12 +133,14 @@ def _card_by_key(kanban_db_path, key):
         con.close()
 
 
-def _pr_event(action, head_sha, pr=PR):
+def _pr_event(action, head_sha, pr=PR, updated_at="2026-01-01T00:00:00Z"):
+    # updated_at defaults to a fixed stamp so the ordering guard (strictly-older ignored)
+    # never trips for equal-timestamp events; the ordering-guard arm passes explicit values.
     return {
         "action": action,
         "repository": {"full_name": REPO},
         "number": pr,
-        "pull_request": {"number": pr, "head": {"sha": head_sha}},
+        "pull_request": {"number": pr, "head": {"sha": head_sha}, "updated_at": updated_at},
     }
 
 
@@ -297,6 +299,16 @@ def test_ac_loop_f40_2(tmp_path, monkeypatch):
     assert latest is not None and latest[0] == SHA_A
     assert latest[1] == _card_id(kanban_db, _key(SHA_A))
 
+    # The parked card must survive the dispatcher's promotion sweep: it was created
+    # sticky-blocked atomically with its `blocked` event, so recompute_ready leaves
+    # it blocked (a card blocked WITHOUT a sticky event would be auto-promoted to
+    # ready, defeating the CI gate).
+    from hermes_cli import kanban_db as _kdb
+
+    with _kdb.connect_closing(db_path=Path(kanban_db)) as _kconn:
+        _kdb.recompute_ready(_kconn)
+    assert _card_by_key(kanban_db, _key(SHA_A)) == ("blocked", REVIEWER)
+
     barrier = threading.Barrier(2)
     results = []
 
@@ -401,14 +413,51 @@ def test_ac_loop_f40_3(tmp_path, monkeypatch):
     assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#111:{sha_g}")[0] == "done"
     assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#111:{sha_h}")[0] == "blocked"
 
+    # a non-success for the CURRENT head demotes an already-ready, unclaimed card back to
+    # blocked (upholds "review only on green for the current head").
+    sha_k = "5" * 40
+    gate.evaluate(_pr_event("opened", sha_k, pr=120), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    check.evaluate(_check_suite("success", sha_k, pr=120), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#120:{sha_k}") == ("ready", REVIEWER)
+    check.evaluate(_check_suite("failure", sha_k, pr=120), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#120:{sha_k}")[0] == "blocked"
+    # The demoted card must ALSO survive recompute_ready: the demote writes a sticky-block
+    # event, so a dispatcher promotion sweep leaves it blocked (without it the card would be
+    # auto-re-promoted, silently re-queuing the reviewer on the red head).
+    from hermes_cli import kanban_db as _kdb
+
+    with _kdb.connect_closing(db_path=Path(kanban_db)) as _kconn:
+        _kdb.recompute_ready(_kconn)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#120:{sha_k}") == ("blocked", REVIEWER)
+
+    # a card already CLAIMED (running) for the current head is left alone on a red (guard no-ops).
+    sha_m = "6" * 40
+    gate.evaluate(_pr_event("opened", sha_m, pr=121), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    check.evaluate(_check_suite("success", sha_m, pr=121), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    _set_status(kanban_db, f"loop-f40-review:{REPO}#121:{sha_m}", "running")
+    check.evaluate(_check_suite("failure", sha_m, pr=121), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#121:{sha_m}")[0] == "running"
+
+    # out-of-order guard: a redelivered older pull_request (strictly-older updated_at) for a
+    # superseded head is ignored — the current head's card is neither archived nor superseded.
+    sha_bb, sha_aa = "7" * 40, "8" * 40
+    gate.evaluate(_pr_event("synchronize", sha_bb, pr=130, updated_at="2026-02-02T00:00:00Z"), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    gate.evaluate(_pr_event("opened", sha_aa, pr=130, updated_at="2026-01-01T00:00:00Z"), gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#130:{sha_bb}") == ("blocked", REVIEWER)
+    assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#130:{sha_aa}") is None
+
     con = sqlite3.connect(gate_db)
     try:
         prs = [r[0] for r in con.execute(
             "SELECT pr FROM pr_gate WHERE repo = ? ORDER BY pr", (REPO,)
         ).fetchall()]
+        latest_130 = con.execute(
+            "SELECT latest_head_sha FROM pr_gate WHERE repo = ? AND pr = ?", (REPO, 130)
+        ).fetchone()
     finally:
         con.close()
-    assert prs == [PR, 55, 77, 88, 99, 111]
+    assert prs == [PR, 55, 77, 88, 99, 111, 120, 121, 130]
+    assert latest_130 is not None and latest_130[0] == sha_bb
 
 
 def _set_status(kanban_db_path, key, status):
@@ -472,3 +521,17 @@ def test_pr_ci_gate_subprocess_contract(tmp_path, monkeypatch):
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[SILENT]"
     assert _card_by_key(str(kanban_db), _key(SHA_A)) == ("blocked", REVIEWER)
+
+    # The gate store must resolve through the sanctioned plugin_db API under HERMES_HOME
+    # (<home>/plugin-data/<plugin>/<file>), not an ad-hoc path — assert the DB landed there
+    # and carries the pr_gate row the run wrote.
+    gate_file = Path(env["HERMES_HOME"]) / "plugin-data" / PLUGIN_KEY / "loop-f40-ci-gate.db"
+    assert gate_file.is_file(), f"gate DB not resolved under plugin-data: {gate_file}"
+    con = sqlite3.connect(str(gate_file))
+    try:
+        row = con.execute(
+            "SELECT latest_head_sha FROM pr_gate WHERE repo = ? AND pr = ?", (REPO, PR)
+        ).fetchone()
+    finally:
+        con.close()
+    assert row is not None and row[0] == SHA_A
