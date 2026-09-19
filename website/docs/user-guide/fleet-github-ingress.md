@@ -49,7 +49,7 @@ coworker enabling any port-binding platform.
 
 ## The canonical O1 route set
 
-The fleet authors these five routes into the DEFAULT profile's
+The fleet authors these six routes into the DEFAULT profile's
 `default_config.platforms.webhook.extra.routes`. The machine-checked source of
 truth for this contract is the `CANONICAL_ROUTES` constant in
 `tests/plugins/test_ch_f52_github_routing_acceptance.py`; the acceptance fixture
@@ -58,13 +58,20 @@ and the test asserts the fixture's *rendered* output against that constant. The
 table below is explanatory only — it is not what the test inspects, so keep it in
 sync with `CANONICAL_ROUTES` during review:
 
-| route name | `profile` | `events` | `action` filter admits | mention filter |
+| route name | `profile` | `events` | `action` filter admits | route extras |
 |---|---|---|---|---|
-| `gh-issues` | orchestrator | `[issues]` | `[opened, reopened]` | — |
-| `gh-issue-comment` | orchestrator | `[issue_comment]` | `[created]` | `comment.body` contains the bot mention |
-| `gh-pull-request` | reviewer | `[pull_request]` | `[opened, reopened, synchronize, ready_for_review]` | — |
-| `gh-pr-review` | fixer | `[pull_request_review]` | `[submitted]` | — |
-| `gh-check-suite` | fixer | `[check_suite]` | `[completed]` | — |
+| `gh-issues` | orchestrator | `[issues]` | `[opened, reopened]` | prompt + skills |
+| `gh-issue-comment` | orchestrator | `[issue_comment]` | `[created]` | mention filter + prompt + skills |
+| `gh-pull-request` | reviewer | `[pull_request]` | `[opened, reopened, synchronize, ready_for_review]` | **`script: pr_ci_gate.py`, no prompt** (CI-gated — parks a card, stays `[SILENT]`) |
+| `gh-pr-review` | fixer | `[pull_request_review]` | `[submitted]` | prompt + skills |
+| `gh-check-suite` | fixer | `[check_suite]` | `[completed]` | **`script: check_gate.py`** + prompt (promotes on green, wakes the fixer on red) |
+| `gh-pr-review-invite` | reviewer | `[issue_comment]` | `[created]` | mention filter + `deliver: github_comment` + `toolsets: [terminal, hermes-webhook]` |
+
+The two `pull_request`/`check_suite` routes are **CI-gated** (LOOP-F40): a
+`pull_request` delivery does not dispatch a reviewer directly — it parks a per-head
+review card and stays silent until a `check_suite` success promotes it. The
+`gh-pr-review-invite` route is the **human-invited post-back**. Both are detailed
+in [The CI-gate](#the-ci-gate-per-head-park--promote-loop-f40) below.
 
 Each route additionally carries:
 
@@ -80,10 +87,13 @@ Each route additionally carries:
   catch an unprovisioned one.
 - **A `prompt` template** over the payload, referencing fields such as
   `{repository.full_name}`, `{issue.number}`, or `{pull_request.title}`. Payload
-  fields are dot-addressable; `{__raw__}` dumps the whole payload.
+  fields are dot-addressable; `{__raw__}` dumps the whole payload. The one
+  exception is the CI-gated `gh-pull-request` route: it carries **no** prompt,
+  because its `script` returns `[SILENT]` and it never dispatches on the event.
 - **A non-empty `skills` list** — the fleet skills injected for that event class
   (triage, review, CI investigation). The exact skill names are fleet policy;
-  substitute your own.
+  substitute your own. (The CI-gated `gh-pull-request` route carries neither
+  prompt nor skills.)
 
 The `action` filter is a declarative `filters` entry
 (`{field: action, in: [...]}`); the mention gate on `gh-issue-comment` adds a
@@ -91,6 +101,86 @@ second filter `{field: comment.body, contains: "@<your-bot-handle>"}`. Filters i
 a list are ANDed. The event→profile split is the fleet's canonical mapping;
 per-bot comment routes follow the same shape (one route per bot at its
 `/p/<bot>/` prefix, each filtering on that bot's own mention).
+
+## The CI-gate: per-head park → promote (LOOP-F40)
+
+The reviewer is **queued, not spawned**, on a `pull_request` event, and only
+released once CI is green for the PR's current head. Two rendered route scripts
+under the DEFAULT profile's `scripts/` (installed to `$HERMES_HOME/scripts/`)
+drive this; they share a small SQLite gate store opened via
+`plugin_db("nv-coworker-compose", "loop-f40-ci-gate.db")` with two tables:
+`pr_gate(repo, pr, latest_head_sha, current_task_id, …)` (one row per PR, the
+current head and its card) and `green(repo, pr, head_sha)` (heads CI has passed).
+Each script acquires the gate DB write lock with `BEGIN IMMEDIATE` before it reads
+or mutates, so concurrent duplicate deliveries cannot create two cards or lose a
+head update. Route scripts run **before** the `X-GitHub-Delivery` de-dup, so this
+serialization — not delivery de-dup — is what makes the gate idempotent.
+
+- **`pr_ci_gate.py`** (on `gh-pull-request`) — for `opened`/`reopened`/`synchronize`/
+  `ready_for_review` at head `H`: it upserts `pr_gate.latest_head_sha = H`, creates
+  a **blocked** review card assigned to the reviewer, idempotency-keyed
+  `loop-f40-review:{repo}#{pr}:{H}` (a duplicate delivery reuses the same card), and
+  returns `[SILENT]` — no dispatch. If a `check_suite` success for `H` already
+  arrived (recorded in `green`), it promotes the new card immediately (out-of-order
+  webhooks). **Re-arm per head:** when the PR re-syncs to a new head, the prior
+  head's card is retired so the dispatcher cannot review a stale head — a single
+  status-guarded `UPDATE` archives it only while it is `blocked` or `ready`, which
+  serializes with the dispatcher's own guarded claim (`ready → running`) under
+  SQLite single-writer, so a card the dispatcher already claimed (`running`) or a
+  finished one (`done`) is left untouched (its review is in flight or done).
+- **`check_gate.py`** (on `gh-check-suite`) — for a `completed` suite at head `H`:
+  on `conclusion == success` it records `H` in `green` and, if `H` is the PR's
+  current head, promotes that head's card `blocked → ready` (the ordinary kanban
+  dispatcher then spawns `hermes -p reviewer chat -q` in the reviewer's sandbox),
+  staying `[SILENT]`. A **stale-head** success (H is not the current head) does not
+  promote. A **non-success** deletes any earlier `green` for that exact head (so a
+  `success → failure → PR` sequence leaves the card blocked), and — if `H` is the PR's
+  current head and its card was already promoted on an earlier `success(H)` but not yet
+  claimed — **demotes that card `ready → blocked`** (a status-guarded `UPDATE` that no-ops
+  once the dispatcher has claimed it, so a running review finishes under the Orchestrator's
+  merge gate; a sticky-block event keeps `recompute_ready` from re-promoting it), upholding
+  "review only on green for the current head". It then **returns the payload**, which wakes
+  the fixer through this route's prompt. The route is thus silent on green (no needless
+  fixer wake) and wakes the fixer only on red.
+
+**Single-authoritative-`check_suite` assumption.** The gate treats
+`check_suite.conclusion == success` as the aggregate CI-green signal — GitHub's
+`check_suite` aggregates its `check_run`s. Where a repo runs multiple independent
+suites, narrow the route's filter to the authoritative app/suite; `check_run` is
+intentionally **not** the promote trigger.
+
+**Ordering.** Out-of-order `check_suite`-vs-`pull_request` is handled by the
+`green` table (a success recorded before the card exists promotes it on creation).
+Out-of-order `pull_request`-vs-`pull_request` is handled best-effort: real GitHub
+payloads carry `pull_request.updated_at`, and a delivery that is strictly older
+than the last one processed for that PR is ignored (it cannot reset the head or
+retire the current card). Payloads without `updated_at` fall back to
+last-write-wins.
+
+**This is a review QUEUE, not a merge gate.** LOOP-F40 only decides *when* to
+queue the reviewer (once CI is green for the current head). Merge correctness
+remains the Orchestrator's gate; nothing here merges, and the reviewer's verdict
+routes through the board as usual.
+
+### Human-invited post-back (`gh-pr-review-invite`)
+
+A human can pull the reviewer into a PR by mentioning it in a comment. The
+`gh-pr-review-invite` route fires only when a comment on a PR
+(`issue.pull_request` present) is authored by a real person
+(`comment.user.type == User`), is not the reviewer bot's own comment
+(`comment.user.login != <reviewer-bot-login>`), and boundary-mentions the reviewer
+handle (a `regex` filter, so `@slang-reviewer-evil` does **not** match). It grants
+`toolsets: [terminal, hermes-webhook]` because the webhook default toolset
+`hermes-webhook` carries no `terminal`, and the invoked reviewer needs to shell the
+**read-only** `gh pr diff` to read the change. The review is posted back by the
+route's own `deliver: github_comment`.
+
+The authorization boundary here is the **declarative route filter** (a human's
+mention), not LOOP-F37's `pre_tool_call` veto. The veto governs the separate
+*autonomous* shell write path (`gh pr comment|review` invoked by a model); granting
+this route `terminal` does not open that path — the read-only `gh pr diff` is
+unaffected, and the human-visible post-back is the route's host-side delivery, not
+the reviewer shelling `gh pr comment`.
 
 ## Install path — static rendered config, not `hermes webhook subscribe`
 
@@ -113,6 +203,21 @@ Static routes are loaded from the DEFAULT profile's `config.yaml` when the gatew
 starts; only *dynamic* subscriptions hot-reload per request. So a change to the
 rendered route set (re-running the compose render, or editing `config.yaml`) takes
 effect only on the next DEFAULT-gateway restart/redeploy.
+
+**Deploying the DEFAULT profile (and its route scripts).** `hermes onboard
+coworker` installs **coworker** profiles only; it does not deploy the DEFAULT
+(multiplexer) profile. The operator must place the rendered `default/config.yaml`
+**and** `default/scripts/*` (the CI-gate route scripts) into the gateway's
+`$HERMES_HOME` and restart the gateway. The compose renderer declares `scripts` in
+the DEFAULT profile's `distribution.yaml` `distribution_owned` set, so
+`hermes profile install` copies `scripts/` into `$HERMES_HOME/scripts/`, where the
+webhook adapter's script resolver looks up a route's `script:` by name. `scripts/`
+is a distribution-owned **directory**, exactly like the already-owned `skills/`,
+`cron/`, and `skill-bundles/`: an install/update replaces an owned directory
+wholesale (`_copy_dist_payload` rmtree-then-copytree, `hermes_cli/profile_distribution.py`).
+So the DEFAULT (multiplexer) profile owns its `scripts/` dir end-to-end — keep any
+custom operator scripts outside it (or re-add them after an install), the same
+rule that already applies to `skills/` and `cron/`.
 
 ## Endpoints
 
@@ -188,13 +293,20 @@ positive path to GOV-F25.
 ## Post-backs: use the owning bot's own identity, not `github_comment`
 
 The webhook platform's `deliver: github_comment` shells `gh` **on the gateway
-host** to post a comment. Do **not** use it for attributable fleet post-backs: a
-comment posted from the gateway host is attributed to the gateway's principal, not
-to the coworker that did the work. Attributable post-backs are the owning bot's
-**own** `gh` call, made inside that bot's sandbox under its own identity.
-`github_comment` is reserved for **unattributed** notices — a post for which
-gateway-host attribution is acceptable — and none of the five canonical O1 routes
-uses it.
+host** to post a comment. Do **not** use it for *autonomous* attributable fleet
+post-backs: a comment posted from the gateway host is attributed to the gateway's
+principal, not to the coworker that did the work. Attributable **autonomous**
+post-backs are the owning bot's **own** `gh` call, made inside that bot's sandbox
+under its own identity (and gated by LOOP-F37's veto).
+
+`github_comment` is reserved for the **human-requested** post-back — the single
+`gh-pr-review-invite` route (LOOP-F40) — and for unattributed notices. The
+human's mention is the authorization, so gateway-host attribution is acceptable
+there: a person explicitly asked for this specific review. **This is the one
+canonical route permitted to carry `deliver: github_comment`**; the autonomous O1
+ingress routes (`gh-issues`, `gh-issue-comment`, `gh-pull-request`, `gh-pr-review`,
+`gh-check-suite`) remain barred from it, and the acceptance test asserts exactly
+that split.
 
 ## See also
 

@@ -4,9 +4,9 @@ The canonical GitHub ingress route set is authored into the DEFAULT (multiplexer
 default_config and rendered by nv-coworker-compose into platforms.webhook.extra.routes; the built-in
 WebhookAdapter routes each signed delivery to its bound profile. This suite proves (a) the rendered
 route contract against the ADR-pinned CANONICAL_ROUTES and (b) end-to-end routing by feeding the
-RENDERED routes into the core adapter, so a config key that no reader consumes cannot pass. No new
-plugin/render code exists; the canonical route fixture is the CONFIGURE deliverable under test. It is
-a conformance test for that new fixture on already-capable core (the runbook is reviewed separately).
+RENDERED routes into the core adapter, so a config key that no reader consumes cannot pass. The
+canonical route fixture and the CI-gate route scripts are CONFIGURE artifacts rendered by
+nv-coworker-compose onto already-capable core; the runbook is reviewed separately.
 """
 
 import asyncio
@@ -44,13 +44,26 @@ CANONICAL_ROUTES = {
                   "action_admits": ["opened", "reopened"], "sentinel": "slang-coworkers/repo-issues"},
     "gh-issue-comment": {"profile": "orchestrator", "events": ["issue_comment"],
                          "action_admits": ["created"], "sentinel": "slang-coworkers/repo-comment"},
+    # LOOP-F40 gated reviewer route: carries the CI-gate script and NO prompt —
+    # pr_ci_gate.py parks a blocked review card and returns [SILENT]; it never
+    # dispatches a run on the pull_request event itself.
     "gh-pull-request": {"profile": "reviewer", "events": ["pull_request"],
                         "action_admits": ["opened", "reopened", "synchronize", "ready_for_review"],
-                        "sentinel": "slang-coworkers/repo-pr"},
+                        "sentinel": "slang-coworkers/repo-pr",
+                        "script": "pr_ci_gate.py", "prompt_required": False},
     "gh-pr-review": {"profile": "fixer", "events": ["pull_request_review"],
                      "action_admits": ["submitted"], "sentinel": "slang-coworkers/repo-review"},
+    # LOOP-F40: check_gate.py promotes the current-head card on a CI success
+    # ([SILENT]) and returns the payload on a non-success, so the fixer prompt
+    # still dispatches on red — the route carries both its prompt and the script.
     "gh-check-suite": {"profile": "fixer", "events": ["check_suite"],
-                       "action_admits": ["completed"], "sentinel": "slang-coworkers/repo-check"},
+                       "action_admits": ["completed"], "sentinel": "slang-coworkers/repo-check",
+                       "script": "check_gate.py"},
+    # LOOP-F40 human-invited post-back: the ONE route permitted to carry
+    # deliver: github_comment (AC-CH-F52-3 is relaxed for exactly this route).
+    "gh-pr-review-invite": {"profile": "reviewer", "events": ["issue_comment"],
+                            "action_admits": ["created"], "sentinel": "slang-coworkers/repo-invite",
+                            "deliver": "github_comment"},
 }
 
 
@@ -121,11 +134,18 @@ def _assert_route_contract(routes, name):
     assert route["events"] == spec["events"]
     assert set(_action_filter(route)["in"]) == set(spec["action_admits"])
     assert isinstance(route["secret"], str) and route["secret"]
-    assert isinstance(route["prompt"], str) and route["prompt"].strip()
-    # The prompt must template the payload, not hard-code a value: the behaviour
-    # tests post repository.full_name and require it in the dispatched text.
-    assert "{repository.full_name}" in route["prompt"]
-    assert isinstance(route["skills"], list) and route["skills"]
+    if spec.get("script"):
+        # LOOP-F40: a CI-gate route's contract is the script name, not a prompt.
+        assert route.get("script") == spec["script"]
+    if spec.get("prompt_required", True):
+        assert isinstance(route["prompt"], str) and route["prompt"].strip()
+        # The prompt must template the payload, not hard-code a value: the behaviour
+        # tests post repository.full_name and require it in the dispatched text.
+        assert "{repository.full_name}" in route["prompt"]
+        assert isinstance(route["skills"], list) and route["skills"]
+    else:
+        # A [SILENT] gated route must NOT carry an immediate-dispatch prompt.
+        assert not route.get("prompt")
     return route
 
 
@@ -194,25 +214,28 @@ def test_ac_ch_f52_1(tmp_path, monkeypatch):
 @pytest.mark.parametrize("name", ["gh-pull-request", "gh-pr-review", "gh-check-suite"])
 def test_ac_ch_f52_2(tmp_path, monkeypatch, name):
     """The rendered DEFAULT-profile config declares pull-request -> reviewer and review + check ->
-    fixer, each with its own non-empty secret, its exact events + action filter, a non-empty prompt
-    and a non-empty skills list."""
+    fixer, each with its own non-empty secret and its exact events + action filter. gh-pull-request
+    is a gated route (script pr_ci_gate.py, no prompt); gh-check-suite carries check_gate.py and its
+    fixer-wake prompt; gh-pr-review is a bare prompt route."""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     _assert_route_contract(routes, name)
 
 
 # ─────────────────────────── AC-CH-F52-3 ───────────────────────────
 def test_ac_ch_f52_3(tmp_path, monkeypatch):
-    """No canonical O1 ingress route uses deliver: github_comment — attributable post-backs are the
-    owning bot's own gh; github_comment is reserved for unattributed notices."""
+    """No AUTONOMOUS O1 ingress route uses deliver: github_comment. The single human-invited
+    gh-pr-review-invite route is the sole exception (authorized by the human's mention, a declarative
+    route filter); every other route is barred — attributable autonomous post-backs are the owning
+    bot's own gated gh."""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     offenders = [name for name, r in routes.items() if r.get("deliver") == "github_comment"]
-    assert offenders == []
+    assert offenders == ["gh-pr-review-invite"]
 
 
 # ─────────────────────────── AC-CH-F52-4 ───────────────────────────
 def test_ac_ch_f52_4(tmp_path, monkeypatch):
     """The DEFAULT ingress is complete and isolated: the rendered route-name set equals exactly the
-    five canonical routes, their secrets are pairwise distinct, the DEFAULT webhook platform is
+    six canonical routes, their secrets are pairwise distinct, the DEFAULT webhook platform is
     enabled, and no coworker profile declares a webhook route or enables the webhook platform."""
     rendered, routes = _rendered_default_routes(tmp_path, monkeypatch)
     assert set(routes) == set(CANONICAL_ROUTES)
@@ -255,14 +278,13 @@ async def test_ac_ch_f52_5(tmp_path, monkeypatch):
 # ─────────────────────────── AC-CH-F52-6 ───────────────────────────
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,event,action", [
-    ("gh-pull-request", "pull_request", "opened"),
     ("gh-pr-review", "pull_request_review", "submitted"),
-    ("gh-check-suite", "check_suite", "completed"),
 ])
 async def test_ac_ch_f52_6(tmp_path, monkeypatch, name, event, action):
-    """A signed delivery for each PR/review/check route POSTed to its bound /p/<profile>/ endpoint
-    dispatches exactly one run to the expected profile (pull_request -> reviewer; review, check ->
-    fixer) with the route prompt rendered over the payload."""
+    """A signed delivery for a bare prompt route POSTed to its bound /p/<profile>/ endpoint
+    dispatches exactly one run to the expected profile (pull_request_review -> fixer) with the route
+    prompt rendered over the payload. (The CI-gated pull_request and check_suite routes are covered by
+    test_ac_ch_f52_6_gated.)"""
     _, routes = _rendered_default_routes(tmp_path, monkeypatch)
     route = routes[name]
     profile = CANONICAL_ROUTES[name]["profile"]
@@ -278,6 +300,46 @@ async def test_ac_ch_f52_6(tmp_path, monkeypatch, name, event, action):
     assert len(captured) == 1
     assert captured[0].source.profile == profile
     assert sentinel in captured[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,event,action,conclusion,profile,expect_dispatch", [
+    ("gh-pull-request", "pull_request", "opened", None, "reviewer", False),
+    ("gh-check-suite", "check_suite", "completed", "failure", "fixer", True),
+])
+async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, action, conclusion, profile, expect_dispatch):
+    """The two CI-gated routes run their rendered route script (installed at $HERMES_HOME/scripts)
+    end-to-end through the adapter subprocess: a pull_request delivery parks a card and stays silent
+    (200 ignored, no dispatch); a failed check_suite delivery returns the payload and dispatches the
+    fixer (202, one run). This exercises the __main__ shim; the park/promote gate state transitions
+    are proven directly in test_loop_f40_acceptance."""
+    import os
+    import shutil as _sh
+
+    rendered, routes = _rendered_default_routes(tmp_path, monkeypatch)
+    route = routes[name]
+    assert route.get("script")  # the CI-gate script is what makes this route gated
+    # Install the rendered scripts where the webhook resolver looks them up.
+    _sh.copytree(Path(rendered[DEFAULT_PROFILE]) / "scripts", Path(os.environ["HERMES_HOME"]) / "scripts")
+    sentinel = CANONICAL_ROUTES[name]["sentinel"]
+    app, captured = _multiplex_app(monkeypatch, tmp_path, routes)
+    payload = {"action": action, "repository": {"full_name": sentinel},
+               "pull_request": {"number": 4242, "head": {"sha": "a" * 40}},
+               "check_suite": {"conclusion": conclusion, "head_sha": "a" * 40,
+                               "pull_requests": [{"number": 4242}]}}
+    body = json.dumps(payload).encode()
+    async with TestClient(TestServer(app)) as cli:
+        resp = await _post(cli, f"/p/{profile}/webhooks/{name}", body, event, route["secret"], delivery=f"gated-{name}")
+        if expect_dispatch:
+            assert resp.status == 202
+            await _await_dispatch(captured, 1)
+            assert len(captured) == 1
+            assert captured[0].source.profile == profile
+        else:
+            assert resp.status == 200
+            assert (await resp.json()).get("status") == "ignored"
+            await asyncio.sleep(0.05)
+            assert captured == []
 
 
 # ─────────────────────────── AC-CH-F52-7 ───────────────────────────
