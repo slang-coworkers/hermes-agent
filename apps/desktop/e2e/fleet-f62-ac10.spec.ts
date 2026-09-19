@@ -70,9 +70,11 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
       await expect(page.getByRole('tab', { name: /review-room/ }).filter({ visible: true }).first()).toBeVisible()
     },
 
-    // Step 4 — the Kanban board loads over the single gateway with a 200 and empty state.
-    afterKanbanBoard: async (page, boardResponse) => {
-      expect(boardResponse.status(), 'GET /api/plugins/kanban/board returned 200').toBe(200)
+    // Step 4 — the Kanban board renders over the single gateway connection. The board's
+    // data fetch is ctx.rest (IPC-tunneled to the gateway, not a renderer HTTP GET), so
+    // the empty-state content proves a successful fetch — a failed fetch shows an error,
+    // not "No tasks on this board".
+    afterKanbanBoard: async page => {
       await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
       await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
     }

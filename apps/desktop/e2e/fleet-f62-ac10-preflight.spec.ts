@@ -44,8 +44,11 @@ test('FLEET-F62 desktop navigation preflight (uncounted): the shared driveFleetF
         'at least one coworker face rendered in the roster'
       ).toBeVisible()
     },
-    afterKanbanBoard: async (_page, boardResponse) => {
-      expect(boardResponse, 'a Kanban board response was received').toBeTruthy()
+    afterKanbanBoard: async page => {
+      await expect(
+        page.getByRole('heading', { name: 'Kanban', level: 1 }),
+        'the Kanban board view mounted'
+      ).toBeVisible()
     }
   })
 })

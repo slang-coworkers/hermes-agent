@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { ElectronApplication, Response } from '@playwright/test'
+import type { ElectronApplication } from '@playwright/test'
 
 import {
   buildAppEnv,
@@ -59,7 +59,7 @@ export function rowNameRegex(title: string, handle: string): RegExp {
 export interface FleetF62NavCheckpoints {
   afterBotsRoster?: (page: Page) => Promise<void>
   afterRooms?: (page: Page) => Promise<void>
-  afterKanbanBoard?: (page: Page, boardResponse: Response) => Promise<void>
+  afterKanbanBoard?: (page: Page) => Promise<void>
 }
 
 // ─── Seeding (identical fixture for both specs) ──────────────────────────
@@ -259,25 +259,15 @@ async function activateSessions(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 30_000 })
 }
 
-/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch and
- *  navigate to its board. The board-response listener is armed BEFORE the enable click:
- *  enabling mounts the sidebar KanbanCount, which issues the single boardKey(slug,false)
- *  GET the query client then caches for 60s (query-client.ts:10), so a listener armed
- *  only around the nav click could miss the one real request and hang. */
-async function openKanbanBoard(page: Page): Promise<Response> {
+/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
+ *  dismiss the Settings overlay, bring the Sessions pane forward (where the Kanban nav
+ *  registers reactively) and open the board. */
+async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
   })
   const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })
-
-  const boardResponsePromise = page.waitForResponse(
-    response =>
-      response.request().method() === 'GET' &&
-      /\/api\/plugins\/kanban\/board(?:\?|$)/.test(response.url()),
-    { timeout: 60_000 }
-  )
-
   await enableKanban.click()
   // The nav registers reactively once the switch reads "Disable Kanban" (no reload).
   await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
@@ -286,11 +276,11 @@ async function openKanbanBoard(page: Page): Promise<Response> {
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
   await kanbanNav.click()
-  // Reachability ends at the board GET completing; the board's rendered content
-  // (heading, empty state, 200) is a counted assertion the counted spec owns.
-  const boardResponse = await boardResponsePromise
-
-  return boardResponse
+  // Reachability = the board view mounts. The board's data fetch is the plugin SDK's
+  // ctx.rest, tunneled to the gateway over Electron IPC — NOT a renderer HTTP request
+  // (the renderer's only kanban traffic is the ws /events stream), so page.waitForResponse
+  // never observes a board GET. Wait on the rendered board heading instead.
+  await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 60_000 })
 }
 
 /** Drive the full counted-order FLEET-F62 desktop navigation, taking one screenshot per
@@ -313,7 +303,7 @@ export async function driveFleetF62Nav(
   await openOrchestratorChat(page)
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
 
-  const boardResponse = await openKanbanBoard(page)
+  await openKanbanBoard(page)
   await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })
-  await checkpoints.afterKanbanBoard?.(page, boardResponse)
+  await checkpoints.afterKanbanBoard?.(page)
 }
