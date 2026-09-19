@@ -20,6 +20,7 @@ def register(ctx) -> None:
     oneclient.configure(
         gateway_api_base_url=ctx.get_config("gateway_api_base_url"),
         api_key_env=api_key_env,
+        insecure_no_auth_origins=ctx.get_config("insecure_no_auth_origins", []),
     )
     ctx.register_secret_source(OneCLISecretSource(api_key_env=api_key_env))
     ctx.register_hook("on_session_start", reconcile_identity)
