@@ -2,35 +2,19 @@ import { type MockBackendFixture } from './fixtures'
 import { bootFleetDesktop, driveFleetF62Nav } from './fleet-f62-ac10.helpers'
 import { expect, test } from './test'
 
-// FLEET-F62 desktop navigation preflight (R5-1, UNCOUNTED — NOT an AC id).
+// FLEET-F62 desktop navigation preflight (uncounted — NOT an AC id).
 //
-// Purpose: prove the full shared driveFleetF62Nav path completes MECHANICALLY on this
-// head before the counted AC-FLEET-F62-10 runs, so a new nav bug cannot first surface
-// mid-counted-run and burn the final round. It drives the SAME driveFleetF62Nav helper
-// as fleet-f62-ac10.spec.ts (they cannot drift) but passes mechanical-only checkpoints
-// and holds NONE of the counted criteria (exact-five roster, the title↔handle regex, the
-// rooms' membership, the board status, one gateway stay ONLY in the counted spec).
+// Drives the SAME driveFleetF62Nav path as the counted fleet-f62-ac10.spec.ts (they
+// cannot drift) with mechanical-only checkpoints, so a nav bug surfaces here rather than
+// mid-counted-run. It holds NONE of the counted criteria. State isolation:
+// bootFleetDesktop('fleet-f62-ac10-preflight') uses a fresh disposable sandbox root
+// distinct from the counted spec's (both HERMES_HOME and HERMES_DESKTOP_USER_DATA_DIR),
+// destroyed in afterAll, so nothing carries into the counted AC-10.
 //
-// State isolation (R5-1): bootFleetDesktop('fleet-f62-ac10-preflight') creates a FRESH
-// disposable sandbox root distinct from the counted spec's, holding both HERMES_HOME and
-// HERMES_DESKTOP_USER_DATA_DIR; afterAll closes the app + gateway and destroys the whole
-// root, so no room DB, plugin-decision/localStorage or connection carries into the
-// counted AC-10.
-//
-// Operational classification (R5-3, fail-closed — the tester's rubric, mirrored here so
-// the intent is on record): a preflight failure is an uncounted in-surface
-// DRIVER-PREFLIGHT FAIL (fixed in apps/desktop/e2e/** and re-run) ONLY when its root cause
-// is a PROVEN test-driver defect — a FIXTURE failure proven by pre-launch fs/schema
-// validation BEFORE product ingestion, or a SELECTOR/ACTIONABILITY failure proven by the
-// trace/screenshot PLUS an independent DOM/API probe that the correct product state
-// exists. ANY failure whose root cause is PRODUCT (an element genuinely absent because a
-// plugin failed to register, the board endpoint 500s, an incorrect product-rendered
-// state) AND any failure whose root cause is INCONCLUSIVE (that proof absent) is recorded
-// IMMEDIATELY as a COUNTED AC-FLEET-F62-10 failure. The default when unproven is COUNTED;
-// this preflight never reclassifies a product defect.
-//
-// This spec does NOT force zero retries: it is a mechanical gate, so a retry is
-// acceptable. The counted spec is the one pinned to retries: 0 (R5-5).
+// The fail-closed classification for a preflight failure (proven driver defect =>
+// uncounted; PRODUCT or inconclusive => counted AC-FLEET-F62-10) lives in the ADR
+// AC-10 §Setup and the tester hand-off. Unlike the counted spec this one does not pin
+// retries: 0 — it is a mechanical gate and may retry.
 
 let fixture: MockBackendFixture | null = null
 

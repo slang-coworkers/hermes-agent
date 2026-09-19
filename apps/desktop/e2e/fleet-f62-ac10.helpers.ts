@@ -8,6 +8,7 @@ import {
   createSandbox,
   launchDesktop,
   type MockBackendFixture,
+  type Sandbox,
   waitForAppReady,
   writeEnvFile,
   writeMockProviderConfig
@@ -16,11 +17,10 @@ import { startMockServer } from './mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 
-// Shared driver for the FLEET-F62 desktop tier (R5-1). The counted spec
-// (fleet-f62-ac10.spec.ts) and the uncounted navigation preflight
-// (fleet-f62-ac10-preflight.spec.ts) call the SAME driveFleetF62Nav here, so the
-// nav path the preflight proves is byte-for-byte the path the counted run drives —
-// a new nav bug cannot first surface mid-counted-run.
+// Shared FLEET-F62 desktop driver: the counted spec and the uncounted preflight both
+// call driveFleetF62Nav, so the nav path they exercise cannot drift apart. The driver
+// owns the nav actions and their sequencing waits; callers add any assertions via the
+// checkpoints.
 
 type Page = MockBackendFixture['page']
 
@@ -59,7 +59,6 @@ export function rowNameRegex(title: string, handle: string): RegExp {
 export interface FleetF62NavCheckpoints {
   afterBotsRoster?: (page: Page) => Promise<void>
   afterRooms?: (page: Page) => Promise<void>
-  afterOrchestratorChat?: (page: Page) => Promise<void>
   afterKanbanBoard?: (page: Page, boardResponse: Response) => Promise<void>
 }
 
@@ -133,11 +132,13 @@ function seedDefaultHidden(hermesHome: string): void {
  *  a partial-start exception closes the app + mock and destroys the root before it
  *  rethrows, so a boot failure leaks no resources or half-seeded root. */
 export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixture> {
-  const mock = await startMockServer()
-  const sandbox = createSandbox(prefix)
+  let mock: Awaited<ReturnType<typeof startMockServer>> | undefined
+  let sandbox: Sandbox | undefined
   let app: ElectronApplication | undefined
 
   try {
+    mock = await startMockServer()
+    sandbox = createSandbox(prefix)
     // The DEFAULT (launch) profile is the multiplexer host; the five coworkers are the
     // served secondaries. All six live in ONE HERMES_HOME behind ONE gateway.
     writeMockProviderConfig(sandbox.hermesHome, mock.url)
@@ -152,16 +153,23 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
     const launched = await launchDesktop(buildAppEnv(sandbox))
     app = launched.app
 
+    const boundMock = mock
+    const boundSandbox = sandbox
+
     const fixture: MockBackendFixture = {
       app: launched.app,
       page: launched.page,
-      mock,
-      mockUrl: mock.url,
-      sandbox,
+      mock: boundMock,
+      mockUrl: boundMock.url,
+      sandbox: boundSandbox,
       cleanup: async () => {
-        await launched.app.close().catch(() => undefined)
-        await mock.close()
-        sandbox.cleanup()
+        // Destroy the sandbox root even if closing the app or mock rejects.
+        try {
+          await launched.app.close().catch(() => undefined)
+          await boundMock.close().catch(() => undefined)
+        } finally {
+          boundSandbox.cleanup()
+        }
       }
     }
 
@@ -169,9 +177,13 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
 
     return fixture
   } catch (err) {
+    // Close only what was actually started, so a failure at any point leaks no Electron
+    // process, mock server, or sandbox root.
     if (app) {await app.close().catch(() => undefined)}
-    await mock.close().catch(() => undefined)
-    sandbox.cleanup()
+
+    if (mock) {await mock.close().catch(() => undefined)}
+
+    if (sandbox) {sandbox.cleanup()}
     throw err
   }
 }
@@ -214,12 +226,11 @@ async function openOrchestratorChat(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 30_000 })
 }
 
-/** Dismiss the full-viewport Settings ▸ Plugins OverlayView backdrop (fixed inset-0
- *  z-50 data-overlay-surface, overlay-view.tsx:74-104) BEFORE touching the Sessions tab:
- *  while it is open it intercepts pointer events on the panes beneath it, so a
- *  Sessions-tab click is intercepted and times out (the round-4 FAIL). Prefer the labeled
- *  Close-settings control (overlay-view.tsx:126-134), fall back to Escape
- *  (overlay-view.tsx:53-72), then await the surface's removal. */
+/** Dismiss the full-viewport Settings OverlayView (data-overlay-surface,
+ *  overlay-view.tsx:74-104) before touching the Sessions tab: while open it intercepts
+ *  pointer events on the panes beneath it, so a Sessions-tab click would be intercepted.
+ *  Prefer the labeled Close-settings control (overlay-view.tsx:126-134), fall back to
+ *  Escape (overlay-view.tsx:53-72), then await the surface's removal. */
 async function dismissSettingsOverlay(page: Page): Promise<void> {
   const closeBtn = page.getByRole('button', { name: 'Close settings' })
 
@@ -275,8 +286,9 @@ async function openKanbanBoard(page: Page): Promise<Response> {
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
   await kanbanNav.click()
+  // Reachability ends at the board GET completing; the board's rendered content
+  // (heading, empty state, 200) is a counted assertion the counted spec owns.
   const boardResponse = await boardResponsePromise
-  await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
 
   return boardResponse
 }
@@ -300,7 +312,6 @@ export async function driveFleetF62Nav(
 
   await openOrchestratorChat(page)
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
-  await checkpoints.afterOrchestratorChat?.(page)
 
   const boardResponse = await openKanbanBoard(page)
   await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })

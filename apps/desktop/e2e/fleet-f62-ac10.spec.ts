@@ -14,10 +14,8 @@ import { expect, test } from './test'
 // and room UI behind a mock provider. The nav path is owned by the shared
 // driveFleetF62Nav helper, exercised uncounted first by fleet-f62-ac10-preflight.spec.ts.
 
-// R5-5: round 5 is exactly ONE counted invocation, no patch-and-rerun. Force zero
-// retries at the file level so the counted AC-10 test runs a single attempt regardless
-// of the CLI flag or the config's CI retry — a property of the spec, not of how the
-// tester invokes playwright.
+// The counted test must not retry: a single attempt regardless of the CLI flag or the
+// config's CI retry (R5-5 — one counted invocation, no patch-and-rerun).
 test.describe.configure({ retries: 0 })
 
 let fixture: MockBackendFixture | null = null
