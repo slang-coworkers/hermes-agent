@@ -19,6 +19,10 @@ import { expect, test } from './test'
 let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
+  // Boot seeds six profiles then waits up to waitForAppReady(120s); the config's
+  // default 90s hook timeout can't cover that on a cold container, so raise it to the
+  // sibling fleet-boot budget (fleet-profile-rail.spec.ts:234).
+  test.setTimeout(240_000)
   fixture = await bootFleetDesktop('fleet-f62-ac10-preflight')
 })
 
@@ -33,19 +37,22 @@ test('FLEET-F62 desktop navigation preflight (uncounted): the shared driveFleetF
 
   // Mechanical-only checkpoints: confirm each action reached the next view without
   // asserting a counted criterion. The driver's own locators/waits (roster rendered,
-  // room tabs, Bot Chat tab, overlay dismissed, Sessions pane visible, Kanban board
-  // request + heading) are the primary proof; these callbacks add the lightest
-  // presence checks and never assert exact-five, the title↔handle binding or the board
-  // status.
+  // room tabs, Bot Chat tab, overlay dismissed, Sessions pane visible, the /kanban route
+  // registered + opened as a route tile + the board heading mounted) are the primary proof;
+  // these callbacks add the lightest presence checks and never assert exact-five, the
+  // title↔handle binding or the board status.
   await driveFleetF62Nav(page, {
     afterBotsRoster: async page => {
       await expect(
         page.locator('[data-bot-face]').first(),
         'at least one coworker face rendered in the roster'
-      ).toBeVisible()
+      ).toBeVisible({ timeout: 30_000 })
     },
-    afterKanbanBoard: async (_page, boardResponse) => {
-      expect(boardResponse, 'a Kanban board response was received').toBeTruthy()
+    afterKanbanBoard: async page => {
+      await expect(
+        page.getByRole('heading', { name: 'Kanban', level: 1 }),
+        'the Kanban board view mounted on the /kanban route'
+      ).toBeVisible()
     }
   })
 })

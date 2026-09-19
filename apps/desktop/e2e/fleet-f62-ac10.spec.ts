@@ -21,6 +21,11 @@ test.describe.configure({ retries: 0 })
 let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
+  // Boot seeds six profiles then waits up to waitForAppReady(120s); the config's
+  // default 90s hook timeout can't cover that on a cold container, so raise it to the
+  // sibling fleet-boot budget (fleet-profile-rail.spec.ts:234). Hook-scoped only — the
+  // counted test body keeps its own timeout and retries:0.
+  test.setTimeout(240_000)
   fixture = await bootFleetDesktop('fleet-f62-ac10')
 })
 
@@ -70,11 +75,16 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
       await expect(page.getByRole('tab', { name: /review-room/ }).filter({ visible: true }).first()).toBeVisible()
     },
 
-    // Step 4 — the Kanban board loads over the single gateway with a 200 and empty state.
-    afterKanbanBoard: async (page, boardResponse) => {
-      expect(boardResponse.status(), 'GET /api/plugins/kanban/board returned 200').toBe(200)
-      await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 30_000 })
-      await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 30_000 })
+    // Step 4 — the Kanban board renders over the single gateway connection on the /kanban
+    // route (the driver docked it as a route tile and already asserted the board
+    // heading mounted). The data fetch is ctx.rest (IPC-tunneled to the gateway, not a
+    // renderer HTTP GET), so assert rendered content, never a network probe. The
+    // board-wide empty state "No tasks on this board" (k.noTasks, board.tsx:1378-1382)
+    // renders ONLY after fetchBoard resolves with total===0 — proving the board loaded its
+    // data over the one gateway rather than the ErrorState branch (board.tsx:1370-1372).
+    // (k.empty="Empty" is a per-lane overlay, never a board-wide state.)
+    afterKanbanBoard: async page => {
+      await expect(page.getByText('No tasks on this board')).toBeVisible({ timeout: 60_000 })
     }
   }
 
@@ -82,5 +92,5 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
 
   // Single-gateway invariant: bootFleetDesktop launches exactly ONE local backend
   // (buildAppEnv(sandbox)), waitForAppReady gated on that one gateway, and the Kanban
-  // board 200 above is served by that same gateway — there is no second port anywhere.
+  // board rendered above is served by that same gateway — there is no second port anywhere.
 })

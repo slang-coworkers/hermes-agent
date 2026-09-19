@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { ElectronApplication, Response } from '@playwright/test'
+import type { ElectronApplication } from '@playwright/test'
 
 import {
   buildAppEnv,
@@ -59,7 +59,7 @@ export function rowNameRegex(title: string, handle: string): RegExp {
 export interface FleetF62NavCheckpoints {
   afterBotsRoster?: (page: Page) => Promise<void>
   afterRooms?: (page: Page) => Promise<void>
-  afterKanbanBoard?: (page: Page, boardResponse: Response) => Promise<void>
+  afterKanbanBoard?: (page: Page) => Promise<void>
 }
 
 // ─── Seeding (identical fixture for both specs) ──────────────────────────
@@ -243,10 +243,10 @@ async function dismissSettingsOverlay(page: Page): Promise<void> {
   await expect(page.locator('[data-overlay-surface]')).toHaveCount(0, { timeout: 30_000 })
 }
 
-/** The Kanban nav renders inside the Sessions pane, which stays hidden after openBots()
- *  activated the Bots pane; bring Sessions forward so the nav enters the accessibility
- *  tree (Bots and Sessions are one enforced tab group, hermes-bots/plugin.tsx:359; the
- *  inactive pane is aria-hidden + visibility:hidden, tree-group.tsx:666,680). */
+/** The Kanban sidebar nav renders inside the Sessions pane, which stays hidden after
+ *  openBots() activated the Bots pane; bring Sessions forward so the nav row enters the
+ *  DOM (Bots and Sessions are one enforced tab group; the inactive pane is aria-hidden +
+ *  visibility:hidden, tree-group.tsx). */
 async function activateSessions(page: Page): Promise<void> {
   const tab = page
     .getByRole('button', { name: 'sessions', exact: true })
@@ -259,38 +259,55 @@ async function activateSessions(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 30_000 })
 }
 
-/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch and
- *  navigate to its board. The board-response listener is armed BEFORE the enable click:
- *  enabling mounts the sidebar KanbanCount, which issues the single boardKey(slug,false)
- *  GET the query client then caches for 60s (query-client.ts:10), so a listener armed
- *  only around the nav click could miss the one real request and hang. */
-async function openKanbanBoard(page: Page): Promise<Response> {
+/** The docked /kanban route-tile pane header id (paneMirror prefix `route-tile` + the
+ *  route path as key — route-tile.tsx:87-96). Present as a `[data-tree-tab]` only once a
+ *  second pane docks beside the workspace pane (a lone uncloseable pane shows no strip). */
+export const kanbanTile = (page: Page) => page.locator('[data-tree-tab="route-tile:/kanban"]')
+
+/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
+ *  dismiss the Settings overlay, bring the Sessions pane forward to GATE on the /kanban
+ *  route being registered, then dock the board as an independent route-tile pane. */
+async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
   })
   const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })
-
-  const boardResponsePromise = page.waitForResponse(
-    response =>
-      response.request().method() === 'GET' &&
-      /\/api\/plugins\/kanban\/board(?:\?|$)/.test(response.url()),
-    { timeout: 60_000 }
-  )
-
-  await enableKanban.click()
-  // The nav registers reactively once the switch reads "Disable Kanban" (no reload).
+  // The Plugins panel's Agent-plugins section fires a `plugins.manage` backend RPC that
+  // can take the full 30s to settle (times out to "Could not load agent plugins" on a slow
+  // gateway); while it is pending the panel re-renders and the (visible) desktop-plugin
+  // switch never stabilises to actionable. Outlast that churn so the click lands once the
+  // section reaches its terminal state — the default 30s click timeout races it and flakes.
+  await enableKanban.click({ timeout: 60_000 })
+  // The switch flipping to "Disable Kanban" confirms the plugin is enabled, so its
+  // /kanban route, board, and sidebar nav row register reactively.
   await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
   await dismissSettingsOverlay(page)
+  // GATE: the "Kanban" SIDEBAR-NAV row present proves the /kanban route is registered in
+  // contributedRoutes() — the SAME registry RouteTilePane reads (route-tile.tsx:55). Bring
+  // the Sessions pane forward first (step-1 left Bots active, hiding the nav row).
   await activateSessions(page)
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
-  await kanbanNav.click()
-  // Reachability ends at the board GET completing; the board's rendered content
-  // (heading, empty state, 200) is a counted assertion the counted spec owns.
-  const boardResponse = await boardResponsePromise
-
-  return boardResponse
+  // Dock the board as its own route-tile pane: RouteTilePane renders a registered /kanban
+  // contribution independently of the workspace <Routes> router (route-tile.tsx:50-73).
+  await kanbanNav.click({ button: 'right' })
+  const menu = page.getByRole('menu', { name: 'Kanban' })
+  await expect(menu).toBeVisible({ timeout: 30_000 })
+  await menu.getByRole('menuitem', { name: 'Open in split' }).hover()
+  const rightSplit = page.getByRole('menuitem', { name: 'Right', exact: true })
+  await expect(rightSplit).toBeVisible({ timeout: 30_000 })
+  await rightSplit.click()
+  // openRouteTile('/kanban','right') docks an INDEPENDENT route-tile pane; its header id
+  // present (a 2nd pane, so the tree tab-strip now renders) proves the tile mounted before
+  // we assert the board contribution rendered inside it.
+  await expect(kanbanTile(page)).toHaveCount(1, { timeout: 30_000 })
+  // The docked route-tile renders the board contribution; its unconditional
+  // <h1>Kanban</h1> (board.tsx:1331) is the mount proof. The data fetch is ctx.rest over
+  // the Electron IPC bridge (NOT a renderer HTTP GET), so assert rendered content, never
+  // page.waitForResponse('/api/plugins/kanban/board'). The counted board-content assertion
+  // ("No tasks on this board") lives in the spec's afterKanbanBoard checkpoint.
+  await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 60_000 })
 }
 
 /** Drive the full counted-order FLEET-F62 desktop navigation, taking one screenshot per
@@ -313,7 +330,7 @@ export async function driveFleetF62Nav(
   await openOrchestratorChat(page)
   await page.screenshot({ path: test.info().outputPath('step-3-orchestrator-bot-chat.png') })
 
-  const boardResponse = await openKanbanBoard(page)
+  await openKanbanBoard(page)
   await page.screenshot({ path: test.info().outputPath('step-4-kanban-board.png') })
-  await checkpoints.afterKanbanBoard?.(page, boardResponse)
+  await checkpoints.afterKanbanBoard?.(page)
 }
