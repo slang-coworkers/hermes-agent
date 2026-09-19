@@ -253,7 +253,7 @@ research-bot/
 ├── distribution.yaml            # required
 ├── SOUL.md                      # strongly recommended
 ├── config.yaml                  # model, provider, tool defaults
-├── mcp.json                     # MCP server connections
+├── mcp.json                     # copied MCP metadata; not read at runtime (see note above)
 ├── skills/
 │   ├── arxiv-search/SKILL.md
 │   ├── paper-summarization/SKILL.md
@@ -746,3 +746,4 @@ The short version:
 - [Using SOUL with Hermes](../guides/use-soul-with-hermes.md) — authoring personalities
 - [Personality & SOUL](./features/personality.md) — how SOUL fits into the agent
 - [Skills catalog](../reference/skills-catalog.md) — skills you can bundle
+- [Per-Profile Config and Multi-Provider Runner](./per-profile-config-and-multi-provider.md) — what a distribution's `config.yaml` controls per coworker (model, provider, effort, container image, mounts, `mcp_servers`, timezone, toolsets) and switching provider/model with no runner restart
