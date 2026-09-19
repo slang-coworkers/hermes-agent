@@ -270,11 +270,19 @@ _DEFAULT_SESSION_MODE = "per-thread"
 _AGENT_SHARED_MODE = "agent-shared"
 
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
-# (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
+# (hermes_cli/profile_distribution.py:88-95) plus the extras this render adds.
+# "scripts" carries the DEFAULT profile's rendered webhook route scripts to
+# $HERMES_HOME/scripts/ on install (webhook_filters resolves scripts there); the
+# installer skips a declared owned path that a profile does not have, so coworker
+# profiles without a scripts/ dir are unaffected (profile_distribution.py:613-614).
 _DIST_OWNED: List[str] = [
     "SOUL.md", "config.yaml", "mcp.json", "skills", "cron",
-    "distribution.yaml", "skill-bundles", ".env.template",
+    "distribution.yaml", "skill-bundles", ".env.template", "scripts",
 ]
+
+# LOOP-F40 CI-gate route scripts materialized into the DEFAULT profile's
+# scripts/ dir; a route's `script:` in the fleet spec references them by name.
+_ROUTE_SCRIPTS = ("pr_ci_gate.py", "check_gate.py")
 
 _ENV_TEMPLATE_BODY = (
     "# Environment variables for this Hermes coworker distribution.\n"
@@ -2389,6 +2397,22 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     _write_distribution(pdir, tname, f"Composed Hermes coworker profile: {tname}")
 
 
+def _render_route_scripts(pdir: Path) -> None:
+    """Materialize the webhook route scripts into the DEFAULT profile's scripts/.
+
+    On install they land in $HERMES_HOME/scripts/, where the webhook adapter's
+    resolver looks them up by the `script:` name declared on a route. They are
+    inert unless a rendered route references them.
+    """
+    src_dir = Path(__file__).resolve().parent / "route_scripts"
+    scripts_dir = pdir / "scripts"
+    scripts_dir.mkdir(exist_ok=True)
+    for script in _ROUTE_SCRIPTS:
+        (scripts_dir / script).write_text(
+            (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
 def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", name, "Multiplexer profile for the Bot-Mode gateway.", [], [])
@@ -2396,6 +2420,7 @@ def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     _write_common(pdir)
     (pdir / "skills").mkdir(exist_ok=True)
     (pdir / "skill-bundles").mkdir(exist_ok=True)
+    _render_route_scripts(pdir)
     _write_distribution(pdir, name, "Composed Hermes multiplexer (DEFAULT) profile")
 
 
