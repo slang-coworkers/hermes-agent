@@ -1,0 +1,18 @@
+project: loop-f39
+workspace_root: /data/coworkers
+default_profile: default            # compose.py:1577 requires exactly "default"
+orchestrator_profile: orchestrator  # must be a declared type (compose.py:1590)
+spines: {base: {source: spines/base.yaml}}
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+types:
+  orchestrator:
+    extends: [base]
+    identity: O
+    skills: [supervise-issues]
+    cron_jobs:
+      - {name: supervise-issues, schedule: "every 12h",
+         prompt: "Run the supervise-issues sweep over the fleet's in-flight work.",
+         skills: [supervise-issues], deliver: "bot-chat"}
+  worker: {extends: [base], identity: W}
