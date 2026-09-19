@@ -129,12 +129,14 @@ item below is owned by a separate piece of work; this page describes per-profile
 - **A distribution copies `config.yaml` verbatim — keep secrets out of it.** `install`
   (and `update --force-config`) copy `config.yaml` byte-for-byte, including the whole
   `providers.*` block, and the runtime will honor an **inline** `providers.<name>.api_key`
-  when no `key_env` is set. So a credential written directly into `config.yaml` **would**
-  ship with the distribution. Keep provider secrets in the profile's `.env` — which
-  `install` / `update` never copy — and reference them from `config.yaml` via `key_env`
-  (or a `${ENV}` placeholder); never inline a key. Only `.env`-style credentials are
-  excluded from a distribution, so a freshly installed profile cannot authenticate a
-  provider call until its per-profile `.env` credential is supplied.
+  whenever the environment-backed key (`key_env`) is absent or resolves empty. So a
+  credential written directly into `config.yaml` **would** ship with the distribution.
+  Never inline credentials: store them in the installer's `.env`, an inherited shell
+  environment variable, or a configured secret source, and reference them from
+  `config.yaml` via `key_env` (or a `${ENV}` placeholder). The installer excludes the
+  top-level `.env` and `auth.json` from a distribution, but it does not scan the files
+  it copies for embedded secrets — so a fresh install authenticates only once a
+  credential is reachable through one of those references.
 - **`hermes profile install` has no `--ref` flag.** Pinning a distribution to an exact
   commit rests on source-branch immutability, not a recorded SHA.
 

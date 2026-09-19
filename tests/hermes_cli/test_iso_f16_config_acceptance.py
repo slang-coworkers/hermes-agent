@@ -173,13 +173,8 @@ def test_ac_iso_f16_5(tmp_path):
 
 
 def test_iso_f16_model_normalization_canonicalizes_raw_form(tmp_path, monkeypatch):
-    """The loader canonicalizes a raw-form model:{name, provider} to model.default/provider.
-
-    Strengthens the "through the loader's normalization" clause of AC-ISO-F16-1: the two
-    committed fixtures use the already-canonical model:{default, provider} form, which is a
-    no-op for _normalize_root_model_keys (config.py:3202-3209), so this drives the
-    canonicalization path directly (name -> default, alias dropped).
-    """
+    """A raw-form model:{name, provider} canonicalizes to model.default/provider (the
+    normalization clause of AC-ISO-F16-1)."""
     home = tmp_path / "iso-f16-rawform"
     home.mkdir()
     (home / "config.yaml").write_text(
@@ -193,9 +188,9 @@ def test_iso_f16_model_normalization_canonicalizes_raw_form(tmp_path, monkeypatc
 
 
 def test_iso_f16_per_profile_resolution_is_path_keyed_not_size_keyed(tmp_path, monkeypatch):
-    """Two profiles whose config.yaml files are the SAME byte length but different content
-    each resolve their own model — the loader keys resolution by full config path, so a
-    size-based cache regression cannot make one profile read another profile's values.
+    """Two profiles whose config.yaml files share an identical (mtime_ns, size) signature
+    but differ in content each resolve their own model — the loader keys resolution by full
+    config path, so dropping the path from the cache key would be caught here.
     """
     a = tmp_path / "iso-f16-cache-a"
     b = tmp_path / "iso-f16-cache-b"
@@ -207,7 +202,9 @@ def test_iso_f16_per_profile_resolution_is_path_keyed_not_size_keyed(tmp_path, m
     (b / "config.yaml").write_text(
         "model:\n  default: bbbbbbbb\n  provider: pb\n", encoding="utf-8"
     )
-    assert (a / "config.yaml").stat().st_size == (b / "config.yaml").stat().st_size
+    shutil.copystat(a / "config.yaml", b / "config.yaml")
+    sa, sb = (a / "config.yaml").stat(), (b / "config.yaml").stat()
+    assert (sa.st_mtime_ns, sa.st_size) == (sb.st_mtime_ns, sb.st_size)
 
     monkeypatch.setenv("HERMES_HOME", str(a))
     cfg_a = load_config()
