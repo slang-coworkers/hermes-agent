@@ -2,8 +2,9 @@
 originating session/edge through three native correlations.
 
 - Bot Chat reply-home: message_agent dispatches a background, notify-on-complete
-  delivery pinned to the target's canonical "Bot Chat", carrying the origin
-  task id so the completion notification threads back to the sender.
+  delivery pinned to the target's canonical "Bot Chat" and carrying the origin
+  task id; route-home threads the completion back to the sender's originating
+  session by the queued event's session_key (not the foreground).
 - Kanban durable hand-off: a decomposed child inherits the root's notify
   subscription, a terminal child event is delivered to that originating
   destination, and the dependency-gated root is promoted todo->ready.
@@ -112,8 +113,10 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
     assert len(calls) == 1
     call = calls[0]
     # background + notify_on_complete = the reply lands as a completion
-    # notification on the sender's next turn; task_id is the correlation key
-    # that threads it home. A mutant dropping any of the three breaks reply-home.
+    # notification on the sender's next turn, not synchronously; task_id is the
+    # origin id passed through to terminal_tool (route-home keys on the queued
+    # event's session_key — see test_ac_a2a_f20_3). A mutant dropping any of the
+    # three flips this test.
     assert call["background"] is True
     assert call["notify_on_complete"] is True
     assert call["task_id"] == origin_task
