@@ -49,7 +49,7 @@ bypasses the fail-closed allowlist and proves nothing.
 
 ## Setup (after the fixtures are installed)
 
-- **Shared-fs `$HERMES_HOME` (§ Deployment item 5, operator DONE):** set
+- **Shared-fs `$HERMES_HOME` (§ Deployment item 5, operator action pending — the tester-side `rw` remount must be confirmed; round 4 found it mounted `ro`):** set
   `TB=/workspace/extra/hermes-fleet-testbed/hermes-FLEET-F62`, `HERMES_HOME=$TB/home`
   (install the six profiles there), and leave `TERMINAL_SANDBOX_DIR` UNSET — so every
   Hermes-emitted bind (`sandboxes/docker/<p>/home`, `workspace`, `skills`, `cache`)
@@ -67,7 +67,7 @@ bypasses the fail-closed allowlist and proves nothing.
   (§ Deployment item 2; secret grants stay scenario-staged, not pre-granted here).
 - Confirm the podman socket + the `localhost/hermes-sandbox:pinned` image (§ Deployment
   item 4). `$PODMAN` = the `podman-remote-static` 3.4.4 binary.
-- **UNCOUNTED ENV-READINESS PREFLIGHT — gates the counted round-4 run.** For each of the
+- **UNCOUNTED ENV-READINESS PREFLIGHT — gates the counted round-5 run.** For each of the
   **five coworker profiles (excluding the launch `default`** — a sixth `default` container
   would break the five-container criterion), run one wrapper-mediated sandbox spawn with
   `TERMINAL_CWD=/root` (§ Common substrate — so the auto-cwd bind does not add the tester
@@ -84,11 +84,16 @@ bypasses the fail-closed allowlist and proves nothing.
   `FAIL(env)`. This proves ONLY that the provisioned daemon/socket is rootless under uid 1001
   (a wrong `CONTAINER_HOST` → a rootful or wrong-uid daemon is an operator misprovision — env,
   not product). **The WRAPPER-MEDIATED Hermes sandbox's `uid_map` is NOT inspected in the
-  preflight** — it stays a COUNTED AC-5 step-1 assertion. **This is an ENV-READINESS gate
-  ONLY — it makes NO sandbox-ISOLATION judgment on the Hermes-configured spawn.** A failure
-  here — a bind source not server-visible (statfs/125), a missing socket/image, a permission
-  error, or the raw-daemon canary not showing `0 1001 1` — is a `FAIL(env)` surfaced BEFORE
-  the counted rows, never a counted defect. The wrapper-mediated `uid_map == 0 1001 1`
+  preflight** — it stays a COUNTED AC-5 step-1 assertion. **Classify failures before spawning
+  Hermes (R5-2, fail-closed):** derive an EXPECTED bind-source/mode manifest INDEPENDENTLY
+  from the fixture spec + the operator inventory (§ Deployment items 1/4/5). ONLY an EXPECTED
+  source proven ABSENT or UNWRITABLE server-side, or a failing raw socket/image/rootless
+  canary, is `FAIL(env)` (surfaced BEFORE the counted rows). Once those independent
+  prerequisites pass, every wrapper-mediated or Hermes spawn failure — including statfs/125 or
+  permission errors — and every UNEXPECTED or malformed rendered source/mode is a COUNTED
+  AC-5 failure; an INDETERMINATE root cause defaults to COUNTED. Env only ever EXCUSES a
+  proven-missing expected prerequisite; everything else counts. This gate makes NO
+  sandbox-ISOLATION judgment on the Hermes-configured spawn. The wrapper-mediated `uid_map == 0 1001 1`
   (step 1, also asserted by AC-7 / AC-CRED-F28-2 / AC-ISO-F14-1) and the mount-policy allowlist
   (cross-profile exclusion, per-mount rendered mode, `--memory`/`--pids-limit`; step 3) are
   COUNTED, so a rootful wrapper-mediated spawn on a correctly-provisioned daemon or a
