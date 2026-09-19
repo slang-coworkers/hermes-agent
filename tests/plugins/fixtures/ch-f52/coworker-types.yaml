@@ -53,6 +53,9 @@ default_config:
                 contains: "@slang-orchestrator"
             prompt: "GitHub issue comment on {repository.full_name} (issue #{issue.number}): {comment.body}"
             skills: [github-comment-triage]
+          # LOOP-F40: CI-gated reviewer route. pr_ci_gate.py parks a per-head
+          # blocked review card and returns [SILENT] — no immediate dispatch;
+          # gh-check-suite promotes the card once CI is green for that head.
           gh-pull-request:
             secret: "ch-f52-secret-pr"
             profile: reviewer
@@ -60,8 +63,7 @@ default_config:
             filters:
               - field: action
                 in: [opened, reopened, synchronize, ready_for_review]
-            prompt: "GitHub pull_request event on {repository.full_name}: PR #{pull_request.number} {pull_request.title}. Review per the fleet workflow."
-            skills: [github-pr-review]
+            script: pr_ci_gate.py
           gh-pr-review:
             secret: "ch-f52-secret-review"
             profile: fixer
@@ -71,6 +73,9 @@ default_config:
                 in: [submitted]
             prompt: "GitHub pull_request_review on {repository.full_name}: PR #{pull_request.number}. Address the review feedback."
             skills: [github-review-triage]
+          # LOOP-F40: check_gate.py promotes the current head's parked card to
+          # ready on a CI success ([SILENT]); on a non-success it returns the
+          # payload so this fixer-bound route wakes the fixer with the prompt.
           gh-check-suite:
             secret: "ch-f52-secret-check"
             profile: fixer
@@ -78,6 +83,36 @@ default_config:
             filters:
               - field: action
                 in: [completed]
+            script: check_gate.py
             prompt: "GitHub check_suite completed on {repository.full_name}: conclusion {check_suite.conclusion}. Investigate the CI failure."
             skills: [github-ci-triage]
+          # LOOP-F40: human-invited reviewer post-back. Fires only when a real
+          # human (comment.user.type == User, not the reviewer bot itself)
+          # boundary-mentions the reviewer on a PR (issue.pull_request present).
+          # The reviewer run it dispatches shells the READ-only `gh pr diff`
+          # (toolsets grants `terminal` on top of the `terminal`-less
+          # hermes-webhook default), and the route posts the review back via
+          # deliver: github_comment.
+          gh-pr-review-invite:
+            secret: "ch-f52-secret-invite"
+            profile: reviewer
+            events: [issue_comment]
+            filters:
+              - field: action
+                in: [created]
+              - field: issue.pull_request
+                exists: true
+              - field: comment.user.type
+                equals: "User"
+              - field: comment.user.login
+                not_equals: "slang-reviewer[bot]"
+              - field: comment.body
+                regex: "(?<![A-Za-z0-9-])@slang-reviewer(?![A-Za-z0-9-])"
+            prompt: "A human invited a review on {repository.full_name} PR #{issue.number}: {comment.body}. Read the change with `gh pr diff {issue.number} --repo {repository.full_name}` and post a concise, actionable review."
+            skills: [sdlc-review]
+            toolsets: [terminal, hermes-webhook]
+            deliver: github_comment
+            deliver_extra:
+              repo: "{repository.full_name}"
+              pr_number: "{issue.number}"
 workspace_root: /data/coworkers

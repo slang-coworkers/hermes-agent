@@ -416,3 +416,38 @@ def test_ac_loop_f40_4(tmp_path, monkeypatch):
     assert matches(_comment(f"{REVIEWER_HANDLE} self", login=REVIEWER_LOGIN)) is False
     assert matches(_comment(f"{REVIEWER_HANDLE} on an issue", is_pr=False)) is False
     assert matches(_comment("cc @slang-reviewer-evil not you")) is False
+
+
+def _pr_event_at(action, head_sha, updated_at, pr=PR):
+    ev = _pr_event(action, head_sha, pr=pr)
+    ev["pull_request"]["updated_at"] = updated_at
+    return ev
+
+
+def test_loop_f40_out_of_order_pr_guard(tmp_path, monkeypatch):
+    """Supplementary (no AC id): a delayed/out-of-order pull_request delivery — an
+    older pull_request.updated_at for a superseded head — must not reset the current
+    head or retire the current card. Real GitHub payloads carry updated_at; the AC
+    payloads omit it and keep last-write-wins, so this best-effort guard is inert for
+    AC-2/AC-3 and only bites a genuinely stale redelivery."""
+    rendered, default_dir = _render(tmp_path, monkeypatch)
+    gate_db = str(tmp_path / "gate.db")
+    kanban_db = str(tmp_path / "kanban.db")
+    gate = _load_script(default_dir, "pr_ci_gate.py")
+
+    gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    gate.evaluate(_pr_event_at("synchronize", SHA_B, "2026-01-01T00:05:00Z"),
+                  gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
+    assert _card_by_key(kanban_db, _key(SHA_B)) == ("blocked", REVIEWER)
+    assert _latest(gate_db)[0] == SHA_B
+
+    # a DELAYED redelivery of the older opened(A) is ignored: head stays B, card B
+    # still blocked, no fresh card A created, archived A stays archived.
+    keep, _ = gate.evaluate(_pr_event_at("opened", SHA_A, "2026-01-01T00:00:00Z"),
+                            gate_db_path=gate_db, kanban_db_path=kanban_db)
+    assert keep is False
+    assert _latest(gate_db)[0] == SHA_B
+    assert _card_by_key(kanban_db, _key(SHA_B))[0] == "blocked"
+    assert _card_by_key(kanban_db, _key(SHA_A))[0] == "archived"
