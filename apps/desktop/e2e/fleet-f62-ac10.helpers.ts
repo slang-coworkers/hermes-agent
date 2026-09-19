@@ -243,10 +243,10 @@ async function dismissSettingsOverlay(page: Page): Promise<void> {
   await expect(page.locator('[data-overlay-surface]')).toHaveCount(0, { timeout: 30_000 })
 }
 
-/** The Kanban nav renders inside the Sessions pane, which stays hidden after openBots()
- *  activated the Bots pane; bring Sessions forward so the nav enters the accessibility
- *  tree (Bots and Sessions are one enforced tab group, hermes-bots/plugin.tsx:359; the
- *  inactive pane is aria-hidden + visibility:hidden, tree-group.tsx:666,680). */
+/** The Kanban sidebar nav renders inside the Sessions pane, which stays hidden after
+ *  openBots() activated the Bots pane; bring Sessions forward so the nav row enters the
+ *  DOM (Bots and Sessions are one enforced tab group; the inactive pane is aria-hidden +
+ *  visibility:hidden, tree-group.tsx). */
 async function activateSessions(page: Page): Promise<void> {
   const tab = page
     .getByRole('button', { name: 'sessions', exact: true })
@@ -260,8 +260,7 @@ async function activateSessions(page: Page): Promise<void> {
 }
 
 /** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
- *  dismiss the Settings overlay, bring the Sessions pane forward (where the Kanban nav
- *  registers reactively) and open the board. */
+ *  dismiss the Settings overlay, bring the Sessions pane forward, then open the board. */
 async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
@@ -269,17 +268,23 @@ async function openKanbanBoard(page: Page): Promise<void> {
   const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })
   await enableKanban.click()
-  // The nav registers reactively once the switch reads "Disable Kanban" (no reload).
+  // The switch flipping to "Disable Kanban" confirms the plugin is enabled, so its
+  // /kanban route, board, and sidebar nav row are now contributed.
   await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
   await dismissSettingsOverlay(page)
   await activateSessions(page)
+  // Open the board by dispatching the click event directly on the nav row rather than a
+  // real pointer click. These top sidebar rows sit under the titlebar
+  // [-webkit-app-region:drag] strip, and on Linux/WSLg (xvfb) the drag region wins
+  // hit-testing and swallows a real click (sidebar/index.tsx:1493). A synthetic click
+  // bypasses hit-testing yet still fires the row's onNavigate → navigateToWorkspacePage,
+  // which BOTH routes to /kanban and fronts the workspace pane — a bare
+  // location.hash='/kanban' routes but leaves the workspace pane un-fronted, so the board
+  // stays hidden. The board is a full-page route whose <h1> "Kanban" mounts unconditionally
+  // (board.tsx:1330).
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })
-  await kanbanNav.click()
-  // Reachability = the board view mounts. The board's data fetch is the plugin SDK's
-  // ctx.rest, tunneled to the gateway over Electron IPC — NOT a renderer HTTP request
-  // (the renderer's only kanban traffic is the ws /events stream), so page.waitForResponse
-  // never observes a board GET. Wait on the rendered board heading instead.
+  await kanbanNav.dispatchEvent('click')
   await expect(page.getByRole('heading', { name: 'Kanban', level: 1 })).toBeVisible({ timeout: 60_000 })
 }
 
