@@ -126,11 +126,11 @@ function seedDefaultHidden(hermesHome: string): void {
 /** Seed the six-profile fleet (launch `default` hidden + the five coworkers) into a
  *  FRESH disposable sandbox root — createSandbox gives ONE tmp root holding both
  *  HERMES_HOME (hermes-home) and HERMES_DESKTOP_USER_DATA_DIR (electron-user-data),
- *  and cleanup() destroys the whole root — then launch a NEW Electron + gateway (R5-1
- *  state isolation: the preflight and the counted spec pass DISTINCT prefixes, so
- *  neither the room DB nor the desktop plugin-decision store carries over). Fail-closed:
- *  a partial-start exception closes the app + mock and destroys the root before it
- *  rethrows, so a boot failure leaks no resources or half-seeded root. */
+ *  and cleanup() destroys the whole root — then launch a NEW Electron + gateway. The
+ *  preflight and the counted spec pass DISTINCT prefixes, so neither the room DB nor the
+ *  desktop plugin-decision store carries between them. Fail-closed: a partial-start
+ *  exception closes the app + mock and destroys the root before it rethrows, so a boot
+ *  failure leaks no resources or half-seeded root. */
 export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixture> {
   let mock: Awaited<ReturnType<typeof startMockServer>> | undefined
   let sandbox: Sandbox | undefined

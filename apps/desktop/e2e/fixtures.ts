@@ -333,13 +333,20 @@ export async function launchDesktop(
     cwd: DESKTOP_ROOT,
   })
 
-  const page = await app.firstWindow()
+  // Close the app if it launches but never yields a usable first window, so a
+  // post-launch failure leaves no orphaned Electron process behind.
+  try {
+    const page = await app.firstWindow()
 
-  // Install the error-banner guard so any [role="alert"] that appears
-  // during a test is collected and surfaced in afterEach.
-  installErrorBannerGuard(page)
+    // Install the error-banner guard so any [role="alert"] that appears
+    // during a test is collected and surfaced in afterEach.
+    installErrorBannerGuard(page)
 
-  return { app, page }
+    return { app, page }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
+  }
 }
 
 // ─── Public fixtures ────────────────────────────────────────────────────

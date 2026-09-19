@@ -14,8 +14,8 @@ import { expect, test } from './test'
 // and room UI behind a mock provider. The nav path is owned by the shared
 // driveFleetF62Nav helper, exercised uncounted first by fleet-f62-ac10-preflight.spec.ts.
 
-// The counted test must not retry: a single attempt regardless of the CLI flag or the
-// config's CI retry (R5-5 — one counted invocation, no patch-and-rerun).
+// The counted test must run without retries: a single attempt regardless of the CLI
+// flag or the config's CI retry setting.
 test.describe.configure({ retries: 0 })
 
 let fixture: MockBackendFixture | null = null
