@@ -45,7 +45,12 @@ const TOKENS = ['hello from bot a', 'hello from bot b', 'still bot a'] as const
 let fixture: MockBackendFixture | null = null
 
 // ── Diagnostics: reset per test (afterEach attaches on failure) ───────────
-interface ReadEntry { ts: string; db: string; sql: string; error: string | null }
+interface ReadEntry {
+  ts: string
+  db: string
+  sql: string
+  error: string | null
+}
 let readLog: ReadEntry[] = []
 let phases: { phase: string; ms: number }[] = []
 let uiObs: string[] = []
@@ -87,7 +92,13 @@ function pySelect(stateDb: string, sql: string, ...args: string[]): { rows: stri
       stdio: ['ignore', 'pipe', 'pipe']
     })
 
-    return { rows: out.split('\n').map(s => s.trim()).filter(Boolean), error: null }
+    return {
+      rows: out
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean),
+      error: null
+    }
   } catch (error) {
     const message = String(
       (error as { stderr?: string }).stderr || (error as { message?: string }).message || error
@@ -113,6 +124,22 @@ function messageSessionId(stateDb: string, needle: string): string | null {
   return rows[0] ?? null
 }
 
+/** Assert `needle` is ABSENT from stateDb AND that the read itself succeeded.
+ *  messageSessionId returns null on a silent SQLite read error too, so a bare
+ *  toBeNull() on the isolation negatives would let a failed read pass as proof
+ *  of isolation; here the read's error is checked explicitly. Runs at the
+ *  quiescent end of the test, so a genuine error is a real failure to surface. */
+function expectAbsent(stateDb: string, needle: string, message: string): void {
+  const { rows, error } = pySelect(
+    stateDb,
+    'select session_id from messages where content like ? order by rowid desc limit 1',
+    `%${needle}%`
+  )
+
+  expect(error, `${message} — SQLite read must succeed (a read error is not proof of absence)`).toBeNull()
+  expect(rows[0] ?? null, message).toBeNull()
+}
+
 function stateDbFor(hermesHome: string, bot: string): string {
   return path.join(hermesHome, 'profiles', bot, 'state.db')
 }
@@ -124,7 +151,10 @@ function escapeRegExp(value: string): string {
 /** The roster row label displayName() renders for a profile: hyphens→spaces,
  *  title-cased, so "rt-f03-bot-a" surfaces as "Rt F03 Bot A" (labels.ts:60-62). */
 function rosterLabel(name: string): string {
-  return name.replace(/[-_]+/g, ' ').trim().replace(/\b\w/g, ch => ch.toUpperCase())
+  return name
+    .replace(/[-_]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, ch => ch.toUpperCase())
 }
 
 /** Birth one profile's canonical "Bot Chat" (core UNIQUE(title)) by running a
@@ -153,12 +183,12 @@ async function seedBot(hermesHome: string, mockUrl: string, name: string, seed: 
 const focusedSurface = (page: Page) => page.locator('[data-chat-surface]:not([data-chat-unfocused])').first()
 
 /** Pre-type readiness gate. The row-menu open is fire-and-forget (bot-row.tsx:287)
- *  and the composer stays editable while the gateway is "Reconnecting to Hermes…"
- *  (chat/index.tsx:223-224), so a send gated on composer-visibility alone can land
- *  on the previous surface or be lost. Gate instead on three signals of the
- *  focused, hydrated target surface: its own seed marker turn visible, the
- *  gateway open (Voice-dictation control enabled, disabled while reconnecting),
- *  and an editable composer mounted (chat/index.tsx:537). */
+ *  and the composer stays editable while the gateway is "Reconnecting to Hermes…",
+ *  so a send gated on composer-visibility alone can land on the previous surface
+ *  or be lost. Gate instead on three signals of the focused, hydrated target
+ *  surface: its own seed marker turn visible; the gateway open (the empty-composer
+ *  "Voice dictation" control is enabled, and disabled while reconnecting); and an
+ *  editable composer mounted. */
 async function awaitBotChatReady(page: Page, seedMarker: string, timeout = 45_000): Promise<void> {
   const surface = focusedSurface(page)
   await expect(surface.getByText(seedMarker, { exact: true }).first()).toBeVisible({ timeout })
@@ -217,7 +247,11 @@ async function openBotChat(page: Page, botName: string, seedMarker: string, atte
   }
 }
 
-interface PersistResult { ok: boolean; reason?: 'WRONG_ROUTE' | 'NO_OWNER_ROW'; sessionId?: string }
+interface PersistResult {
+  ok: boolean
+  reason?: 'WRONG_ROUTE' | 'NO_OWNER_ROW'
+  sessionId?: string
+}
 
 /** Poll BOTH profile stores together and decide on the first decisive read:
  *  the token in the OTHER profile's db → wrong-route (fail fast, no resend); in
@@ -469,8 +503,8 @@ test("AC-RT-F03-9: a coworker Bot Chat is one session across re-opens while each
     expect(botChatSessionIds(dbB), 'bot-b has exactly one canonical Bot Chat').toEqual([bId])
     expect(bId, "bot-b's Bot Chat is a distinct session from bot-a's").not.toBe(aFirst)
 
-    expect(messageSessionId(dbB, 'hello from bot a'), 'bot-a text must never reach bot-b').toBeNull()
-    expect(messageSessionId(dbB, 'still bot a'), 'bot-a text must never reach bot-b').toBeNull()
-    expect(messageSessionId(dbA, 'hello from bot b'), 'bot-b text must never reach bot-a').toBeNull()
+    expectAbsent(dbB, 'hello from bot a', 'bot-a text must never reach bot-b')
+    expectAbsent(dbB, 'still bot a', 'bot-a text must never reach bot-b')
+    expectAbsent(dbA, 'hello from bot b', 'bot-b text must never reach bot-a')
   })
 })
