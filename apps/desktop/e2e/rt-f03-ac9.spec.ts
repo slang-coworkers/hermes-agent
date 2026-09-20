@@ -74,18 +74,27 @@ async function openBotChat(page: Page, title: string): Promise<void> {
     .waitFor({ state: 'visible', timeout: 120_000 })
 }
 
-async function sendMessage(page: Page, text: string): Promise<void> {
+async function sendMessage(page: Page, stateDb: string, text: string): Promise<void> {
   const composer = page
     .locator('[data-slot="composer-root"] [contenteditable="true"]')
     .filter({ visible: true })
     .first()
   await composer.click()
-  await composer.type(text, { delay: 20 })
+  // Deterministic input: fill() sets the value in one step. The old char-by-char
+  // type({delay}) could drop characters under container load, committing a truncated
+  // message (e.g. "hello from" instead of "hello from bot a").
+  await composer.fill(text)
+  // Fail fast and clearly if the input method did not deliver the whole message,
+  // rather than timing out later on a content check.
+  await expect(composer, 'composer holds the full message before submit').toHaveText(text)
   await page.keyboard.press('Enter')
-  // The user message is persisted on submit (independent of the model reply).
-  await page.waitForFunction(t => (document.body?.textContent ?? '').includes(t), text, {
-    timeout: 30_000
-  })
+  // Prove submission against the AC's stated identity source — the durable "Bot Chat"
+  // session store (this file's header, lines 14-18) — not the exact literal in
+  // document.body.textContent, which is fragile to how the message renders (truncated
+  // preview / directive slot) and to render timing.
+  await expect
+    .poll(() => messageSessionId(stateDb, text), { timeout: 60_000 })
+    .not.toBeNull()
 }
 
 /** Run one read-only SELECT against a profile's state.db via the stdlib sqlite3
@@ -158,21 +167,21 @@ test('AC-RT-F03-9: a coworker Bot Chat is one session across re-opens while each
 
   await test.step('bot-a first open: send a message into its Bot Chat', async () => {
     await openBotChat(page, 'RT F03 Bot A')
-    await sendMessage(page, 'hello from bot a')
+    await sendMessage(page, dbA, 'hello from bot a')
     await page.screenshot({ path: test.info().outputPath('step-2-bot-a-first.png') })
   })
 
   await test.step('bot-b open (distinct profile): send a message into its Bot Chat', async () => {
     await openBots(page)
     await openBotChat(page, 'RT F03 Bot B')
-    await sendMessage(page, 'hello from bot b')
+    await sendMessage(page, dbB, 'hello from bot b')
     await page.screenshot({ path: test.info().outputPath('step-3-bot-b.png') })
   })
 
   await test.step('bot-a re-open via the explicit action: send again', async () => {
     await openBots(page)
     await openBotChat(page, 'RT F03 Bot A')
-    await sendMessage(page, 'still bot a')
+    await sendMessage(page, dbA, 'still bot a')
     await page.screenshot({ path: test.info().outputPath('step-4-bot-a-reopened.png') })
   })
 
