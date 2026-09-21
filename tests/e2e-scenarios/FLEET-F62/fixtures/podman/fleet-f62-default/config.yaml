@@ -25,6 +25,11 @@ terminal:
     HERMES_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
     DENO_CERT: /etc/ssl/certs/hermes-egress-ca.crt
     ANTHROPIC_API_KEY: onecli-injects-at-request-time
+  docker_forward_env:
+  - HTTPS_PROXY
+  - https_proxy
+  - HTTP_PROXY
+  - http_proxy
   docker_persist_across_processes: false
   container_memory: 1024
   container_cpu: 0.5

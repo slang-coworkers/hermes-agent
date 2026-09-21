@@ -40,10 +40,15 @@ wrapper, `PODMAN_ONECLI_*` coordinates). Shares AC-FLEET-F62-5's fleet-boot spaw
 
 ## Steps
 
-1. Inside each sandbox `env` → expect: `HTTPS_PROXY`/`https_proxy` authority ==
-   172.17.0.1:10255, CA-trust vars set, CA file readable and mounted `:ro`; assert NO
-   key in `plugin_strip_env_keys() ∪ _ALWAYS_STRIP_KEYS` carries a real value (only
-   `HERMES_PROXY_TOKEN_*` swap tokens / placeholders).
+1. Inside each sandbox, a REDACTING probe (never a raw `env` dump — the proxy URL
+   carries the `aoc_` token as userinfo): assert all FOUR proxy spellings
+   (`HTTPS_PROXY`,`https_proxy`,`HTTP_PROXY`,`http_proxy`) present with authority ==
+   172.17.0.1:10255, each resolving to THIS profile's identity — extract the URL
+   userinfo and emit ONLY its `sha256` (never the raw value); CA-trust vars set, CA
+   file readable and mounted `:ro`; assert NO key in
+   `plugin_strip_env_keys() ∪ _ALWAYS_STRIP_KEYS` carries a real value. The five
+   profiles' userinfo-`sha256` are DISTINCT (per-profile identity, no cross-profile
+   bleed); step 5 reads these hashes, never the token.
 2. `curl` via the proxy to `https://inference-api.nvidia.com/v1/models` → expect: 200
    (all five granted per § Deployment item 2 ordering); never a 401 (a 401 = failed grant
    setup) and never a TLS error.
@@ -54,6 +59,23 @@ wrapper, `PODMAN_ONECLI_*` coordinates). Shares AC-FLEET-F62-5's fleet-boot spaw
 5. sha256 the injected proxy token per profile → expect: five DISTINCT identities
    (never log the value).
 
+## Round-6 (C1, exec-mediation proof)
+
+Steps 2/4's proxy `curl` is a HERMES-issued `docker exec` (never a raw `podman exec`).
+`podman-onecli` exposes the token under all four proxy spellings and
+`nv-coworker-compose` forwards them via `terminal.docker_forward_env`, which win over
+the tokenless `docker_env` placeholders at exec (`docker.py:1595-1596,:1638,:1642`) —
+so each granted sandbox's own token reaches its exec (step 2 `200`), step 5's five
+identities stay distinct (no cross-profile bleed), and the token is ABSENT from
+`config.yaml`, the podman argv (name-only `-e KEY`) and the wrapper log. The evidence
+records three explicit PASS markers: `exec-via-hermes=PASS` (the `curl`'s exec appears
+in the wrapper's value-free `exec` audit line — proving it was a Hermes `docker exec`,
+not a raw `podman exec`), `alias-profile-match=PASS` (all four spellings carry THIS
+profile's identity — the userinfo `sha256` matches the profile, and its granted request
+is `200`), and `distinct-profile-hashes=5`. AC-6's "no REAL provider credential inside"
+assertion (step 1) is UNWEAKENED — the forwarded value is the swap token, not a real
+key (§ Security condition 4). See § Round-6 amendment C1.
+
 ## Pass
 
 Each sandbox reaches the outside world only via its own OneCLI proxy identity on
@@ -63,4 +85,5 @@ API :10254 directly.
 ## Evidence
 
 `scenario-AC-FLEET-F62-6/sandbox.log` + `evidence.txt` (env-var NAMES and http codes
-only, never token values).
+only, never token values; the `exec-via-hermes`/`alias-profile-match`/`distinct-profile-hashes=5`
+markers) + a token-absent grep of `config.yaml`/argv/`podman-calls.log`.

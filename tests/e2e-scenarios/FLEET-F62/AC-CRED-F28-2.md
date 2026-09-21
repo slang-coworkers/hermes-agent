@@ -14,13 +14,15 @@ timeout_s: 300
 
 # AC-CRED-F28-2 (carried) — per-profile identity + request-time injection (sandbox)
 
-Carried from CRED-F28 under its original id (required PASS at merge-gate P5). From a
-profile SUBPROCESS (a Hermes-driven `_DockerEnvironment` spawn, not a gateway turn),
-`curl` through the rendered `https_proxy` returns 401 for profile A before its secrets
-are assigned, 200 after `onecli agents set-secrets`, and 401 for a sibling profile B
-with no grant — per-profile identity + request-time credential injection, no
-credential value ever inside the sandbox. Shares AC-FLEET-F62-5/6's fleet boot;
-A = architect, B = builder.
+Carried from CRED-F28 under its original id (required PASS at merge-gate P5;
+strengthened in place per the operator's round-6 directive — the added revoke→401
+step, id + `sandbox:` kind unchanged). From a profile SUBPROCESS (a Hermes-driven
+`_DockerEnvironment` spawn, not a gateway turn), `curl` through the rendered
+`https_proxy` returns 401 for profile A before its secret is granted, 200 after the
+grant, 401 again after the grant is revoked, and 401 for a sibling profile B with no
+grant — per-profile identity + request-time credential injection, no credential value
+ever inside the sandbox. Shares AC-FLEET-F62-5/6's fleet boot; A = architect,
+B = builder.
 
 ## Common substrate
 
@@ -46,18 +48,33 @@ reconciliation and the FLEET-F62 exact-origin base-URL edit); the render sets
 
 1. Profile A, ungranted: sandboxed `curl` through its `https_proxy` → expect: 401
    (identity exists, no secret).
-2. `onecli agents set-secrets` the inference secret to A; A again → expect: 200.
-3. Sibling profile B, still ungranted: sandboxed `curl` through B's `https_proxy` →
+2. Grant A the inference secret via the C1b-fixed `set_secrets` — resolve
+   `identifier`→`uuid` (`GET /api/agents`), then
+   `PUT /api/agents/<uuid>/secrets {"secretIds":["4d1da6ff-4af8-44f3-8831-07b11bfd004f"]}`
+   → 200 (NOT the old `POST /api/agents/<identifier>/secrets`, which 404s); A again
+   through its `https_proxy` → expect: 200 (§ Round-6 amendment C1b).
+3. Revoke A: the same C1b `set_secrets` with `{"secretIds":[]}` (empty list) → A again
+   through its `https_proxy` → expect: 401 (grant removed).
+4. Sibling profile B, still ungranted: sandboxed `curl` through B's `https_proxy` →
    expect: 401.
+
+## Round-6 (C1, exec-mediation)
+
+Every profile's proxy `curl` in steps 1–4 is a HERMES-issued `docker exec` (not a raw
+`podman exec`); the forwarded `docker_forward_env` proxy URL (all four spellings, incl.
+the `aoc_` userinfo) wins over the `docker_env` placeholder at exec, so A's granted
+request is 200 and its ungranted/revoked and B's are 401 — each carrying only its OWN
+profile's token (no cross-profile bleed). See § Round-6 amendment C1.
 
 ## Pass
 
-Per-profile identity + request-time injection hold — A goes 401→200 on its own grant,
-B stays 401 with no grant.
+Per-profile identity + request-time injection hold — A goes 401→grant→200→revoke→401
+on its own grant then revoke, B stays 401 with no grant.
 
 ## Evidence
 
 `scenario-AC-CRED-F28-2/sandbox.log` — `podman-calls.log` (forwarded launch argv per
-profile), `http-a-pre.txt`(401)/`http-a-post.txt`(200)/`http-b-ungranted.txt`(401),
-`uid_map-*.txt`(`0 1001 1`); env-var NAMES only, the run refuses to write any `aoc_`
-token.
+profile, token redacted to sha256), `http-a-pre.txt`(401)/`http-a-post.txt`(200)/`http-a-revoked.txt`(401)/`http-b-ungranted.txt`(401),
+`uid_map-*.txt`(`0 1001 1`), `exec-via-hermes=PASS` (each `curl`'s exec in the wrapper
+audit line); env-var NAMES only, the run refuses to write any `aoc_` token (token-absent
+grep of `config.yaml`/argv/`podman-calls.log`).

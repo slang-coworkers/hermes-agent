@@ -39,6 +39,13 @@ Same wrapper wiring as AC-FLEET-F62-5. The CA is mounted `:ro` at the wrapper's
    `https_proxy` → expect: 200 via OneCLI, TLS verified against the mounted CA;
    `/proc/1/uid_map == "0 1001 1"`.
 
+## Round-6 (C1, exec-mediation proof)
+
+The outbound `curl` is a HERMES-issued `docker exec`; the forwarded
+`docker_forward_env` token (all four proxy spellings) wins over the `docker_env`
+placeholder at exec, so this granted profile's request is `200`. See § Round-6
+amendment C1.
+
 ## Pass
 
 The rendered egress posture routes a real request through the OneCLI proxy to a 200
