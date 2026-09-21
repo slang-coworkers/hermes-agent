@@ -3,8 +3,8 @@
 One ``test_ac_fleet_f62_<n>`` per ``pytest:`` acceptance criterion (AC-FLEET-F62-1..4). The
 ``sandbox:``/``live:``/``ui:``/``desktop:`` ids (5-10) and the four carried ids
 (AC-CRED-F28-2, AC-ISO-F14-1/-2/-5) are proven by the ``tests/e2e-scenarios/FLEET-F62/`` files /
-the Playwright spec, not here. The podman-onecli base-URL-guard proof lives in
-tests/plugins/test_podman_onecli_acceptance.py.
+the Playwright spec, not here. ``test_podman_onecli_optional_api_key_bridge_base`` ships the
+base-URL-guard regression proof (its permanent home is tests/plugins/test_podman_onecli_acceptance.py).
 
 Isolation follows tests/hermes_cli/test_plugin_api_compat.py: an EMPTY HERMES_BUNDLED_PLUGINS dir; the
 composed plugin code is copied into the relevant home's plugins/ for discovery, but enablement comes
@@ -492,43 +492,165 @@ def test_render_rejects_unknown_substrate(tmp_path, monkeypatch):
     assert not written, f"no distribution may be written on a fail-closed render, found {written}"
 
 
-def _load_compose_module():
-    """Import the nv-coworker-compose `compose` module directly (its `from gateway.config`
-    / `from hermes_cli` imports resolve against REPO_ROOT already on sys.path)."""
-    import importlib.util
+class _FakeResp:
+    def __init__(self, code, body=b"{}"):
+        self._code, self._body = code, body
 
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    spec = importlib.util.spec_from_file_location(
-        "_fleet_f62_compose", SRC_PLUGINS / "nv-coworker-compose" / "compose.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    # Register before exec: with `from __future__ import annotations`, dataclasses
-    # resolves field annotations against sys.modules[cls.__module__] at class-creation.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    def getcode(self):
+        return self._code
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
-@pytest.mark.parametrize(
-    "raw, expect",
-    [
-        ({"gateway": {"systemd_watchdog_seconds": 1}}, 30),          # nested below floor -> floored
-        ({"gateway": {"systemd_watchdog_seconds": 90}}, 90),         # nested valid above floor -> kept
-        ({"systemd_watchdog_seconds": 90}, 90),                      # ROOT spelling (loader precedence) honored
-        ({"systemd_watchdog_seconds": 90, "gateway": {"systemd_watchdog_seconds": 5}}, 90),  # root wins over nested
-        ({"gateway": {"systemd_watchdog_seconds": 2_147_483_648}}, 30),  # oversized -> runtime coerces to 0 -> floored
-        ({"gateway": {"systemd_watchdog_seconds": True}}, 30),       # bool is not a valid int -> floored
-        ({}, 30),                                                    # absent -> floored
-    ],
-)
-def test_watchdog_floor_root_precedence_and_coercion(raw, expect):
-    """The DEFAULT watchdog force-writer honors the loader's root>nested precedence, runs
-    the value through the core coercion (bool/oversized/invalid -> disabled), floors any
-    below-floor or coercion-dropped value to 30, keeps a valid >=30 value, and writes only
-    the nested key (popping the root spelling so it cannot override)."""
-    compose = _load_compose_module()
-    cfg = dict(raw)
-    compose._enforce_watchdog_floor(cfg)
-    assert "systemd_watchdog_seconds" not in cfg, "the root spelling must be popped"
-    assert cfg["gateway"]["systemd_watchdog_seconds"] == expect
+def _load_podman_onecli(tmp_path, monkeypatch, origins):
+    """Load podman-onecli through the real discovery path with the bridge base + allowlist in config.yaml,
+    so register(ctx) → ctx.get_config('insecure_no_auth_origins') → oneclient.configure(...) actually runs
+    (proving the plumbing, not just the guard function). Returns the configured oneclient module."""
+    import yaml
+
+    from hermes_cli.plugins import PluginManager
+
+    home = tmp_path / "poh"
+    (home / "plugins").mkdir(parents=True)
+    shutil.copytree(SRC_PLUGINS / "podman-onecli", home / "plugins" / "podman-onecli",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "plugins": {"enabled": ["podman-onecli"], "entries": {"podman-onecli": {"settings": {
+            "gateway_api_base_url": "http://172.17.0.1:10256",
+            "insecure_no_auth_origins": origins,
+            "api_key_env": "ONECLI_API_KEY",
+        }}}},
+    }), encoding="utf-8")
+    bundled = tmp_path / "poh-bundled"
+    bundled.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins["podman-onecli"]
+    assert loaded.enabled and loaded.error is None
+    oneclient = getattr(loaded.module, "oneclient", None) or sys.modules.get("oneclient")
+    assert oneclient is not None, "podman-onecli __init__ must expose its oneclient module"
+    return oneclient
+
+
+@pytest.mark.parametrize("fail_status", [401, 403])
+def test_podman_onecli_optional_api_key_bridge_base(tmp_path, monkeypatch, fail_status):
+    """The podman-onecli base-URL guard, configured through register(ctx)→configure(), permits http:// only
+    to an allowlisted EXACT origin when no bootstrap key is set, still protects a present key, and fails
+    closed on 401/403. Permanent home: tests/plugins/test_podman_onecli_acceptance.py. The exact-origin bound
+    (not host-only) is deliberate: get_container_config returns the aoc_ proxy token as userinfo, so a
+    host-only allowlist would leak it on any other port of the same host."""
+    oneclient = _load_podman_onecli(tmp_path, monkeypatch, ["172.17.0.1:10256"])
+
+    oneclient._require_secure_base("http://172.17.0.1:10256")
+    captured = {}
+
+    def _capture(req, timeout=30):
+        captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        return _FakeResp(200)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", _capture)
+    oneclient.get_container_config(agent="architect")
+    assert "authorization" not in captured["headers"], "no key set ⇒ no Authorization header"
+
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:9999")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://10.0.0.5:10256")
+
+    monkeypatch.setenv("ONECLI_API_KEY", "aoc_secret")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:10256")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", lambda req, timeout=30: _FakeResp(fail_status))
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient.get_container_config(agent="architect")
+
+
+def _capturing_opener(responses):
+    """An _OPENER.open stub recording (method, url, body) per request and replying from `responses`
+    (a list of (code, body) consumed in order)."""
+    calls = []
+    seq = list(responses)
+
+    def _open(req, timeout=30):
+        body = req.data.decode() if getattr(req, "data", None) else ""
+        calls.append((req.get_method(), req.full_url, body))
+        code, payload = seq.pop(0) if seq else (200, b"{}")
+        return _FakeResp(code, payload)
+
+    return _open, calls
+
+
+def test_podman_onecli_set_secrets_resolves_uuid_and_uses_put(tmp_path, monkeypatch):
+    """Resolve an agent UUID (GET /api/agents) then PUT exact grant/revoke secretIds bodies to
+    /api/agents/<uuid>/secrets, never POST by identifier. Non-AC id, backstopped by AC-CRED-F28-2."""
+    oneclient = _load_podman_onecli(tmp_path, monkeypatch, ["172.17.0.1:10256"])
+    uuid = "11111111-2222-3333-4444-555555555555"
+    agents_body = json.dumps([{"identifier": "architect", "id": uuid}]).encode()
+
+    grant_open, grant_calls = _capturing_opener([(200, agents_body), (200, b"{}")])
+    monkeypatch.setattr(oneclient._OPENER, "open", grant_open)
+    oneclient.set_secrets(identifier="architect", secrets=["4d1da6ff-4af8-44f3-8831-07b11bfd004f"])
+    methods = [m for m, _u, _b in grant_calls]
+    urls = [u for _m, u, _b in grant_calls]
+    assert "GET" in methods, "set_secrets must GET /api/agents to resolve the identifier→uuid"
+    assert any(u.rstrip("/").endswith("/api/agents") for u in urls), "must list agents to resolve the uuid"
+    put_i = next(i for i, m in enumerate(methods) if m == "PUT")
+    assert f"/api/agents/{uuid}/secrets" in urls[put_i], "PUT must target the resolved UUID path"
+    put_body = grant_calls[put_i][2]
+    assert json.loads(put_body).get("secretIds") == ["4d1da6ff-4af8-44f3-8831-07b11bfd004f"], \
+        "grant PUT body is exactly the granted secretIds list"
+    assert all("/architect/secrets" not in u for _m, u, _b in grant_calls), \
+        "must NOT POST/PUT /api/agents/<identifier>/secrets (the 404-ing base behavior)"
+
+    revoke_open, revoke_calls = _capturing_opener([(200, agents_body), (200, b"{}")])
+    monkeypatch.setattr(oneclient._OPENER, "open", revoke_open)
+    oneclient.set_secrets(identifier="architect", secrets=[])
+    r_methods = [m for m, _u, _b in revoke_calls]
+    r_put = next(i for i, m in enumerate(r_methods) if m == "PUT")
+    r_body = revoke_calls[r_put][2]
+    assert json.loads(r_body).get("secretIds") == [], "revoke PUT body is an empty secretIds list"
+
+
+def test_fleet_f62_render_forwards_proxy_token_aliases(tmp_path, monkeypatch):
+    """Render the four proxy spellings in terminal.docker_forward_env (name-only; value via the
+    subprocess env) and NEVER the ONECLI_API_KEY control-plane key or a HERMES_PROXY_TOKEN_* swap
+    token (§ Security condition 3). Non-AC id; provider-credential reachability + exec-mediation are
+    proven functionally by AC-6/AC-7."""
+    rendered = _build_rendered("podman", tmp_path, monkeypatch)
+    render_dir = rendered["render"]
+    aliases = {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
+    for name in ROLES:
+        cfg = _read_yaml(render_dir / name / "config.yaml")
+        fwd = _dig(cfg, "terminal.docker_forward_env") or []
+        fwd_set = set(fwd)
+        # C1: docker_forward_env is EXACTLY the four proxy spellings (name-only; the live token-bearing
+        # value wins over the docker_env placeholder at exec). The provider placeholder is NOT here.
+        assert fwd_set == aliases, (
+            f"{name} terminal.docker_forward_env must be EXACTLY the four proxy spellings, got {fwd!r}"
+        )
+        # § Security condition 3: the control-plane key is NEVER forwarded into the sandbox.
+        assert "ONECLI_API_KEY" not in fwd_set, (
+            f"{name} must NEVER forward the ONECLI_API_KEY control-plane key "
+            f"(§ Security condition 3 — host-only via PODMAN_ONECLI_FORBIDDEN_ENV), got {fwd!r}"
+        )
+        # § Security condition 4: the provider key is a non-secret placeholder in docker_env
+        # (the OneCLI proxy injects the real value at request time), never a real credential.
+        denv = _dig(cfg, "terminal.docker_env") or {}
+        assert denv.get("ANTHROPIC_API_KEY") == "onecli-injects-at-request-time", (
+            f"{name} terminal.docker_env must carry the ANTHROPIC_API_KEY provider placeholder value "
+            f"(onecli-injects-at-request-time), never a real credential; got {denv.get('ANTHROPIC_API_KEY')!r}"
+        )
