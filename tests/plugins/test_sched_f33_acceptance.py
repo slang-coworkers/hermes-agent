@@ -552,7 +552,7 @@ def test_cron_jobs_naive_absolute_oneshot_rejected(tmp_path, monkeypatch):
 
 
 def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
-    """A non-boolean no_agent and a job with neither prompt nor script are render errors."""
+    """A non-boolean no_agent and a job with no prompt, script, or skill are render errors."""
     module = _load_compose(tmp_path, monkeypatch)
     spine = {"identity": "BASE"}
     base_types = {"orchestrator": {"extends": ["base"], "identity": "O"}}
@@ -571,7 +571,7 @@ def test_cron_jobs_malformed_payload_rejected(tmp_path, monkeypatch):
         "extends": ["base"], "identity": "W",
         "cron_jobs": [{"name": "e", "schedule": "*/5 * * * *", "monitor": "https://x.invalid/h"}],
     }
-    with pytest.raises(module.CompositionError, match="prompt or a script"):
+    with pytest.raises(module.CompositionError, match="an empty payload has nothing to run"):
         module.compose(str(_write_inline_spec(tmp_path / "spec2", types_empty, spine)), str(tmp_path / "out2"))
 
 

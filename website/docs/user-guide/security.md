@@ -453,6 +453,48 @@ restart the container — the entrypoint will fix ownership on the next start.
 - `{platform}-approved.json` — approved users
 - `_rate_limits.json` — rate limit and lockout tracking
 
+See [Admission policy model: strict, request-approval, public](#admission-policy-model) below for how pairing combines with allowlists and allow-all to express the three classic admission policies.
+
+### Admission policy model: strict, request-approval, public {#admission-policy-model}
+
+An *admission policy* decides what happens to a message from a sender the bot does not yet know. The three classic policies are **strict** (drop unknown senders), **request_approval** (hold the sender pending an operator decision), and **public** (admit everyone). Hermes provides all three out of the box — no plugin and no extra configuration key. They are expressed through two existing surfaces: the authorization decision made by [`_is_user_authorized`](#authorization-check-order) from the [allowlist / allow-all env flags](#platform-allowlists) and pairing grants, and — only when authorization fails — the [`unauthorized_dm_behavior`](./configuration.md) key, which the inbound handler resolves through `_get_unauthorized_dm_behavior` to choose between a pairing offer and a silent drop, backed by the [DM pairing system](#dm-pairing-system). This section maps the three policies onto those surfaces.
+
+:::note Citation convention
+Each `tag:` citation below is `path:line` in the pinned release **v2026.8.31** (commit `29112bef`) and is the authoritative reference. The `main:` counterparts (the same symbols on the moving `upstream/main` branch) are carried from the RT-F05 gap-matrix evidence (upstream `main@08b140d14`, resolved 2026-09-07) and are **not** re-verified here — treat the `main:` side as attributed. `main:` counterparts by subsystem: config field/resolver `gateway/config.py:585`, `:589`; authorization gate + resolver `gateway/authz_mixin.py:473`; pairing store `gateway/pairing.py:446`; unauthorized-DM arm `gateway/run_inbound.py:185`; CLI approve `hermes_cli/pairing.py:1`; dashboard approve `hermes_cli/web_routers/ops.py:82`.
+:::
+
+| Admission policy | Hermes configuration | What happens to an unknown DM sender |
+|---|---|---|
+| **strict** | A per-platform or global allowlist of concrete ids (`<PLATFORM>_ALLOWED_USERS` / `GATEWAY_ALLOWED_USERS`). An allowlist alone already makes the gateway's unauthorized-DM behaviour fall back to `ignore` (absent a higher-precedence override); `unauthorized_dm_behavior: ignore` is the explicit form. A literal `*` entry is **not** strict — it admits everyone (see the **public** row). | Denied and silently dropped, with no pairing offer. `_is_user_authorized` reaches its default-deny (tag: `gateway/authz_mixin.py:964`) and `_get_unauthorized_dm_behavior` falls back to `ignore` when an allowlist is set and no higher-precedence override (an explicit per-platform `unauthorized_dm_behavior: pair`, or an adapter DM policy of `pairing`) selects pairing first (tag: `gateway/authz_mixin.py:966-1069`). |
+| **request_approval** | `unauthorized_dm_behavior: pair` — the **default when no allowlist is configured**. To combine request-approval *with* an allowlist, set the per-platform override `platforms.<platform>.unauthorized_dm_behavior: pair`; an allowlist alone would otherwise fall back to `ignore`, and the explicit per-platform value always wins. | Receives a one-time pairing code; the request is held **pending** (for up to one hour, the code's TTL) until the operator approves. Approval adds the sender to that profile's approved list, which `_is_user_authorized` unions with the allowlist — so the sender is authorized even if never added to an allowlist (tag: mint `gateway/pairing.py:639`, approve `gateway/pairing.py:564-585`, authz union `gateway/authz_mixin.py:710-712`). |
+| **public** | `<PLATFORM>_ALLOW_ALL_USERS=true` (checked **unconditionally**) or `GATEWAY_ALLOW_ALL_USERS=true` (applies **only when no allowlist is configured**), or a literal `*` in an applicable allowlist (`<PLATFORM>_ALLOWED_USERS=*` / `GATEWAY_ALLOWED_USERS=*`), which short-circuits to allow-everyone with no flag — **all off for the fleet**. | Admitted with no approval step (tag: per-platform allow-all `gateway/authz_mixin.py:679-682`, global allow-all `gateway/authz_mixin.py:823`, `*`-in-allowlist `gateway/authz_mixin.py:914-917`). |
+
+Two resolvers decide the unauthorized-DM behaviour and must not be conflated: `GatewayConfig.get_unauthorized_dm_behavior()` reads configuration only — per-platform override (from `PlatformConfig.extra`, tag: `gateway/config.py:689`), else email ⇒ `ignore`, else the configured global `unauthorized_dm_behavior` value (default `pair`) (field tag: `gateway/config.py:1020`; resolver tag: `gateway/config.py:1353-1369`). The gateway-side `_get_unauthorized_dm_behavior()` applies a fuller precedence (tag: `gateway/authz_mixin.py:966-1069`): explicit per-platform override, then email ⇒ `ignore`, then a non-default global value (`ignore`), then an adapter DM policy (`pairing` ⇒ `pair`, `allowlist`/`disabled` ⇒ `ignore`), then an env allowlist ⇒ `ignore`, else `pair`. Only this second resolver folds in allowlists and adapter DM policy; both keep the same default of `pair`.
+
+:::note `dm_policy: open` is not the same as public
+An "open" DM policy is not an allow-all: without an allow-all flag it still falls through to default-deny (tag: `gateway/authz_mixin.py:731-746`). Admitting everyone requires an explicit opt-in — either an `*_ALLOW_ALL_USERS` flag **or** a literal `*` in an applicable allowlist (`<PLATFORM>_ALLOWED_USERS=*` / `GATEWAY_ALLOWED_USERS=*`), which short-circuits to allow-everyone (tag: `gateway/authz_mixin.py:914-917`). A `*` allowlist entry is therefore **public, not strict**.
+:::
+
+#### Where operator approvals surface
+
+Approving a pending request is one operator action available in two places:
+
+- **CLI** — `hermes pairing approve <platform> <request-id|code>` (tag: `hermes_cli/pairing.py:6`); see the [pairing commands](../reference/cli-commands.md).
+- **Dashboard** — the [Pairing panel](./features/web-dashboard.md#pairing), backed by `POST /api/pairing/approve` (tag: `hermes_cli/web_server.py:13914-13935`).
+
+In Bot Mode the fleet runs one gateway with per-profile pairing stores, so these are a single fleet-wide operator panel — one place to approve pending requests across every coworker profile.
+
+#### Two accepted differences
+
+Two behaviours are intentionally documented rather than changed:
+
+1. **The triggering message is not replayed after approval.** The unauthorized-DM arm returns without enqueueing the message (tag: `gateway/run.py:18243`), and the pending record holds only the pairing fields — platform, request id, user id, user name, age — never the message body (tag: `gateway/pairing.py:800-831`). There is nothing to replay when the operator approves; the sender simply sends again.
+2. **Unauthorized group messages are silently ignored.** The pairing offer is gated on `chat_type == "dm"` (tag: `gateway/run.py:18191`); a group message from an unauthorized sender skips the offer and hits the same drop (tag: `gateway/run.py:18243`) — no code, no reply.
+
+#### Fleet note
+
+Pairing stores are per-profile isolated (tag: `gateway/pairing.py:451-467`). Absent allowlist mirroring, approving a sender in one profile does not authorize them in another. The fleet default is `pair` on chat-shaped DMs (email defaults to `ignore`) with allow-all off. One caveat under profile multiplexing: `_approve_user` always calls `_sync_allowlist_add`, and when a platform allowlist is already configured that mirror writes the granted user into the **root** `.env` allowlist rather than a per-profile one (tag: `gateway/pairing.py:205-231`, flagged in-code at `gateway/pairing.py:188`). The JSON pairing grant remains profile-local. The allowlist mirror does not: it targets the root/default profile's `.env`, so an approval made for a named profile can also affect the root/default profile's effective authorization when that mirror runs, while other named profiles continue reading their own scoped allowlists (`_platform_gate_env`, tag: `gateway/authz_mixin.py:31-56`). The per-profile approved list held in the pairing store is the grant the authorization check reads.
+
 ## Container Isolation
 
 When using the `docker` terminal backend, Hermes applies strict security hardening to every container.

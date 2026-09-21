@@ -1,0 +1,16 @@
+# The inline dummy api_key survives the webhook route's recipient subprocess,
+# which strips ANTHROPIC_* (tools/environments/local.py:359-361); the remote host
+# lets the OneCLI egress proxy inject the real credential without relying on a
+# loopback port. The literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-loop-f40-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

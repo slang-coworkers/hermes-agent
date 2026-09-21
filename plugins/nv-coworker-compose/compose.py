@@ -271,11 +271,19 @@ _DEFAULT_SESSION_MODE = "per-thread"
 _AGENT_SHARED_MODE = "agent-shared"
 
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
-# (hermes_cli/profile_distribution.py:88-95) plus the two this render adds.
+# (hermes_cli/profile_distribution.py:88-95) plus the extras this render adds.
+# "scripts" carries the DEFAULT profile's rendered webhook route scripts to
+# $HERMES_HOME/scripts/ on install (webhook_filters resolves scripts there); the
+# installer skips a declared owned path that a profile does not have, so coworker
+# profiles without a scripts/ dir are unaffected (profile_distribution.py:613-614).
 _DIST_OWNED: List[str] = [
     "SOUL.md", "config.yaml", "mcp.json", "skills", "cron",
-    "distribution.yaml", "skill-bundles", ".env.template",
+    "distribution.yaml", "skill-bundles", ".env.template", "scripts",
 ]
+
+# LOOP-F40 CI-gate route scripts materialized into the DEFAULT profile's
+# scripts/ dir; a route's `script:` in the fleet spec references them by name.
+_ROUTE_SCRIPTS = ("pr_ci_gate.py", "check_gate.py")
 
 _ENV_TEMPLATE_BODY = (
     "# Environment variables for this Hermes coworker distribution.\n"
@@ -2161,7 +2169,12 @@ def _write_common(pdir: Path) -> None:
 # misspelled 'script' would otherwise be silently dropped and render a pre-task
 # gate that never gates.
 _CRON_JOB_KEYS = frozenset(
-    {"name", "schedule", "prompt", "script", "monitor", "monitor_url", "monitor_script", "no_agent"}
+    {
+        "name", "schedule", "prompt", "script", "monitor", "monitor_url", "monitor_script",
+        "no_agent",
+        # skill-backed jobs (optionally Bot-Chat-delivered), mirroring native create_job
+        "skill", "skills", "deliver",
+    }
 )
 
 
@@ -2211,7 +2224,7 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
     declaration, and execution-mode invariants mirror
     ``cron/jobs.py:_validate_job_mode_invariants`` so a rendered job can never be
     a shape the runtime would silently auto-pause or mis-gate."""
-    from cron.jobs import compute_next_run, parse_schedule
+    from cron.jobs import _normalize_skill_list, compute_next_run, parse_schedule
 
     if not isinstance(decl, dict):
         raise CompositionError(
@@ -2290,9 +2303,57 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
             f"{profile}: cron job {name!r} 'prompt' must be a string, got {type(prompt).__name__}"
         )
     has_prompt = isinstance(prompt, str) and bool(prompt.strip())
-    if not (has_prompt or script):
+    # skill-backed job (optionally Bot-Chat-delivered): mirror native create_job's
+    # persisted shape (_normalize_skill_list cron/jobs.py:500-514; skills/skill
+    # :2395-2397; deliver :2432) so a rendered skill-backed cron loads and fires like a
+    # runtime one. Validate on KEY PRESENCE and fail closed: a declared-but-null or blank
+    # value is an operator error, not "absent" — rejecting it (rather than letting a
+    # value-based .get() and _normalize_skill_list silently drop it) keeps the render honest.
+    raw_skill = None
+    if "skill" in decl:
+        raw_skill = decl["skill"]
+        if not isinstance(raw_skill, str) or not raw_skill.strip():
+            raise CompositionError(
+                f"{profile}: cron job {name!r}: 'skill' must be a non-empty string, got {raw_skill!r}"
+            )
+    raw_skills = None
+    if "skills" in decl:
+        raw_skills = decl["skills"]
+        if isinstance(raw_skills, str):
+            if not raw_skills.strip():
+                raise CompositionError(
+                    f"{profile}: cron job {name!r}: 'skills' must be a non-empty string or a list of non-empty strings"
+                )
+        elif isinstance(raw_skills, list):
+            if not raw_skills:
+                raise CompositionError(
+                    f"{profile}: cron job {name!r}: 'skills' must be a non-empty string or a non-empty list of non-empty strings"
+                )
+            for item in raw_skills:
+                if not isinstance(item, str) or not item.strip():
+                    raise CompositionError(
+                        f"{profile}: cron job {name!r}: every 'skills' entry must be a non-empty string, got {item!r}"
+                    )
+        else:
+            raise CompositionError(
+                f"{profile}: cron job {name!r}: 'skills' must be a string or a list of strings, "
+                f"got {type(raw_skills).__name__}"
+            )
+    skills = _normalize_skill_list(raw_skill, raw_skills)
+    deliver = None
+    if "deliver" in decl:
+        # validate the shape but store verbatim — native create_job persists deliver
+        # exactly as given (cron/jobs.py:2432) and applies no strip.
+        deliver = decl["deliver"]
+        if not isinstance(deliver, str) or not deliver.strip():
+            raise CompositionError(
+                f"{profile}: cron job {name!r}: 'deliver' must be a non-empty string, got {deliver!r}"
+            )
+    # A skill-backed agent job is a valid payload on its own — the skill drives the turn —
+    # matching native create_job, which accepts skills with no prompt/script.
+    if not (has_prompt or script or skills):
         raise CompositionError(
-            f"{profile}: cron job {name!r} needs a prompt or a script (an empty payload has nothing to run)"
+            f"{profile}: cron job {name!r} needs a prompt, a script, or a skill (an empty payload has nothing to run)"
         )
     monitor_script, monitor_url = _normalize_monitor(name, decl)
     # 'false'/'0' are truthy strings, so a bare bool() would flip an intended
@@ -2339,6 +2400,14 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
         job["monitor_url"] = monitor_url
     if no_agent:
         job["no_agent"] = True
+    # Emit skills/deliver only when declared, so a job without them renders byte-identically
+    # (an unchanged distribution must re-render identically). skill is the legacy singular
+    # alias native create_job also persists (cron/jobs.py:2395-2397).
+    if skills:
+        job["skills"] = skills
+        job["skill"] = skills[0]
+    if deliver:
+        job["deliver"] = deliver
     return job
 
 
@@ -2444,6 +2513,22 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     _write_distribution(pdir, tname, f"Composed Hermes coworker profile: {tname}")
 
 
+def _render_route_scripts(pdir: Path) -> None:
+    """Materialize the webhook route scripts into the DEFAULT profile's scripts/.
+
+    On install they land in $HERMES_HOME/scripts/, where the webhook adapter's
+    resolver looks them up by the `script:` name declared on a route. They are
+    inert unless a rendered route references them.
+    """
+    src_dir = Path(__file__).resolve().parent / "route_scripts"
+    scripts_dir = pdir / "scripts"
+    scripts_dir.mkdir(exist_ok=True)
+    for script in _ROUTE_SCRIPTS:
+        (scripts_dir / script).write_text(
+            (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
 def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", name, "Multiplexer profile for the Bot-Mode gateway.", [], [])
@@ -2451,6 +2536,7 @@ def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     _write_common(pdir)
     (pdir / "skills").mkdir(exist_ok=True)
     (pdir / "skill-bundles").mkdir(exist_ok=True)
+    _render_route_scripts(pdir)
     _write_distribution(pdir, name, "Composed Hermes multiplexer (DEFAULT) profile")
 
 
