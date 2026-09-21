@@ -106,7 +106,8 @@ class _FakeTransport:
 def _load(tmp_path, monkeypatch):
     hermes_home = tmp_path / "home"
     (hermes_home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     # secrets.onecli.enabled is left unset, so SecretSource.is_enabled() is
     # False and discovery does NOT pull the source (which would need a live
     # transport). Tests install a stub transport and drive fetch()/ensure_agent.

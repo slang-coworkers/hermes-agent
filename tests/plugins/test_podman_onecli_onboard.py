@@ -24,7 +24,8 @@ PLUGIN_SRC = REPO_ROOT / "plugins" / PLUGIN_KEY
 def _load(tmp_path, monkeypatch, profile_secret_sets_yaml: str):
     hermes_home = tmp_path / "home"
     (hermes_home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (hermes_home / "config.yaml").write_text(
         "plugins:\n"
         f"  enabled: [{PLUGIN_KEY}]\n"

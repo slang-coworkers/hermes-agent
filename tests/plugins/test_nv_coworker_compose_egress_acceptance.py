@@ -61,7 +61,8 @@ def _load(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     plugins_dir = home / "plugins"
     plugins_dir.mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (home / "config.yaml").write_text(
         yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}), encoding="utf-8"
     )
