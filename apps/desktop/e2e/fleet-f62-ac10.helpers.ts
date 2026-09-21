@@ -8,6 +8,7 @@ import {
   createSandbox,
   launchDesktop,
   type MockBackendFixture,
+  REPO_ROOT,
   type Sandbox,
   waitForAppReady,
   writeEnvFile,
@@ -166,7 +167,14 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
 
     seedDefaultHidden(sandbox.hermesHome)
 
-    const launched = await launchDesktop(buildAppEnv(sandbox))
+    // C2 (FLEET-F62): pin bundled-plugin discovery to the tested worktree's plugins dir
+    // so the spawned headless `hermes serve` DISCOVERS kanban and mounts
+    // /api/plugins/kanban/board (web_server.py honours HERMES_BUNDLED_PLUGINS via
+    // get_bundled_plugins_dir; bundled plugins mount regardless of plugins.enabled).
+    // Scoped to this AC-10 harness (preflight + counted both boot through here).
+    const launched = await launchDesktop(
+      buildAppEnv(sandbox, { HERMES_BUNDLED_PLUGINS: path.join(REPO_ROOT, 'plugins') })
+    )
     app = launched.app
 
     const boundMock = mock

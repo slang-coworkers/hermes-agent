@@ -35,6 +35,25 @@ test('FLEET-F62 desktop navigation preflight (uncounted): the shared driveFleetF
   test.setTimeout(420_000)
   const { page } = fixture!
 
+  // C2 readiness gate (uncounted): before driving nav, prove the single gateway
+  // DISCOVERED and MOUNTED kanban — GET /api/dashboard/plugins lists it and the board
+  // endpoint returns a payload. Discovery alone is insufficient (a mount import failure
+  // is caught+logged), so also fetch the board. Both go through the Electron IPC bridge
+  // (window.hermesDesktop.api), not a renderer HTTP GET. A discovered-but-unmounted
+  // kanban FAILs the preflight uncounted, before the sole counted AC-10 run.
+  const readiness = await page.evaluate(async () => {
+    const api = (window as unknown as {
+      hermesDesktop: { api: <T>(request: { path: string }) => Promise<T> }
+    }).hermesDesktop.api
+    const plugins = await api<Array<{ name?: string }>>({ path: '/api/dashboard/plugins' })
+    const board = await api<{ columns?: unknown[] }>({ path: '/api/plugins/kanban/board' })
+    return { pluginNames: plugins.map(plugin => plugin.name), board }
+  })
+  expect(readiness.pluginNames, 'the single gateway discovered the bundled kanban plugin').toContain('kanban')
+  expect(readiness.board, 'the kanban board API mounted and returns a columns payload').toMatchObject({
+    columns: expect.any(Array)
+  })
+
   // Mechanical-only checkpoints: confirm each action reached the next view without
   // asserting a counted criterion. The driver's own locators/waits (roster rendered,
   // room tabs, Bot Chat tab, overlay dismissed, Sessions pane visible, docked Kanban
