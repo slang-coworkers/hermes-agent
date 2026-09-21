@@ -27,6 +27,12 @@ plugins:
         operators:
           - "dashboard:oauth:org-1:op-1"
           - "gateway:slack:ws-1:op-1"
+        # The testbed dashboard runs in loopback (no OAuth IDP in-container), so it carries
+        # no per-user session and principal_from_request returns None. Opt the single trusted
+        # local token in as the panel operator so AC-6 can resolve hermetically; this is the
+        # explicit, default-off fail-closed escape hatch the plugin documents. It does NOT
+        # affect AC-8 (the gateway path derives its principal from the event, not this).
+        loopback_operator: "dashboard:oauth:org-1:op-1"
         # A very low Tier-2 ceiling so the first turn crosses and raises an episode.
         default_ceiling_usd: 0.02
         escalation_increment_usd: 0.05

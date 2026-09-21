@@ -18,11 +18,12 @@ reported no-op.
 ## Setup
 - Install the `fixtures:` list (the tester does this before `## Setup`). Do NOT re-install
   it here.
-- Start `hermes dashboard` for `cost-f30-operator` **in gated/OAuth mode** (so
-  `request.state.session` carries `provider`/`org_id`/`user_id`), authenticated as the OAuth
-  operator whose derived principal is `dashboard:oauth:org-1:op-1` (already in the fixture's
-  `operators`). Point the model at the hermetic **stub** (the fixture's live provider block
-  is for AC-8).
+- Start `hermes dashboard` for `cost-f30-operator` **in loopback mode** (the mode the testbed
+  supports — no OAuth IDP in-container). Loopback carries no per-user session, so
+  `principal_from_request` returns None; the fixture's `loopback_operator:
+  dashboard:oauth:org-1:op-1` (already set) opts the single trusted local token in as that
+  panel operator, which is exactly one of the fixture's `operators`. Point the model at the
+  hermetic **stub** (the fixture's live provider block is for AC-8).
 - Load the dashboard under agent-browser. Because the SPA opens the DEFAULT profile's view
   regardless of `-p`, first **select `cost-f30-operator` in the dashboard profile combobox**
   → expect the `cost-f30-operator »` context before any assertion.

@@ -23,7 +23,7 @@ import { expect, test } from './test'
 // explicit loopback_operator (the single trusted local token authorizes as the operator);
 // the LOCKED profile does not, so a resolve scoped there is refused — the authz boundary.
 
-const REPO_ROOT = path.resolve(__dirname, '../../..')
+const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
 const PLUGIN_SRC = path.join(REPO_ROOT, 'plugins', 'nv-cost-cap')
 const STORE_PY = path.join(PLUGIN_SRC, 'store.py')
 const LOOPBACK_OP = 'dashboard:oauth:org-1:op-1'
