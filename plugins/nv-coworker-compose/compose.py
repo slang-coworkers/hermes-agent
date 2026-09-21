@@ -875,23 +875,13 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
         env[name] = _EGRESS_PROVIDER_PLACEHOLDER
     _set_dotted(config, descriptor.key("env"), env)
 
-    # C1 (FLEET-F62): forward the four proxy spellings BY NAME so the docker client
-    # resolves each to the live token-bearing value from the per-profile secret scope
-    # at exec, winning over the tokenless placeholder written above. Canonicalise:
-    # keep any pre-existing non-controlled, non-control-plane string entries, then
-    # append the four proxy names not already present. Name-only — no value here.
-    controlled = _egress_controlled_names(params)
-    current_fwd = _get_dotted(config, descriptor.key("forward_env"))
-    fwd = [
-        n for n in (current_fwd if isinstance(current_fwd, list) else [])
-        if isinstance(n, str)
-        and n.strip() != "ONECLI_API_KEY"
-        and not _is_controlled_env_name(n, controlled)
-    ]
-    for var in _EGRESS_PROXY_VARS:
-        if var not in fwd:
-            fwd.append(var)
-    _set_dotted(config, descriptor.key("forward_env"), fwd)
+    # C1 (FLEET-F62): forward EXACTLY the four proxy spellings BY NAME so the docker
+    # client resolves each to the live token-bearing value from the per-profile secret
+    # scope at exec, winning over the tokenless placeholder written above. The render
+    # owns docker_forward_env like it owns the egress docker_env, so it is set to
+    # exactly the four (any spec-declared forward_env is overwritten). Name-only — no
+    # value is written here; the value travels through the client subprocess env.
+    _set_dotted(config, descriptor.key("forward_env"), list(_EGRESS_PROXY_VARS))
 
     _set_dotted(config, descriptor.key("persist_across_processes"), False)
     _set_dotted(config, "terminal.container_memory", params["container_memory"])

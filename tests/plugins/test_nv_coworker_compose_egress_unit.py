@@ -179,6 +179,21 @@ def test_docker_forward_env_proxy_alias_allowed_and_rendered_as_four(tmp_path, m
         assert set(fwd) == {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}, fwd
 
 
+def test_docker_forward_env_discards_unrelated_names(tmp_path, monkeypatch):
+    """The render OWNS docker_forward_env: a spec-declared non-controlled forward name
+    (allowed past the guard) is overwritten, so the rendered forward_env is EXACTLY the
+    four proxy spellings — never a fifth entry that could ride an unexpected name into
+    the sandbox."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-extra",
+                      spine_config={"terminal": {"docker_forward_env": ["MY_APP_FLAG"]}})
+    rendered = module.compose(str(spec), str(tmp_path / "out"))
+    for rdir in rendered.values():
+        assert _config(rdir)["terminal"]["docker_forward_env"] == [
+            "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"
+        ]
+
+
 def test_docker_forward_env_control_plane_key_rejected(tmp_path, monkeypatch):
     """The OneCLI control-plane key is never forwardable — it authenticates the render to
     OneCLI and must stay host-only (§ Security condition 3), and it is not in the egress-
