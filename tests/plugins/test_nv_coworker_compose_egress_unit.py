@@ -165,6 +165,41 @@ def test_docker_forward_env_controlled_rejected(tmp_path, monkeypatch):
         module.compose(str(spec), str(tmp_path / "out"))
 
 
+def test_docker_forward_env_proxy_alias_allowed_and_rendered_as_four(tmp_path, monkeypatch):
+    """FLEET-F62 C1: an EXACT proxy spelling in docker_forward_env is permitted (the render
+    forwards the four proxy NAMES so the live token-bearing value wins over the docker_env
+    placeholder at exec), and the rendered forward_env is EXACTLY the four canonical spellings —
+    the spec's single entry is canonicalized, not duplicated."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-proxy-ok",
+                      spine_config={"terminal": {"docker_forward_env": ["HTTPS_PROXY"]}})
+    rendered = module.compose(str(spec), str(tmp_path / "out"))
+    for rdir in rendered.values():
+        fwd = _config(rdir)["terminal"]["docker_forward_env"]
+        assert set(fwd) == {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}, fwd
+
+
+def test_docker_forward_env_control_plane_key_rejected(tmp_path, monkeypatch):
+    """The OneCLI control-plane key is never forwardable — it authenticates the render to
+    OneCLI and must stay host-only (§ Security condition 3), and it is not in the egress-
+    controlled set, so it needs its own explicit refusal."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-onecli",
+                      spine_config={"terminal": {"docker_forward_env": ["ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_forward_env_ca_var_still_rejected(tmp_path, monkeypatch):
+    """The relax is EXACTLY the four proxy spellings — a controlled NON-proxy name (a CA-trust
+    var) in docker_forward_env still collides with the render-owned egress posture."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-ca",
+                      spine_config={"terminal": {"docker_forward_env": ["SSL_CERT_FILE"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
 @pytest.mark.parametrize("extra", [
     ["-e", "HTTPS_PROXY=http://evil:1"],
     ["--env", "SSL_CERT_FILE=/x"],

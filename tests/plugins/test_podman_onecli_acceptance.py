@@ -33,10 +33,14 @@ WRAPPER = PLUGIN_SRC / "bin" / "podman-onecli-wrap"
 SANDBOX_CA = "/etc/ssl/certs/hermes-egress-ca.crt"
 EXPECTED_PROXY = "172.17.0.1:10255"
 PROVIDER_PLACEHOLDER = "onecli-injects-at-egress"
-PROXY_URL_KEYS = {"HTTPS_PROXY", "HTTP_PROXY"}
+# FLEET-F62 C1: the SecretSource exposes the token-bearing proxy value under all four
+# spellings (curl prefers the lowercase), so the lowercase aliases are also proxy URLs.
+PROXY_URL_KEYS = {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
 EXPECTED_SECRET_KEYS = {
     "HTTPS_PROXY",
+    "https_proxy",
     "HTTP_PROXY",
+    "http_proxy",
     "NO_PROXY",
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -68,10 +72,16 @@ class _FakeTransport:
                 return 409, {"error": "agent already exists"}
             self.existing.add(ident)
             return 201, {"identifier": ident}
-        if method == "POST" and path.startswith("/api/agents/") and path.endswith("/secrets"):
-            ident = path[len("/api/agents/"):-len("/secrets")]
+        # FLEET-F62 C1b: set_secrets resolves identifier->uuid (GET /api/agents) then
+        # PUTs secretIds to the UUID-keyed path (the old POST-by-identifier 404s).
+        if method == "GET" and path == "/api/agents":
+            self.calls.append(("list_agents", None))
+            return 200, [{"identifier": i, "id": f"uuid-{i}"} for i in sorted(self.existing)]
+        if method == "PUT" and path.startswith("/api/agents/") and path.endswith("/secrets"):
+            uuid = path[len("/api/agents/"):-len("/secrets")]
+            ident = uuid[len("uuid-"):] if uuid.startswith("uuid-") else uuid
             self.calls.append(("set_secrets", ident))
-            self.secrets[ident] = list((json or {}).get("secrets", []))
+            self.secrets[ident] = list((json or {}).get("secretIds", []))
             return 200, {}
         if method == "GET" and path.startswith("/v1/container-config"):
             ident = parse_qs(urlparse(path).query)["agent"][0]
@@ -294,7 +304,7 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
         fake.calls.clear()
         entry["handler_fn"](args)
         kinds = [kind for kind, _ in fake.calls]
-        assert kinds == ["ensure_agent", "set_secrets", "get_container_config"]
+        assert kinds == ["ensure_agent", "list_agents", "set_secrets", "get_container_config"]
         assert fake.secrets["cred-f28-bot-a"] == []
 
     # The 409 tolerance is the REAL client's mapping, not the stub's: a repeat
