@@ -32,6 +32,15 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from . import policy, store
+from .escalation import (  # noqa: F401  (re-exported as the plugin's public COST-F30 API)
+    handle_cost_command,
+    principal_from_event,
+    principal_from_request,
+    reconcile_once,
+    resolve_escalation,
+    resolve_via_cli,
+    set_episode_ceiling,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +530,41 @@ def _on_session_end(session_id=None, **kwargs):
             )
     except Exception:
         logger.warning("nv-cost-cap on_session_end failed", exc_info=True)
+    # COST-F30: a one-shot reconcile so a grant claimed but not applied (a resolver crash),
+    # or an episode whose session closed mid-decision, is made consistent on the next turn
+    # of any surface. Best-effort and idempotent; a no-op when nothing is pending.
+    try:
+        reconcile_once()
+    except Exception:
+        logger.warning("nv-cost-cap on_session_end reconcile failed", exc_info=True)
+    return None
+
+
+def _on_session_finalize(session_id=None, profile=None, **kwargs):
+    """COST-F30: a session is truly closed — mark ``ended_at`` so a later resolve no-ops.
+
+    Gateway finalization can fire OUTSIDE the per-message profile scope, so if the owning
+    profile is supplied, pin it; otherwise mark under the ambient/current home. Marking sets
+    ``ended_at`` only — the reconciler is the sole actor that finalises the open episode.
+    """
+    try:
+        if not session_id:
+            return None
+        if profile:
+            from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+            from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
+
+            canon = normalize_profile_name(profile)
+            validate_profile_name(canon)
+            token = set_hermes_home_override(str(get_profile_dir(canon)))
+            try:
+                store.mark_session_closed(session_id)
+            finally:
+                reset_hermes_home_override(token)
+        else:
+            store.mark_session_closed(session_id)
+    except Exception:
+        logger.warning("nv-cost-cap on_session_finalize failed", exc_info=True)
     return None
 
 
@@ -586,8 +630,65 @@ def _event_platform(event):
     return getattr(getattr(event, "source", None), "platform", None)
 
 
+def _cost_command_text(event):
+    """Return the raw text of a ``/cost …`` command on this event, else None."""
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text:
+        return None
+    first = text.split()[0].lstrip("/").lower()
+    return text if first == "cost" else None
+
+
+_reconcile_loop_started = False
+
+
+def _maybe_start_reconcile_loop() -> None:
+    """Start the periodic reconciler ONCE, from the gateway loop thread (spawn_task needs one)."""
+    global _reconcile_loop_started
+    if _reconcile_loop_started or _CTX is None:
+        return
+    try:
+        import asyncio
+
+        interval = max(1, _cfg_int("escalation_reconcile_seconds", 3600))
+
+        async def _loop():
+            while True:
+                try:
+                    await asyncio.sleep(interval)
+                    reconcile_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("nv-cost-cap reconcile loop iteration failed", exc_info=True)
+
+        _CTX.spawn_task(_loop(), name="nv-cost-cap-reconcile")
+        _reconcile_loop_started = True
+    except Exception:
+        logger.warning("nv-cost-cap reconcile loop start failed", exc_info=True)
+
+
 def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs):
     try:
+        _maybe_start_reconcile_loop()
+        # COST-F30: intercept `/cost <continue|stop|ceiling ...>` and resolve it in-plugin
+        # BEFORE the boundary/skip logic — a blocked session would otherwise skip its own
+        # `/cost`. The command is dropped from dispatch (never a wasted model turn); the
+        # operator observes the outcome on the session's NEXT turn (resumed if the Continue
+        # was granted, still the enriched pause notice if it was refused).
+        cost_text = _cost_command_text(event)
+        if cost_text is not None:
+            session_id = _resolve_session_id(event, gateway, session_store)
+            if session_id:
+                profile = getattr(getattr(event, "source", None), "profile", None)
+                try:
+                    handle_cost_command(
+                        session_id, cost_text, principal_from_event(event), profile=profile
+                    )
+                except Exception:
+                    logger.warning("nv-cost-cap /cost handling failed", exc_info=True)
+            return {"action": "skip", "reason": "nv-cost-cap: /cost handled"}
+
         # Recovery/steering commands are never skipped — checked BEFORE any
         # blocked/window state so an over-cap session can always be recovered.
         if _resolve_recovery_command(event) is not None:
@@ -614,7 +715,9 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
 def _synthetic_response(api_mode):
     message = (
         "Spending paused: this session reached its configured Tier-2 cost ceiling. "
-        "Start a new session (/new) or ask an operator to raise the ceiling."
+        "An authorized operator can resume it with `/cost continue`, set an exact ceiling "
+        "with `/cost ceiling <usd>`, or stop it with `/cost stop` — on this gateway or from "
+        "the operator panel. Or start a new session (/new)."
     )
     if api_mode == "anthropic_messages":
         return SimpleNamespace(
@@ -791,7 +894,46 @@ def _cli_cost_cap(ns, **kwargs):
         print(json.dumps(result))
         return result
 
-    result = {"ok": False, "reason": "usage: hermes cost-cap {show|set [--fleet-ceiling X] [--profile P --ceiling Y]}"}
+    if command == "resolve":
+        orchestrator = _orchestrator_profile()
+        # Self-gate BEFORE any resolution: the CLI's authorization is operational
+        # (orchestrator profile only), not operator-list membership.
+        if active != orchestrator:
+            result = {
+                "ok": False,
+                "reason": (
+                    f"cost-cap resolve is orchestrator-only; active profile {active!r} "
+                    f"is not the orchestrator {orchestrator!r}"
+                ),
+            }
+            print(json.dumps(result))
+            return result
+
+        decision = getattr(ns, "decision", None)
+        amount_usd = getattr(ns, "amount_usd", None)
+        if decision == "set-ceiling" and amount_usd is None:
+            result = {"ok": False, "reason": "--amount-usd is required for --decision set-ceiling"}
+            print(json.dumps(result))
+            return result
+
+        # The recorded actor is the surface-namespaced fleet-admin id, consistent with the
+        # dashboard:/gateway: principals so the audited actor is unambiguous.
+        admin_id = _cfg("fleet_admin_id", None) or active
+        actor = f"cli:{orchestrator}:{admin_id}"
+        outcome = resolve_via_cli(
+            getattr(ns, "profile", None),
+            getattr(ns, "session_id", None),
+            getattr(ns, "episode_id", None),
+            getattr(ns, "budget_gen", None),
+            decision,
+            amount_usd,
+            actor,
+        )
+        result = {"ok": bool(outcome.get("granted")), "actor": actor, "result": outcome}
+        print(json.dumps(result))
+        return result
+
+    result = {"ok": False, "reason": "usage: hermes cost-cap {show|set [--fleet-ceiling X] [--profile P --ceiling Y]|resolve --profile P --session S --episode E --budget-gen G --decision continue|stop|set-ceiling [--amount-usd U]}"}
     print(json.dumps(result))
     return result
 
@@ -810,6 +952,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
+    ctx.register_hook("on_session_finalize", _on_session_finalize)
     ctx.register_middleware("llm_execution", _llm_execution)
     ctx.register_cli_command(
         name="cost-cap",
