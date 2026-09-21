@@ -160,14 +160,22 @@ the single trusted local token should authorize as (default off).
   `$HERMES_HOME/plugins/nv-cost-cap/` and is enabled in **Settings → Plugins** (off by
   default); the Python backend half must be enabled on the gateway host.
 - **Messaging gateways:** `/cost continue | stop | ceiling <exact-usd>` resolves the
-  session's pending episode. A blocked session's own turn carries the enriched pause notice
-  naming these commands; after an authorized `/cost continue` the session resumes on its
-  next turn.
+  session's pending episode (parsed through the adapter's own command API, so `/cost@bot`
+  and iOS em-dash-corrected flags work). The plugin replies on the gateway's own outbound
+  rail with a one-line outcome (`resumed`, `stopped`, `ceiling set to $X`, or the refusal
+  reason), because a resolved command is dropped from dispatch and never becomes a model
+  turn. A blocked session's ordinary inbound is likewise dropped, so the plugin delivers the
+  pause notice naming these commands at that point; after an authorized `/cost continue` the
+  session resumes on its next turn, and a repeat `/cost continue` reports `already-resolved`.
 - **Orchestrator CLI (fallback):** `hermes cost-cap resolve --profile P --session S
-  --episode E --budget-gen G --decision continue|stop|set-ceiling [--amount-usd U]`. It is
-  reachable only from the orchestrator profile (operational gate) and pins `--profile`
-  around the full lookup / authorize / CAS / apply, recording a `cli:<orchestrator-profile>:<fleet-admin-id>`
-  actor. It is the panel-independent path when the dashboard runs in loopback mode.
+  --episode E --budget-gen G --decision continue|stop|set-ceiling [--amount-usd U]`. Two
+  independent gates, both required: it is reachable only from the orchestrator profile (an
+  operational gate) **and** the recorded `cli:<orchestrator-profile>:<fleet-admin-id>` actor
+  must itself be a configured `operators` entry of the target profile — the requirement that
+  every resolution is authorized against the structured operators applies to the CLI too, so
+  the operational gate is additive, not a substitute. It pins `--profile` around the full
+  lookup / authorize / CAS / apply, and is the panel-independent path when the dashboard runs
+  in loopback mode.
 
 A reconciler makes mid-decision episodes consistent: a grant claimed but not applied (a
 resolver crash) is applied exactly once, and an episode whose session closed mid-decision

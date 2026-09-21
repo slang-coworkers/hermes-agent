@@ -33,10 +33,33 @@
     }
   }
 
+  // One-line operator feedback for a resolution outcome that returns 2xx with granted:false
+  // (unauthorized / deferred / already-resolved / …) — otherwise the click looks like a no-op.
+  const OUTCOME_NOTE = {
+    unauthorized: "Not authorized for this profile.",
+    "already-resolved": "Already resolved.",
+    "no-episode": "No pending escalation.",
+    "immortal-continue-only": "Continue-only session.",
+    "invalid-amount": "Enter a valid exact USD amount.",
+    managed: "Ceiling is administrator-managed.",
+    "stale-generation": "Superseded by a newer cost event.",
+    "session-closed": "Session already closed.",
+    deferred: "Retrying — check again shortly."
+  };
+  function outcomeNote(res) {
+    if (!res || typeof res !== "object") return "Request failed.";
+    if (res.granted) {
+      if (res.decision === "ceiling" && res.amount_usd != null) return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}.`;
+      return "Applied.";
+    }
+    return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`;
+  }
+
   function EscalationCard() {
     const [items, setItems] = useState([]);
     const [busy, setBusy] = useState({});
     const [amounts, setAmounts] = useState({});
+    const [notes, setNotes] = useState({});
 
     const refresh = useCallback(async () => {
       try {
@@ -60,12 +83,14 @@
         const profile = await currentProfile();
         const body = { decision };
         if (amountUsd !== undefined && amountUsd !== null) body.amount_usd = amountUsd;
-        await SDK.fetchJSON(
+        const res = await SDK.fetchJSON(
           `${API}/escalations/${encodeURIComponent(episodeId)}/resolve?profile=${encodeURIComponent(profile)}`,
           { method: "POST", body: JSON.stringify(body) }
         );
+        setNotes((n) => ({ ...n, [episodeId]: outcomeNote(res) }));
       } catch (e) {
-        // a repeat resolve returns already-resolved; the refresh below reconciles the view
+        // non-2xx (e.g. a 403) — surface the refusal rather than swallow it
+        setNotes((n) => ({ ...n, [episodeId]: "Not authorized for this profile." }));
       } finally {
         setBusy((b) => ({ ...b, [episodeId]: false }));
         refresh();
@@ -92,20 +117,22 @@
             { type: "button", disabled: !!busy[eid], onClick: () => resolve(eid, "continue"),
               className: "rounded bg-(--ui-accent) px-2 py-0.5 text-white disabled:opacity-50" },
             "Continue"),
+          // An immortal (daily) session is Continue-only: no Stop, no set-ceiling control.
           immortal ? null : h("button",
             { type: "button", disabled: !!busy[eid], onClick: () => resolve(eid, "stop"),
               className: "rounded border border-(--ui-stroke-secondary) px-2 py-0.5 disabled:opacity-50" },
             "Stop"),
-          h("input",
+          immortal ? null : h("input",
             { type: "number", step: "0.01", min: "0", placeholder: "exact $",
               value: amounts[eid] || "", "aria-label": "exact ceiling in USD",
               onChange: (e) => setAmounts((a) => ({ ...a, [eid]: e.target.value })),
               className: "w-20 rounded border border-(--ui-stroke-secondary) px-1 py-0.5" }),
-          h("button",
+          immortal ? null : h("button",
             { type: "button", disabled: !!busy[eid] || !amounts[eid],
               onClick: () => resolve(eid, "ceiling", parseFloat(amounts[eid])),
               className: "rounded border border-(--ui-stroke-secondary) px-2 py-0.5 disabled:opacity-50" },
-            "Set ceiling")
+            "Set ceiling"),
+          notes[eid] ? h("span", { role: "status", className: "text-(--ui-text-tertiary)" }, notes[eid]) : null
         );
       })
     );

@@ -21,13 +21,18 @@ context-local ``set_hermes_home_override(get_profile_dir("default"))`` (never
 
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 PLUGIN_KEY = "nv-cost-cap"
+DEFAULT_CEILING_USD = 25.0
+FLEET_CEILING_KEY = f"plugins.entries.{PLUGIN_KEY}.settings.fleet_ceiling_usd"
 
 # COST-F30: a competing concurrent resolver waits for the first writer's IMMEDIATE
 # transaction to commit rather than erroring with "database is locked".
@@ -111,10 +116,12 @@ def _add_missing_columns(conn, table, added_columns) -> None:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
             except sqlite3.OperationalError:
-                # A second store module instance (the ctx-free dashboard import loads
-                # its own object) can race this ALTER; "duplicate column name" means a
-                # peer won, which is fine — the column now exists either way.
-                pass
+                # A second store module instance (the ctx-free dashboard import loads its
+                # own object) can win this ALTER concurrently ("duplicate column name").
+                # Tolerate ONLY when the column is now present; otherwise re-raise.
+                current = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if name not in current:
+                    raise
     conn.commit()
 
 
@@ -514,20 +521,57 @@ def claim_resolution(
         conn.close()
 
 
-def apply_effect(episode_id: str) -> bool:
+# Terminal outcomes of apply_effect — callers map these to a granted/reason result.
+APPLIED = "applied"
+CANCELLED_CLOSED = "cancelled-session-closed"
+CANCELLED_STALE = "cancelled-stale-generation"
+DEFERRED = "deferred"
+NOOP = "noop"
+
+
+def _cancel_if_closed_or_stale(conn, episode_id, session_id, claimed_gen):
+    """Inside an OPEN ``BEGIN IMMEDIATE`` tx: cancel the resolution (mark the row + COMMIT) and
+    return the cancel status when the session closed (``CANCELLED_CLOSED``) or its generation
+    moved past the claimed one (``CANCELLED_STALE``); else return None with the tx STILL OPEN.
+
+    The generation guard applies to EVERY decision — a ceiling claimed at gen N must not clear a
+    gen N+1 block any more than a stale Continue/Stop may lower a newer baseline.
+    """
+    state = conn.execute(
+        "SELECT ended_at, budget_gen FROM cap_state WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if state is not None and state[0]:
+        conn.execute(
+            "UPDATE resolutions SET status='cancelled', reason='session-closed' WHERE episode_id = ?",
+            (episode_id,),
+        )
+        conn.execute("COMMIT")
+        return CANCELLED_CLOSED
+    current_gen = state[1] if state is not None else None
+    if current_gen is not None and int(current_gen) != int(claimed_gen):
+        conn.execute(
+            "UPDATE resolutions SET status='cancelled', reason='stale-generation' WHERE episode_id = ?",
+            (episode_id,),
+        )
+        conn.execute("COMMIT")
+        return CANCELLED_STALE
+    return None
+
+
+def apply_effect(episode_id: str) -> str:
     """Apply the claimed resolution's effect exactly once; idempotent under retry.
 
-    Re-checks IN-TX both ``ended_at`` (closed -> cancelled/``session-closed``) and that
-    ``cap_state.budget_gen`` still equals the claimed episode's generation (a stale
-    Continue/Stop -> cancelled/``stale-generation`` so it can never lower a newer
-    baseline or clear a newer block). Continue assigns the kind's ABSOLUTE baseline and
-    clears ``blocked``; a mortal Stop sets ``blocked=1``; ceiling touches no cap_state
-    (its config write is the side-effect). The DB effect commits first; the external
-    side-effects run next; ``status='applied'`` is marked LAST so a crash before it
-    leaves the row ``pending`` for the reconciler to re-run (the DB effect is absolute).
+    Returns a terminal status the caller maps to granted/reason. Under one ``BEGIN IMMEDIATE``
+    the resolution is cancelled if the session closed (``CANCELLED_CLOSED``) or its
+    ``cap_state.budget_gen`` moved past the claimed generation (``CANCELLED_STALE``) — for ANY
+    decision, so nothing lowers a newer baseline or clears a newer block. Continue assigns the
+    kind's ABSOLUTE baseline and clears ``blocked``; a mortal Stop sets ``blocked=1``; a ceiling
+    clears ``blocked`` (resume, no baseline advance) only AFTER its exact-value config write
+    succeeds and only while still at the claimed generation. A required side-effect that fails
+    (the ESTOP clear a Continue/ceiling needs, or the ceiling config write) leaves the row
+    ``pending`` and returns ``DEFERRED`` for the reconciler; ``status='applied'`` is marked LAST.
     """
     conn = _cas_conn()
-    session_id = decision = amount_usd = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         res = conn.execute(
@@ -537,31 +581,17 @@ def apply_effect(episode_id: str) -> bool:
         ).fetchone()
         if res is None:
             conn.execute("ROLLBACK")
-            return False
+            conn.close()
+            return NOOP
         session_id, claimed_gen, decision, amount_usd, status = res
         if status != "pending":
             conn.execute("ROLLBACK")
-            return False
-        state = conn.execute(
-            "SELECT ended_at, budget_gen FROM cap_state WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        if state is not None and state[0]:
-            conn.execute(
-                "UPDATE resolutions SET status='cancelled', reason='session-closed' "
-                "WHERE episode_id = ?", (episode_id,),
-            )
-            conn.execute("COMMIT")
-            return True
-        current_gen = state[1] if state is not None else None
-        if (decision in ("continue", "stop") and current_gen is not None
-                and int(current_gen) != int(claimed_gen)):
-            conn.execute(
-                "UPDATE resolutions SET status='cancelled', reason='stale-generation' "
-                "WHERE episode_id = ?", (episode_id,),
-            )
-            conn.execute("COMMIT")
-            return True
+            conn.close()
+            return NOOP
+        cancelled = _cancel_if_closed_or_stale(conn, episode_id, session_id, claimed_gen)
+        if cancelled is not None:
+            conn.close()
+            return cancelled
         if decision == "continue":
             kind_row = conn.execute(
                 "SELECT kind FROM episodes WHERE episode_id = ?", (episode_id,)
@@ -571,8 +601,74 @@ def apply_effect(episode_id: str) -> bool:
                 f"UPDATE cap_state SET {column} = ?, blocked = 0 WHERE session_id = ?",
                 (_sanitize(amount_usd) if amount_usd is not None else 0.0, session_id),
             )
+            conn.execute("COMMIT")
         elif decision == "stop":
             conn.execute("UPDATE cap_state SET blocked = 1 WHERE session_id = ?", (session_id,))
+            conn.execute("COMMIT")
+        else:
+            # ceiling: no cap_state mutation here — the config write + the guarded unblock happen
+            # AFTER this tx releases the write lock (a file write must not run inside it).
+            conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        conn.close()
+        raise
+    conn.close()
+
+    if decision == "stop":
+        _engage_profile_estop(session_id)  # best-effort belt; committed blocked=1 is authoritative
+        return _mark_applied(episode_id)
+    if decision == "continue":
+        # Clearing the profile ESTOP sentinel is REQUIRED: without it a Continue leaves the whole
+        # profile paused despite blocked=0. A failed clear -> DEFERRED (row stays pending; the
+        # cap_state mutation is idempotent, so the reconciler safely retries).
+        if not _clear_profile_estop():
+            return DEFERRED
+        return _mark_applied(episode_id)
+
+    # ceiling
+    if amount_usd is None:
+        return DEFERRED
+    try:
+        wrote = bool(write_profile_ceiling(amount_usd))
+    except Exception:
+        logger.warning("nv-cost-cap: ceiling config write failed", exc_info=True)
+        wrote = False
+    if not wrote:
+        return DEFERRED
+    cancelled = _finalize_ceiling_unblock(episode_id, session_id, claimed_gen)
+    if cancelled is not None:
+        return cancelled
+    if not _clear_profile_estop():
+        return DEFERRED
+    return _mark_applied(episode_id)
+
+
+def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen):
+    """After the ceiling config write: clear ``blocked`` ONLY while the session is still unclosed
+    and at the claimed generation, so a ceiling never clears a newer generation's block. Returns a
+    cancel status (row marked, committed) or None (block cleared, row left pending for the shared
+    ESTOP-clear + applied tail). The profile-ceiling value is already written and is benign policy
+    even when this now cancels.
+    """
+    conn = _cas_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status FROM resolutions WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        if row is None or row[0] != "pending":
+            conn.execute("ROLLBACK")
+            conn.close()
+            return NOOP
+        cancelled = _cancel_if_closed_or_stale(conn, episode_id, session_id, claimed_gen)
+        if cancelled is not None:
+            conn.close()
+            return cancelled
+        conn.execute("UPDATE cap_state SET blocked = 0 WHERE session_id = ?", (session_id,))
         conn.execute("COMMIT")
     except Exception:
         try:
@@ -582,47 +678,47 @@ def apply_effect(episode_id: str) -> bool:
         conn.close()
         raise
     conn.close()
-    _apply_side_effects(session_id, decision, amount_usd)
-    conn2 = _conn()
+    return None
+
+
+def _mark_applied(episode_id: str) -> str:
+    """Mark the resolution applied LAST (only from pending), after every side-effect succeeded."""
+    conn = _conn()
     try:
-        conn2.execute(
+        conn.execute(
             "UPDATE resolutions SET status='applied' WHERE episode_id = ? AND status = 'pending'",
             (episode_id,),
         )
-        conn2.commit()
+        conn.commit()
     finally:
-        conn2.close()
-    return True
+        conn.close()
+    return APPLIED
 
 
-def _apply_side_effects(session_id, decision, amount_usd) -> None:
-    """External (non-sqlite) effects of an applied resolution — all best-effort.
-
-    Continue clears ONLY the profile-local ESTOP sentinel (never ``disengage()``, which
-    also lifts the fleet-root pause — COST-F29-CAP-1); a mortal Stop engages it; a
-    ceiling writes the exact profile override. The authoritative gate is the committed
-    ``cap_state.blocked`` flag, so a transient sentinel failure never re-permits spend.
+def _clear_profile_estop() -> bool:
+    """Clear ONLY the profile-local ESTOP sentinel (never ``disengage()``, which also lifts the
+    fleet-root pause). Returns True on success or when no sentinel exists, False when the unlink
+    fails — Continue/ceiling treat a False as a required-side-effect failure (-> ``DEFERRED``).
     """
-    if decision == "continue":
-        try:
-            from agent import estop
+    try:
+        from agent import estop
 
-            estop.sentinel_path().unlink(missing_ok=True)
-        except Exception:
-            pass
-    elif decision == "stop":
-        try:
-            from agent import estop
+        estop.sentinel_path().unlink(missing_ok=True)
+        return True
+    except Exception:
+        logger.warning("nv-cost-cap: clearing profile ESTOP failed", exc_info=True)
+        return False
 
-            if not estop.sentinel_path().exists():
-                estop.engage(reason=f"nv-cost-cap: session {session_id} stopped by operator")
-        except Exception:
-            pass
-    elif decision == "ceiling" and amount_usd is not None:
-        try:
-            write_profile_ceiling(amount_usd)
-        except Exception:
-            pass
+
+def _engage_profile_estop(session_id) -> None:
+    """Engage the profile-local ESTOP belt for a Stop (best-effort; committed blocked=1 gates)."""
+    try:
+        from agent import estop
+
+        if not estop.sentinel_path().exists():
+            estop.engage(reason=f"nv-cost-cap: session {session_id} stopped by operator")
+    except Exception:
+        logger.warning("nv-cost-cap: engaging profile ESTOP failed", exc_info=True)
 
 
 def write_profile_ceiling(amount) -> bool:
@@ -743,10 +839,15 @@ def finalise_closed_unresolved() -> int:
 
 
 def mark_session_closed(session_id: str) -> None:
-    """Set ``ended_at`` ONLY (does not terminalise episodes — the reconciler does that)."""
+    """Set ``ended_at`` on an EXISTING row only — a bare UPDATE, never an INSERT.
+
+    The finalize hook carries no owning profile, so it is called once per profile; this
+    must therefore be a genuine no-op in every DB except the one that already holds this
+    session's ``cap_state`` row (an INSERT would fabricate a closed row in every profile).
+    Sets ``ended_at`` only — the reconciler terminalises the open episode.
+    """
     conn = _conn()
     try:
-        conn.execute("INSERT OR IGNORE INTO cap_state (session_id) VALUES (?)", (session_id,))
         conn.execute(
             "UPDATE cap_state SET ended_at = ? "
             "WHERE session_id = ? AND (ended_at IS NULL OR ended_at = '')",
@@ -776,16 +877,83 @@ def latest_pending_episode(session_id: str) -> Optional[Dict[str, Any]]:
     return {"episode_id": row[0], "budget_gen": int(row[1]), "kind": row[2], "day": row[3]}
 
 
-def _profile_ceiling_setting() -> Optional[float]:
+def latest_episode(session_id: str) -> Optional[Dict[str, Any]]:
+    """The newest episode for a session REGARDLESS of resolution status.
+
+    The gateway ``/cost`` fallback: once the pending episode is resolved a repeat ``/cost``
+    still targets it, so the CAS reports ``already-resolved`` rather than ``no-episode``.
+    """
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT episode_id, budget_gen, kind, day FROM episodes "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"episode_id": row[0], "budget_gen": int(row[1]), "kind": row[2], "day": row[3]}
+
+
+def _finite(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _dig(mapping, dotted_key):
+    cur = mapping
+    for part in dotted_key.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def resolved_ceiling() -> float:
+    """The Tier-2 ceiling for the CURRENT (pinned) profile, resolved CTX-FREE.
+
+    Precedence: per-profile ``profile_ceiling_usd`` override -> managed-scope fleet ceiling ->
+    owner-pinned fleet default -> plugin ``default_ceiling_usd`` (fallback ``DEFAULT_CEILING_USD``).
+    Reads only ``load_config_readonly`` / ``managed_scope`` / the owner-pinned fleet default, so it
+    holds identically on the hook path and the ctx-free dashboard-import path. This is the ONE
+    resolver the enforcement path (``__init__.resolve_ceiling``) and the panel display share, so a
+    card can never show a ceiling that disagrees with the one actually enforced.
+    """
     try:
         from hermes_cli.config import load_config_readonly
 
-        cfg = load_config_readonly() or {}
-        val = (cfg.get("plugins", {}).get("entries", {}).get(PLUGIN_KEY, {})
-               .get("settings", {}).get("profile_ceiling_usd"))
-        return float(val) if val is not None else None
+        settings = ((load_config_readonly() or {}).get("plugins", {}).get("entries", {})
+                    .get(PLUGIN_KEY, {}).get("settings", {})) or {}
     except Exception:
-        return None
+        logger.warning("nv-cost-cap ceiling settings read failed", exc_info=True)
+        settings = {}
+
+    override = settings.get("profile_ceiling_usd")
+    if override is not None and _finite(override):
+        return float(override)
+    try:
+        from hermes_cli import managed_scope
+        from hermes_cli.config import _expand_env_vars
+
+        if managed_scope.is_key_managed(FLEET_CEILING_KEY):
+            managed_cfg = _expand_env_vars(managed_scope.load_managed_config() or {})
+            managed_value = _dig(managed_cfg, FLEET_CEILING_KEY)
+            if managed_value is not None and _finite(managed_value):
+                return float(managed_value)
+    except Exception:
+        logger.warning("nv-cost-cap managed ceiling read failed", exc_info=True)
+    try:
+        owner_pinned = get_fleet_default()
+        if owner_pinned is not None and _finite(owner_pinned):
+            return float(owner_pinned)
+    except Exception:
+        logger.warning("nv-cost-cap owner-pinned ceiling read failed", exc_info=True)
+    default = settings.get("default_ceiling_usd")
+    return float(default) if default is not None and _finite(default) else DEFAULT_CEILING_USD
 
 
 def pending_escalations() -> List[Dict[str, Any]]:
@@ -803,7 +971,7 @@ def pending_escalations() -> List[Dict[str, Any]]:
         ).fetchall()
     finally:
         conn.close()
-    ceiling = _profile_ceiling_setting()
+    ceiling = resolved_ceiling()
     out: List[Dict[str, Any]] = []
     for r in rows:
         effective = float(r[5]) if r[5] is not None else 0.0

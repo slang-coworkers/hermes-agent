@@ -11,9 +11,104 @@
 
 import { host, useValue } from '@hermes/plugin-sdk'
 import { useQuery, useMutation, useQueryClient } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const API = '/escalations'
+
+// One-line operator feedback for a 2xx resolution that returns granted:false (unauthorized /
+// deferred / already-resolved / …) — otherwise the click looks like a silent no-op.
+const OUTCOME_NOTE = {
+  unauthorized: 'Not authorized for this profile.',
+  'already-resolved': 'Already resolved.',
+  'no-episode': 'No pending escalation.',
+  'immortal-continue-only': 'Continue-only session.',
+  'invalid-amount': 'Enter a valid exact USD amount.',
+  managed: 'Ceiling is administrator-managed.',
+  'stale-generation': 'Superseded by a newer cost event.',
+  'session-closed': 'Session already closed.',
+  deferred: 'Retrying — check again shortly.',
+}
+function outcomeNote(res) {
+  if (!res || typeof res !== 'object') return 'Request failed.'
+  if (res.granted) {
+    if (res.decision === 'ceiling' && res.amount_usd != null) return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}.`
+    return 'Applied.'
+  }
+  return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`
+}
+
+// One card per pending episode. A CHILD component (not an inline map body) so each card
+// can hold its own ceiling-input / outcome-note state via hooks — hooks cannot live in a map callback.
+function EscalationCard({ it, resolve }) {
+  const immortal = !!it.immortal
+  const [amount, setAmount] = useState('')
+  const [note, setNote] = useState('')
+  const amt = Number.parseFloat(amount)
+  const canSet = Number.isFinite(amt) && amt > 0
+
+  const act = (payload) =>
+    resolve.mutateAsync(payload).then(
+      (res) => setNote(outcomeNote(res)),
+      () => setNote('Not authorized for this profile.'),
+    )
+
+  const controls = [
+    jsx('button', {
+      type: 'button',
+      className: 'rounded bg-(--ui-accent) px-2 py-0.5 text-white',
+      onClick: () => act({ episodeId: it.episode_id, decision: 'continue' }),
+      children: 'Continue',
+    }, 'continue'),
+  ]
+  // An immortal (daily) session is Continue-only: no Stop, no set-ceiling control.
+  if (!immortal) {
+    controls.push(jsx('button', {
+      type: 'button',
+      className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5',
+      onClick: () => act({ episodeId: it.episode_id, decision: 'stop' }),
+      children: 'Stop',
+    }, 'stop'))
+    controls.push(jsx('input', {
+      type: 'number',
+      step: '0.01',
+      min: '0',
+      inputMode: 'decimal',
+      'aria-label': 'exact ceiling USD',
+      className: 'w-20 rounded border border-(--ui-stroke-secondary) bg-transparent px-1 py-0.5',
+      placeholder: 'USD',
+      value: amount,
+      onChange: (e) => setAmount(e.target.value),
+    }, 'ceiling-input'))
+    controls.push(jsx('button', {
+      type: 'button',
+      disabled: !canSet,
+      className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5 disabled:opacity-50',
+      // decision 'ceiling' is the dashboard backend's set-ceiling verb (plugin_api.py).
+      onClick: () => canSet && act({ episodeId: it.episode_id, decision: 'ceiling', amountUsd: amt }),
+      children: 'Set ceiling',
+    }, 'set-ceiling'))
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 rounded border border-(--ui-stroke-secondary) p-2',
+    children: [
+      jsx('div', {
+        className: 'font-medium',
+        children: `Cost escalation — session ${it.session}`,
+      }, 'title'),
+      jsx('div', {
+        className: 'text-(--ui-text-secondary)',
+        children:
+          `spend $${Number(it.spend || 0).toFixed(2)}` +
+          (it.ceiling != null ? ` · ceiling $${Number(it.ceiling).toFixed(2)}` : '') +
+          (immortal ? ' · immortal (continue-only)' : ''),
+      }, 'meta'),
+      jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: controls }, 'controls'),
+      note ? jsx('div', { role: 'status', className: 'text-(--ui-text-tertiary)', children: note }, 'note') : null,
+    ],
+  })
+}
 
 function EscalationPane(ctx) {
   return function Pane() {
@@ -46,42 +141,7 @@ function EscalationPane(ctx) {
 
     return jsx('div', {
       className: 'flex h-full flex-col gap-2 p-3 text-sm',
-      children: items.map((it) => {
-        const immortal = !!it.immortal
-        const controls = [
-          jsx('button', {
-            type: 'button',
-            className: 'rounded bg-(--ui-accent) px-2 py-0.5 text-white',
-            onClick: () => resolve.mutate({ episodeId: it.episode_id, decision: 'continue' }),
-            children: 'Continue',
-          }, 'continue'),
-        ]
-        if (!immortal) {
-          controls.push(jsx('button', {
-            type: 'button',
-            className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5',
-            onClick: () => resolve.mutate({ episodeId: it.episode_id, decision: 'stop' }),
-            children: 'Stop',
-          }, 'stop'))
-        }
-        return jsxs('div', {
-          className: 'flex flex-col gap-1 rounded border border-(--ui-stroke-secondary) p-2',
-          children: [
-            jsx('div', {
-              className: 'font-medium',
-              children: `Cost escalation — session ${it.session}`,
-            }, 'title'),
-            jsx('div', {
-              className: 'text-(--ui-text-secondary)',
-              children:
-                `spend $${Number(it.spend || 0).toFixed(2)}` +
-                (it.ceiling != null ? ` · ceiling $${Number(it.ceiling).toFixed(2)}` : '') +
-                (immortal ? ' · immortal (continue-only)' : ''),
-            }, 'meta'),
-            jsxs('div', { className: 'flex items-center gap-2', children: controls }, 'controls'),
-          ],
-        }, it.episode_id)
-      }),
+      children: items.map((it) => jsx(EscalationCard, { it, resolve }, it.episode_id)),
     })
   }
 }

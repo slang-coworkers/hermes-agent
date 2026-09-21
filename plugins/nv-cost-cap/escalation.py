@@ -1,11 +1,12 @@
-"""nv-cost-cap — COST-F30 escalation resolution chokepoint.
+"""nv-cost-cap — escalation resolution chokepoint.
 
 ONE authz + compare-and-set + apply path (`resolve_escalation`) that every surface
 funnels through: the web dashboard route, the Electron desktop half, the gateway
-`/cost` command, and the orchestrator CLI. Fixes the two ported P0 defects — the
-pill double-grant (a durable exactly-once CAS on the resolution row) and the
-unauthenticated click (every resolution authorized against structured `operators`
-using a SURFACE-NAMESPACED principal, never a bare/client-supplied id).
+`/cost` command, and the orchestrator CLI. Two invariants hold across all of them:
+a resolution applies its effect at most once (a durable exactly-once CAS on the
+resolution row keyed by the episode), and every resolution is authorized against
+structured `operators` using a SURFACE-NAMESPACED principal, never a bare or
+client-supplied id.
 
 CTX-FREE by construction: operators + the exact-ceiling write are read/written via
 `load_config_readonly()` / `config.save_config` (honouring the current/overridden
@@ -24,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 PLUGIN_KEY = "nv-cost-cap"
 DEFAULT_INCREMENT_USD = 5.0
+
+# The three surfaces that can mint a principal. A well-formed operator/actor id is always
+# one of these namespaces; anything else (a bare user_id, a client-supplied string) is
+# rejected before the operator-set membership test, so a cross-surface id collision cannot
+# authorize a click.
+_PRINCIPAL_PREFIXES = ("dashboard:", "gateway:", "cli:")
 
 # ``store`` must import BOTH as a package member (the PluginManager loads the directory
 # plugin as a package, so ``from . import store`` works) AND when this module is loaded
@@ -100,6 +107,8 @@ def _authorized(principal) -> bool:
     the CURRENT (pinned) HERMES_HOME, so authz is per-profile.
     """
     if not principal or not isinstance(principal, str):
+        return False
+    if not principal.startswith(_PRINCIPAL_PREFIXES):
         return False
     return principal in _operators()
 
@@ -181,6 +190,27 @@ def _current_profile_name() -> str:
 
 # --- the resolution chokepoint ---------------------------------------------
 
+def _finish(status, decision, episode_id, **extra):
+    """Map ``store.apply_effect`` status to the surface reply dict.
+
+    A claim can win the CAS yet still not apply — the session closed under it
+    (``session-closed``), a newer budget generation superseded it
+    (``stale-generation``), or a required side-effect (the ceiling write) failed and
+    the row stays pending for the reconciler (``deferred``). Only ``APPLIED`` is a grant;
+    every other status is a fail-closed ``granted: False`` so no surface reports success
+    for an effect that did not land.
+    """
+    if status == store.APPLIED:
+        return {"granted": True, "decision": decision, "episode_id": episode_id, **extra}
+    reason = {
+        store.CANCELLED_CLOSED: "session-closed",
+        store.CANCELLED_STALE: "stale-generation",
+        store.DEFERRED: "deferred",
+        store.NOOP: "already-resolved",
+    }.get(status, "not-applied")
+    return {"granted": False, "reason": reason, "episode_id": episode_id}
+
+
 def resolve_escalation(session_id, episode_id, budget_gen, decision, principal, *, amount_usd=None):
     """Authorize -> immortal-guard -> CAS -> apply. The ONE path every surface funnels through.
 
@@ -220,8 +250,7 @@ def _resolve_core(session_id, episode_id, budget_gen, decision, actor):
 
     if not store.claim_resolution(episode_id, session_id, budget_gen, decision, actor, target):
         return {"granted": False, "reason": "already-resolved"}
-    store.apply_effect(episode_id)
-    return {"granted": True, "decision": decision, "episode_id": episode_id}
+    return _finish(store.apply_effect(episode_id), decision, episode_id)
 
 
 def set_episode_ceiling(profile, session_id, episode_id, budget_gen, amount, principal):
@@ -240,12 +269,17 @@ def set_episode_ceiling(profile, session_id, episode_id, budget_gen, amount, pri
 
 
 def _ceiling_after_pin(session_id, episode_id, budget_gen, amount, actor):
-    """Parse -> managed-check -> CAS -> apply, assuming the target profile is ALREADY pinned.
+    """Immortal-guard -> parse -> managed-check -> CAS -> apply, target profile ALREADY pinned.
 
     Authorization is the caller's job (``set_episode_ceiling`` operator-list; the CLI its
-    operational gate). The managed-key check precedes the claim so a rejected write never
-    leaves a permanently-pending claim that would block a later Continue/Stop.
+    operational gate). An immortal session is Continue-only, so a ceiling on it is refused
+    like a Stop. The managed-key check precedes the claim so a rejected write never leaves a
+    permanently-pending claim that would block a later Continue/Stop. A non-``APPLIED`` status
+    (a closed/superseded episode, or a failed config write left for the reconciler) is a
+    fail-closed refusal, never a false ``granted``.
     """
+    if store.get_state(session_id).get("immortal"):
+        return {"granted": False, "reason": "immortal-continue-only"}
     value = _parse_exact_usd(amount)
     if value is None:
         return {"granted": False, "reason": "invalid-amount"}
@@ -253,21 +287,24 @@ def _ceiling_after_pin(session_id, episode_id, budget_gen, amount, actor):
         return {"granted": False, "reason": "managed"}
     if not store.claim_resolution(episode_id, session_id, budget_gen, "ceiling", actor, value):
         return {"granted": False, "reason": "already-resolved"}
-    store.apply_effect(episode_id)
-    return {"granted": True, "decision": "ceiling", "amount_usd": value}
+    return _finish(store.apply_effect(episode_id), "ceiling", episode_id, amount_usd=value)
 
 
 def resolve_via_cli(profile, session_id, episode_id, budget_gen, decision, amount, actor):
-    """Orchestrator CLI entry: pin ``profile`` around the FULL lookup/CAS/apply, no operator authz.
+    """Orchestrator CLI entry: pin ``profile`` around the FULL authorize/lookup/CAS/apply.
 
-    The caller (`hermes cost-cap resolve`) is already gated to the orchestrator profile, so
-    authorization here is OPERATIONAL, not operator-list; ``actor`` is the surface-namespaced
-    ``cli:<orchestrator-profile>:<fleet-admin-id>`` recorded on the resolution row. Pinning the
-    target profile for the whole operation is what makes a mis-targeted resolution impossible
-    (the F30-R3-1 fix), mirroring the dashboard route's pin.
+    Two independent gates, both required. The caller (`hermes cost-cap resolve`) is first gated
+    to the orchestrator profile (an OPERATIONAL gate in ``_cli_cost_cap``); then — because the
+    requirement is that EVERY resolution is authorized against the structured ``operators`` — the
+    surface-namespaced ``cli:<orchestrator-profile>:<fleet-admin-id>`` ``actor`` must itself be a
+    configured operator of the TARGET profile, checked here under the pin. The operational gate is
+    additive, not a substitute. Pinning the target profile for the whole operation is what makes a
+    mis-targeted resolution impossible, mirroring the dashboard route's pin.
     """
     decision = (decision or "").strip().lower()
     with _pinned_profile(profile):
+        if not _authorized(actor):
+            return {"granted": False, "reason": "unauthorized"}
         if decision == "set-ceiling":
             return _ceiling_after_pin(session_id, episode_id, budget_gen, amount, actor)
         return _resolve_core(session_id, episode_id, budget_gen, decision, actor)
@@ -286,7 +323,9 @@ def handle_cost_command(session_id, text, principal, *, profile=None):
         if len(tokens) < 2 or tokens[0].lstrip("/").lower() != "cost":
             return {"granted": False, "reason": "bad-command"}
         sub = tokens[1].lower()
-        episode = store.latest_pending_episode(session_id)
+        # Prefer the pending episode; fall back to the latest terminal one so a repeat command
+        # after a resolution reports already-resolved (via the CAS) rather than no-episode.
+        episode = store.latest_pending_episode(session_id) or store.latest_episode(session_id)
         if episode is None:
             return {"granted": False, "reason": "no-episode"}
         if sub in ("continue", "stop"):
@@ -331,8 +370,10 @@ def reconcile_once() -> int:
         try:
             for row in store.claimed_unapplied():
                 try:
-                    store.apply_effect(row["episode_id"])
-                    acted += 1
+                    # Count only a real terminal transition — a DEFERRED retry or a NOOP
+                    # (already applied by a racing caller) is not an action taken.
+                    if store.apply_effect(row["episode_id"]) == store.APPLIED:
+                        acted += 1
                 except Exception:
                     logger.warning("nv-cost-cap reconcile apply failed for %s", row.get("episode_id"), exc_info=True)
             try:

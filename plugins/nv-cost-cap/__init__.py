@@ -25,6 +25,7 @@ cost-cap`` CLI; no env var is a source of truth.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -45,7 +46,6 @@ from .escalation import (  # noqa: F401  (re-exported as the plugin's public COS
 logger = logging.getLogger(__name__)
 
 PLUGIN_KEY = "nv-cost-cap"
-DEFAULT_CEILING_USD = 25.0
 DEFAULT_P90_WINDOW = 50
 FLEET_CEILING_KEY = f"plugins.entries.{PLUGIN_KEY}.settings.fleet_ceiling_usd"
 
@@ -78,14 +78,6 @@ def _cfg(key, default=None):
         logger.warning("nv-cost-cap config read failed for %r", key, exc_info=True)
         return default
     return default if value is None else value
-
-
-def _cfg_float(key, default) -> float:
-    try:
-        value = float(_cfg(key, default))
-    except (TypeError, ValueError):
-        return float(default)
-    return value if _finite(value) else float(default)
 
 
 def _cfg_int(key, default) -> int:
@@ -125,15 +117,6 @@ def _current_profile_home() -> str:
     from hermes_constants import get_hermes_home
 
     return str(get_hermes_home())
-
-
-def _dig(mapping, dotted_key: str):
-    cur = mapping
-    for part in dotted_key.split("."):
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(part)
-    return cur
 
 
 def _platform_value(platform):
@@ -227,38 +210,11 @@ def _unpriced_signal(session_id) -> int:
 def resolve_ceiling() -> float:
     """Tier-2 ceiling for the ACTIVE profile, read live on every call.
 
-    Precedence: per-profile override -> managed-scope fleet ceiling ->
-    owner-pinned fleet default -> plugin default. No ``HERMES_*`` env var.
+    Precedence: per-profile override -> managed-scope fleet ceiling -> owner-pinned fleet
+    default -> plugin default. No ``HERMES_*`` env var. Delegates to the single ctx-free
+    resolver in ``store`` so the enforcement path and the panel display never disagree.
     """
-    override = _cfg("profile_ceiling_usd", None)
-    if override is not None:
-        try:
-            value = float(override)
-            if _finite(value):
-                return value
-        except (TypeError, ValueError):
-            pass
-
-    try:
-        from hermes_cli import managed_scope
-        from hermes_cli.config import _expand_env_vars
-
-        if managed_scope.is_key_managed(FLEET_CEILING_KEY):
-            managed_cfg = _expand_env_vars(managed_scope.load_managed_config() or {})
-            managed_value = _dig(managed_cfg, FLEET_CEILING_KEY)
-            if managed_value is not None and _finite(managed_value):
-                return float(managed_value)
-    except Exception:
-        logger.warning("nv-cost-cap managed ceiling read failed", exc_info=True)
-
-    try:
-        owner_pinned = store.get_fleet_default()
-        if owner_pinned is not None and _finite(owner_pinned):
-            return float(owner_pinned)
-    except Exception:
-        logger.warning("nv-cost-cap owner-pinned ceiling read failed", exc_info=True)
-
-    return _cfg_float("default_ceiling_usd", DEFAULT_CEILING_USD)
+    return store.resolved_ceiling()
 
 
 def set_fleet_ceiling(value: float) -> None:
@@ -543,29 +499,60 @@ def _on_session_end(session_id=None, **kwargs):
 def _on_session_finalize(session_id=None, profile=None, **kwargs):
     """COST-F30: a session is truly closed — mark ``ended_at`` so a later resolve no-ops.
 
-    Gateway finalization can fire OUTSIDE the per-message profile scope, so if the owning
-    profile is supplied, pin it; otherwise mark under the ambient/current home. Marking sets
-    ``ended_at`` only — the reconciler is the sole actor that finalises the open episode.
+    The core hook (``gateway/run.py`` finalize, ``cli.py`` /new, idle expiry) carries no
+    owning profile and runs off-loop under a copied context, so the ambient HERMES_HOME is
+    NOT reliably the session's own. Marking under the wrong home would leave ``ended_at``
+    unset in the owning DB and let a post-close resolve wrongly succeed. So when no ``profile``
+    is given, mark across every profile: ``mark_session_closed`` is a bare UPDATE, a no-op in
+    every DB except the one that actually holds this session's row. An explicit ``profile``
+    (a direct caller / test) pins just that one. Marking sets ``ended_at`` only — the
+    reconciler is the sole actor that finalises the open episode.
     """
     try:
         if not session_id:
             return None
         if profile:
-            from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-            from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
+            with _pinned_profile_home(profile):
+                store.mark_session_closed(session_id)
+            return None
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli.profiles import get_profile_dir, list_profiles
 
-            canon = normalize_profile_name(profile)
-            validate_profile_name(canon)
-            token = set_hermes_home_override(str(get_profile_dir(canon)))
+        try:
+            profiles = list_profiles()
+        except Exception:
+            logger.warning("nv-cost-cap finalize: list_profiles failed", exc_info=True)
+            store.mark_session_closed(session_id)
+            return None
+        for info in profiles:
+            name = getattr(info, "name", None)
+            if not name:
+                continue
+            token = set_hermes_home_override(str(get_profile_dir(name)))
             try:
                 store.mark_session_closed(session_id)
+            except Exception:
+                logger.warning("nv-cost-cap finalize mark failed for %s", name, exc_info=True)
             finally:
                 reset_hermes_home_override(token)
-        else:
-            store.mark_session_closed(session_id)
     except Exception:
         logger.warning("nv-cost-cap on_session_finalize failed", exc_info=True)
     return None
+
+
+@contextlib.contextmanager
+def _pinned_profile_home(profile):
+    """Pin ``profile``'s HERMES_HOME for the body (normalize + validate + token/reset)."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
+
+    canon = normalize_profile_name(profile)
+    validate_profile_name(canon)
+    token = set_hermes_home_override(str(get_profile_dir(canon)))
+    try:
+        yield canon
+    finally:
+        reset_hermes_home_override(token)
 
 
 def _pre_tool_call(session_id=None, **kwargs):
@@ -631,12 +618,83 @@ def _event_platform(event):
 
 
 def _cost_command_text(event):
-    """Return the raw text of a ``/cost …`` command on this event, else None."""
+    """Return a normalized ``/cost <args>`` string when this event is a ``/cost`` command, else None.
+
+    Prefer the adapter's own command parser (``get_command``/``get_command_args`` on
+    ``MessageEvent``): it strips a ``/cost@botname`` suffix, rejects a ``/path/like`` token,
+    and repairs iOS em-dash-corrected flags — none of which raw ``text`` splitting handles.
+    Fall back to raw splitting only for a minimal event object that lacks those methods.
+    """
+    get_command = getattr(event, "get_command", None)
+    if callable(get_command):
+        try:
+            if get_command() != "cost":
+                return None
+            get_args = getattr(event, "get_command_args", None)
+            args = (get_args() if callable(get_args) else "") or ""
+            return f"/cost {args}".rstrip()
+        except Exception:
+            return None
     text = str(getattr(event, "text", "") or "").strip()
     if not text:
         return None
     first = text.split()[0].lstrip("/").lower()
     return text if first == "cost" else None
+
+
+_COST_OUTCOME_MESSAGES = {
+    "unauthorized": "⚠️ Cost cap: you are not an authorized operator for this profile.",
+    "already-resolved": "Cost cap: this escalation was already resolved.",
+    "no-episode": "Cost cap: no pending cost escalation for this session.",
+    "immortal-continue-only": "Cost cap: this session is continue-only; Stop and set-ceiling are unavailable.",
+    "invalid-amount": "Cost cap: not a valid exact USD amount. Use `/cost ceiling <number>`.",
+    "managed": "Cost cap: the ceiling is administrator-managed and cannot be changed here.",
+    "stale-generation": "Cost cap: that escalation is no longer current; a newer cost event superseded it.",
+    "session-closed": "Cost cap: that session has closed; nothing to resolve.",
+    "deferred": "Cost cap: the resolution is being retried; check again shortly.",
+    "bad-command": "Cost cap: usage — `/cost continue | stop | ceiling <usd>`.",
+    "bad-decision": "Cost cap: usage — `/cost continue | stop | ceiling <usd>`.",
+}
+
+
+def _cost_outcome_text(result) -> str:
+    """A one-line operator-facing summary of a ``/cost`` resolution outcome."""
+    if not isinstance(result, dict):
+        return "Cost cap: could not process that /cost command."
+    if result.get("granted"):
+        decision = result.get("decision")
+        if decision == "continue":
+            return "✅ Cost cap: session resumed (Continue applied)."
+        if decision == "stop":
+            return "🛑 Cost cap: session stopped."
+        if decision == "ceiling":
+            amount = result.get("amount_usd")
+            try:
+                return f"✅ Cost cap: ceiling set to ${float(amount):.2f}."
+            except (TypeError, ValueError):
+                return "✅ Cost cap: ceiling set."
+        return "✅ Cost cap: resolution applied."
+    return _COST_OUTCOME_MESSAGES.get(result.get("reason"), f"Cost cap: could not resolve ({result.get('reason')}).")
+
+
+def _deliver_notice(gateway, event, text) -> None:
+    """Best-effort one-line notice back to the event's source over the gateway's own outbound rail.
+
+    A ``pre_gateway_dispatch`` ``skip`` drops the inbound with no reply, so this is the ONLY way
+    to tell the operator the /cost outcome or that a turn is paused. Scheduled on the gateway loop
+    via ``ctx.spawn_task``; a failure is swallowed (the durable state change already happened and
+    the panel / the session's next turn still reflect it).
+    """
+    if gateway is None or _CTX is None or not text:
+        return
+    source = getattr(event, "source", None)
+    deliver = getattr(gateway, "_deliver_platform_notice", None)
+    if source is None or not callable(deliver):
+        return
+    try:
+        _CTX.spawn_task(deliver(source, text), name="nv-cost-cap-notice")
+    except Exception:
+        logger.warning("nv-cost-cap notice delivery failed", exc_info=True)
 
 
 _reconcile_loop_started = False
@@ -682,11 +740,15 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
             if session_id:
                 profile = getattr(getattr(event, "source", None), "profile", None)
                 try:
-                    handle_cost_command(
+                    outcome = handle_cost_command(
                         session_id, cost_text, principal_from_event(event), profile=profile
                     )
                 except Exception:
                     logger.warning("nv-cost-cap /cost handling failed", exc_info=True)
+                    outcome = {"granted": False, "reason": "error"}
+                _deliver_notice(gateway, event, _cost_outcome_text(outcome))
+            else:
+                _deliver_notice(gateway, event, "Cost cap: no active session for this chat.")
             return {"action": "skip", "reason": "nv-cost-cap: /cost handled"}
 
         # Recovery/steering commands are never skipped — checked BEFORE any
@@ -700,6 +762,9 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
             session_id, today=_today(kwargs), platform=_event_platform(event)
         )
         if stopped:
+            # A skipped inbound never reaches the llm_execution middleware, so this is the only
+            # place the operator is told the session is paused and how to resolve it.
+            _deliver_notice(gateway, event, _pause_notice_text())
             return {
                 "action": "skip",
                 "reason": "nv-cost-cap: session over the Tier-2 cost ceiling",
@@ -712,13 +777,20 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
 
 # --- llm_execution middleware ----------------------------------------------
 
-def _synthetic_response(api_mode):
-    message = (
+def _pause_notice_text() -> str:
+    """The operator-facing pause notice naming the /cost commands — shared by the llm_execution
+    synthetic response and the gateway skip path (a skipped inbound never reaches the middleware,
+    so the gateway must deliver this itself)."""
+    return (
         "Spending paused: this session reached its configured Tier-2 cost ceiling. "
         "An authorized operator can resume it with `/cost continue`, set an exact ceiling "
         "with `/cost ceiling <usd>`, or stop it with `/cost stop` — on this gateway or from "
         "the operator panel. Or start a new session (/new)."
     )
+
+
+def _synthetic_response(api_mode):
+    message = _pause_notice_text()
     if api_mode == "anthropic_messages":
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text=message)],
