@@ -185,7 +185,7 @@ is finalised so a later resolution no-ops.
 
 | setting | meaning |
 |---|---|
-| `operators` | list of surface-namespaced principals allowed to resolve escalations (dashboard/gateway). Never a bare `user_id`. |
+| `operators` | list of surface-namespaced principals allowed to resolve escalations on every surface — dashboard, gateway, and the CLI `resolve` verb (`cli:<orchestrator>:<admin>`). Never a bare `user_id`. |
 | `escalation_increment_usd` | how much a Continue advances the kind's window baseline (headroom granted per Continue). |
 | `escalation_reconcile_seconds` | interval for the periodic reconciler that re-applies crashed grants and finalises closed episodes. |
 | `loopback_operator` | opt-in namespaced principal a loopback dashboard's single shared token authorizes as (default off/`null`; fail-closed when unset). |

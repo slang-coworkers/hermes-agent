@@ -11,7 +11,7 @@ import argparse
 
 
 def setup_cost_cap(parser: argparse.ArgumentParser) -> None:
-    """Build ``hermes cost-cap {show|set}``."""
+    """Build ``hermes cost-cap {show|set|resolve}``."""
     subs = parser.add_subparsers(dest="cost_cap_command")
 
     subs.add_parser(
