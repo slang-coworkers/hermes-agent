@@ -551,6 +551,11 @@ _EGRESS_PROVIDER_PLACEHOLDER = "onecli-injects-at-request-time"
 # Swap-token keys would create a second credential path, so any HERMES_PROXY_TOKEN_*
 # key in a spec is refused.
 _EGRESS_FORBIDDEN_ENV_PREFIX = "HERMES_PROXY_TOKEN_"
+# The OneCLI control-plane key authenticates the render to OneCLI and must stay
+# host-only (C1, § Security condition 3). It is treated as a controlled egress name so
+# EVERY host-env-forwarding path (docker_env, docker_forward_env, env_passthrough,
+# docker_extra_args -e, provider_env) refuses it uniformly — never just one path.
+_EGRESS_CONTROL_PLANE_VARS = ("ONECLI_API_KEY",)
 # podman 3.4.4 has no host.docker.internal mapping, so a proxy address carrying the
 # docker-desktop alias is rewritten to the literal docker0 bridge gateway IP.
 _DOCKER_BRIDGE_HOST = "host.docker.internal"
@@ -589,7 +594,10 @@ def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
     if not isinstance(providers, list):
         raise CompositionError(
             f"egress.provider_env must be a list of names, got {type(providers).__name__}")
-    reserved = set(_EGRESS_PROXY_VARS) | set(_EGRESS_NO_PROXY_VARS) | set(_EGRESS_CA_BUNDLE_VARS)
+    reserved = (
+        set(_EGRESS_PROXY_VARS) | set(_EGRESS_NO_PROXY_VARS)
+        | set(_EGRESS_CA_BUNDLE_VARS) | set(_EGRESS_CONTROL_PLANE_VARS)
+    )
     normalized_providers: List[str] = []
     for name in providers:
         if not isinstance(name, str):
@@ -642,6 +650,7 @@ def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
         set(_EGRESS_PROXY_VARS)
         | set(_EGRESS_NO_PROXY_VARS)
         | set(_EGRESS_CA_BUNDLE_VARS)
+        | set(_EGRESS_CONTROL_PLANE_VARS)
         | set(params["provider_env"])
     )
 
@@ -805,17 +814,11 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                 raise CompositionError(
                     f"{profile_name}: terminal.docker_forward_env entries must be strings, "
                     f"got {name!r}")
-            # The OneCLI control-plane key is never forwardable (C1, § Security condition 3):
-            # it authenticates the render to OneCLI and must stay host-only, and it is not in
-            # the egress-controlled set, so it needs its own explicit refusal here.
-            if name.strip() == "ONECLI_API_KEY":
-                raise CompositionError(
-                    f"{profile_name}: docker_forward_env must never forward the OneCLI "
-                    f"control-plane key ONECLI_API_KEY")
             # C1 (FLEET-F62): the render forwards EXACTLY the four proxy spellings by name so the
             # live token-bearing value wins over the docker_env placeholder at exec; an exact
             # proxy spelling is therefore allowed. Every OTHER controlled name — a padded proxy
-            # alias, a CA var, NO_PROXY, a provider name, a swap token — still collides.
+            # alias, a CA var, NO_PROXY, a provider name, the ONECLI_API_KEY control-plane key,
+            # or a swap token — still collides via the controlled-name check below.
             if name in _EGRESS_PROXY_VARS:
                 continue
             if _is_controlled_env_name(name, controlled):

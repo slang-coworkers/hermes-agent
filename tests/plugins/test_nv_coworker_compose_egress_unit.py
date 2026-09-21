@@ -196,11 +196,43 @@ def test_docker_forward_env_discards_unrelated_names(tmp_path, monkeypatch):
 
 def test_docker_forward_env_control_plane_key_rejected(tmp_path, monkeypatch):
     """The OneCLI control-plane key is never forwardable — it authenticates the render to
-    OneCLI and must stay host-only (§ Security condition 3), and it is not in the egress-
-    controlled set, so it needs its own explicit refusal."""
+    OneCLI and must stay host-only (§ Security condition 3). It is a controlled egress name,
+    so the four-proxy relax never applies to it and the controlled-name check refuses it."""
     module = _load(tmp_path, monkeypatch)
     spec = _make_spec(tmp_path, name="fwd-onecli",
                       spine_config={"terminal": {"docker_forward_env": ["ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_env_passthrough_control_plane_key_rejected(tmp_path, monkeypatch):
+    """env_passthrough forwards a NAME (the host value rides into the sandbox at exec), so
+    ONECLI_API_KEY there would leak the control-plane credential — the belt must refuse it
+    on this path too, not only on docker_forward_env (FLEET-F62 C1 'never forwarded')."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="passthrough-onecli",
+                      spine_config={"terminal": {"env_passthrough": ["ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_env_control_plane_key_rejected(tmp_path, monkeypatch):
+    """A spec-set docker_env entry for the control-plane key is refused: the render owns the
+    egress env and the control-plane key must never appear in a sandbox's environment."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="env-onecli",
+                      spine_config={"terminal": {"docker_env": {"ONECLI_API_KEY": "x"}}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_extra_args_control_plane_key_rejected(tmp_path, monkeypatch):
+    """A name-only `-e ONECLI_API_KEY` in docker_extra_args forwards the host value — the
+    same leak vector as env_passthrough — so the extra-args belt refuses the control-plane
+    key as a controlled env name."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="extra-onecli",
+                      spine_config={"terminal": {"docker_extra_args": ["-e", "ONECLI_API_KEY"]}})
     with pytest.raises(module.CompositionError):
         module.compose(str(spec), str(tmp_path / "out"))
 
@@ -308,10 +340,11 @@ def test_default_colon_less_ca_docker_volume_rejected(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("name", ["HTTPS_PROXY", " HTTPS_PROXY ", "NODE_EXTRA_CA_CERTS",
-                                  "HERMES_PROXY_TOKEN_X", "not a name", ""])
+                                  "HERMES_PROXY_TOKEN_X", "ONECLI_API_KEY", "not a name", ""])
 def test_provider_env_reserved_or_malformed_rejected(tmp_path, monkeypatch, name):
     """A provider name that is a reserved control (or malformed) is refused at validation —
-    else the provider loop would clobber the proxy/CA value or emit a forbidden token."""
+    else the provider loop would clobber the proxy/CA value or emit a forbidden token. The
+    OneCLI control-plane key is reserved too, so it can never enter via provider_env."""
     module = _load(tmp_path, monkeypatch)
     egress = dict(BASE_EGRESS, provider_env=[name])
     with pytest.raises(module.CompositionError):

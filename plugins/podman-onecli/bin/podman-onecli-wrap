@@ -446,10 +446,8 @@ case "$verb" in
         exec_ps "$@"
         ;;
     exec)
-        # Value-free audit witness (FLEET-F62 C1): every Hermes-issued `docker exec`
-        # (the wrapper IS HERMES_DOCKER_BINARY) records a bare "exec" marker, so an
-        # exec-mediation proof can distinguish a Hermes exec from a raw `podman exec`.
-        # No argv is logged — the marker never carries a proxy token.
+        # Log the verb only — never argv, which can carry the proxy token — so an
+        # exec-mediation proof can tell a Hermes-mediated exec from a raw `podman exec`.
         log_line "exec"
         exec "$PODMAN" "$@"
         ;;
