@@ -60,13 +60,20 @@ function appliedCount(profileHome: string, sessionId: string): number {
 }
 
 async function apiFetch(page: MockBackendFixture['page'], method: string, url: string, body?: unknown) {
-  return page.evaluate(async ({ method, url, body }) => {
-    const token = (window as unknown as { __HERMES_SESSION_TOKEN__?: string }).__HERMES_SESSION_TOKEN__
-    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
-    if (body !== undefined) headers['Content-Type'] = 'application/json'
-    const r = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
-    return { status: r.status, body: await r.json().catch(() => null) }
-  }, { method, url, body })
+  // The packaged renderer is file-backed, so issue HTTP from the Node test process to avoid CORS.
+  const conn = await page.evaluate(() =>
+    (window as unknown as {
+      hermesDesktop: { getConnection: (profile: string) => Promise<{ baseUrl: string; token: string }> }
+    }).hermesDesktop.getConnection('default')
+  )
+  const headers: Record<string, string> = { 'X-Hermes-Session-Token': conn.token }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const response = await fetch(conn.baseUrl + url, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body)
+  })
+  return { status: response.status, body: await response.json().catch(() => null) }
 }
 
 test.beforeAll(async () => {

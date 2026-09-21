@@ -22,6 +22,14 @@ drives the hook, and prints one JSON line:
 `resumes` is True iff the session's next turn would now run (the `llm_execution` gate admits it).
 The scenario asserts on `after` (window_start_total advance / blocked / applied rows), `notice`,
 `hook_result.action`, and `resumes`.
+
+AC-8 Part B (seeded priced-path): `--seed-priced-breach --session <id>` seeds a PRICED `breach`
+on that session through the REAL COST-F29 accrual path (`record_api_request` with the priced model
+`claude-opus-4-8` + `_evaluate_boundary`), prints `{"seeded","priced_total","crossed",
+"episode_kinds","unpriced_signal","state"}`, and exits WITHOUT a gateway drive (no live model call).
+The subsequent drive invocations (unauth/auth/repeat) then run on the same session exactly as in
+Part A — and an authorized Continue on the priced breach yields `resumes=true` (unlike Part A's
+`unknown_pricing` crossing, which correctly stays fail-closed).
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 
 def _state(mod, session_id):
@@ -68,6 +77,30 @@ async def _run(args) -> int:
     loaded = manager._plugins["nv-cost-cap"]
     assert loaded.enabled and loaded.module is not None, getattr(loaded, "error", None)
     mod = loaded.module
+
+    # provider="anthropic" routes claude-opus-4-8 to the PRICED table entry
+    # (usage_pricing.py:211-222); the default/unknown route fail-closes as unknown_pricing
+    # and never resumes, so only a priced breach can prove Part B's resume.
+    if args.seed_priced_breach:
+        if not args.session:
+            print(json.dumps({"error": "--seed-priced-breach requires --session"}))
+            return 2
+        session_id = args.session
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        platform_value = Platform(args.platform).value
+        priced_total = mod.record_api_request(
+            session_id, "claude-opus-4-8",
+            {"input_tokens": 20000, "output_tokens": 5000},
+            "ac8-priced-seed", provider="anthropic",
+        )
+        crossed = mod._evaluate_boundary(session_id, today=today, platform=platform_value)
+        kinds = sorted({e["kind"] for e in mod.episodes(session_id)})
+        print(json.dumps({
+            "seeded": session_id, "priced_total": priced_total, "crossed": crossed,
+            "episode_kinds": kinds, "unpriced_signal": mod._unpriced_signal(session_id),
+            "state": _state(mod, session_id),
+        }))
+        return 0
 
     # Target the given session (a repeat drive of an ALREADY-resolved episode has nothing
     # pending, so it must be named explicitly), else auto-discover the session the live turn
@@ -175,6 +208,10 @@ def main() -> int:
     p.add_argument("--scope", default="ws-1")
     p.add_argument("--decision", default="continue")
     p.add_argument("--amount", default="")
+    p.add_argument("--seed-priced-breach", action="store_true", dest="seed_priced_breach",
+                   help="AC-8 Part B: seed a PRICED breach (model claude-opus-4-8) on --session "
+                        "via the real record_api_request + _evaluate_boundary accrual path, print "
+                        "the seeded state, and exit (no gateway drive); no live model call")
     return asyncio.run(_run(p.parse_args()))
 
 
