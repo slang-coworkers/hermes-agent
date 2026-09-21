@@ -1,0 +1,41 @@
+# COST-F30 scenario fixture (cost-f30-operator).
+#
+# Live provider block (A2A-F21 §Scenario-outlines form): a single interactive Bot
+# Chat, so the key resolves from THIS profile's own .env via key_env. The dummy
+# ANTHROPIC_API_KEY is written post-install by the scenario Setup (a committed .env is
+# gitignored and excluded from profile install); the real credential is injected by the
+# OneCLI egress proxy at the inference-api.nvidia.com hop. The AC-6 (ui, stub) harness
+# points the model at the hermetic stub instead — this block is for AC-8 (live).
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    api: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    model: aws/anthropic/bedrock-claude-opus-4-8
+    key_env: ANTHROPIC_API_KEY
+plugins:
+  enabled:
+    - nv-cost-cap
+  entries:
+    nv-cost-cap:
+      settings:
+        # Surface-namespaced operators (never a bare user_id): the OAuth panel operator
+        # (AC-6 dashboard, AC-7 desktop) and the messaging-gateway operator (AC-8). Align
+        # the gateway id with the operator account's real gateway:<platform.value>:<scope>:<user_id>.
+        operators:
+          - "dashboard:oauth:org-1:op-1"
+          - "gateway:slack:ws-1:op-1"
+        # A very low Tier-2 ceiling so the first turn crosses and raises an episode.
+        default_ceiling_usd: 0.02
+        escalation_increment_usd: 0.05
+        escalation_reconcile_seconds: 3600
+        # estop belt off in the scenario: the block/unblock we assert is the cap_state flag,
+        # and the profile-local sentinel would otherwise gate the whole scenario profile.
+        estop_on_breach: false
+approvals:
+  mode: "off"
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
