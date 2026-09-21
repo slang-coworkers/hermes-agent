@@ -116,3 +116,69 @@ All settings live under `plugins.entries.nv-cost-cap.settings`.
 
 The fleet ceiling itself lives in managed scope and/or the owner-pinned fleet
 default — it is not a per-profile settings key.
+
+## Escalation decisions — the operator card (COST-F30)
+
+A Tier-1 or Tier-2 crossing records an **escalation episode**. On top of that, an
+operator can **Continue**, **Stop**, or **set an exact USD ceiling** for the session —
+from the web dashboard, the Electron desktop app, or a messaging gateway. Every
+resolution funnels through one plugin chokepoint (`resolve_escalation`) backed by a
+durable exactly-once compare-and-set on the episode, so a double click (the ported
+"pill double-grant" defect) applies the effect only once and a repeat reports
+`already-resolved`. A Continue advances the kind's window baseline
+(`day_start_total` for the immortal per-day kind, else `window_start_total`) by
+`escalation_increment_usd` and clears `blocked`; a mortal Stop blocks the session; an
+immortal (`daily`) session is **Continue-only** and a Stop is refused.
+
+### Authorization — surface-namespaced operators
+
+Every resolution is authorized against the `operators` list using a **surface-namespaced
+principal**, never a bare or client-supplied `user_id`:
+
+- **Dashboard / desktop:** `dashboard:<provider>:<org_id>:<user_id>`, derived server-side
+  from the authenticated session (`request.state.session`) — never from the request body.
+- **Gateway `/cost`:** `gateway:<platform>:<scope>:<user_id>`, derived from the platform
+  event (`platform` is the adapter's platform value; `scope` is the workspace/tenant, so
+  the same user in a different workspace is a different principal).
+
+An operator entry is a full namespaced string, e.g.
+`operators: ["dashboard:oauth:org-1:alice", "gateway:slack:T123:U456"]`. A bare `user_id`
+is never an operator, so a click by a non-operator — or by the same user id in another
+workspace — applies nothing.
+
+**Loopback is fail-closed.** A dashboard in loopback/`--insecure` mode has only a shared
+token and no per-user session, so no per-operator principal can be derived and panel
+resolutions are refused by default. To use the panel there, either run the dashboard in
+gated/OAuth mode, or opt in explicitly by setting `loopback_operator` to the namespaced id
+the single trusted local token should authorize as (default off).
+
+### Surfaces
+
+- **Web dashboard + Electron desktop:** the plugin ships a card in a shell-wide panel slot
+  (dashboard) and a contributed pane (desktop) over one shared backend
+  (`/api/plugins/nv-cost-cap/`). The desktop half installs into the desktop host's
+  `$HERMES_HOME/plugins/nv-cost-cap/` and is enabled in **Settings → Plugins** (off by
+  default); the Python backend half must be enabled on the gateway host.
+- **Messaging gateways:** `/cost continue | stop | ceiling <exact-usd>` resolves the
+  session's pending episode. A blocked session's own turn carries the enriched pause notice
+  naming these commands; after an authorized `/cost continue` the session resumes on its
+  next turn.
+- **Orchestrator CLI (fallback):** `hermes cost-cap resolve --profile P --session S
+  --episode E --budget-gen G --decision continue|stop|set-ceiling [--amount-usd U]`. It is
+  reachable only from the orchestrator profile (operational gate) and pins `--profile`
+  around the full lookup / authorize / CAS / apply, recording a `cli:<orchestrator-profile>:<fleet-admin-id>`
+  actor. It is the panel-independent path when the dashboard runs in loopback mode.
+
+A reconciler makes mid-decision episodes consistent: a grant claimed but not applied (a
+resolver crash) is applied exactly once, and an episode whose session closed mid-decision
+is finalised so a later resolution no-ops.
+
+### Additional settings
+
+| setting | meaning |
+|---|---|
+| `operators` | list of surface-namespaced principals allowed to resolve escalations (dashboard/gateway). Never a bare `user_id`. |
+| `escalation_increment_usd` | how much a Continue advances the kind's window baseline (headroom granted per Continue). |
+| `escalation_reconcile_seconds` | interval for the periodic reconciler that re-applies crashed grants and finalises closed episodes. |
+| `loopback_operator` | opt-in namespaced principal a loopback dashboard's single shared token authorizes as (default off/`null`; fail-closed when unset). |
+| `profile_ceiling_usd` | also written by an operator **set-ceiling** resolution — the exact USD value scoped to the target profile. |
