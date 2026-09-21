@@ -46,14 +46,18 @@ Budget bound per `/hermes-ui-driver`: `LIVE_MODEL_CALLS_MAX=40`, `LIVE_BUDGET_US
    `blocked` 1) — the same-user-different-workspace principal `gateway:slack:ws-2:op-1` is refused.
 3. Drive the AUTHORIZED `/cost continue` (`gateway:slack:ws-1:op-1 ∈ operators`):
    `python3 tests/e2e-scenarios/COST-F30/ac8_gateway_drive.py --home "$PH" --platform slack --scope ws-1 --user op-1 --decision continue`
-   → expect: JSON `notice` names "resumed"; `after.window_start_total == before.window_start_total + 0.05`
-   (one `escalation_increment_usd`), `after.blocked == 0`, `after.applied == 1`. Record this JSON's
-   `session` value as `$SID` for step 5.
-4. Prove the resume with a second real live turn:
-   `hermes -p cost-f30-operator -z 'Reply with the single word ACKNOWLEDGED.'`
-   → expect: exit 0 and a real model answer (the session is no longer blocked — its turn runs
-   instead of being skipped), corroborating `after.blocked == 0` from step 3.
-5. Drive the AUTHORIZED `/cost continue` AGAIN for the same (now-resolved) episode — pass
+   → expect: `hook_result.action == "skip"` (the command was consumed, not run as a turn); JSON
+   `notice` names "resumed"; `after.window_start_total == before.window_start_total + 5.0` (one
+   `escalation_increment_usd`), `after.blocked == 0`, `after.applied == 1`; and **`resumes == true`**
+   — the session's next turn would now run. `resumes` is computed by driving the plugin's registered
+   `llm_execution` middleware exactly as `GatewayRunner`'s loop does
+   (`agent/conversation_loop.py:3343` via `hermes_cli.middleware.run_llm_execution_middleware`): a
+   resumed session lets the middleware call through to the terminal exactly once, a still-blocked one
+   short-circuits with the synthetic response. This is the gate a real no-tool turn actually hits
+   (`pre_tool_call` fires only after a tool call, which the crossing turn never emits), so the proof
+   is faithful and needs no second paid model call. Record this JSON's `session` value as `$SID` for
+   step 4.
+4. Drive the AUTHORIZED `/cost continue` AGAIN for the same (now-resolved) episode — pass
    `--session "$SID"` from step 3, because a resolved episode has nothing pending to auto-discover:
    `python3 tests/e2e-scenarios/COST-F30/ac8_gateway_drive.py --home "$PH" --session "$SID" --platform slack --scope ws-1 --user op-1 --decision continue`
    → expect: JSON `notice` names "already resolved"; `before == after` — still exactly one `applied`
@@ -61,13 +65,17 @@ Budget bound per `/hermes-ui-driver`: `LIVE_MODEL_CALLS_MAX=40`, `LIVE_BUDGET_US
 
 ## Pass
 A real crossing raises the decision (1); an unauthorized `/cost` is refused with no effect (2);
-one authorized `/cost continue` applies exactly one increment and unblocks (3); a second live
-turn runs, proving resume (4); a repeat `/cost` is a reported no-op (5).
+one authorized `/cost continue` applies exactly one increment, unblocks, and the session's own gate
+would run its next turn (`resumes == true`) (3); a repeat `/cost` is a reported no-op (4).
 
 ## Evidence
-- The harness JSON line per step 2/3/5 (`before`/`after`/`notice`), saved to
+- The harness JSON line per step 2/3/4 (`hook_result`/`resumes`/`before`/`after`/`notice`), saved to
   `scenario-AC-COST-F30-8/drive-{unauth,auth,repeat}.json`.
-- The step-1 and step-4 `hermes -z` stdout/exit (crossing, then resumed answer).
+- The step-1 `hermes -z` stdout/exit (the real live crossing); the crossing episode is a `breach`
+  (priced turn) — bedrock Claude Opus is priced, so the Continue's baseline advance clears the delta
+  and `resumes == true`. If the store shows an `unknown_pricing` episode instead (model unpriced in
+  this environment), record it: the plugin correctly keeps an unpriced session stopped, an
+  environment fact, not a resolution defect.
 - A `python3 -c` read over `$PH/plugin-data/nv-cost-cap/data.db` (stdlib `sqlite3`) asserting
   exactly one `applied` `resolutions` row for the episode and one `window_start_total` advance:
   ```

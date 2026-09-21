@@ -35,7 +35,11 @@ plugins:
         loopback_operator: "dashboard:oauth:org-1:op-1"
         # A very low Tier-2 ceiling so the first turn crosses and raises an episode.
         default_ceiling_usd: 0.02
-        escalation_increment_usd: 0.05
+        # Headroom granted per Continue. Large enough to clear a single live turn's spend so
+        # ONE authorized Continue actually resumes the session (its own `llm_execution`
+        # turn-admission gate admits the next turn again) — the AC-8 resume proof; a smaller
+        # value could still be over-ceiling after one Continue for a costly turn.
+        escalation_increment_usd: 5.0
         escalation_reconcile_seconds: 3600
         # estop belt off in the scenario: the block/unblock we assert is the cap_state flag,
         # and the profile-local sentinel would otherwise gate the whole scenario profile.

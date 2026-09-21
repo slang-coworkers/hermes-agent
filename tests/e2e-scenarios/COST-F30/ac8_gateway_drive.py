@@ -11,11 +11,17 @@ CAS, and the effect on the profile's plugin_db all run for real; only the transp
 
 Usage (one invocation per gateway send):
     ac8_gateway_drive.py --home <profile-home> --user <uid> [--platform slack] [--scope ws-1]
-                         [--decision continue|stop|ceiling] [--amount <usd>]
-It auto-discovers the session with a pending escalation episode (the one the live turn crossed),
-forges `gateway:<platform>:<scope>:<user>`, drives the hook, and prints one JSON line:
-    {"session": ..., "principal": ..., "notice": ..., "before": {...}, "after": {...}}
-The scenario asserts on `after` (window_start_total advance / blocked / applied rows) and `notice`.
+                         [--session <id>] [--decision continue|stop|ceiling] [--amount <usd>]
+Without --session it auto-discovers the session with a pending escalation episode (the one the
+live turn crossed); with --session it targets that session directly (needed for a repeat drive of
+an ALREADY-resolved episode, which has nothing pending). It forges `gateway:<platform>:<scope>:<user>`,
+drives the hook, and prints one JSON line:
+    {"session": ..., "principal": ..., "hook_result": {...}, "resumes": <bool>,
+     "notice": ..., "before": {...}, "after": {...}}
+`hook_result` is the pre_gateway_dispatch return ({"action":"skip",...} when /cost is consumed);
+`resumes` is True iff the session's next turn would now run (the `llm_execution` gate admits it).
+The scenario asserts on `after` (window_start_total advance / blocked / applied rows), `notice`,
+`hook_result.action`, and `resumes`.
 """
 
 from __future__ import annotations
@@ -46,13 +52,19 @@ async def _run(args) -> int:
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
+    import hermes_cli.plugins as plugins_mod
     from gateway.config import Platform
     from gateway.platforms.base import MessageEvent, MessageType
     from gateway.session import SessionSource
+    from hermes_cli.middleware import run_llm_execution_middleware
     from hermes_cli.plugins import PluginManager
 
     manager = PluginManager()
     manager.discover_and_load()
+    # Pin the process-global manager to THIS instance (the sanctioned embedder hook,
+    # hermes_cli/plugins.py:6224-6233) so run_llm_execution_middleware — which resolves
+    # callbacks via get_plugin_manager()._middleware — runs OUR registered _llm_execution.
+    plugins_mod._plugin_manager = manager
     loaded = manager._plugins["nv-cost-cap"]
     assert loaded.enabled and loaded.module is not None, getattr(loaded, "error", None)
     mod = loaded.module
@@ -77,8 +89,11 @@ async def _run(args) -> int:
         scope_id=args.scope,
     )
     text = f"/cost {args.decision}" + (f" {args.amount}" if args.amount else "")
+    # internal=False: a real operator /cost is a user message — the same non-internal event
+    # GatewayRunner._handle_message forwards to pre_gateway_dispatch (the hook fires only for
+    # non-internal messages, gateway/run.py:18138).
     event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source,
-                         message_id="ac8", internal=True)
+                         message_id="ac8", internal=False)
 
     notices: list[str] = []
     loop = asyncio.get_running_loop()
@@ -113,12 +128,36 @@ async def _run(args) -> int:
 
     before = _state(mod, session_id)
     principal = mod.principal_from_event(event)
-    mod._pre_gateway_dispatch(event=event, gateway=gw, session_store=ss)
+    hook_result = mod._pre_gateway_dispatch(event=event, gateway=gw, session_store=ss)
     await asyncio.sleep(0.05)  # let the scheduled _deliver_platform_notice run
     after = _state(mod, session_id)
+    # "Does the session's NEXT turn run?" — proven against the exact gate a real turn hits.
+    # A plain (no-tool) turn is admitted through the plugin's `llm_execution` middleware
+    # before any provider call (agent/conversation_loop.py:3343 via
+    # hermes_cli.middleware.run_llm_execution_middleware); `pre_tool_call` fires only AFTER
+    # the model emits a tool call, which the crossing turn never does. Drive the registered
+    # middleware exactly as the loop does: a resumed session lets our `_llm_execution` call
+    # through to `next_call` exactly once (result is the sentinel); a still-blocked session
+    # short-circuits with the synthetic response and never calls it. No paid model call.
+    _sentinel = object()
+    _next_calls = 0
+
+    def _next_call(_request):
+        nonlocal _next_calls
+        _next_calls += 1
+        return _sentinel
+
+    resume_result = run_llm_execution_middleware(
+        {}, _next_call,
+        session_id=session_id,
+        platform=source.platform.value,
+        api_mode="anthropic_messages",
+    )
+    resumes = resume_result is _sentinel and _next_calls == 1
 
     print(json.dumps({
         "session": session_id, "principal": principal,
+        "hook_result": hook_result, "resumes": resumes,
         "notice": notices[-1] if notices else None,
         "before": before, "after": after,
     }))
