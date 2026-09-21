@@ -61,7 +61,7 @@ def make_onboard_handler(profile_secret_sets):
         ):
             raise ValueError(
                 f"profile_secret_sets[{identifier!r}] must be a list of non-empty "
-                f"provider names ([] to leave ungranted; got {raw!r})"
+                f"OneCLI secret ids ([] to leave ungranted; got {raw!r})"
             )
         secrets = list(raw)
         oneclient.ensure_agent(identifier=identifier)

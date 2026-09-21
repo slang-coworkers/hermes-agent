@@ -177,11 +177,34 @@ def ensure_agent(*, identifier: str) -> dict:
     raise OneCLIError(f"ensure_agent({identifier!r}) failed: HTTP {status}")
 
 
+def _resolve_agent_uuid(identifier: str) -> str:
+    """Map a OneCLI agent identifier to its server-assigned UUID via GET /api/agents.
+    The secrets endpoint is keyed by that UUID, not the identifier."""
+    status, body = _request("GET", "/api/agents", json=None)
+    if status != 200 or not isinstance(body, list):
+        raise OneCLIError(
+            f"resolve agent {identifier!r}: GET /api/agents returned HTTP {status}"
+        )
+    for agent in body:
+        if isinstance(agent, dict) and agent.get("identifier") == identifier:
+            uuid = agent.get("id")
+            if isinstance(uuid, str) and uuid:
+                # The resolved id flows into a request path, so re-validate its grammar.
+                return _validate_identifier(uuid)
+    raise OneCLIError(
+        f"resolve agent {identifier!r}: no matching agent id in GET /api/agents"
+    )
+
+
 def set_secrets(*, identifier: str, secrets) -> Optional[dict]:
-    """POST /api/agents/<identifier>/secrets with the selective provider set."""
+    """Replace a profile's agent secret grants with exactly ``secrets`` (OneCLI
+    secret ids); an empty list revokes all. The secrets endpoint is keyed by the
+    server-assigned agent UUID, so resolve identifier->uuid first, then
+    PUT /api/agents/<uuid>/secrets {"secretIds":[...]}."""
     _validate_identifier(identifier)
+    uuid = _resolve_agent_uuid(identifier)
     status, body = _request(
-        "POST", f"/api/agents/{identifier}/secrets", json={"secrets": list(secrets)}
+        "PUT", f"/api/agents/{uuid}/secrets", json={"secretIds": list(secrets)}
     )
     if status == 200:
         return body

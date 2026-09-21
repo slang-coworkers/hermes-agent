@@ -797,6 +797,19 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
                 raise CompositionError(
                     f"{profile_name}: terminal.docker_forward_env entries must be strings, "
                     f"got {name!r}")
+            # The OneCLI control-plane key is never forwardable (C1, § Security condition 3):
+            # it authenticates the render to OneCLI and must stay host-only, and it is not in
+            # the egress-controlled set, so it needs its own explicit refusal here.
+            if name.strip() == "ONECLI_API_KEY":
+                raise CompositionError(
+                    f"{profile_name}: docker_forward_env must never forward the OneCLI "
+                    f"control-plane key ONECLI_API_KEY")
+            # C1 (FLEET-F62): the render forwards EXACTLY the four proxy spellings by name so the
+            # live token-bearing value wins over the docker_env placeholder at exec; an exact
+            # proxy spelling is therefore allowed. Every OTHER controlled name — a padded proxy
+            # alias, a CA var, NO_PROXY, a provider name, a swap token — still collides.
+            if name in _EGRESS_PROXY_VARS:
+                continue
             if _is_controlled_env_name(name, controlled):
                 raise CompositionError(
                     f"{profile_name}: egress collision — docker_forward_env forwards a controlled "
@@ -861,6 +874,24 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
     for name in params["provider_env"]:
         env[name] = _EGRESS_PROVIDER_PLACEHOLDER
     _set_dotted(config, descriptor.key("env"), env)
+
+    # C1 (FLEET-F62): forward the four proxy spellings BY NAME so the docker client
+    # resolves each to the live token-bearing value from the per-profile secret scope
+    # at exec, winning over the tokenless placeholder written above. Canonicalise:
+    # keep any pre-existing non-controlled, non-control-plane string entries, then
+    # append the four proxy names not already present. Name-only — no value here.
+    controlled = _egress_controlled_names(params)
+    current_fwd = _get_dotted(config, descriptor.key("forward_env"))
+    fwd = [
+        n for n in (current_fwd if isinstance(current_fwd, list) else [])
+        if isinstance(n, str)
+        and n.strip() != "ONECLI_API_KEY"
+        and not _is_controlled_env_name(n, controlled)
+    ]
+    for var in _EGRESS_PROXY_VARS:
+        if var not in fwd:
+            fwd.append(var)
+    _set_dotted(config, descriptor.key("forward_env"), fwd)
 
     _set_dotted(config, descriptor.key("persist_across_processes"), False)
     _set_dotted(config, "terminal.container_memory", params["container_memory"])
