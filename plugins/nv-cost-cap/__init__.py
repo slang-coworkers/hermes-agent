@@ -362,30 +362,34 @@ def _evaluate_daily(session_id, *, today) -> None:
     state = store.get_state(session_id)
     day_key = state["day_key"]
     day_start = state["day_start_total"]
+    budget_gen = state["budget_gen"]
     if day_key is None:
         day_key, day_start = today, 0.0
     elif day_key != today:
         # New day: the baseline is the total carried INTO the day (the previous
         # day's ending total), not the current — possibly already-increased —
-        # effective, so spend on the new day's first boundary still counts.
+        # effective, so spend on the new day's first boundary still counts. Advance the
+        # generation too, so a PRIOR day's unresolved daily episode becomes stale — a
+        # late Continue on it must not grant this day's baseline fresh headroom.
         day_key, day_start = today, state["last_evaluated_total"]
+        budget_gen += 1
 
     unpriced_now = _unpriced_signal(session_id)
     if unpriced_now > state["last_unpriced_count"]:
         store.record_episode(
-            session_id, "unknown_pricing", state["budget_gen"], today,
+            session_id, "unknown_pricing", budget_gen, today,
             dedup_key=f"{session_id}:unpriced:{today}",
         )
 
     ceiling = resolve_ceiling()
     if _finite(ceiling) and (effective - day_start) >= ceiling:
         store.record_episode(
-            session_id, "daily", state["budget_gen"], today,
+            session_id, "daily", budget_gen, today,
             dedup_key=f"{session_id}:daily:{today}",
         )
 
     store.set_state(
-        session_id, day_key=day_key, day_start_total=day_start,
+        session_id, day_key=day_key, day_start_total=day_start, budget_gen=budget_gen,
         last_evaluated_total=effective, last_unpriced_count=unpriced_now,
     )
 
@@ -732,8 +736,8 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
         # COST-F30: intercept `/cost <continue|stop|ceiling ...>` and resolve it in-plugin
         # BEFORE the boundary/skip logic — a blocked session would otherwise skip its own
         # `/cost`. The command is dropped from dispatch (never a wasted model turn); the
-        # operator observes the outcome on the session's NEXT turn (resumed if the Continue
-        # was granted, still the enriched pause notice if it was refused).
+        # outcome is delivered back on the gateway rail immediately (_deliver_notice), and an
+        # authorized Continue also resumes the session on its next turn.
         cost_text = _cost_command_text(event)
         if cost_text is not None:
             session_id = _resolve_session_id(event, gateway, session_store)
@@ -968,8 +972,9 @@ def _cli_cost_cap(ns, **kwargs):
 
     if command == "resolve":
         orchestrator = _orchestrator_profile()
-        # Self-gate BEFORE any resolution: the CLI's authorization is operational
-        # (orchestrator profile only), not operator-list membership.
+        # First of two gates: the operational gate — the resolve verb runs only from the
+        # orchestrator profile. The second gate (the actor's operator-list membership) is
+        # enforced inside resolve_via_cli under the target profile's pin.
         if active != orchestrator:
             result = {
                 "ok": False,

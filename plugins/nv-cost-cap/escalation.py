@@ -370,9 +370,12 @@ def reconcile_once() -> int:
         try:
             for row in store.claimed_unapplied():
                 try:
-                    # Count only a real terminal transition — a DEFERRED retry or a NOOP
-                    # (already applied by a racing caller) is not an action taken.
-                    if store.apply_effect(row["episode_id"]) == store.APPLIED:
+                    # Count a real terminal transition — applied OR cancelled (closed/stale).
+                    # A DEFERRED (retry next pass) or a NOOP (a racing caller already handled it)
+                    # is not an action taken.
+                    if store.apply_effect(row["episode_id"]) in (
+                        store.APPLIED, store.CANCELLED_CLOSED, store.CANCELLED_STALE,
+                    ):
                         acted += 1
                 except Exception:
                     logger.warning("nv-cost-cap reconcile apply failed for %s", row.get("episode_id"), exc_info=True)

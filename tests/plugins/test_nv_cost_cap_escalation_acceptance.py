@@ -601,3 +601,31 @@ def test_ac_cost_f30_9(loaded_plugin):
     assert after_ok["window_start_total"] == pytest.approx(before["window_start_total"] + INCREMENT_USD), after_ok
     assert after_ok["blocked"] == 0
     assert len(applied) == 1, applied
+
+
+def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
+    """Regression (COST-F30): an immortal daily window advances budget_gen on UTC-day rollover,
+    so a PRIOR day's unresolved daily episode is stale-generation — a late Continue on it is
+    refused and cannot grant the new day's baseline fresh headroom. Not an AC id; guards the
+    generation invariant the daily path depends on (the escalation CAS gen-check assumes the
+    generation moves forward, which for the immortal per-day window only the rollover does)."""
+    mod = loaded_plugin.module
+    sid = "sess-f30-daily-rollover"
+    # Day N: an immortal daily session at generation 1 with a day-N crossing episode.
+    day_n_ep = _seed_episode(mod, sid, kind="daily", budget_gen=1)
+    mod.store.set_state(
+        sid, effective_usd=20.0, day_key="2026-09-19", day_start_total=10.0, last_evaluated_total=20.0
+    )
+    # Roll into day N+1 through the immortal boundary evaluator: the generation must advance.
+    mod._evaluate_daily(sid, today="2026-09-20")
+    rolled = dict(mod.store.get_state(sid))
+    assert rolled["budget_gen"] == 2, rolled
+    before = _baseline(mod, sid, "day_start_total")
+    # The prior-day episode (claimed at generation 1) is now stale: refused, baseline unchanged.
+    stale = mod.resolve_escalation(sid, day_n_ep, 1, "continue", OPERATOR)
+    assert stale["granted"] is False and stale.get("reason") == "stale-generation", stale
+    assert _baseline(mod, sid, "day_start_total") == pytest.approx(before), (
+        "a stale daily Continue must not advance the new day's baseline"
+    )
+    rows = mod.store.resolutions(sid)
+    assert rows and all(r["status"] == "cancelled" for r in rows), rows
