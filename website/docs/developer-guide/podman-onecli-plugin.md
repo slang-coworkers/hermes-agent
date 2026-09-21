@@ -34,8 +34,8 @@ plugins:
       settings:
         gateway_api_base_url: "https://onecli.example"   # OneCLI control-plane base URL
         api_key_env: "ONECLI_API_KEY"                      # host env var holding the bootstrap key
-        profile_secret_sets:                               # selective grants; [] = ungranted
-          research-bot: ["ANTHROPIC_API_KEY"]
+        profile_secret_sets:                               # OneCLI secret ids to grant; [] = ungranted
+          research-bot: ["4d1da6ff-4af8-44f3-8831-07b11bfd004f"]
           triage-bot: []
 ```
 
@@ -84,8 +84,10 @@ requirement is unchanged unless an operator opts a specific keyless endpoint in.
 
 1. `ensureAgent(identifier=<profile>)` — idempotent (`409 → already exists`, no error).
 2. `set_secrets(identifier=<profile>, secrets=profile_secret_sets[<profile>])` —
-   selective, never mode `all`; an empty list leaves the agent ungranted so an
-   unassigned sibling profile still gets `401`.
+   resolves the identifier to its OneCLI agent UUID (`GET /api/agents`) then
+   `PUT /api/agents/<uuid>/secrets {"secretIds": [...]}` (the secrets endpoint is
+   keyed by UUID, not identifier); selective, never mode `all`; an empty list
+   leaves the agent ungranted so an unassigned sibling profile still gets `401`.
 3. `getContainerConfig(agent=<profile>)` — verifies the identity now resolves.
 
 Every onboarded profile must have a `profile_secret_sets` entry (use `[]` to
