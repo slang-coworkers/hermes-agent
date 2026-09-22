@@ -27,7 +27,7 @@ import logging
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 log = logging.getLogger(__name__)
 
@@ -57,11 +57,21 @@ router = APIRouter()
 
 
 def _pin(profile: str):
-    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, validate_profile_name
+    from hermes_cli.profiles import (
+        get_profile_dir,
+        normalize_profile_name,
+        profile_exists,
+        validate_profile_name,
+    )
     from hermes_constants import set_hermes_home_override
 
     canon = normalize_profile_name(profile)
     validate_profile_name(canon)
+    # Reject a syntactically-valid but non-existent profile with 404 BEFORE installing the home
+    # override — otherwise a subsequent plugin_db/config read would materialise <profile>/plugin-data
+    # dirs + a data.db for any name an authenticated caller passes (F30-REV, should-change).
+    if not profile_exists(canon):
+        raise HTTPException(status_code=404, detail="unknown profile")
     return canon, set_hermes_home_override(str(get_profile_dir(canon)))
 
 

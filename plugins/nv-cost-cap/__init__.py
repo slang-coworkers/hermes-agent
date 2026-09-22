@@ -668,7 +668,15 @@ def _cost_outcome_text(result) -> str:
     if result.get("granted"):
         decision = result.get("decision")
         if decision == "continue":
-            return "✅ Cost cap: session resumed (Continue applied)."
+            # F30-REV-2 (+ codex advisory): claim "resumed" ONLY for a session that was actually
+            # stopped and now runs (was_blocked AND resumes). A never-blocked Continue that is
+            # runnable reads "runnable" (not "resumed"); a still-paused one (foreign pause / belt
+            # held / unknown-pricing ⇒ resumes false) reads a plain "Continue applied."
+            if result.get("resumes"):
+                if result.get("was_blocked"):
+                    return "✅ Cost cap: session resumed (Continue applied)."
+                return "✅ Cost cap: Continue applied; session is runnable."
+            return "✅ Cost cap: Continue applied."
         if decision == "stop":
             return "🛑 Cost cap: session stopped."
         if decision == "ceiling":

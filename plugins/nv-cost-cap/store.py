@@ -21,6 +21,7 @@ context-local ``set_hermes_home_override(get_profile_dir("default"))`` (never
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
@@ -297,11 +298,16 @@ def set_state(session_id: str, **fields) -> None:
 
 
 def all_states() -> List[Dict[str, Any]]:
-    """Every tracked per-session state row (for ``hermes cost-cap show``)."""
+    """Every tracked per-session state row (``hermes cost-cap show`` + the F30-REV-1 belt scan).
+
+    Carries ``ended_at`` and ``recon_unpriced`` so the guarded ESTOP-clear can exclude closed
+    sessions and honour the reconcile-path unknown-pricing marker (see ``_belt_is_clear``).
+    """
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT session_id, effective_usd, window_start_total, blocked, immortal "
+            "SELECT session_id, effective_usd, window_start_total, blocked, immortal, "
+            "ended_at, recon_unpriced "
             "FROM cap_state ORDER BY session_id ASC"
         ).fetchall()
     finally:
@@ -313,6 +319,8 @@ def all_states() -> List[Dict[str, Any]]:
             "window_start_total": float(r[2]),
             "blocked": bool(r[3]),
             "immortal": bool(r[4]),
+            "ended_at": r[5],
+            "recon_unpriced": bool(r[6]),
         }
         for r in rows
     ]
@@ -528,6 +536,13 @@ CANCELLED_STALE = "cancelled-stale-generation"
 DEFERRED = "deferred"
 NOOP = "noop"
 
+# Profile-local ESTOP-clear dispositions (F30-REV-1 guarded clear). A CLEARED/LEFT/ABSENT
+# clear is a success (the resolution still applies); only DEFERRED means the clear could not
+# be completed (unlink OSError or tx failure) and the row stays pending for the reconciler.
+CLEARED = "estop-cleared"
+LEFT = "estop-left"
+ABSENT = "estop-absent"
+
 
 def _cancel_if_closed_or_stale(conn, episode_id, session_id, claimed_gen):
     """Inside an OPEN ``BEGIN IMMEDIATE`` tx: cancel the resolution (mark the row + COMMIT) and
@@ -622,12 +637,11 @@ def apply_effect(episode_id: str) -> str:
         _engage_profile_estop(session_id)  # best-effort belt; committed blocked=1 is authoritative
         return _mark_applied(episode_id)
     if decision == "continue":
-        # Clearing the profile ESTOP sentinel is REQUIRED: without it a Continue leaves the whole
-        # profile paused despite blocked=0. A failed clear -> DEFERRED (row stays pending; the
-        # cap_state mutation is idempotent, so the reconciler safely retries).
-        if not _clear_profile_estop():
-            return DEFERRED
-        return _mark_applied(episode_id)
+        # tx1's blocked=0/baseline is committed above; tx2 does the GUARDED ESTOP clear + the
+        # status write atomically (F30-REV-1). A non-owned or belt-held sentinel is LEFT while the
+        # resolution still applies; only an unlink OSError / tx2 failure -> DEFERRED (reconciler
+        # retries — the cap_state mutation is idempotent).
+        return _guarded_clear_and_apply(episode_id)
 
     # ceiling
     if amount_usd is None:
@@ -642,9 +656,7 @@ def apply_effect(episode_id: str) -> str:
     cancelled = _finalize_ceiling_unblock(episode_id, session_id, claimed_gen)
     if cancelled is not None:
         return cancelled
-    if not _clear_profile_estop():
-        return DEFERRED
-    return _mark_applied(episode_id)
+    return _guarded_clear_and_apply(episode_id)
 
 
 def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen):
@@ -695,19 +707,164 @@ def _mark_applied(episode_id: str) -> str:
     return APPLIED
 
 
-def _clear_profile_estop() -> bool:
-    """Clear ONLY the profile-local ESTOP sentinel (never ``disengage()``, which also lifts the
-    fleet-root pause). Returns True on success or when no sentinel exists, False when the unlink
-    fails — Continue/ceiling treat a False as a required-side-effect failure (-> ``DEFERRED``).
+def _owned_local_sentinel():
+    """Read the PROFILE-LOCAL ESTOP sentinel directly (F30-REV-1). NEVER ``estop.get_state()``,
+    which walks ``_candidate_sentinel_paths`` and can surface the FLEET-ROOT reason, mis-attributing
+    ownership. Returns True (present + nv-cost-cap-owned: ``reason`` starts ``"nv-cost-cap:"``),
+    False (present but FOREIGN — a ``hermes pause`` with a different/absent reason, or a body-less
+    sentinel from ``engage()``'s ``touch()`` fail-safe), or None (ABSENT — no local sentinel file).
     """
+    try:
+        from agent import estop
+
+        path = estop.sentinel_path()
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False  # body-less / unreadable ⇒ not provably ours ⇒ FOREIGN, leave it
+        reason = raw.get("reason") if isinstance(raw, dict) else None
+        return isinstance(reason, str) and reason.startswith("nv-cost-cap:")
+    except Exception:
+        logger.warning("nv-cost-cap: reading profile ESTOP ownership failed", exc_info=True)
+        return False  # fail toward LEFT — never unlink a sentinel we could not verify as ours
+
+
+def _belt_is_clear(conn) -> bool:
+    """True when NO OPEN non-immortal session in this profile still holds the belt (F30-REV-1) —
+    none is blocked, unpriced, or over-ceiling, INCLUDING the just-resolved session whose unblock/
+    baseline tx1 already committed. Read on the CALLER's ``BEGIN IMMEDIATE`` connection so a
+    concurrent breach writer serialises against the scan+unlink. Belt over-ceiling mirrors the
+    runtime evaluator (``effective − window_start_total >= resolved_ceiling``); unpriced mirrors it
+    (calls-table ``priced=0`` OR the reconcile-path ``recon_unpriced`` marker).
+    """
+    ceiling = resolved_ceiling()
+    finite = math.isfinite(ceiling)
+    rows = conn.execute(
+        "SELECT session_id, effective_usd, window_start_total, blocked, recon_unpriced "
+        "FROM cap_state WHERE ended_at IS NULL AND immortal = 0"
+    ).fetchall()
+    for sid, effective, window_start, blocked, recon_unpriced in rows:
+        if blocked:
+            return False
+        if recon_unpriced:
+            return False
+        if conn.execute(
+            "SELECT 1 FROM calls WHERE session_id = ? AND priced = 0 LIMIT 1", (sid,)
+        ).fetchone() is not None:
+            return False
+        if finite and (float(effective) - float(window_start)) >= ceiling:
+            return False
+    return True
+
+
+def _unlink_local_sentinel() -> bool:
+    """Unlink ONLY the profile-local sentinel (never ``disengage()``, which lifts the fleet-root
+    too). Returns True on success/absent, False on ``OSError``."""
     try:
         from agent import estop
 
         estop.sentinel_path().unlink(missing_ok=True)
         return True
-    except Exception:
-        logger.warning("nv-cost-cap: clearing profile ESTOP failed", exc_info=True)
+    except OSError:
+        logger.warning("nv-cost-cap: unlinking profile ESTOP failed", exc_info=True)
         return False
+
+
+def _guarded_clear_and_apply(episode_id: str) -> str:
+    """Tx2 of the F30-REV-1 contract: under ONE ``BEGIN IMMEDIATE`` scan the belt, conditionally
+    unlink the OWNED profile-local sentinel, then mark the resolution applied — atomically. tx1
+    already committed the ``cap_state`` unblock, so this never precedes the durable unblock and a
+    concurrent breach serialises on this write lock (it commits ``blocked=1`` before the scan ⇒
+    sentinel LEFT, or re-engages after the unlink via ``_engage_profile_estop``'s ``exists()``
+    guard). Returns APPLIED (owned+belt-clear ⇒ unlinked, or FOREIGN/belt-held/ABSENT ⇒ left) or
+    DEFERRED (unlink ``OSError`` or any tx2 failure; the row stays ``pending`` for the reconciler).
+    """
+    conn = _cas_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        owned = _owned_local_sentinel()
+        if owned is True and _belt_is_clear(conn):
+            if not _unlink_local_sentinel():
+                conn.execute("ROLLBACK")
+                conn.close()
+                return DEFERRED
+        conn.execute(
+            "UPDATE resolutions SET status='applied' WHERE episode_id = ? AND status = 'pending'",
+            (episode_id,),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        conn.close()
+        logger.warning("nv-cost-cap: guarded ESTOP-clear tx failed for %s", episode_id, exc_info=True)
+        return DEFERRED
+    conn.close()
+    return APPLIED
+
+
+def _clear_profile_estop() -> str:
+    """Profile-scoped guarded clear for the reconciler (F30-REV-1 step d) — NO episode, NO status
+    write, NO session-level ``resumes``. Under one ``BEGIN IMMEDIATE``: unlink the local sentinel
+    only when it is OWNED and the belt is clear, so an owned sentinel whose SOLE blocker CLOSED
+    without a resolution is eventually lifted. Returns CLEARED | LEFT | ABSENT | DEFERRED.
+    """
+    owned = _owned_local_sentinel()
+    if owned is None:
+        return ABSENT
+    conn = _cas_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if owned is True and _belt_is_clear(conn):
+            if not _unlink_local_sentinel():
+                conn.execute("ROLLBACK")
+                conn.close()
+                return DEFERRED
+            conn.execute("COMMIT")
+            conn.close()
+            return CLEARED
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        conn.close()
+        logger.warning("nv-cost-cap: reconcile ESTOP-clear tx failed", exc_info=True)
+        return DEFERRED
+    conn.close()
+    return LEFT
+
+
+def session_resumes(session_id: str) -> bool:
+    """Whether the JUST-RESOLVED session is actually runnable now — DECOUPLED from the profile
+    belt/clear decision (F30-REV-1). True iff the session's OWN post-resolution predicates are all
+    false (``blocked==0`` AND not unpriced AND not over-ceiling) AND no ESTOP is engaged
+    (``estop.is_engaged()`` is fleet-root-inclusive, so a still-present operator/fleet pause keeps
+    this False even after we lifted our own profile-local sentinel). Fails toward False.
+    """
+    state = get_state(session_id)
+    if state["blocked"]:
+        return False
+    if unpriced_count(session_id) > 0 or state["recon_unpriced"]:
+        return False
+    ceiling = resolved_ceiling()
+    baseline = state["day_start_total"] if state["immortal"] else state["window_start_total"]
+    if math.isfinite(ceiling) and (state["effective_usd"] - baseline) >= ceiling:
+        return False
+    try:
+        from agent import estop
+
+        if estop.is_engaged():
+            return False
+    except Exception:
+        logger.warning("nv-cost-cap: is_engaged check failed", exc_info=True)
+        return False
+    return True
 
 
 def _engage_profile_estop(session_id) -> None:

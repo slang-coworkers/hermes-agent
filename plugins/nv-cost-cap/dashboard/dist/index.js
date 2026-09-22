@@ -60,11 +60,16 @@
     const [busy, setBusy] = useState({});
     const [amounts, setAmounts] = useState({});
     const [notes, setNotes] = useState({});
+    // Monotonic request token: a slow response for a PREVIOUS profile must not overwrite the
+    // current profile's card state after a profile switch (only the latest refresh applies).
+    const reqSeq = React.useRef(0);
 
     const refresh = useCallback(async () => {
+      const seq = ++reqSeq.current;
       try {
         const profile = await currentProfile();
         const rows = await SDK.fetchJSON(`${API}/escalations?profile=${encodeURIComponent(profile)}`);
+        if (seq !== reqSeq.current) return;  // a newer refresh superseded this one — drop the stale result
         setItems(Array.isArray(rows) ? rows : []);
       } catch (e) {
         // transient (auth/profile switch) — keep the last view, retry on the next tick
@@ -89,8 +94,14 @@
         );
         setNotes((n) => ({ ...n, [episodeId]: outcomeNote(res) }));
       } catch (e) {
-        // non-2xx (e.g. a 403) — surface the refusal rather than swallow it
-        setNotes((n) => ({ ...n, [episodeId]: "Not authorized for this profile." }));
+        // Reserve the auth message for an explicit 401/403; a 500 / network error is a generic,
+        // retryable failure, not an authorization refusal. (An in-band unauthorized RESULT is a
+        // 2xx {granted:false, reason:"unauthorized"} handled by outcomeNote above, not here.)
+        const status = e && (e.status || e.statusCode);
+        const note = (status === 401 || status === 403)
+          ? "Not authorized for this profile."
+          : "Could not resolve — please retry.";
+        setNotes((n) => ({ ...n, [episodeId]: note }));
       } finally {
         setBusy((b) => ({ ...b, [episodeId]: false }));
         refresh();

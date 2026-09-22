@@ -603,6 +603,96 @@ def test_ac_cost_f30_9(loaded_plugin):
     assert len(applied) == 1, applied
 
 
+def test_ac_cost_f30_10(loaded_plugin):
+    """AC-COST-F30-10 (derived, safety): on the default estop_on_breach=true a granted Continue lifts the shared profile-local ESTOP sentinel ONLY when it is nv-cost-cap-owned (reason begins 'nv-cost-cap:') AND no non-immortal OPEN session in the profile — including the just-resolved one — remains blocked/unpriced/over-ceiling; a FOREIGN (hermes pause) sentinel and a still-needed multi-session belt (a second session blocked, over-ceiling, or recon-unpriced) are both LEFT while the resolution is still applied, and the sentinel is unlinked only when owned and the belt is clear."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+
+    # Each sub-case runs in its OWN pinned profile so cap_state and the profile-local ESTOP
+    # sentinel (estop.sentinel_path() = get_hermes_home()/ESTOP, honouring the override) are
+    # isolated; each profile carries the namespaced operators and a high ceiling so a resolved
+    # session is provably runnable (spent well under the ceiling, not over-ceiling).
+    for name in ("estopf", "estopb", "estopc", "estopd"):
+        _write_profile_ceiling(name, 100.0)
+
+    # (i) FOREIGN sentinel preserved: a `hermes pause`-style sentinel (reason without the
+    # 'nv-cost-cap:' prefix) must survive an authorized Continue even when the belt is otherwise
+    # clear — a cost-cap resolution must never lift an operator pause.
+    with _pinned_home("estopf"):
+        ep = _seed_episode(mod, "sess-f30-10-foreign", kind="breach")
+        estop.engage(reason="operator maintenance window")  # foreign: no 'nv-cost-cap:' prefix
+        assert estop.sentinel_path().exists()
+        res = mod.resolve_escalation("sess-f30-10-foreign", ep, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-foreign"))["blocked"] == 0, "resolution IS applied"
+        assert estop.sentinel_path().exists(), "a FOREIGN (hermes pause) sentinel must be left intact"
+
+    # (ii) Multi-session belt preserved: with an nv-cost-cap-owned sentinel and TWO non-immortal
+    # blocked sessions, resolving ONE must LEAVE the sentinel because the other session is still
+    # blocked — clearing it would resume cron/kanban for the profile during an active breach.
+    with _pinned_home("estopb"):
+        ep_a = _seed_episode(mod, "sess-f30-10-belt-a", kind="breach")
+        _seed_episode(mod, "sess-f30-10-belt-b", kind="breach")  # stays blocked
+        estop.engage(reason="nv-cost-cap: session sess-f30-10-belt-a exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-f30-10-belt-a", ep_a, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-belt-a"))["blocked"] == 0
+        assert dict(mod.store.get_state("sess-f30-10-belt-b"))["blocked"] == 1, "the other session stays blocked"
+        assert estop.sentinel_path().exists(), "the shared belt must be left while another session is still blocked"
+
+    # (iii) Cleared when owned AND belt-clear: the sole owned breach, once resolved and runnable,
+    # DOES lift the sentinel — the guard is not over-conservative, which is what lets an authorized
+    # Continue on the sole priced breach resume (cf. AC-8 Part B).
+    with _pinned_home("estopc"):
+        ep_c = _seed_episode(mod, "sess-f30-10-clear", kind="breach")
+        estop.engage(reason="nv-cost-cap: session sess-f30-10-clear exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-f30-10-clear", ep_c, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-clear"))["blocked"] == 0
+        assert not estop.sentinel_path().exists(), "an owned sentinel with a clear belt must be lifted"
+
+    # (iv) BODY-LESS sentinel preserved: engage()'s touch() fail-safe can leave a sentinel with no
+    # JSON body; an unreadable/empty body is not provably nv-cost-cap-owned, so it must be treated
+    # as foreign and survive an authorized Continue even with a clear belt.
+    with _pinned_home("estopd"):
+        ep_d = _seed_episode(mod, "sess-f30-10-empty", kind="breach")
+        estop.sentinel_path().write_text("", encoding="utf-8")  # body-less: json.loads fails -> foreign
+        assert estop.sentinel_path().exists()
+        res = mod.resolve_escalation("sess-f30-10-empty", ep_d, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-empty"))["blocked"] == 0
+        assert estop.sentinel_path().exists(), "a body-less/unreadable sentinel must be treated as foreign and left"
+
+    # (v) OVER-CEILING belt-holder: with an owned sentinel, a SECOND non-immortal session that is
+    # not blocked but is over its ceiling still holds the belt, so resolving a runnable session
+    # LEAVES the sentinel — the belt honours over-ceiling, not only blocked.
+    _write_profile_ceiling("estope", 8.0)
+    with _pinned_home("estope"):
+        ep_e = _seed_episode(mod, "sess-f30-10-ceil", kind="breach")  # after Continue: spent 5 < 8 -> runnable
+        mod.store.set_state("sess-f30-10-ceil-holder", effective_usd=50.0, window_start_total=0.0,
+                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0)  # spent 50 >= 8 -> over-ceiling
+        estop.engage(reason="nv-cost-cap: session sess-f30-10-ceil exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-f30-10-ceil", ep_e, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-ceil"))["blocked"] == 0
+        assert estop.sentinel_path().exists(), "a non-blocked over-ceiling session must hold the belt"
+
+    # (vi) RECON-UNPRICED belt-holder: a reconcile-only unknown-pricing session (recon_unpriced=1,
+    # no unpriced call rows) still holds the belt — the belt must honour the recon marker the
+    # evaluator uses, not only the calls-table unpriced_count, or AC-8 Part A regresses.
+    _write_profile_ceiling("estopg", 100.0)
+    with _pinned_home("estopg"):
+        ep_g = _seed_episode(mod, "sess-f30-10-recon", kind="breach")  # runnable after Continue
+        mod.store.set_state("sess-f30-10-recon-holder", effective_usd=0.0, window_start_total=0.0,
+                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0, recon_unpriced=1)
+        estop.engage(reason="nv-cost-cap: session sess-f30-10-recon exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-f30-10-recon", ep_g, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-f30-10-recon"))["blocked"] == 0
+        assert estop.sentinel_path().exists(), "a recon-unpriced (recon_unpriced=1) session must hold the belt"
+
+
 def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
     """Regression (COST-F30): an immortal daily window advances budget_gen on UTC-day rollover,
     so a PRIOR day's unresolved daily episode is stale-generation — a late Continue on it is
@@ -629,3 +719,134 @@ def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
     )
     rows = mod.store.resolutions(sid)
     assert rows and all(r["status"] == "cancelled" for r in rows), rows
+
+
+# --- F30-REV-1 required guard regressions (beside AC-COST-F30-10) -----------------------------
+# The architect's amended §Design routes these finer conditions to the builder as plugin
+# behavior-contract regressions (not new AC ids): the ceiling call-site guard, the fleet-root
+# resumes=false decoupling, the F30-REV-2 notice, the tx2-failure/retry DEFERRED path, the
+# multi-session belt keeping resumes=false, and the reconciler (step d) re-clear after a close.
+
+
+def test_estop_clear_ceiling_call_site_guards_foreign(loaded_plugin):
+    """Regression (F30-REV-1): the CEILING resolve call-site guards the ESTOP clear too — a FOREIGN
+    (non-nv-cost-cap) sentinel is LEFT by a granted set-ceiling, exactly as on the Continue path."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopceil", 100.0)
+    with _pinned_home("estopceil"):
+        ep = _seed_episode(mod, "sess-ceil-foreign", kind="breach")
+        estop.engage(reason="operator maintenance window")  # foreign: no 'nv-cost-cap:' prefix
+        assert estop.sentinel_path().exists()
+        res = mod.set_episode_ceiling("estopceil", "sess-ceil-foreign", ep, 1, "80.0", OPERATOR)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-ceil-foreign"))["blocked"] == 0
+        assert estop.sentinel_path().exists(), "a foreign sentinel must survive a set-ceiling resolve"
+
+
+def test_estop_leaves_fleet_root_pause_and_resumes_false(loaded_plugin):
+    """Regression (F30-REV-1): clearing our OWN profile-local sentinel does NOT lift a FLEET-ROOT
+    operator pause, and the just-resolved session reports resumes=false while any pause is engaged
+    (resumes is decoupled from the profile clear, via the fleet-root-inclusive is_engaged())."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopfleet", 100.0)
+    with _pinned_home("estopfleet"):
+        ep = _seed_episode(mod, "sess-fleet", kind="breach")
+        fleet = estop._canonical_root() / "ESTOP"  # a DIFFERENT path from the profile-local sentinel
+        fleet.parent.mkdir(parents=True, exist_ok=True)
+        fleet.write_text('{"reason": "operator fleet pause"}', encoding="utf-8")
+        assert fleet.resolve() != estop.sentinel_path().resolve(), "fleet-root must differ from profile-local"
+        estop.engage(reason="nv-cost-cap: session sess-fleet exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-fleet", ep, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert not estop.sentinel_path().exists(), "our owned profile-local sentinel is cleared"
+        assert fleet.exists(), "the fleet-root operator pause must be left intact"
+        assert res.get("resumes") is False, "a still-engaged fleet-root pause keeps resumes false"
+        fleet.unlink(missing_ok=True)
+
+
+def test_cost_outcome_text_claims_resume_only_when_stopped_then_resumed(loaded_plugin):
+    """Regression (F30-REV-2 + codex advisory): the notice claims "session resumed" ONLY for a
+    session that was actually stopped and now runs (was_blocked AND resumes); a never-blocked but
+    runnable Continue reads "runnable" (not "resumed"); a still-paused Continue reads a plain
+    "Continue applied." with no false resume claim."""
+    mod = loaded_plugin.module
+    resumed = mod._cost_outcome_text(
+        {"granted": True, "decision": "continue", "resumes": True, "was_blocked": True})
+    runnable = mod._cost_outcome_text(
+        {"granted": True, "decision": "continue", "resumes": True, "was_blocked": False})
+    still_paused = mod._cost_outcome_text(
+        {"granted": True, "decision": "continue", "resumes": False, "was_blocked": True})
+    assert "resumed" in resumed.lower(), resumed
+    assert "resumed" not in runnable.lower() and "runnable" in runnable.lower(), runnable
+    assert "resumed" not in still_paused.lower(), still_paused
+    assert "continue applied" in still_paused.lower(), still_paused
+
+
+def test_estop_unlink_failure_defers_then_reconciler_clears(loaded_plugin, monkeypatch):
+    """Regression (F30-REV-1): a failing guarded unlink DEFERS (row stays pending, tx1 unblock
+    durable), and a later reconcile_once() re-runs the guarded clear and lifts the owned sentinel."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopdefer", 100.0)
+    orig_unlink = mod.store._unlink_local_sentinel
+    with _pinned_home("estopdefer"):
+        ep = _seed_episode(mod, "sess-defer", kind="breach")
+        estop.engage(reason="nv-cost-cap: session sess-defer exceeded the Tier-2 cost ceiling")
+        monkeypatch.setattr(mod.store, "_unlink_local_sentinel", lambda: False)
+        res = mod.resolve_escalation("sess-defer", ep, 1, "continue", OPERATOR)
+        assert res["granted"] is False and res["reason"] == "deferred", res
+        assert dict(mod.store.get_state("sess-defer"))["blocked"] == 0, "tx1 unblock is durable"
+        assert estop.sentinel_path().exists(), "sentinel still present after the deferred unlink"
+        assert len(_applied(mod, "sess-defer")) == 0, "the resolution row stays pending, not applied"
+        # Restore ONLY the unlink patch — monkeypatch.undo() would also revert the loaded_plugin
+        # fixture's HERMES_HOME setenv (same monkeypatch instance), sending reconcile_once() to the
+        # wrong home where this profile does not exist.
+        monkeypatch.setattr(mod.store, "_unlink_local_sentinel", orig_unlink)
+    acted = mod.reconcile_once()
+    assert acted >= 1, acted
+    with _pinned_home("estopdefer"):
+        assert not estop.sentinel_path().exists(), "reconcile_once re-runs the guarded clear and lifts it"
+        assert len(_applied(mod, "sess-defer")) == 1, "the reconciler finalises the pending resolution"
+
+
+def test_estop_belt_held_by_second_session_keeps_resumes_false(loaded_plugin):
+    """Regression (F30-REV-1, multi-session belt): while another non-immortal session is still
+    blocked, resolving one LEAVES the shared sentinel AND the resolved session reports
+    resumes=false (the shared belt pauses the whole profile)."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopbelt2", 100.0)
+    with _pinned_home("estopbelt2"):
+        ep_a = _seed_episode(mod, "sess-belt2-a", kind="breach")
+        _seed_episode(mod, "sess-belt2-b", kind="breach")  # stays blocked
+        estop.engage(reason="nv-cost-cap: session sess-belt2-a exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-belt2-a", ep_a, 1, "continue", OPERATOR)
+        assert res["granted"] is True, res
+        assert estop.sentinel_path().exists(), "the belt is left while another session is blocked"
+        assert dict(mod.store.get_state("sess-belt2-b"))["blocked"] == 1
+        assert res.get("resumes") is False, "the shared belt keeps the resolved session non-resumed"
+
+
+def test_estop_reconciler_clears_after_sole_blocker_closes(loaded_plugin):
+    """Regression (F30-REV-1, step d): an owned sentinel whose SOLE blocker CLOSED without a
+    resolution is lifted by reconcile_once()'s guarded clear (closed rows are excluded from the
+    belt) — no stuck belt."""
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopclosed", 100.0)
+    with _pinned_home("estopclosed"):
+        _seed_episode(mod, "sess-closed", kind="breach")
+        estop.engage(reason="nv-cost-cap: session sess-closed exceeded the Tier-2 cost ceiling")
+        assert estop.sentinel_path().exists()
+        mod.store.mark_session_closed("sess-closed")  # closed without a resolution
+    acted = mod.reconcile_once()
+    assert acted >= 1, acted
+    with _pinned_home("estopclosed"):
+        assert not estop.sentinel_path().exists(), "reconcile lifts an owned sentinel whose blocker closed"

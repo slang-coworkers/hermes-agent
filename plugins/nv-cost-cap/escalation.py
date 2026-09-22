@@ -190,7 +190,7 @@ def _current_profile_name() -> str:
 
 # --- the resolution chokepoint ---------------------------------------------
 
-def _finish(status, decision, episode_id, **extra):
+def _finish(status, decision, episode_id, session_id, **extra):
     """Map ``store.apply_effect`` status to the surface reply dict.
 
     A claim can win the CAS yet still not apply — the session closed under it
@@ -199,9 +199,17 @@ def _finish(status, decision, episode_id, **extra):
     the row stays pending for the reconciler (``deferred``). Only ``APPLIED`` is a grant;
     every other status is a fail-closed ``granted: False`` so no surface reports success
     for an effect that did not land.
+
+    On a granted Continue/ceiling the reply carries ``resumes`` — whether the JUST-RESOLVED
+    session actually runs now (F30-REV-1: ``store.session_resumes``, decoupled from the profile
+    ESTOP-clear decision and computed AFTER any unlink) — so ``_cost_outcome_text`` never claims a
+    still-paused (foreign-pause / belt-held / unknown-pricing) session resumed (F30-REV-2).
     """
     if status == store.APPLIED:
-        return {"granted": True, "decision": decision, "episode_id": episode_id, **extra}
+        result = {"granted": True, "decision": decision, "episode_id": episode_id, **extra}
+        if decision in ("continue", "ceiling"):
+            result["resumes"] = store.session_resumes(session_id)
+        return result
     reason = {
         store.CANCELLED_CLOSED: "session-closed",
         store.CANCELLED_STALE: "stale-generation",
@@ -250,7 +258,13 @@ def _resolve_core(session_id, episode_id, budget_gen, decision, actor):
 
     if not store.claim_resolution(episode_id, session_id, budget_gen, decision, actor, target):
         return {"granted": False, "reason": "already-resolved"}
-    return _finish(store.apply_effect(episode_id), decision, episode_id)
+    # was_blocked = the PRIOR (pre-resolution) blocked state, so the notice claims "resumed" only
+    # when the session was actually stopped-then-resumed, not merely runnable (codex advisory on
+    # F30-REV-2: a never-blocked Tier-1/immortal Continue must not read "session resumed").
+    return _finish(
+        store.apply_effect(episode_id), decision, episode_id, session_id,
+        was_blocked=bool(state.get("blocked")),
+    )
 
 
 def set_episode_ceiling(profile, session_id, episode_id, budget_gen, amount, principal):
@@ -287,7 +301,7 @@ def _ceiling_after_pin(session_id, episode_id, budget_gen, amount, actor):
         return {"granted": False, "reason": "managed"}
     if not store.claim_resolution(episode_id, session_id, budget_gen, "ceiling", actor, value):
         return {"granted": False, "reason": "already-resolved"}
-    return _finish(store.apply_effect(episode_id), "ceiling", episode_id, amount_usd=value)
+    return _finish(store.apply_effect(episode_id), "ceiling", episode_id, session_id, amount_usd=value)
 
 
 def resolve_via_cli(profile, session_id, episode_id, budget_gen, decision, amount, actor):
@@ -383,6 +397,14 @@ def reconcile_once() -> int:
                 acted += store.finalise_closed_unresolved()
             except Exception:
                 logger.warning("nv-cost-cap reconcile finalise failed", exc_info=True)
+            # (d) F30-REV-1: re-run the guarded profile ESTOP-clear AFTER apply/finalise, so an
+            # owned sentinel whose SOLE blocker CLOSED without a resolution (its row now finalised
+            # above, ended_at set → excluded from the belt) is eventually lifted — no stuck belt.
+            try:
+                if store._clear_profile_estop() == store.CLEARED:
+                    acted += 1
+            except Exception:
+                logger.warning("nv-cost-cap reconcile ESTOP-clear failed", exc_info=True)
         finally:
             reset_hermes_home_override(token)
     return acted
