@@ -13,6 +13,7 @@ vi.mock('./mock-server', () => ({
 }))
 
 vi.mock('./fixtures', () => ({
+  REPO_ROOT: '/repo',
   createSandbox: vi.fn(() => ({
     root: '/tmp/fleet-f62-unit',
     hermesHome: '/tmp/fleet-f62-unit/hermes-home',
