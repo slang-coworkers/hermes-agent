@@ -852,38 +852,27 @@ def test_estop_reconciler_clears_after_sole_blocker_closes(loaded_plugin):
         assert not estop.sentinel_path().exists(), "reconcile lifts an owned sentinel whose blocker closed"
 
 
-def test_estop_concurrent_breach_serializes_leaves_belt(loaded_plugin):
-    """Regression (F30-REV-1): tx2's BEGIN IMMEDIATE serialises against a concurrent breach — a real
-    second-session breach that commits blocked=1 before the resolver's belt scan leaves the shared
-    sentinel. Barrier-coordinated so the breach lands first, deterministically (no lock deadlock:
-    the breach commits before the resolve enters tx2)."""
-    import threading
-
+def test_estop_breach_after_unlink_reengages_sentinel(loaded_plugin):
+    """Regression (F30-REV-1, after-unlink arm): once tx2 clears an owned sentinel on a clear belt,
+    a subsequent breach re-engages the shared profile sentinel through _engage_estop's exists()
+    guard, so the belt is restored — the "re-engages AFTER the unlink" writer order the amended ADR
+    names, complementing the before-scan arm (a session already blocked at scan time keeps the belt,
+    proved by test_estop_belt_held_by_second_session_keeps_resumes_false). Deterministic and faithful
+    to the real breach writer (store.set_state + _engage_estop, as _evaluate_boundary uses)."""
     from agent import estop
 
     mod = loaded_plugin.module
-    _write_profile_ceiling("estopconc", 100.0)
-    with _pinned_home("estopconc"):
-        ep_a = _seed_episode(mod, "sess-conc-a", kind="breach")
-        mod.store.set_state("sess-conc-b", effective_usd=0.0, window_start_total=0.0,
-                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0)
-        estop.engage(reason="nv-cost-cap: session sess-conc-a exceeded the Tier-2 cost ceiling")
-        start = threading.Barrier(2)
-        breached = threading.Event()
-
-        def _breach():
-            start.wait(timeout=5)
-            with _pinned_home("estopconc"):
-                mod.store.set_state("sess-conc-b", blocked=1)  # a real concurrent breach writer
-            breached.set()
-
-        t = threading.Thread(target=_breach)
-        t.start()
-        start.wait(timeout=5)
-        assert breached.wait(timeout=5), "the concurrent breach did not commit"
-        res = mod.resolve_escalation("sess-conc-a", ep_a, 1, "continue", OPERATOR)
-        t.join(timeout=5)
-        assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-conc-b"))["blocked"] == 1
-        assert estop.sentinel_path().exists(), "a concurrent breach committed before the scan keeps the belt"
-        assert res.get("resumes") is False, "the shared belt keeps the resolved session non-resumed"
+    _write_profile_ceiling("estopreeng", 100.0)
+    with _pinned_home("estopreeng"):
+        ep = _seed_episode(mod, "sess-reeng", kind="breach")
+        estop.engage(reason="nv-cost-cap: session sess-reeng exceeded the Tier-2 cost ceiling")
+        res = mod.resolve_escalation("sess-reeng", ep, 1, "continue", OPERATOR)
+        assert res["granted"] is True and res.get("resumes") is True, res
+        assert not estop.sentinel_path().exists(), "owned + belt-clear -> tx2 unlinked the sentinel"
+        # A later Tier-2 crossing on a new session re-engages the shared belt exactly as
+        # _evaluate_boundary does (store.set_state blocked=1 then _engage_estop).
+        mod.store.set_state("sess-reeng-2", effective_usd=0.0, window_start_total=0.0,
+                            day_start_total=0.0, budget_gen=1, blocked=1, immortal=0)
+        mod._engage_estop("sess-reeng-2")
+        assert estop.sentinel_path().exists(), "a post-unlink breach re-engages the profile sentinel"
+        assert dict(mod.store.get_state("sess-reeng-2"))["blocked"] == 1
