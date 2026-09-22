@@ -51,7 +51,8 @@ at `$HERMES_HOME/kanban.db`; `KANBAN_DB` below resolves it the way `kanban_db.py
 ```bash
 source "$TB/harness.live.env"          # testbed env: HERMES_HOME, HERMES_KANBAN_HOME, GATEWAY_TOKEN, WT, ART …
 cat > "$TB/fleet-f62a.env" <<EOF
-PORT=9119
+PORT=9119                                  # the gateway api_server (fire route + scheduler)
+DASH_PORT=9120                             # the separate web-UI dashboard for the required post-sweep screenshots (dashboard defaults to 9119 too — must differ from PORT)
 NONCE="f39-$(date +%s)"
 API_SERVER_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(24))')"   # 48 hex chars, ≥16
 KANBAN_DB="${HERMES_KANBAN_DB:-${HERMES_KANBAN_HOME:-$HERMES_HOME}/kanban.db}"
@@ -85,10 +86,18 @@ source "$TB/fleet-f62a.env"
    plugins:
      enabled: [nv-coworker-compose]
    ```
-2. **Boot ONE gateway** on the DEFAULT profile (the testbed's gateway/dashboard launch, `/hermes-ui-driver`
-   §1a) with `API_SERVER_KEY` exported in the process env, on `127.0.0.1:$PORT`. Wait for readiness
-   (`HERMES_DASHBOARD_READY port=9119` | `Hermes Web UI` | `GET /api/health` 200); confirm exactly one HTTP
-   listener (no second port).
+2. **Boot the FULL messaging gateway** on the DEFAULT profile — `hermes gateway run --no-supervise`
+   (`hermes_cli/subcommands/gateway.py:47`), with `API_SERVER_KEY` + `API_SERVER_HOST=127.0.0.1` +
+   `API_SERVER_PORT=$PORT` exported in the process env. This is the process that loads the aiohttp
+   **api_server platform** — the one that serves `POST /p/<profile>/api/jobs/{id}/run`
+   (`gateway/platforms/api_server.py:6803` `_handle_run_job`) and runs the per-profile scheduler tick.
+   Do NOT boot `hermes dashboard`/`hermes serve` for the fire: that is the uvicorn **web UI** server
+   (`hermes_cli/main.py:11995` `cmd_dashboard`), a SEPARATE process that does not load gateway platforms and
+   returns HTTP 405 (`allow: GET`) on the `/p/.../api/jobs/{id}/run` route. Wait for `GET
+   http://127.0.0.1:$PORT/health` → 200 (the api_server listener is up; the api_server registers `/health`,
+   `/health/detailed`, `/v1/health` — `gateway/platforms/api_server.py:2217-2219` — not `/api/health`). A dashboard SPA is launched
+   separately (on `$DASH_PORT`, against the same `$HERMES_HOME`) only AFTER a successful sweep, for the
+   required post-sweep UI screenshots in §Evidence.
 3. **Onboard-render the canonical spec** over the loopback WS (renders the cron + skill + Bot Chats):
    ```bash
    ( source "$TB/fleet-f62a.env" && source "$TB/harness.live.env" && cd "$WT"
@@ -285,15 +294,32 @@ no re-drive).
 
 ## Evidence
 
-- Three named UI screenshots (resume the exact `sessions.title='Bot Chat'` session by id over the dashboard,
-  mirroring AC-FLEET-F62-7's UI + state.db pairing), each stating what it proves:
-  - `scenario-AC-LOOP-F39-6/step-1.png` — the orchestrator's `Bot Chat` showing the card-A `message_agent`
-    nudge to `worker` carrying `F39A-$NONCE` (observation a).
-  - `scenario-AC-LOOP-F39-6/step-2.png` — `worker`'s `Bot Chat` showing the `Message from 🤖 orchestrator
-    (@orchestrator): …F39A-$NONCE…` inbound (observation b).
-  - `scenario-AC-LOOP-F39-6/step-3.png` — the orchestrator's `Bot Chat` showing the `F39-ESC:F39B-$NONCE`
-    human-facing escalation and NO third nudge to `worker` (observation c).
-- `oracle.py`'s stdout (the `PASS …` line) captured to `scenario-AC-LOOP-F39-6/oracle.txt`.
-- `onboard.log`, the rendered `orchestrator/cron/jobs.json` (`deliver:bot-chat` + interval 720 + `JOB_ID`),
-  `f62a-baselines.json`, and the `session_model_usage` call counter before/after (each < 40; cost recorded,
-  may read `unknown_pricing`).
+**Semantic gate (headless — the state that decides PASS/FAIL):** the api_server platform serves the fire
+route but NOT the web SPA, so the semantic pass gate is on disk (`oracle.py` + state.db); the required UI
+screenshots below corroborate it and are captured from a separately-launched dashboard post-sweep.
+- `oracle.py`'s stdout (the `PASS …` line) captured to `scenario-AC-LOOP-F39-6/oracle.txt` — the semantic gate.
+- The three oracle clauses as stdlib `python3 -c "import sqlite3 …"` (read-only `file:<path>?mode=ro`)
+  dumps against the live stores, each labelled with what it proves: (a) the orchestrator `Bot Chat`
+  assistant `tool_calls` row carrying the `message_agent` nudge to `worker` + `F39A-$NONCE` and its
+  `status:"sent"` result; (b) the `worker` `Bot Chat` `role='user'` inbound `Message from 🤖 orchestrator
+  (@orchestrator): …F39A-$NONCE…`; (c) the orchestrator `Bot Chat` assistant row beginning
+  `F39-ESC:F39B-$NONCE` + card B's unchanged two-nudge `task_comments` set.
+- `execution.txt` (the one `source='builtin'` cron execution, `status=completed`), the `gateway.log`
+  excerpt for the fired turn, `onboard.log`, the rendered `orchestrator/cron/jobs.json`
+  (`deliver:bot-chat` + interval 720 + `JOB_ID`), `f62a-baselines.json`, and the `session_model_usage`
+  call counter before/after (each < 40; cost recorded, may read `unknown_pricing`).
+
+**Required UI corroboration (post-sweep):** the screenshots require the web SPA, which is a SEPARATE server
+(`hermes dashboard`, `hermes_cli/main.py:11995`) — it does not serve the fire route, so it is launched only
+AFTER `oracle.py` passes, against the same `$HERMES_HOME` on its own port:
+`hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open` (resume the exact
+`sessions.title='Bot Chat'` session by id, mirroring AC-FLEET-F62-7's UI + state.db pairing). `oracle.py`
+remains the semantic state gate, but the AC row remains **FAIL** if any of the three required screenshots
+below cannot be captured (the live-scenario contract requires user-visible artifacts). On the 503-blocked
+run there were no nudge/escalation bubbles to capture, which is consistent with the FAIL.
+- `scenario-AC-LOOP-F39-6/step-1.png` — the orchestrator's `Bot Chat` showing the card-A `message_agent`
+  nudge to `worker` carrying `F39A-$NONCE` (observation a).
+- `scenario-AC-LOOP-F39-6/step-2.png` — `worker`'s `Bot Chat` showing the `Message from 🤖 orchestrator
+  (@orchestrator): …F39A-$NONCE…` inbound (observation b).
+- `scenario-AC-LOOP-F39-6/step-3.png` — the orchestrator's `Bot Chat` showing the `F39-ESC:F39B-$NONCE`
+  human-facing escalation and NO third nudge to `worker` (observation c).
