@@ -721,11 +721,12 @@ def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
     assert rows and all(r["status"] == "cancelled" for r in rows), rows
 
 
-# --- F30-REV-1 required guard regressions (beside AC-COST-F30-10) -----------------------------
-# The architect's amended §Design routes these finer conditions to the builder as plugin
-# behavior-contract regressions (not new AC ids): the ceiling call-site guard, the fleet-root
-# resumes=false decoupling, the F30-REV-2 notice, the tx2-failure/retry DEFERRED path, the
-# multi-session belt keeping resumes=false, and the reconciler (step d) re-clear after a close.
+# --- Guarded ESTOP-clear behavior contracts (beside AC-COST-F30-10) ---------------------------
+# Finer guard conditions AC-10 does not itself assert: the ceiling call-site guards the same way,
+# the clear leaves a fleet-root pause and keeps resumes false, the notice claims resume only on a
+# real blocked→runnable transition, a failed unlink defers and the reconciler recovers, a
+# concurrent breach that commits before the scan keeps the belt, and the reconciler clears an
+# owned sentinel once its sole blocker closes.
 
 
 def test_estop_clear_ceiling_call_site_guards_foreign(loaded_plugin):
@@ -769,10 +770,9 @@ def test_estop_leaves_fleet_root_pause_and_resumes_false(loaded_plugin):
 
 
 def test_cost_outcome_text_claims_resume_only_when_stopped_then_resumed(loaded_plugin):
-    """Regression (F30-REV-2 + codex advisory): the notice claims "session resumed" ONLY for a
-    session that was actually stopped and now runs (was_blocked AND resumes); a never-blocked but
-    runnable Continue reads "runnable" (not "resumed"); a still-paused Continue reads a plain
-    "Continue applied." with no false resume claim."""
+    """Regression (F30-REV-2): the notice claims "session resumed" ONLY for a real blocked→runnable
+    transition (was_blocked AND resumes); a never-blocked but runnable Continue reads "runnable"
+    (not "resumed"); a still-paused Continue reads a plain "Continue applied." with no false claim."""
     mod = loaded_plugin.module
     resumed = mod._cost_outcome_text(
         {"granted": True, "decision": "continue", "resumes": True, "was_blocked": True})
@@ -850,3 +850,40 @@ def test_estop_reconciler_clears_after_sole_blocker_closes(loaded_plugin):
     assert acted >= 1, acted
     with _pinned_home("estopclosed"):
         assert not estop.sentinel_path().exists(), "reconcile lifts an owned sentinel whose blocker closed"
+
+
+def test_estop_concurrent_breach_serializes_leaves_belt(loaded_plugin):
+    """Regression (F30-REV-1): tx2's BEGIN IMMEDIATE serialises against a concurrent breach — a real
+    second-session breach that commits blocked=1 before the resolver's belt scan leaves the shared
+    sentinel. Barrier-coordinated so the breach lands first, deterministically (no lock deadlock:
+    the breach commits before the resolve enters tx2)."""
+    import threading
+
+    from agent import estop
+
+    mod = loaded_plugin.module
+    _write_profile_ceiling("estopconc", 100.0)
+    with _pinned_home("estopconc"):
+        ep_a = _seed_episode(mod, "sess-conc-a", kind="breach")
+        mod.store.set_state("sess-conc-b", effective_usd=0.0, window_start_total=0.0,
+                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0)
+        estop.engage(reason="nv-cost-cap: session sess-conc-a exceeded the Tier-2 cost ceiling")
+        start = threading.Barrier(2)
+        breached = threading.Event()
+
+        def _breach():
+            start.wait(timeout=5)
+            with _pinned_home("estopconc"):
+                mod.store.set_state("sess-conc-b", blocked=1)  # a real concurrent breach writer
+            breached.set()
+
+        t = threading.Thread(target=_breach)
+        t.start()
+        start.wait(timeout=5)
+        assert breached.wait(timeout=5), "the concurrent breach did not commit"
+        res = mod.resolve_escalation("sess-conc-a", ep_a, 1, "continue", OPERATOR)
+        t.join(timeout=5)
+        assert res["granted"] is True, res
+        assert dict(mod.store.get_state("sess-conc-b"))["blocked"] == 1
+        assert estop.sentinel_path().exists(), "a concurrent breach committed before the scan keeps the belt"
+        assert res.get("resumes") is False, "the shared belt keeps the resolved session non-resumed"

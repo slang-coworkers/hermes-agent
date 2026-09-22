@@ -55,6 +55,16 @@
     return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`;
   }
 
+  function httpStatus(e) {
+    // SDK.fetchJSON rejects with a plain Error("<code>: <body>") carrying no status field, so
+    // recover the HTTP status from an explicit property when present, else the "<code>" prefix.
+    if (!e) return null;
+    if (typeof e.status === "number") return e.status;
+    if (typeof e.statusCode === "number") return e.statusCode;
+    const m = typeof e.message === "string" ? /^(\d{3})\b/.exec(e.message) : null;
+    return m ? Number(m[1]) : null;
+  }
+
   function EscalationCard() {
     const [items, setItems] = useState([]);
     const [busy, setBusy] = useState({});
@@ -67,9 +77,12 @@
     const refresh = useCallback(async () => {
       const seq = ++reqSeq.current;
       try {
-        const profile = await currentProfile();
-        const rows = await SDK.fetchJSON(`${API}/escalations?profile=${encodeURIComponent(profile)}`);
-        if (seq !== reqSeq.current) return;  // a newer refresh superseded this one — drop the stale result
+        const requestedProfile = await currentProfile();
+        const rows = await SDK.fetchJSON(`${API}/escalations?profile=${encodeURIComponent(requestedProfile)}`);
+        // Drop a stale result: a newer refresh started, OR the active profile changed while this
+        // request was in flight (the header slot is not remounted on a profile switch, so a
+        // delayed prior-profile response must not overwrite the current profile's card).
+        if (seq !== reqSeq.current || requestedProfile !== (await currentProfile())) return;
         setItems(Array.isArray(rows) ? rows : []);
       } catch (e) {
         // transient (auth/profile switch) — keep the last view, retry on the next tick
@@ -95,9 +108,9 @@
         setNotes((n) => ({ ...n, [episodeId]: outcomeNote(res) }));
       } catch (e) {
         // Reserve the auth message for an explicit 401/403; a 500 / network error is a generic,
-        // retryable failure, not an authorization refusal. (An in-band unauthorized RESULT is a
-        // 2xx {granted:false, reason:"unauthorized"} handled by outcomeNote above, not here.)
-        const status = e && (e.status || e.statusCode);
+        // retryable failure. (An in-band unauthorized RESULT is a 2xx {granted:false,
+        // reason:"unauthorized"} handled by outcomeNote above.)
+        const status = httpStatus(e);
         const note = (status === 401 || status === 403)
           ? "Not authorized for this profile."
           : "Could not resolve — please retry.";

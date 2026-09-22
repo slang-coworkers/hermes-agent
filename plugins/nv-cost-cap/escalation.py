@@ -258,9 +258,8 @@ def _resolve_core(session_id, episode_id, budget_gen, decision, actor):
 
     if not store.claim_resolution(episode_id, session_id, budget_gen, decision, actor, target):
         return {"granted": False, "reason": "already-resolved"}
-    # was_blocked = the PRIOR (pre-resolution) blocked state, so the notice claims "resumed" only
-    # when the session was actually stopped-then-resumed, not merely runnable (codex advisory on
-    # F30-REV-2: a never-blocked Tier-1/immortal Continue must not read "session resumed").
+    # Capture the PRIOR blocked state so the notice can distinguish a true blocked→runnable resume
+    # from a Continue on a session that was never blocked (which must not read "session resumed").
     return _finish(
         store.apply_effect(episode_id), decision, episode_id, session_id,
         was_blocked=bool(state.get("blocked")),

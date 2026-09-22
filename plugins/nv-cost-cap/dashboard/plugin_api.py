@@ -67,9 +67,9 @@ def _pin(profile: str):
 
     canon = normalize_profile_name(profile)
     validate_profile_name(canon)
-    # Reject a syntactically-valid but non-existent profile with 404 BEFORE installing the home
-    # override — otherwise a subsequent plugin_db/config read would materialise <profile>/plugin-data
-    # dirs + a data.db for any name an authenticated caller passes (F30-REV, should-change).
+    # Validate existence BEFORE installing the home override: a subsequent plugin_db/config read
+    # materialises <profile>/plugin-data dirs + a data.db, so pinning an unknown profile would
+    # create one for any syntactically-valid name an authenticated caller passes. 404 instead.
     if not profile_exists(canon):
         raise HTTPException(status_code=404, detail="unknown profile")
     return canon, set_hermes_home_override(str(get_profile_dir(canon)))
