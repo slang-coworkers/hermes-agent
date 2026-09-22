@@ -143,9 +143,20 @@ test('AC-COST-F30-7: the desktop escalation card renders after install+enable an
   expect(Array.isArray(listed.body) && listed.body.some((e: { session?: string }) => e.session === 'sess-cost-f30-ac7'),
     'the seeded crossing is listed for the active profile').toBeTruthy()
 
-  // The escalation card/pane is visible.
-  await expect(page.getByText(/cost escalation/i).first(),
-    'the escalation card is visible in the desktop panel').toBeVisible({ timeout: 30_000 })
+  // Contributed panes mount inactive, so activate this pane through its visible tab first.
+  const escalationsTab = page
+    .getByRole('tab', { name: /cost escalations/i })
+    .or(page.getByRole('button', { name: /cost escalations/i }))
+    .first()
+  await expect(escalationsTab,
+    'the "Cost escalations" pane is operator-activatable (accessible tab/rail control present)').toBeVisible({ timeout: 30_000 })
+  await escalationsTab.click()
+
+  // The escalation card is visible once the operator activates its pane. Match the card's own
+  // "Cost escalation — session <id>" text (not the "Cost escalations" tab) so the assertion
+  // binds to the revealed content, never to the control that revealed it.
+  await expect(page.getByText(/cost escalation.*session/i).first(),
+    'the escalation card is visible after activating the pane').toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-2-card.png') })
 
   // Step 2 (ADR): an unauthorized principal (locked profile: no loopback_operator -> None) applies NOTHING.
