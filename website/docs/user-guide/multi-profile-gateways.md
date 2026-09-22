@@ -569,3 +569,188 @@ systemctl --user restart hermes-gateway-<profile>.service
 hermes doctor                  # default profile
 hermes -p <profile> doctor     # one profile
 ```
+
+### Host sweep & restart recovery
+
+A Hermes fleet is supervised as **one gateway** in Bot Mode, not as a bank of
+per-bot daemons and not by a periodic host "sweep" loop. The default profile's
+gateway runs with `gateway.multiplex_profiles: true` and a
+`multiplex_profile_allowlist` naming the roster, so that single multiplexing
+process serves every allowlisted coworker. Each responsibility a NanoClaw-style
+host `sweep()` used to carry — inbound `processing_ack` reconciliation, outbound
+at-least-once delivery, stale-claim detection, due-message wake, recurrence, and
+crash-loop backoff — is owned by a first-class Hermes mechanism (mapped in the
+table at the end of this section), and the gateway process itself is kept alive
+by the OS service supervisor: systemd on Linux, launchd on macOS, s6 inside the
+fleet container.
+
+Every behaviour described here is stock v2026.8.31, proven by the hermetic
+adopt-proof tests in `tests/gateway/test_iso_f17_supervision_acceptance.py`
+(`AC-ISO-F17-1` … `AC-ISO-F17-11`). The fails-on-base documentation contract for
+this section is `tests/hermes_cli/test_iso_f17_doc_contract.py`.
+
+#### One gateway, per-profile boot reconcile
+
+On container boot, `container_boot.py` reconciles a per-profile s6 service slot
+for each profile from that profile's persisted `desired_state`. When the
+`GATEWAY_MULTIPLEX_PROFILES` environment flag is set (the fleet default), only
+the **default** slot auto-starts and owns all inbound; every named coworker slot
+is *registered but held down* (a `down` marker is written) even when its
+persisted `desired_state` is `running`. Boot reconcile **does not mutate** the
+persisted `desired_state` — it only reads it and suppresses the named-profile
+autostart — so the fleet image should separately keep every coworker profile at
+a **non-running** desired state, so that the same tree also does the right thing
+if the multiplexer flag is ever cleared (`AC-ISO-F17-1`, `AC-ISO-F17-2`).
+
+A legacy transient `gateway_state` of `draining` or `degraded` normalizes to
+running-eligible during this read; an explicit `desired_state` (including
+`startup_failed`) is honoured verbatim and is **not** normalized to `running`.
+
+#### Restarting the gateway (exit-code contract)
+
+The generated service unit restarts that one gateway and distinguishes an
+intentional restart from a fatal config error by exit code
+(`AC-ISO-F17-3`, `AC-ISO-F17-4`):
+
+- **systemd** (`hermes gateway install`): `Restart=always` with
+  `RestartForceExitStatus=75` (drain-and-restart — a via-service reload stamps
+  exit `75`) and `RestartPreventExitStatus=78` (fatal config — the unit will not
+  restart). With `gateway.systemd_watchdog_seconds` > 0 the unit is emitted as
+  `Type=notify` with `WatchdogSec=<n>s` and the loop heartbeat sends
+  `WATCHDOG=1` only on a timely tick, so a frozen loop is starved of its
+  heartbeat and systemd restarts it; the default is `0` (`Type=simple`, watchdog
+  off — opt-in).
+- **s6** (fleet container): the finish script maps a child exit of `78` to `125`
+  (s6's "permanent down"), so a fatal-config gateway is not respawned; other
+  non-zero exits restart normally.
+- **launchd** (macOS): `KeepAlive` is **unconditional** — launchd relaunches the
+  gateway on *any* exit. launchd has **no** exit-78 permanent-stop equivalent
+  (the systemd/s6 78-stop is the systemd/s6 guarantee only). On macOS, launchd
+  relaunches and re-hits the fatal error until the configuration is fixed:
+  `restart_loop_guard` does not stop launchd from relaunching the gateway; it only
+  suppresses automatic session replay after chained crash-boots.
+
+Separately from the systemd watchdog, an out-of-loop **`shutdown_watchdog`**
+loop-liveness thread probes the running event loop and, if the loop misses its
+probe budget (frozen), hard-exits the process with the restart exit code `75` so
+the supervisor revives it; a live loop that answers the probe is left alone
+(`AC-ISO-F17-5`).
+
+#### `hermes -p <bot> gateway start` under the multiplexer
+
+While the default multiplexer is serving a named profile, that named profile
+**cannot run its own gateway** — but the two entry points behave differently, so
+state it precisely (`AC-ISO-F17-11`):
+
+- **Foreground** `hermes -p <bot> gateway run` refuses **synchronously**: the
+  guard sees a running multiplexer already serving `<bot>` and exits `78`
+  (fatal config). `--force` bypasses the guard; with no running multiplexer it
+  does not refuse.
+- **Supervised** `hermes -p <bot> gateway start` dispatches to the service
+  manager: it issues `s6-svc -u` for the slot, persists `desired_state=running`,
+  and **returns 0**. The spawned gateway child then hits the same guard and
+  exits `78`, and under s6 the finish script maps `78 → 125` so the supervisor
+  **permanently stops** the slot. The named profile therefore never serves — the
+  refusal is operationally a hard error — but note that the `start` *command*
+  returns before its spawned child is stopped; do not expect a non-zero status
+  from `gateway start` itself in the s6 path.
+
+To actually move inbound to a different profile, change which profile the one
+multiplexer serves (its `multiplex_profile_allowlist`), rather than starting a
+second gateway.
+
+#### Interrupted-session and lease recovery
+
+At startup the gateway re-arms sessions that a crash or restart left mid-turn:
+`resume_pending` sessions are scheduled for exactly one auto-resume turn, gated
+so that an already-running (slot-claimed), suspended, wrong-reason, or
+unauthorized session is skipped. The auto-resume reason taxonomy is
+`restart_interrupted` / `restart_timeout` / `shutdown_timeout`, and the in-process
+respawn guard (below) caps chained restart-interrupted boots so a crash-looping
+turn does not replay forever (`AC-ISO-F17-6`).
+
+A durable per-session **turn lease** fences concurrent turns. A lease whose
+holder PID is dead is reclaimed by the next caller; a lease held by a live PID
+is retained (owner-fenced), so a crashed worker's lease is freed without
+stealing a live worker's turn (`AC-ISO-F17-7`).
+
+#### Kanban claim reclaim and respawn guards
+
+The kanban dispatcher runs embedded in the gateway (`kanban.dispatch_in_gateway`,
+default on — the standalone dispatcher unit is deprecated). Its
+`release_stale_claims` pass reclaims a dead worker's expired claim (writing a
+`reclaimed` event) but **extends** a live worker's claim when its heartbeat is
+fresh (a `claim_extended` event); a claim whose heartbeat is older than the
+max-stale window with a still-live PID is not extended — the dispatcher signals
+the worker to terminate and, if it survives, defers the reclaim with a grace (a
+`reclaim_deferred` event, the claim retained) rather than yanking a live
+worker's task (`AC-ISO-F17-8`).
+
+Before re-dispatching a task, `check_respawn_guard` defers across three signals
+(`AC-ISO-F17-9`): a recent rate-limited run holds the task under a cooldown
+(the rate-limit sentinel exit code is `75`), an auth/quota `last_failure_error`
+yields `blocker_auth`, and a protocol-violation streak (a worker exiting `rc=0`
+while the task is still running) keeps the task `ready` below the failure limit
+but `blocked` at it. A clean task is respawnable.
+
+#### Sandbox orphan reaping
+
+Sandbox orphans are the terminal backend's job, not a daemon's: the Docker
+terminal backend's `reap_orphan_containers` runs **once per interpreter** (a
+process-level guard makes a second call a no-op), gated by
+`terminal.docker_orphan_reaper`. Its selection filter removes only containers
+that are `status=exited`, carry the `hermes-agent=1` label, and are older than
+the max age (scoped to `hermes-profile=<p>` when a profile is given); a running,
+too-young, unlabelled, or other-profile container is never selected
+(`AC-ISO-F17-10`).
+
+#### NanoClaw sweep item → Hermes owner
+
+There is no single sweep daemon to port. Each item a NanoClaw host `sweep()`
+carried maps to a Hermes mechanism owned by a specific requirement row:
+
+| NanoClaw sweep item | Hermes owner | Mechanism |
+|---|---|---|
+| Inbound `processing_ack` reconciliation | ISO-F11 | webhook delivery-id cache + `hermes kanban create --idempotency-key` (there is no one-for-one inbound ACK table) |
+| Outbound at-least-once delivery | ISO-F11 | the delivery-obligation ledger (`gateway/delivery_ledger.py`), swept on startup |
+| Stale detection / claim reclaim | ISO-F11 | `release_stale_claims` / `detect_crashed_workers` / `check_respawn_guard`, plus the cron in-flight sweep (`cron/scheduler.py` `sweep_stale_inflight`) |
+| Due-message wake + recurrence | SCHED-F32 | the cron ticker over `get_due_jobs` (`cron/jobs.py`); `compute_next_run` anchored on `last_run_at` |
+| Crash-loop backoff | ISO-F17 (the gateway) + SCHED-F33 (cron jobs) | Gateway: the start-storm breaker (`gateway/status.py`) applies exponential backoff (5 s base, capped at 300 s) once starts exceed its threshold within its window, and the respawn guard (`gateway/restart_loop_guard.py`) stops replaying auto-resume after 3 restart-interrupted boots that chain within 300 s of each other. Cron jobs: fixed-schedule re-firing with a failure-streak review nudge and auto-pause for structurally unrunnable jobs — not a backoff curve. |
+
+NanoClaw's fixed `0/0/10/30/120/300/900` crash-loop backoff array is **not**
+ported as a live retry schedule. Gateway restarts are bounded by the OS
+supervisor plus the start-storm breaker's **exponential backoff**
+(`gateway/status.py`, capped at 300 s) and the respawn guard; cron jobs re-fire
+on their fixed schedule and are nudged or auto-paused rather than backed off. So
+the fixed array is *replaced* by supervisor restart + the storm breaker + the
+respawn guard, not reimplemented.
+
+#### Recovery drill (operator)
+
+To confirm the supervision stack end-to-end on a booted fleet:
+
+```bash
+# 1. Health: the one multiplex gateway is up and serving the roster.
+hermes doctor
+hermes gateway status
+
+# 2. Kill the gateway process and watch the supervisor bring it back.
+#    Linux (systemd):
+#    (the default profile's unit has no suffix; a named profile is hermes-gateway-<profile>.service)
+systemctl --user kill hermes-gateway.service
+systemctl --user status hermes-gateway.service    # Active: active (running) again
+#    macOS (launchd) — KeepAlive relaunches unconditionally:
+launchctl kill TERM gui/$(id -u)/ai.hermes.gateway
+
+# 3. Confirm the restart re-armed any interrupted session and resumed serving.
+#    Each resume_pending session gets exactly one auto-resume turn (reason
+#    restart_interrupted); watch the gateway log for that auto-resume, then send
+#    a test message to the bot to confirm it answers again.
+hermes doctor
+hermes logs gateway -f | grep -i "resume"    # follow the GATEWAY log (default is agent.log)
+```
+
+A gateway that exits `78` (fatal config) is **not** brought back on
+systemd/s6 (`RestartPreventExitStatus=78` / s6 `78 → 125`); fix the config and
+restart the unit by hand. On launchd it will relaunch and re-hit the fatal
+error until the config is fixed — check the log rather than the exit status.
