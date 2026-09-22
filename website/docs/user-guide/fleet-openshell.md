@@ -31,12 +31,17 @@ profile's **tool** execution. `hermes coworker compose <spec>` with
   executed inside that profile's own OpenShell **worker sandbox**, never on the
   gateway host. The render-derived `plugins.entries.nv-fleet-gates.settings.expected_backend`
   is `ssh` (the same source that writes `terminal.backend`), so the single
-  `pre_tool_call` veto admits an own-profile ssh call and denies `local`,
-  cross-profile, an unready backend, and stdio MCP — unchanged.
+  `pre_tool_call` veto admits an own-profile ssh call — **bound to that profile's OWN
+  sandbox host** via the worker-unforgeable managed `expected_ssh_host` map (a sibling
+  host, an absent host, or an absent/malformed map is refused *before* the readiness
+  gate connects) — and denies `local`, cross-profile, an unready backend, and stdio MCP.
 - a per-profile ssh block: `terminal.ssh_host` (the sandbox name `<fleet>-<profile>`,
   distinct per profile), `terminal.ssh_user`, `terminal.ssh_port`, and
-  `terminal.ssh_key` — a **path** under the gateway `$HERMES_HOME` (never key
-  material; the builtin ssh backend passes it as `ssh -i <path>`).
+  `terminal.ssh_key` — a **path** under the gateway `$HERMES_HOME` (never key material;
+  in the fleet testbed that root is under `/workspace/extra/hermes-fleet-testbed/`, never
+  `/opt`). On the OpenShell lane `openshell sandbox ssh-config` emits `User sandbox` + a
+  `ProxyCommand` and **no `IdentityFile`** (auth rides the mTLS proxy), so the key file
+  need only EXIST — present for the builtin `ssh -i <path>` contract, not used for auth.
 - a per-profile `policy-<profile>.yaml` — the `openshell policy` allow-set for that
   sandbox (see [Egress policy](#egress-policy-one-openshell-policy-per-profile)).
 
@@ -116,12 +121,13 @@ Nothing else is allowed: **no wildcard**, and the OneCLI control plane
 (`172.17.0.1:10256`) is never in the allow-set (only the request hop `:10255` is).
 `OPENSHELL_ENDPOINT` is added only if the policy grammar requires it for the sandbox's
 own control connection (an on-box question, established at provisioning), and even then
-never as a tool-egress allow. The render writes this `egress.allow` file at
-`<profile>/policy-<profile>.yaml` — the **canonical allow-set** the provisioning plan
-names on its `--policy` argument. Where the pinned `openshell policy` CLI expects a
-different on-box grammar, the operator regenerates the file **at that same path** with
-the **same three endpoints** before running the plan, so the `--policy
-<profile>/policy-<profile>.yaml` argument always names the file that is applied.
+never as a tool-egress allow. The render writes this `egress.allow` file as
+`policy-<profile>.yaml` beside the profile's config (carried into the installed profile
+via `distribution_owned`) — the **canonical allow-set** the provisioning plan names on
+its bare `--policy policy-<profile>.yaml` argument. **AC-OSH-F63-5 validates this emitted
+file unchanged:** if the pinned OpenShell CLI rejects it (`openshell policy set` /
+`prove`), the criterion FAILS and the renderer must be corrected — do not regenerate or
+hand-edit the policy during verification.
 
 ## Operator prerequisites
 
@@ -142,24 +148,33 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
 4. The rendered per-profile ssh config installed into the gateway user's OpenSSH
    configuration (the `openshell sandbox ssh-config <name>` output), so `terminal.ssh_host`
    resolves through the OpenShell `ProxyCommand`, and the per-profile key path referenced
-   by `terminal.ssh_key` provisioned with the sandbox's key.
+   by `terminal.ssh_key` present (it need only exist; the ssh-config carries no
+   `IdentityFile` — auth rides the mTLS proxy).
+5. The **managed fragment** (`managed/config.yaml`) installed to `$HERMES_MANAGED_DIR`
+   (or `/etc/hermes/config.yaml`) — it carries the veto's per-profile `expected_ssh_host`
+   anchor (and the fleet role map); **without it the veto refuses every ssh terminal
+   call** (fail-closed), so install it before starting the gateway (see the
+   [fleet deployment runbook](./fleet-deployment.md) §2).
 
 ## Provisioning plan and teardown
 
 `hermes coworker compose <spec> --provision-dry-run` renders the fleet and then prints
-a deterministic provisioning plan (identical across runs, `--policy` paths relative to
-the render `--out` root) — the create, policy-set, and ssh-config lines per profile,
-then the teardown lines:
+a deterministic provisioning plan (identical across runs and across `--out` dirs — no
+`--out` path appears) — the create, policy-set, and ssh-config lines per profile, then
+the teardown lines. Each `--policy` names the bare `policy-<profile>.yaml` (the operator
+materialises it at that name from the profile's `distribution_owned` before running the
+plan), and each create `--name` is the sandbox alias == that profile's rendered
+`terminal.ssh_host` (so create / ssh-config / delete all target the same sandbox):
 
 ```
-openshell sandbox create --name <fleet>-<profile> --from <pinned image> --policy <profile>/policy-<profile>.yaml
+openshell sandbox create --name <fleet>-<profile> --from <pinned image> --policy policy-<profile>.yaml
 ...
-openshell policy set <fleet>-<profile> --policy <profile>/policy-<profile>.yaml
+openshell policy set policy-<profile>.yaml
 ...
 openshell sandbox ssh-config <fleet>-<profile>
 ...
 openshell sandbox delete <fleet>-<profile>
-openshell policy delete <fleet>-<profile>
+openshell policy delete policy-<profile>.yaml
 ```
 
 The plan runs **no** container engine. The teardown lines delete each per-profile
