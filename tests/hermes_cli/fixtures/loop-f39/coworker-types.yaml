@@ -10,6 +10,7 @@ types:
   orchestrator:
     extends: [base]
     identity: O
+    config: {toolsets: [hermes-cli, kanban]}   # kanban tools survive runtime toolset gating (tools/kanban_tools.py:59-60)
     skills: [supervise-issues]
     cron_jobs:
       - {name: supervise-issues, schedule: "every 12h",
