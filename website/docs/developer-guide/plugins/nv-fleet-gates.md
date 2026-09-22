@@ -79,6 +79,18 @@ subprocess, which bridges its own correct `terminal.*` at its own startup. The l
 profile's own turns (active == launch) are unaffected, and with `enforce_sandbox: false`
 the whole predicate — this check included — is inert.
 
+**`message_agent` is exempt from the entire SANDBOX predicate.** `message_agent`'s
+delivery runs **host-local** (`bot_mode_dm.py`, `_host_local=True`) as a control-plane
+child that never consumes the active profile's frozen `terminal.*` config, so it is not
+a sandbox-consuming call: the cross-profile, backend and task-env checks all target
+sandbox-consuming tools and none applies to it. If it were not exempt, the cross-profile
+hard-fail above would fire for every **served** (non-launch) profile's `message_agent`
+coordination turn on a multiplexed gateway — the fleet could not coordinate on one
+gateway at all. The exemption is a bare early return for `message_agent`; coordination
+still flows only along provisioned edges, because the separate **WIRING** predicate
+continues to gate `message_agent` to wired targets. `terminal`/`execute_code`/`mcp_*`/
+file tools keep the full cross-profile + backend + dangerous-command checks.
+
 ## Companion surfaces
 
 - **`codex_critique` tool** (+ `/codex-critique` slash alias) — runs a critique

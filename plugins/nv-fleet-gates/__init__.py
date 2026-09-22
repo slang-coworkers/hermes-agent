@@ -259,7 +259,14 @@ def register(ctx) -> None:
 
     # --- predicates ---------------------------------------------------------
     def _sandbox_block(canon, args):
-        if not enforce_sandbox:
+        # message_agent's delivery runs host-local (bot_mode_dm.py `_host_local=True`) as a
+        # control-plane child that never consumes the active profile's frozen terminal.* config,
+        # so it is not a sandbox-consuming call: exempt it from the ENTIRE sandbox predicate
+        # (the cross-profile, backend and task-env checks all target sandbox-consuming tools).
+        # Without this, ISO-F10.a's cross-profile refusal below fires for a served (non-launch)
+        # profile's message_agent coordination turn (active != launch) and the fleet cannot
+        # coordinate on one gateway. _wiring_block still gates message_agent to WIRED targets.
+        if not enforce_sandbox or canon == "message_agent":
             return None
         # TERMINAL_* stays process-global at this pin (terminal_scope.py absent), so a
         # non-launch gateway turn would inherit the LAUNCH profile's frozen sandbox
