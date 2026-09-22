@@ -17,8 +17,13 @@ The rendered supervise-issues 12h `--deliver bot-chat` cron, made due and fired 
 scheduler**, wakes the orchestrator's OWN canonical Bot Chat turn, which `message_agent`s the assignee of a
 silent card (the nudge lands in the assignee's Bot Chat) and — for a card already nudged twice with no
 assignee response — escalates to the human in the orchestrator's room instead of a third nudge. `model:
-live` — a real model answers behind the OneCLI proxy (dummy `ANTHROPIC_API_KEY`, real base URL). Budget:
-`LIVE_MODEL_CALLS_MAX=40`, `LIVE_BUDGET_USD=5`, **ONE run, no re-drive**.
+live` — a real model answers behind the OneCLI proxy. The on-disk provider is the named-provider
+`api_key`-literal form (`providers.coworkers-live` with an inline dummy `api_key` the egress proxy replaces
+at the wire), NOT a bare `key_env: ANTHROPIC_API_KEY` block: that shape 404/401s behind the proxy and does
+not resolve across the profile/child execution boundaries the fire crosses (a secondary profile's secret
+scope does not read process env — `agent/secret_scope.py:176` — and the cron delivery / `message_agent`
+hops do not carry `ANTHROPIC_*` through), so the inline-key form is required (matches the FLEET-F62
+precedent fixtures; the frontmatter `key_env` line is descriptive metadata only — see §Setup 4). Budget: `LIVE_MODEL_CALLS_MAX=40`, `LIVE_BUDGET_USD=5`, **ONE run, no re-drive**.
 
 The oracle is strict and exactly-one, mirroring AC-FLEET-F62-7. The cron-delivered envelope
 (`[Cronjob "supervise-issues" output …`) and the `message_agent` envelope
@@ -108,12 +113,58 @@ source "$TB/fleet-f62a.env"
    PY
    ) ; echo "JOB_ID=$JOB_ID" >> "$TB/fleet-f62a.env" ; source "$TB/fleet-f62a.env"
    ```
-4. **Post-onboard merge** (the onboard force-installs spine-minimal config/SOUL): re-apply the live provider
-   block on each profile, the `orchestrator`'s `platforms.api_server.enabled: false`, and the `worker`'s
-   silent SOUL, WITHOUT replacing the rendered `skills/supervise-issues/SKILL.md` or `cron/jobs.json`. The
-   cron delivery spawns `hermes -p orchestrator chat` as a fresh subprocess that reads the current
-   `orchestrator/config.yaml`, so the merged live provider takes effect for the fire. The `worker` SOUL
-   says: *you never reply to a supervisor nudge — stay silent.*
+4. **Post-onboard merge — deterministic DEEP-MERGE (never a `cp`/file-replace), so the render's `toolsets`
+   survive.** `hermes onboard` renders each profile's `config.yaml` from the coworker-types.yaml type
+   `config` — so `orchestrator/config.yaml` gains `toolsets: [hermes-cli, kanban]` (`compose.py:2107`
+   deep-merges the type `config`, `:2482` writes it) but NOT the live `coworkers-live` provider, which is
+   fixture-only. Restore the provider by DEEP-MERGING the installed fixture config ONTO the rendered config
+   (fixture wins on the provider / `model` / `api_server` keys; the rendered `toolsets` and identity are
+   preserved — a naive `cp` of the fixture config, which has no `toolsets`, would silently strip
+   `kanban_list`/`kanban_comment` and the sweep would no-op). Also re-write the `worker` silent SOUL (onboard
+   force-installs the spine SOUL). Do NOT touch the rendered `skills/supervise-issues/SKILL.md` or
+   `cron/jobs.json`. The cron delivery spawns `hermes -p orchestrator chat` as a fresh subprocess that reads
+   the merged `orchestrator/config.yaml`, so the live provider takes effect for the fire.
+   ```bash
+   for p in orchestrator worker; do
+     python3 - "$SCN/fixtures/$p/config.yaml" "$HERMES_HOME/profiles/$p/config.yaml" <<'PY'
+   import sys, yaml
+   src, dst = sys.argv[1], sys.argv[2]
+   fix = yaml.safe_load(open(src, encoding="utf-8")) or {}
+   cur = yaml.safe_load(open(dst, encoding="utf-8")) or {}
+   def dm(a, b):                 # deep-merge b (fixture) onto a (rendered); dict merges key-wise, leaf wins
+       for k, v in b.items():
+           a[k] = dm(a[k], v) if isinstance(v, dict) and isinstance(a.get(k), dict) else v
+       return a
+   yaml.safe_dump(dm(cur, fix), open(dst, "w", encoding="utf-8"), sort_keys=False)
+   PY
+   done
+   cp "$SCN/fixtures/worker/SOUL.md" "$HERMES_HOME/profiles/worker/SOUL.md"
+   ```
+   Then assert the merge landed AND the render survived — fail the scenario here rather than waste the fire:
+   ```bash
+   python3 - <<'PY'
+   import os, json, yaml
+   H = os.environ["HERMES_HOME"]
+   o = yaml.safe_load(open(f"{H}/profiles/orchestrator/config.yaml", encoding="utf-8"))
+   assert o["model"]["provider"] == "coworkers-live", o.get("model")
+   assert o["providers"]["coworkers-live"]["base_url"] == "https://inference-api.nvidia.com"
+   assert o["providers"]["coworkers-live"].get("api_key"), "orchestrator api_key empty"
+   assert o["providers"]["coworkers-live"]["api_mode"] == "anthropic_messages"
+   assert o["platforms"]["api_server"]["enabled"] is False
+   assert o.get("toolsets") == ["hermes-cli", "kanban"], f"toolsets lost by the merge: {o.get('toolsets')}"
+   w = yaml.safe_load(open(f"{H}/profiles/worker/config.yaml", encoding="utf-8"))
+   assert w["providers"]["coworkers-live"].get("api_key"), "worker api_key empty"
+   assert os.path.isfile(f"{H}/profiles/orchestrator/skills/supervise-issues/SKILL.md"), "SKILL.md clobbered"
+   jobs = json.load(open(f"{H}/profiles/orchestrator/cron/jobs.json", encoding="utf-8"))["jobs"]
+   assert any(j.get("name") == "supervise-issues" and j.get("deliver") == "bot-chat" for j in jobs), "cron clobbered"
+   soul = open(f"{H}/profiles/worker/SOUL.md", encoding="utf-8").read().lower()
+   assert "stay silent" in soul or "never reply" in soul, "worker SOUL is not the silent one"
+   print("post-merge OK: provider+toolsets+api_server restored; skill/cron/silent-SOUL intact")
+   PY
+   ```
+   The `toolsets` assertion is load-bearing: the render supplies them from the orchestrator type
+   `config.toolsets` and the deep-merge preserves them, but any file-replace would drop them; without
+   `kanban` the orchestrator cannot `kanban_list`/`kanban_comment` and the sweep silently no-ops.
 5. **Seed the shared board** `$KANBAN_DB` (= the testbed's `$HERMES_KANBAN_HOME/kanban.db`, NOT
    `$HERMES_HOME/kanban.db`) with raw stdlib sqlite (backdate directly —
    `_append_event` hardcodes `now`; and `kanban_show` reads comments from `task_comments`, not
