@@ -11,3 +11,4 @@ distribution_owned:
 - skill-bundles
 - .env.template
 - scripts
+- policy-orchestrator.yaml

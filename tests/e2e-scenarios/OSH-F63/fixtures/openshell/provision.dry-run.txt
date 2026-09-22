@@ -1,13 +1,13 @@
-openshell sandbox create --name osh-f63-architect --from localhost/hermes-openshell-sandbox:pinned --policy policy-architect.yaml
-openshell sandbox create --name osh-f63-builder --from localhost/hermes-openshell-sandbox:pinned --policy policy-builder.yaml
-openshell sandbox create --name osh-f63-orchestrator --from localhost/hermes-openshell-sandbox:pinned --policy policy-orchestrator.yaml
-openshell sandbox create --name osh-f63-reviewer --from localhost/hermes-openshell-sandbox:pinned --policy policy-reviewer.yaml
-openshell sandbox create --name osh-f63-tester --from localhost/hermes-openshell-sandbox:pinned --policy policy-tester.yaml
-openshell policy set osh-f63-architect --policy policy-architect.yaml
-openshell policy set osh-f63-builder --policy policy-builder.yaml
-openshell policy set osh-f63-orchestrator --policy policy-orchestrator.yaml
-openshell policy set osh-f63-reviewer --policy policy-reviewer.yaml
-openshell policy set osh-f63-tester --policy policy-tester.yaml
+openshell sandbox create --name osh-f63-architect --from localhost/hermes-openshell-sandbox:pinned --policy architect/policy-architect.yaml
+openshell sandbox create --name osh-f63-builder --from localhost/hermes-openshell-sandbox:pinned --policy builder/policy-builder.yaml
+openshell sandbox create --name osh-f63-orchestrator --from localhost/hermes-openshell-sandbox:pinned --policy orchestrator/policy-orchestrator.yaml
+openshell sandbox create --name osh-f63-reviewer --from localhost/hermes-openshell-sandbox:pinned --policy reviewer/policy-reviewer.yaml
+openshell sandbox create --name osh-f63-tester --from localhost/hermes-openshell-sandbox:pinned --policy tester/policy-tester.yaml
+openshell policy set osh-f63-architect --policy architect/policy-architect.yaml
+openshell policy set osh-f63-builder --policy builder/policy-builder.yaml
+openshell policy set osh-f63-orchestrator --policy orchestrator/policy-orchestrator.yaml
+openshell policy set osh-f63-reviewer --policy reviewer/policy-reviewer.yaml
+openshell policy set osh-f63-tester --policy tester/policy-tester.yaml
 openshell sandbox ssh-config osh-f63-architect
 openshell sandbox ssh-config osh-f63-builder
 openshell sandbox ssh-config osh-f63-orchestrator

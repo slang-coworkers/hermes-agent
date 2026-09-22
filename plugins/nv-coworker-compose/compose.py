@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -576,6 +577,19 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
                 f"(the fleet's per-profile {descriptor.substrate} sandbox backend); "
                 f"got {terminal['backend']!r}"
             )
+        # A remote-ssh substrate has no local container, so any inherited/spec-declared
+        # terminal.docker_* key cannot be honoured — refuse it rather than silently
+        # serialize a dead key (fail closed, and keep the no-docker_* invariant true).
+        if descriptor.kind == "remote_ssh":
+            docker_keys = sorted(
+                k for k in terminal if isinstance(k, str) and k.startswith("docker_")
+            )
+            if docker_keys:
+                raise CompositionError(
+                    f"{profile_name}: substrate 'openshell' does not support container "
+                    f"terminal keys {docker_keys}; the remote-ssh backend has no local "
+                    f"container to configure"
+                )
         # The shared-container-key is a container-substrate concept: a remote-ssh
         # sandbox has no shared-container identity to collapse, so the guard and the
         # empty-string write below are container-only (no terminal.<prefix>_* key is
@@ -988,9 +1002,9 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
 # builtin ssh backend. Unlike the container path there is no local container to
 # configure: the per-profile egress posture is a standalone `openshell policy`
 # file, and the terminal block carries the builtin ssh coordinates (host/user/
-# port/key-path). The on-box translation of the canonical policy to the exact
-# `openshell policy` CLI, and the ssh-config/ProxyCommand install, are operator
-# provisioning steps proven by the AC-OSH-F63-5 sandbox scenario — not the render.
+# port/key-path). Materialising the on-box `openshell policy` from that file, and
+# installing the ssh-config/ProxyCommand, are operator provisioning steps — not
+# render steps.
 
 _OPENSHELL_SSH_USER = "sandbox"
 _OPENSHELL_SSH_PORT = 22
@@ -1032,6 +1046,12 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
         val = egress.get(key)
         if not isinstance(val, str) or not val.strip():
             raise CompositionError(f"egress.{key} must be a non-empty string, got {val!r}")
+        # No newline/CR/NUL: these values are interpolated into the provisioning plan,
+        # so a control char could inject an extra command line (defeating the
+        # no-container-engine guarantee). The provision plan also shlex-quotes them.
+        if any(c in val for c in "\n\r\x00"):
+            raise CompositionError(
+                f"egress.{key} must not contain control characters, got {val!r}")
         return val.strip()
 
     proxy_addr = _normalize_proxy_addr(_req_str("proxy_addr"))
@@ -1053,10 +1073,21 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
 def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str]) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the allow-listed egress
-    endpoints, exactly the declared set. This is the OSH-F63 render policy contract
-    (``egress.allow``); the operator translates it to the on-box ``openshell policy``
-    CLI at provisioning (AC-OSH-F63-5)."""
-    _write_yaml(pdir / f"policy-{profile_name}.yaml", {"egress": {"allow": list(allow)}})
+    endpoints, exactly the declared set (the render's ``egress.allow`` contract; the
+    operator materialises the on-box ``openshell policy`` from it at provisioning).
+
+    The policy file is also added to the distribution manifest's ``distribution_owned``
+    so ``install_distribution`` carries it into the installed profile rather than
+    dropping it. ``config.yaml`` (and thus ``distribution.yaml``) were already written
+    by ``_render_coworker`` before this runs."""
+    policy_name = f"policy-{profile_name}.yaml"
+    _write_yaml(pdir / policy_name, {"egress": {"allow": list(allow)}})
+    dist_path = pdir / "distribution.yaml"
+    dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
+    owned = dist.get("distribution_owned")
+    if isinstance(owned, list) and policy_name not in owned:
+        owned.append(policy_name)
+        _write_yaml(dist_path, dist)
 
 
 def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> List[str]:
@@ -1069,18 +1100,22 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     if descriptor.kind != "remote_ssh":
         return []
     fleet_name = _safe_name("project", data.get("project", "fleet"))
-    image = _validate_openshell_egress(data.get("egress") or {})["sandbox_image"]
+    # shlex-quote the spec-supplied image so a metachar cannot alter the plan (the
+    # egress validator already refuses control chars). fleet/role names are
+    # _safe_name-validated, so they carry no shell metachars.
+    image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
     roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
     lines: List[str] = []
+    # `--policy` paths are relative to the render `--out` root: each profile dir holds
+    # its own policy-<role>.yaml, so the plan is run from the output root.
     for role in roster:
         lines.append(
             f"openshell sandbox create --name {fleet_name}-{role} --from {image} "
-            f"--policy policy-{role}.yaml")
+            f"--policy {role}/policy-{role}.yaml")
     for role in roster:
-        lines.append(f"openshell policy set {fleet_name}-{role} --policy policy-{role}.yaml")
+        lines.append(f"openshell policy set {fleet_name}-{role} --policy {role}/policy-{role}.yaml")
     for role in roster:
         lines.append(f"openshell sandbox ssh-config {fleet_name}-{role}")
-    # teardown
     for role in roster:
         lines.append(f"openshell sandbox delete {fleet_name}-{role}")
     for role in roster:

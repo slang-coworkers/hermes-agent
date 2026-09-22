@@ -116,9 +116,12 @@ Nothing else is allowed: **no wildcard**, and the OneCLI control plane
 (`172.17.0.1:10256`) is never in the allow-set (only the request hop `:10255` is).
 `OPENSHELL_ENDPOINT` is added only if the policy grammar requires it for the sandbox's
 own control connection (an on-box question, established at provisioning), and even then
-never as a tool-egress allow. This `egress.allow` document is the render's **canonical
-policy contract**; the operator translates it to the exact on-box `openshell policy`
-schema at provisioning.
+never as a tool-egress allow. The render writes this `egress.allow` file at
+`<profile>/policy-<profile>.yaml` — the **canonical allow-set** the provisioning plan
+names on its `--policy` argument. Where the pinned `openshell policy` CLI expects a
+different on-box grammar, the operator regenerates the file **at that same path** with
+the **same three endpoints** before running the plan, so the `--policy
+<profile>/policy-<profile>.yaml` argument always names the file that is applied.
 
 ## Operator prerequisites
 
@@ -144,23 +147,23 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
 ## Provisioning plan and teardown
 
 `hermes coworker compose <spec> --provision-dry-run` renders the fleet and then prints
-a deterministic provisioning plan (identical across runs) — the create, policy-set, and
-ssh-config lines per profile, then the teardown:
+a deterministic provisioning plan (identical across runs, `--policy` paths relative to
+the render `--out` root) — the create, policy-set, and ssh-config lines per profile,
+then the teardown lines:
 
 ```
-openshell sandbox create --name <fleet>-<profile> --from <pinned image> --policy policy-<profile>.yaml
+openshell sandbox create --name <fleet>-<profile> --from <pinned image> --policy <profile>/policy-<profile>.yaml
 ...
-openshell policy set <fleet>-<profile> --policy policy-<profile>.yaml
+openshell policy set <fleet>-<profile> --policy <profile>/policy-<profile>.yaml
 ...
 openshell sandbox ssh-config <fleet>-<profile>
 ...
-# teardown
 openshell sandbox delete <fleet>-<profile>
 openshell policy delete <fleet>-<profile>
 ```
 
-The plan runs **no** container engine. Teardown deletes each per-profile sandbox and
-its policy; deleting a sandbox is the per-profile teardown that frees its resources.
+The plan runs **no** container engine. The teardown lines delete each per-profile
+sandbox and its policy, freeing that profile's resources.
 
 ## Sandbox scope
 

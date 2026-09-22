@@ -473,3 +473,41 @@ def test_openshell_rejects_container_mount_fields(tmp_path):
         msg = (proc.stdout + proc.stderr).lower()
         assert field in msg and "openshell" in msg, f"{field}: refusal must name the field + substrate, got: {msg!r}"
         assert not list(out.glob("*/config.yaml")), f"{field}: no distribution may be written on the refusal"
+
+
+def test_openshell_rejects_docker_terminal_keys(tmp_path):
+    """Unit (not an AC id): the openshell substrate refuses an inherited/spec
+    terminal.docker_* key — the remote-ssh backend has no local container, so such a
+    key can never be honoured; failing closed keeps the no-docker_* render invariant
+    true even for a hostile spec (rather than silently serializing a dead key)."""
+    home = _bootstrap_home(tmp_path)
+    spec_dir = tmp_path / "openshell-dockerkey"
+    shutil.copytree(OPENSHELL_SPEC.parent, spec_dir)
+    spec = spec_dir / OPENSHELL_SPEC.name
+    data = yaml.safe_load(spec.read_text(encoding="utf-8"))
+    data.setdefault("default_config", {})["terminal"] = {"docker_image": "leaked/image:tag"}
+    spec.write_text(yaml.safe_dump(data), encoding="utf-8")
+    out = tmp_path / "out-dockerkey"
+    proc = _render(spec, out, home)
+    assert proc.returncode != 0, "openshell must reject an inherited terminal.docker_* key"
+    msg = (proc.stdout + proc.stderr).lower()
+    assert "docker_" in msg and "openshell" in msg, f"refusal must name the docker key + substrate, got: {msg!r}"
+    assert not list(out.glob("*/config.yaml")), "no distribution may be written on the docker-key refusal"
+
+
+def test_openshell_egress_rejects_control_char_image(tmp_path):
+    """Unit (not an AC id): a control character in the spec's egress.sandbox_image is
+    refused — it is interpolated into the provisioning plan, so a newline could inject
+    an extra (container-engine) command line."""
+    home = _bootstrap_home(tmp_path)
+    spec_dir = tmp_path / "openshell-badimage"
+    shutil.copytree(OPENSHELL_SPEC.parent, spec_dir)
+    spec = spec_dir / OPENSHELL_SPEC.name
+    data = yaml.safe_load(spec.read_text(encoding="utf-8"))
+    data["egress"]["sandbox_image"] = "safe-image\npodman run attacker/image"
+    spec.write_text(yaml.safe_dump(data), encoding="utf-8")
+    out = tmp_path / "out-badimage"
+    proc = _render(spec, out, home)
+    assert proc.returncode != 0, "a control-char sandbox_image must be rejected"
+    assert "control character" in (proc.stdout + proc.stderr).lower()
+    assert not list(out.glob("*/config.yaml")), "no distribution may be written on the bad-image refusal"
