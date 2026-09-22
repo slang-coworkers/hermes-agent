@@ -449,3 +449,27 @@ def test_ac_osh_f63_6():
     ]
     missing = [k for k in required if k not in text]
     assert not missing, f"fleet-openshell.md missing required topics: {missing}"
+
+
+def test_openshell_rejects_container_mount_fields(tmp_path):
+    """Unit (not an AC id): the openshell substrate fails CLOSED — not a silent
+    no-op — when a spec sets a container-only mount field the remote-ssh substrate
+    cannot honour (workspace_root / shared_learnings_root / install_surfaces)."""
+    home = _bootstrap_home(tmp_path)
+    for field, value in (
+        ("workspace_root", "/data/osh-fleet"),
+        ("shared_learnings_root", "/opt/osh-shared-learnings"),
+        ("install_surfaces", ["/opt/osh-tools"]),
+    ):
+        spec_dir = tmp_path / f"openshell-{field}"
+        shutil.copytree(OPENSHELL_SPEC.parent, spec_dir)
+        spec = spec_dir / OPENSHELL_SPEC.name
+        data = yaml.safe_load(spec.read_text(encoding="utf-8"))
+        data[field] = value
+        spec.write_text(yaml.safe_dump(data), encoding="utf-8")
+        out = tmp_path / f"out-{field}"
+        proc = _render(spec, out, home)
+        assert proc.returncode != 0, f"{field}: openshell must reject a container-mount field, not ignore it"
+        msg = (proc.stdout + proc.stderr).lower()
+        assert field in msg and "openshell" in msg, f"{field}: refusal must name the field + substrate, got: {msg!r}"
+        assert not list(out.glob("*/config.yaml")), f"{field}: no distribution may be written on the refusal"
