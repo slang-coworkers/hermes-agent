@@ -876,3 +876,58 @@ def test_estop_breach_after_unlink_reengages_sentinel(loaded_plugin):
         mod._engage_estop("sess-reeng-2")
         assert estop.sentinel_path().exists(), "a post-unlink breach re-engages the profile sentinel"
         assert dict(mod.store.get_state("sess-reeng-2"))["blocked"] == 1
+
+
+def test_cli_resolve_orchestrator_gate_pin_and_principal(loaded_plugin, monkeypatch):
+    """The `hermes cost-cap resolve` CLI fallback gates callers to the orchestrator profile, pins the
+    target --profile around the resolution, authorizes it against a constructed cli: principal, and
+    requires --amount-usd for set-ceiling — the CLI seam _resolve_core (AC-1..5) does not exercise."""
+    import argparse
+
+    from hermes_cli import profiles as _profiles
+
+    mod = loaded_plugin.module
+
+    # The target profile owns the episode and must list the actor the handler constructs, because
+    # resolve_via_cli authorizes under the target's pin (fleet_admin_id unset -> admin id = active).
+    cli_actor = "cli:orchestrator:orchestrator"
+    _write_profile_ceiling("profa", 10.0, operators=[OP_DASH, OPERATOR, cli_actor])
+    with _pinned_home("profa"):
+        episode = _seed_episode(mod, "sess-cli-resolve", kind="breach")
+        before = dict(mod.store.get_state("sess-cli-resolve"))
+
+    def _ns(**over):
+        base = dict(cost_cap_command="resolve", profile="profa", session_id="sess-cli-resolve",
+                    episode_id=episode, budget_gen=1, decision="continue", amount_usd=None)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    # Drive the active-vs-orchestrator relation explicitly: the sandbox HERMES_HOME resolves the
+    # active profile to the default (== the default orchestrator), which would mask the operational
+    # gate. That gate precedes the authz seam, so a non-orchestrator caller is refused with a
+    # top-level reason and no resolution row (of any status) is written.
+    monkeypatch.setattr(mod, "_orchestrator_profile", lambda: "orchestrator")
+    monkeypatch.setattr(_profiles, "get_active_profile_name", lambda: "worker")
+    refused = mod._cli_cost_cap(_ns())
+    assert refused["ok"] is False and "orchestrator-only" in refused["reason"], refused
+    with _pinned_home("profa"):
+        assert mod.store.resolutions("sess-cli-resolve") == []
+        assert dict(mod.store.get_state("sess-cli-resolve")) == before
+
+    monkeypatch.setattr(_profiles, "get_active_profile_name", lambda: "orchestrator")
+
+    missing_amt = mod._cli_cost_cap(_ns(decision="set-ceiling", amount_usd=None))
+    assert missing_amt["ok"] is False and "amount-usd" in missing_amt["reason"], missing_amt
+    with _pinned_home("profa"):
+        assert mod.store.resolutions("sess-cli-resolve") == []
+        assert dict(mod.store.get_state("sess-cli-resolve")) == before
+
+    granted = mod._cli_cost_cap(_ns(decision="continue"))
+    assert granted["ok"] is True and granted["actor"] == cli_actor, granted
+    assert granted["result"].get("granted") is True, granted
+    with _pinned_home("profa"):
+        after = dict(mod.store.get_state("sess-cli-resolve"))
+        applied = _applied(mod, "sess-cli-resolve")
+    assert after["blocked"] == 0, after
+    assert after["window_start_total"] == pytest.approx(before["window_start_total"] + INCREMENT_USD), after
+    assert len(applied) == 1 and applied[0]["actor"] == cli_actor, applied
