@@ -5,9 +5,15 @@ One ``test_ac_osh_f63_<n>`` per ``pytest:`` acceptance criterion (1, 2, 3, 4,
 tests/e2e-scenarios/OSH-F63/AC-OSH-F63-5.md, not a function here.
 
 Behaviour contracts, not byte snapshots (AGENTS.md forbids change-detector
-tests). No network I/O; the veto's readiness oracle ``ensure_task_env`` is
-monkeypatched so the production gate is exercised unchanged. HERMES_HOME is
-tmp_path-rooted. Shapes mirror tests/plugins/test_fleet_f62_acceptance.py and
+tests). No network I/O: for the ready/unready readiness cases the oracle
+``ensure_task_env`` is monkeypatched, and for the one causal config-absent
+case the REAL oracle is left in place and proven to return ``None`` — on
+missing ssh_host/ssh_user ``_create_environment`` raises ValueError at its ssh
+guard (terminal_tool.py:2122-2124) BEFORE any SSHEnvironment is constructed,
+so no ssh subprocess and no connection ever run; ``ensure_task_env`` catches
+it and returns None (terminal_tool.py:2336-2341). HERMES_HOME is
+tmp_path-rooted. Shapes mirror
+tests/plugins/test_fleet_f62_acceptance.py and
 tests/plugins/test_nv_fleet_gates_acceptance.py. The openshell spec/fixtures
 ship in the same PR under tests/e2e-scenarios/OSH-F63/.
 """
@@ -15,6 +21,7 @@ ship in the same PR under tests/e2e-scenarios/OSH-F63/.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,7 +39,8 @@ PODMAN_SPEC = (
 )
 DOC_PAGE = REPO_ROOT / "website" / "docs" / "user-guide" / "fleet-openshell.md"
 
-# nv-fleet-gates is loaded (not edited) so AC-3 exercises the production veto.
+# Both fleet plugins load so AC-3 exercises the production veto end to end
+# (nv-coworker-compose render + nv-fleet-gates predicates).
 FLEET_PLUGINS = ("nv-coworker-compose", "nv-fleet-gates")
 COWORKER_PROFILES = ("orchestrator", "architect", "builder", "tester", "reviewer")
 
@@ -95,17 +103,6 @@ def _dotted(d: dict, path: str):
             return None
         cur = cur[part]
     return cur
-
-
-def _extract_allowed_hosts(policy: dict):
-    """The allow-listed host:port entries from a parsed openshell policy.
-
-    OSH-F63 render contract (this ADR defines it): the policy carries an
-    ``egress.allow`` list of ``"host:port"`` strings. This is the schema the
-    render emits and the tester parses.
-    """
-    egress = (policy or {}).get("egress") or {}
-    return [str(x) for x in (egress.get("allow") or [])]
 
 
 def _pre_tool_call_hooks(manager) -> list:
@@ -210,7 +207,7 @@ def test_ac_osh_f63_1(tmp_path):
     for profile in COWORKER_PROFILES:
         cfg = _profile_config(out, profile)
         assert _dotted(cfg, "terminal.backend") == "ssh", profile
-        # the render-derived expected_backend is what makes the (unchanged) veto admit ssh
+        # the render-derived expected_backend is what the veto's backend-name check reads to admit ssh
         assert _dotted(cfg, "plugins.entries.nv-fleet-gates.settings.expected_backend") == "ssh", profile
         host = _dotted(cfg, "terminal.ssh_host")
         key = str(_dotted(cfg, "terminal.ssh_key") or "")
@@ -281,9 +278,11 @@ def test_ac_osh_f63_1(tmp_path):
 
 
 def test_ac_osh_f63_2(tmp_path):
-    """AC-OSH-F63-2: the render emits one policy-<profile>.yaml per profile
-    whose allowed egress set is exactly the OneCLI hop + inference route + ssh
-    control path, and never 10256 or a wildcard."""
+    """AC-OSH-F63-2: the render emits one well-formed policy-<profile>.yaml per
+    profile that contains each of the three required endpoint literals (OneCLI
+    hop, inference route, ssh control path) and excludes 10256 and wildcard
+    egress (0.0.0.0/0, ::/0) — schema-independent checks; the allow-vs-deny
+    semantics are proven on-box by AC-OSH-F63-5."""
     home = _bootstrap_home(tmp_path)
     out = tmp_path / "out"
     assert _render(OPENSHELL_SPEC, out, home).returncode == 0
@@ -307,12 +306,20 @@ def test_ac_osh_f63_2(tmp_path):
     assert {p.name for p in policy_paths} == {f"policy-{p}.yaml" for p in COWORKER_PROFILES}, f"policy files != one per profile: {sorted(p.name for p in policy_paths)}"
     policy_files = {p.name: p for p in policy_paths}
 
+    # AC-2 is a SCHEMA-INDEPENDENT contract: the exact OpenShell policy grammar
+    # is pinned by operator step 2 (external, no release-tree citation), so this
+    # asserts only what holds regardless of structure — each required endpoint is
+    # present, the control plane and obvious wildcards are absent — and defers the
+    # allow-vs-deny SEMANTICS (only these three admitted, everything else denied)
+    # to AC-OSH-F63-5's on-box `openshell policy prove` (§Scenario outlines).
     for profile in COWORKER_PROFILES:
         raw = policy_files[f"policy-{profile}.yaml"].read_text(encoding="utf-8")
-        allowed = set(_extract_allowed_hosts(yaml.safe_load(raw)))
-        assert allowed == expected_allowed, f"{profile}: allowed {allowed} != {expected_allowed}"
-        assert not any("*" in a for a in allowed), f"{profile}: wildcard in allowed set {allowed}"
+        assert yaml.safe_load(raw) is not None, f"{profile}: policy is not well-formed YAML"
+        for endpoint in expected_allowed:
+            assert endpoint in raw, f"{profile}: required endpoint {endpoint!r} absent from the emitted policy"
         assert "10256" not in raw, f"{profile}: OneCLI control plane 10256 present in policy"
+        for wildcard in ("0.0.0.0/0", "::/0"):
+            assert wildcard not in raw, f"{profile}: wildcard egress {wildcard!r} present in policy"
 
 
 def _scope(manager, monkeypatch, active: Path, launch: Path):
@@ -324,59 +331,120 @@ def _scope(manager, monkeypatch, active: Path, launch: Path):
     monkeypatch.setattr(vmod, "get_process_hermes_home", lambda *a, **k: launch, raising=False)
 
 
+def _managed_expected_ssh_host(veto_home: Path) -> dict:
+    """The ``expected_ssh_host`` map the render pins into the MANAGED fragment
+    (worker-unforgeable, mirroring ``profile_roles`` — read straight from
+    managed scope, never ctx.get_config). Read from the copied managed config so
+    the test proves the map exists and is populated per profile."""
+    mpath = veto_home / "managed" / "config.yaml"
+    if not mpath.exists():
+        return {}
+    data = yaml.safe_load(mpath.read_text(encoding="utf-8")) or {}
+    settings = _dotted(data, "plugins.entries.nv-fleet-gates.settings") or {}
+    m = settings.get("expected_ssh_host")
+    return m if isinstance(m, dict) else {}
+
+
+class _SSHConstructReached(BaseException):
+    """A BaseException (not Exception) sentinel: ensure_task_env's except
+    Exception (terminal_tool.py:2336) would SWALLOW an Exception and mask the
+    failure, so the sentinel must escape that boundary to fail the test."""
+
+
 def test_ac_osh_f63_3(tmp_path, monkeypatch):
-    """AC-OSH-F63-3: the single pre_tool_call veto admits an own-profile ssh
-    terminal call and still blocks mcp_*, local, cross-profile, an unready
-    container backend, and an unready/config-absent ssh backend (isolation
-    preserved; the veto itself is unchanged)."""
+    """AC-OSH-F63-3: the single pre_tool_call veto binds the ssh terminal to the
+    profile's OWN sandbox host — admitting the own-host call and blocking a
+    sibling host, an absent host, an absent/malformed managed map, a
+    dead-but-configured backend, an unready container, mcp_*, local, and
+    cross-profile — with host binding ordered BEFORE the readiness gate."""
     import tools.terminal_tool as tt
 
-    # Load the veto from an actual RENDERED openshell coworker home (real
-    # render-derived expected_backend=ssh, enforce_sandbox, mcp_scope).
     home = _bootstrap_home(tmp_path)
     out = tmp_path / "out-openshell"
     assert _render(OPENSHELL_SPEC, out, home).returncode == 0
+
+    own_host = _dotted(_profile_config(out, "builder"), "terminal.ssh_host")
+    sibling_host = _dotted(_profile_config(out, "tester"), "terminal.ssh_host")
+    assert own_host and sibling_host and own_host != sibling_host, (
+        f"render must give distinct per-profile hosts: own={own_host!r} sibling={sibling_host!r}"
+    )
+
     veto_home = _rendered_veto_home(out, "builder", tmp_path, monkeypatch, "osh-veto")
     manager = _load_veto(veto_home)
-
     assert len(_pre_tool_call_hooks(manager)) == 1, "the fleet must register a single veto hook"
 
-    # own profile (active == launch); readiness oracle ready (mocked, no net).
+    # The render pins expected_ssh_host into the MANAGED fragment
+    # (worker-unforgeable) for EVERY coworker profile, each to its OWN rendered
+    # host — the value the veto's host-binding predicate compares against.
+    managed = _managed_expected_ssh_host(veto_home)
+    for prof in COWORKER_PROFILES:
+        pdir = next(iter(out.glob(f"*{prof}*/")))
+        phost = _dotted(yaml.safe_load((pdir / "config.yaml").read_text(encoding="utf-8")), "terminal.ssh_host")
+        assert managed.get(pdir.name) == phost, (
+            f"managed expected_ssh_host[{pdir.name}] must be {phost!r}, got {managed!r}"
+        )
+    assert managed.get(veto_home.name) == own_host
+
     _scope(manager, monkeypatch, active=veto_home, launch=veto_home)
-    monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: object())
-
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.setenv("TERMINAL_SSH_HOST", "fleet-builder")
     monkeypatch.setenv("TERMINAL_SSH_USER", "sandbox")
-    assert not _is_block(manager, "terminal", {"command": "hostname"}), "own ssh call must be admitted"
 
-    # the builder fixture declares a stdio mcp server, so the render scopes it
-    # stdio: the block must cite the stdio-transport branch, not "not allow-listed".
+    real_ensure = tt.ensure_task_env  # for the causal config-absent case below
+
+    # A call-counting readiness oracle: readiness stays SUCCESSFUL for these
+    # cases so the host predicate is the sole decider, and the counter proves the
+    # ORDERING — readiness must not run for a sibling/absent host (else a
+    # reachable sibling would be connected + cached before the veto blocks).
+    ready_calls = {"n": 0}
+
+    def _ready_spy(*a, **k):
+        ready_calls["n"] += 1
+        return object()
+
+    monkeypatch.setattr(tt, "ensure_task_env", _ready_spy)
+
+    monkeypatch.setenv("TERMINAL_SSH_HOST", own_host)
+    ready_calls["n"] = 0
+    assert not _is_block(manager, "terminal", {"command": "hostname"}), "own-host ssh must be admitted"
+    assert ready_calls["n"] >= 1, "readiness must run once the host matches"
+
+    # a stdio mcp server is scoped stdio by the render; _sandbox_block admits
+    # (host ok, ready) so the block comes from _mcp_scope_block and cites stdio.
     msg = _block_message(manager, "mcp__somestdioserver__tool", {})
     assert msg is not None, "stdio mcp tool must be blocked"
     assert "stdio" in msg.lower(), f"mcp block not the stdio-transport branch: {msg!r}"
 
+    # sibling host (a REAL sibling's rendered host): blocked, and readiness must
+    # NOT be reached (the host predicate gates before any connect/cache).
+    monkeypatch.setenv("TERMINAL_SSH_HOST", sibling_host)
+    ready_calls["n"] = 0
+    msg = _block_message(manager, "terminal", {"command": "hostname"})
+    assert msg is not None and "host" in msg.lower(), f"sibling-host must block on the host mismatch: {msg!r}"
+    assert ready_calls["n"] == 0, "readiness ran for a sibling host — a reachable sibling would be connected+cached"
+
+    monkeypatch.delenv("TERMINAL_SSH_HOST", raising=False)
+    ready_calls["n"] = 0
+    msg = _block_message(manager, "terminal", {"command": "hostname"})
+    assert msg is not None and "host" in msg.lower(), f"absent-host must block on the missing host: {msg!r}"
+    assert ready_calls["n"] == 0, "readiness ran for an absent host"
+
     monkeypatch.setenv("TERMINAL_ENV", "local")
     assert _is_block(manager, "terminal", {"command": "hostname"}), "local must be blocked"
 
-    # BLOCK (negative control b): resolved ssh with config ABSENT — unset
-    # host/user so this specifically covers the config-absent path, and the
-    # (unchanged) readiness gate reports not-ready.
+    # dead-but-configured: own host set (host predicate passes), oracle reports
+    # not-ready -> block. Isolates the oracle from the host predicate.
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.delenv("TERMINAL_SSH_HOST", raising=False)
-    monkeypatch.delenv("TERMINAL_SSH_USER", raising=False)
+    monkeypatch.setenv("TERMINAL_SSH_HOST", own_host)
     monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: None)
-    assert _is_block(manager, "terminal", {"command": "hostname"}), "config-absent ssh must not fall through"
-    monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: object())
-    monkeypatch.setenv("TERMINAL_SSH_HOST", "fleet-builder")
-    monkeypatch.setenv("TERMINAL_SSH_USER", "sandbox")
+    assert _is_block(manager, "terminal", {"command": "hostname"}), (
+        "dead-but-configured ssh (oracle None) must be blocked"
+    )
 
+    monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: object())
     _scope(manager, monkeypatch, active=(tmp_path / "other-profile"), launch=veto_home)
     assert _is_block(manager, "terminal", {"command": "hostname"}), "cross-profile call must be refused"
 
-    # BLOCK (negative control a): a CONTAINER backend with liveness unready —
-    # the unchanged container path, proven on a RENDERED podman coworker home
-    # (real expected_backend=docker).
+    # Use a rendered podman profile to exercise the non-SSH readiness path.
     pod_out = tmp_path / "out-podman"
     assert _render(PODMAN_SPEC, pod_out, home).returncode == 0
     pod_home = _rendered_veto_home(pod_out, "builder", tmp_path, monkeypatch, "pod-veto")
@@ -386,39 +454,143 @@ def test_ac_osh_f63_3(tmp_path, monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "docker")
     assert _is_block(dmanager, "terminal", {"command": "hostname"}), "unready container must stay blocked"
 
+    # expected_ssh_host is read LIVE inside the predicate, not captured at
+    # register(): mutate the ALREADY-LOADED manager's managed file, invalidate the
+    # cache, and the verdict must flip to block — a capture-at-register impl would
+    # keep admitting. A missing or non-dict map fails CLOSED (block) with the hook
+    # still registered, and readiness is never reached (the map check precedes it).
+    from hermes_cli import managed_scope
+
+    mpath = veto_home / "managed" / "config.yaml"
+    good_managed = mpath.read_text(encoding="utf-8")
+    _scope(manager, monkeypatch, active=veto_home, launch=veto_home)
+    # the container case above repointed HERMES_HOME/HERMES_MANAGED_DIR at the
+    # podman home; restore the osh-veto home so managed_scope reads the fragment
+    # we mutate below (else these cases read the podman managed map — which pins
+    # no expected_ssh_host — and pass without proving the live read).
+    monkeypatch.setenv("HERMES_HOME", str(veto_home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(veto_home / "managed"))
+    managed_scope.invalidate_managed_cache()
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_SSH_HOST", own_host)
+    monkeypatch.setattr(tt, "ensure_task_env", _ready_spy)
+    for corrupt in (
+        lambda s: s.pop("expected_ssh_host", None),                  # missing map
+        lambda s: s.__setitem__("expected_ssh_host", "not-a-dict"),  # malformed map
+    ):
+        data = yaml.safe_load(mpath.read_text(encoding="utf-8"))
+        corrupt(_dotted(data, "plugins.entries.nv-fleet-gates.settings"))
+        mpath.write_text(yaml.safe_dump(data), encoding="utf-8")
+        managed_scope.invalidate_managed_cache()
+        ready_calls["n"] = 0
+        assert _is_block(manager, "terminal", {"command": "hostname"}), "own-host must block under a corrupt managed map (live read, fail-closed)"
+        assert len(_pre_tool_call_hooks(manager)) == 1, "veto must stay registered under a corrupt managed map (not fail-open)"
+        assert ready_calls["n"] == 0, "readiness ran despite a corrupt managed map — the map check must precede it"
+        mpath.write_text(good_managed, encoding="utf-8")
+        managed_scope.invalidate_managed_cache()
+
+    # a worker cannot forge a host for a profile ABSENT from the managed map by
+    # writing expected_ssh_host into its LOCAL config.yaml. An unmanaged profile
+    # name ("rogue") is what discriminates a ctx.get_config deep-merged read
+    # (which would surface the local entry and admit the sibling) from the
+    # required managed-only read (the managed map has no rogue entry, so the call
+    # is refused). A managed profile would not discriminate: the managed entry
+    # wins the merge regardless of which read the veto uses.
+    lconf = yaml.safe_load((veto_home / "config.yaml").read_text(encoding="utf-8")) or {}
+    lconf.setdefault("plugins", {}).setdefault("entries", {}).setdefault(
+        "nv-fleet-gates", {}
+    ).setdefault("settings", {})["expected_ssh_host"] = {"rogue": sibling_host}
+    (veto_home / "config.yaml").write_text(yaml.safe_dump(lconf), encoding="utf-8")
+    managed_scope.invalidate_managed_cache()
+    lmanager = _load_veto(veto_home)
+    rogue_home = veto_home.parent / "rogue"  # basename -> _current_profile() == "rogue"
+    _scope(lmanager, monkeypatch, active=rogue_home, launch=rogue_home)
+    monkeypatch.setattr(tt, "ensure_task_env", _ready_spy)
+    monkeypatch.setenv("TERMINAL_SSH_HOST", sibling_host)
+    ready_calls["n"] = 0
+    assert _is_block(lmanager, "terminal", {"command": "hostname"}), "a worker-local expected_ssh_host for an unmanaged profile must not authorize a sibling host (managed map governs)"
+    assert ready_calls["n"] == 0, "readiness ran despite the host not matching the managed map"
+
+    # causal config-absent: the REAL oracle returns None on missing config. A
+    # minimal home whose config.yaml carries only terminal.backend: ssh (no
+    # ssh_host/ssh_user) so the one-shot config->env bridge cannot restore them;
+    # _create_environment then raises at its ssh guard (terminal_tool.py:2122-2124)
+    # BEFORE constructing SSHEnvironment, caught -> None (2336-2341), zero network.
+    # The _SSHEnvironment sentinel (BaseException) makes reaching the constructor
+    # fail the test, so a poisoned config cannot yield a false pass.
+    min_home = tmp_path / "ssh-only-home"
+    min_home.mkdir()
+    (min_home / "config.yaml").write_text(
+        yaml.safe_dump({"terminal": {"backend": "ssh"}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(min_home))
+    monkeypatch.delenv("TERMINAL_SSH_HOST", raising=False)
+    monkeypatch.delenv("TERMINAL_SSH_USER", raising=False)
+    monkeypatch.setattr(tt, "_terminal_config_bridge_attempted", False, raising=False)
+    monkeypatch.setattr(tt, "_active_environments", {}, raising=False)
+
+    def _no_construct(*a, **k):
+        raise _SSHConstructReached("SSHEnvironment constructed on config-absent path")
+
+    monkeypatch.setattr(tt, "_SSHEnvironment", _no_construct, raising=False)
+    assert real_ensure() is None, "real ensure_task_env must return None on missing ssh config (no connect)"
+
 
 def test_ac_osh_f63_4(tmp_path):
-    """AC-OSH-F63-4: --provision-dry-run prints the create/policy/ssh-config/
-    teardown lines for all five profiles, deterministically across two runs.
-    (substrate is the spec-file key; --provision-dry-run is the only flag.)"""
+    """AC-OSH-F63-4: --provision-dry-run prints, deterministically, a plan where
+    each profile's create/policy/ssh-config/teardown commands are JOINED by the
+    same sandbox name + policy file and setup precedes teardown — so a plan that
+    creates one name, configures another, and points Hermes at a third cannot
+    pass. (substrate is the spec-file key; --provision-dry-run is the only flag.)"""
     home = _bootstrap_home(tmp_path)
     r1 = _render(OPENSHELL_SPEC, tmp_path / "o1", home, "--provision-dry-run")
     r2 = _render(OPENSHELL_SPEC, tmp_path / "o2", home, "--provision-dry-run")
     assert r1.returncode == 0 and r2.returncode == 0, (r1.stderr, r2.stderr)
     assert r1.stdout == r2.stdout, "provision dry-run not deterministic across runs"
 
-    lines = r1.stdout.splitlines()
-    n = len(COWORKER_PROFILES)
+    tokens = [shlex.split(ln) for ln in r1.stdout.splitlines() if ln.strip()]
 
-    def _one_line_per_profile(cmd: str) -> list:
-        hits_all = [ln for ln in lines if cmd in ln]
-        assert len(hits_all) == n, f"{cmd!r}: expected exactly {n} lines, got {len(hits_all)}"
-        for profile in COWORKER_PROFILES:
-            per = [ln for ln in hits_all if profile in ln]
-            assert len(per) == 1, f"{cmd!r}: expected exactly one line for {profile}, got {per}"
-        return hits_all
+    def _arg(toks, flag):
+        if flag in toks and toks.index(flag) + 1 < len(toks):
+            return toks[toks.index(flag) + 1]
+        return None
 
-    creates = _one_line_per_profile("openshell sandbox create")
-    _one_line_per_profile("openshell policy set")
-    _one_line_per_profile("openshell sandbox ssh-config")
-    _one_line_per_profile("openshell sandbox delete")
-    _one_line_per_profile("openshell policy delete")
+    def _find(subcmd, needle):
+        hits = [(i, t) for i, t in enumerate(tokens) if t[: len(subcmd)] == subcmd and needle in t]
+        assert len(hits) == 1, f"{' '.join(subcmd)} referencing {needle!r}: expected exactly one line, got {[h[1] for h in hits]}"
+        return hits[0]
 
-    for ln in creates:
-        assert "--from" in ln and "--policy" in ln, f"create line missing --from/--policy: {ln}"
-    # the "no nested podman" requirement: the plan runs no container engine.
-    for ln in lines:
-        assert not ln.strip().startswith(("podman", "docker")), f"nested container command in plan: {ln}"
+    # no nested container engine anywhere in the plan (the P7 "no nested podman").
+    for t in tokens:
+        assert t and t[0] == "openshell", f"provision plan runs a non-openshell command: {t}"
+
+    for profile in COWORKER_PROFILES:
+        policy = f"policy-{profile}.yaml"
+        ci, create = _find(["openshell", "sandbox", "create"], policy)
+        name = _arg(create, "--name")
+        # the create --name must equal the profile's RENDERED terminal.ssh_host
+        # (the sandbox alias Hermes ssh's to) — so a plan cannot create one name
+        # while the render points Hermes at another host containing the profile.
+        rendered_host = _dotted(_profile_config(tmp_path / "o1", profile), "terminal.ssh_host")
+        assert name and name == rendered_host, f"{profile}: create --name {name!r} != rendered ssh_host {rendered_host!r}"
+        assert "--from" in create, f"{profile}: create missing --from: {create}"
+        # ssh-config and delete must target the SAME sandbox name the create used.
+        si, _ = _find(["openshell", "sandbox", "ssh-config"], name)
+        di, _ = _find(["openshell", "sandbox", "delete"], name)
+        psi, _ = _find(["openshell", "policy", "set"], policy)
+        pdi, _ = _find(["openshell", "policy", "delete"], policy)
+        assert max(ci, si, psi) < min(di, pdi), (
+            f"{profile}: a teardown command precedes setup (create={ci} ssh-config={si} policy-set={psi}; sandbox-delete={di} policy-delete={pdi})"
+        )
+
+    # exactly one of each command per profile.
+    for subcmd in (
+        ["openshell", "sandbox", "create"], ["openshell", "policy", "set"],
+        ["openshell", "sandbox", "ssh-config"], ["openshell", "sandbox", "delete"],
+        ["openshell", "policy", "delete"],
+    ):
+        cnt = sum(1 for t in tokens if t[: len(subcmd)] == subcmd)
+        assert cnt == len(COWORKER_PROFILES), f"{' '.join(subcmd)}: expected {len(COWORKER_PROFILES)} lines, got {cnt}"
 
 
 def test_ac_osh_f63_6():
@@ -449,6 +621,9 @@ def test_ac_osh_f63_6():
     ]
     missing = [k for k in required if k not in text]
     assert not missing, f"fleet-openshell.md missing required topics: {missing}"
+
+
+# --- fail-closed unit tests (not AC ids; safety regressions) ----------------
 
 
 def test_openshell_rejects_container_mount_fields(tmp_path):
