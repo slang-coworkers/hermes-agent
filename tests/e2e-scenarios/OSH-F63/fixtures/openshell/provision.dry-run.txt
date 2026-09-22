@@ -1,0 +1,25 @@
+openshell sandbox create --name osh-f63-architect --from localhost/hermes-openshell-sandbox:pinned --policy policy-architect.yaml
+openshell sandbox create --name osh-f63-builder --from localhost/hermes-openshell-sandbox:pinned --policy policy-builder.yaml
+openshell sandbox create --name osh-f63-orchestrator --from localhost/hermes-openshell-sandbox:pinned --policy policy-orchestrator.yaml
+openshell sandbox create --name osh-f63-reviewer --from localhost/hermes-openshell-sandbox:pinned --policy policy-reviewer.yaml
+openshell sandbox create --name osh-f63-tester --from localhost/hermes-openshell-sandbox:pinned --policy policy-tester.yaml
+openshell policy set osh-f63-architect --policy policy-architect.yaml
+openshell policy set osh-f63-builder --policy policy-builder.yaml
+openshell policy set osh-f63-orchestrator --policy policy-orchestrator.yaml
+openshell policy set osh-f63-reviewer --policy policy-reviewer.yaml
+openshell policy set osh-f63-tester --policy policy-tester.yaml
+openshell sandbox ssh-config osh-f63-architect
+openshell sandbox ssh-config osh-f63-builder
+openshell sandbox ssh-config osh-f63-orchestrator
+openshell sandbox ssh-config osh-f63-reviewer
+openshell sandbox ssh-config osh-f63-tester
+openshell sandbox delete osh-f63-architect
+openshell sandbox delete osh-f63-builder
+openshell sandbox delete osh-f63-orchestrator
+openshell sandbox delete osh-f63-reviewer
+openshell sandbox delete osh-f63-tester
+openshell policy delete osh-f63-architect
+openshell policy delete osh-f63-builder
+openshell policy delete osh-f63-orchestrator
+openshell policy delete osh-f63-reviewer
+openshell policy delete osh-f63-tester

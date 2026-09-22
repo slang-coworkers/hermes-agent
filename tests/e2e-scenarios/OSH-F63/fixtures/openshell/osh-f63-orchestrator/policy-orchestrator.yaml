@@ -1,0 +1,5 @@
+egress:
+  allow:
+  - 172.17.0.1:10255
+  - inference-api.nvidia.com:443
+  - 172.17.0.1:22

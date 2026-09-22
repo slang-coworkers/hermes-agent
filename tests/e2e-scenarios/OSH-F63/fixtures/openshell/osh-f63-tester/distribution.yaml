@@ -1,0 +1,13 @@
+name: tester
+version: 0.1.0
+description: 'Composed Hermes coworker profile: tester'
+distribution_owned:
+- SOUL.md
+- config.yaml
+- mcp.json
+- skills
+- cron
+- distribution.yaml
+- skill-bundles
+- .env.template
+- scripts

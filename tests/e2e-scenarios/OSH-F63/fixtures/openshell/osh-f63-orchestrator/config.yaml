@@ -1,0 +1,74 @@
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-osh-f63-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+secrets:
+  onecli:
+    enabled: true
+plugins:
+  enabled:
+  - nv-coworker-compose
+  - nv-fleet-gates
+  entries:
+    nv-fleet-gates:
+      settings:
+        enforce_sandbox: true
+        edges_db_path: /tmp/hermes-osh-f63/edges.db
+        admin_tools:
+        - onboard_coworker
+        - onboard_project
+        - create_agent
+        expected_backend: ssh
+        mcp_scope:
+          orchestrator: {}
+          architect: {}
+          builder:
+            mcp__somestdioserver__tool: stdio
+          tester: {}
+          reviewer: {}
+          default: {}
+    nv-coworker-compose:
+      settings:
+        orchestrator_profile: orchestrator
+terminal:
+  backend: ssh
+  ssh_host: osh-f63-orchestrator
+  ssh_user: sandbox
+  ssh_port: 22
+  ssh_key: /opt/hermes-fleet/osh-f63/openshell/keys/orchestrator
+sessions:
+  auto_prune: false
+  auto_archive: true
+compression:
+  in_place: true
+checkpoints:
+  auto_prune: false
+memory:
+  memory_char_limit: 4000
+  user_char_limit: 2000
+  write_approval: false
+curator:
+  enabled: true
+  backup:
+    enabled: true
+    keep: 5
+approvals:
+  deny:
+  - git *push* --forc*
+  - git *push* -f
+  - git *push* -f *
+  - git *push* -f[!- ]*
+  - git *push* -[!- ]f*
+  - git *push* -[!- ][!- ]f*
+  - git push* *+*
+  - git -*push* *+*
+  - git tag *
+  - git -* tag *
+  - gh release *
+  - gh -* release *
