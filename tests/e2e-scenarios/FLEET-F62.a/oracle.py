@@ -81,7 +81,7 @@ def main():
     a = ap.parse_args()
 
     home = Path(a.home)
-    bl = json.loads(Path(a.baselines).read_text())
+    bl = json.loads(Path(a.baselines).read_text(encoding="utf-8"))
     base_orch, base_worker = int(bl["base_orch"]), int(bl["base_worker"])
     exec_base = set(bl.get("exec_base") or [])
     base_a_ids = set(bl.get("card_a_nudge_ids") or [])
