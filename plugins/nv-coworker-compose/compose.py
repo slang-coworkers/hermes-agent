@@ -3306,10 +3306,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         tname: ("orchestrator" if tname == orchestrator_profile else "worker")
         for tname in roster
     }
-    # OSH-F63 (R1-1): pin each remote-ssh profile's OWN sandbox host into the managed
-    # fragment (worker-unforgeable, like the role map). Keyed by profile/dir name (==
-    # the veto's _current_profile()); value == that profile's rendered terminal.ssh_host
-    # (same _openshell_sandbox_name(fleet_name, ·) the ssh render + provision plan use).
+    # Derive the managed authorization map from the same helper used for
+    # terminal.ssh_host so the two values cannot drift.
     expected_ssh_host_map = (
         {tname: _openshell_sandbox_name(fleet_name, tname) for tname in roster}
         if is_remote else None
