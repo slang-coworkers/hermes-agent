@@ -1021,13 +1021,21 @@ def _openshell_keys_dir() -> Path:
     return get_hermes_home() / "openshell" / "keys"
 
 
+def _openshell_sandbox_name(fleet_name: str, profile_name: str) -> str:
+    """The OpenShell sandbox alias for a profile: ``<fleet>-<profile>``. The single
+    source of this name for the three places that MUST agree — the ssh render
+    (``terminal.ssh_host``), the veto's managed ``expected_ssh_host`` anchor, and the
+    provision plan's ``--name`` — so a create / ssh-config / veto can never drift."""
+    return f"{fleet_name}-{profile_name}"
+
+
 def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name: str,
                            keys_dir: Path) -> None:
     """Write one coworker's builtin-ssh terminal block for its OWN OpenShell sandbox:
     a distinct ``ssh_host`` (``<fleet>-<profile>``, the sandbox name), a uniform
     ``ssh_user``/``ssh_port``, and an ``ssh_key`` PATH under ``keys_dir`` (distinct
     leaf per profile, never key material)."""
-    _set_dotted(config, "terminal.ssh_host", f"{fleet_name}-{profile_name}")
+    _set_dotted(config, "terminal.ssh_host", _openshell_sandbox_name(fleet_name, profile_name))
     _set_dotted(config, "terminal.ssh_user", _OPENSHELL_SSH_USER)
     _set_dotted(config, "terminal.ssh_port", _OPENSHELL_SSH_PORT)
     _set_dotted(config, "terminal.ssh_key", str(keys_dir / profile_name))
@@ -1106,20 +1114,24 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
     roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
     lines: List[str] = []
-    # `--policy` paths are relative to the render `--out` root: each profile dir holds
-    # its own policy-<role>.yaml, so the plan is run from the output root.
+    # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
+    # that file; the operator materialises it at that name before running the plan). The
+    # create `--name` is the sandbox alias == that profile's rendered `terminal.ssh_host`,
+    # and the ssh-config / delete target that same name — so the plan joins to the render
+    # per profile. All setup lines (create, policy-set, ssh-config) precede all teardown
+    # lines (sandbox-delete, policy-delete).
     for role in roster:
         lines.append(
-            f"openshell sandbox create --name {fleet_name}-{role} --from {image} "
-            f"--policy {role}/policy-{role}.yaml")
+            f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
+            f"--from {image} --policy policy-{role}.yaml")
     for role in roster:
-        lines.append(f"openshell policy set {fleet_name}-{role} --policy {role}/policy-{role}.yaml")
+        lines.append(f"openshell policy set policy-{role}.yaml")
     for role in roster:
-        lines.append(f"openshell sandbox ssh-config {fleet_name}-{role}")
+        lines.append(f"openshell sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
     for role in roster:
-        lines.append(f"openshell sandbox delete {fleet_name}-{role}")
+        lines.append(f"openshell sandbox delete {_openshell_sandbox_name(fleet_name, role)}")
     for role in roster:
-        lines.append(f"openshell policy delete {fleet_name}-{role}")
+        lines.append(f"openshell policy delete policy-{role}.yaml")
     return lines
 
 
@@ -1573,7 +1585,8 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
 
 
-def _build_managed_fragment(profile_roles: Dict[str, str]) -> Dict[str, Any]:
+def _build_managed_fragment(profile_roles: Dict[str, str],
+                            expected_ssh_host: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build the machine-wide managed-scope fragment: the eight fleet-uniform
     approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
     this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
@@ -1584,11 +1597,18 @@ def _build_managed_fragment(profile_roles: Dict[str, str]) -> Dict[str, Any]:
     nv-fleet-gates settings at the MANAGED scope, not per-profile config, because the
     veto's fleet-admin gate reads the role from there — a worker must not be able to
     rewrite its own role by editing its own config (nv-fleet-gates prefers the managed
-    map over the per-profile fallback)."""
+    map over the per-profile fallback).
+
+    ``expected_ssh_host`` ({profile: sandbox host}), for the remote-ssh substrate
+    (OSH-F63), is pinned at the same managed scope so the veto's host-binding predicate
+    anchors each profile to its OWN sandbox host from a map a worker cannot forge via
+    its per-profile config."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
+    if expected_ssh_host:
+        _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.expected_ssh_host", dict(expected_ssh_host))
     return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
@@ -3286,7 +3306,15 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         tname: ("orchestrator" if tname == orchestrator_profile else "worker")
         for tname in roster
     }
-    managed_fragment = _build_managed_fragment(profile_roles_map)
+    # OSH-F63 (R1-1): pin each remote-ssh profile's OWN sandbox host into the managed
+    # fragment (worker-unforgeable, like the role map). Keyed by profile/dir name (==
+    # the veto's _current_profile()); value == that profile's rendered terminal.ssh_host
+    # (same _openshell_sandbox_name(fleet_name, ·) the ssh render + provision plan use).
+    expected_ssh_host_map = (
+        {tname: _openshell_sandbox_name(fleet_name, tname) for tname in roster}
+        if is_remote else None
+    )
+    managed_fragment = _build_managed_fragment(profile_roles_map, expected_ssh_host_map)
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology

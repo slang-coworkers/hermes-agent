@@ -169,6 +169,28 @@ def _managed_profile_roles():
     return roles
 
 
+def _managed_expected_ssh_host():
+    """The per-profile ``expected_ssh_host`` map the managed layer pins (OSH-F63), or
+    None when it does not pin the key. Read straight from managed scope (never
+    ``ctx.get_config``, whose deep-merge would surface a worker-local forgery), LIVE per
+    gate call so a post-render managed edit is seen. A non-dict pin is malformed and
+    raises — caught by the gate's ``except BaseException`` boundary and failed CLOSED —
+    rather than silently admitting.
+    """
+    from hermes_cli import managed_scope
+
+    mc = managed_scope.load_managed_config() or {}
+    settings = (
+        ((mc.get("plugins") or {}).get("entries") or {}).get(PLUGIN_KEY) or {}
+    ).get("settings") or {}
+    if "expected_ssh_host" not in settings:
+        return None
+    hosts = settings["expected_ssh_host"]
+    if not isinstance(hosts, dict):
+        raise RuntimeError("managed nv-fleet-gates expected_ssh_host is not a mapping")
+    return hosts
+
+
 def _status_ok(status) -> bool:
     if status is None or status is True:
         return True
@@ -287,6 +309,23 @@ def register(ctx) -> None:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
             )
+        # OSH-F63 (R1-1): on the ssh substrate, bind the ssh target to THIS profile's
+        # OWN sandbox host BEFORE the readiness gate below — that gate eagerly connects
+        # to and caches TERMINAL_SSH_HOST (SSHEnvironment.__init__ connects; ensure_task_env
+        # caches), so a reachable SIBLING host would be contacted before any later check.
+        # expected is read LIVE from the worker-unforgeable managed fragment (same scope/
+        # precedence as the role map), never ctx.get_config; a missing map or a profile
+        # absent from it -> expected None -> block, and a non-dict map raises into _gate's
+        # BaseException boundary (fail-closed, hook stays registered). Non-ssh substrates
+        # skip this (no expected_ssh_host rendered) — the podman path is untouched.
+        if expected_backend == "ssh":
+            resolved = os.getenv("TERMINAL_SSH_HOST")
+            expected = (_managed_expected_ssh_host() or {}).get(_current_profile())
+            if not expected or resolved != expected:
+                return _block(
+                    f"sandbox: refused — ssh target host {resolved!r} is not this "
+                    f"profile's sandbox {expected!r}"
+                )
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
