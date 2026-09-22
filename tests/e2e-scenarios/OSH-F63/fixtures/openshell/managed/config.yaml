@@ -19,3 +19,9 @@ plugins:
           builder: worker
           tester: worker
           reviewer: worker
+        expected_ssh_host:
+          orchestrator: osh-f63-orchestrator
+          architect: osh-f63-architect
+          builder: osh-f63-builder
+          tester: osh-f63-tester
+          reviewer: osh-f63-reviewer

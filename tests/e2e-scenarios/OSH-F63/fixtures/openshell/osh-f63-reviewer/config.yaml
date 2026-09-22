@@ -41,7 +41,7 @@ terminal:
   ssh_host: osh-f63-reviewer
   ssh_user: sandbox
   ssh_port: 22
-  ssh_key: /opt/hermes-fleet/osh-f63/openshell/keys/reviewer
+  ssh_key: /workspace/extra/hermes-fleet-testbed/osh-f63/openshell/keys/reviewer
 sessions:
   auto_prune: false
   auto_archive: true
