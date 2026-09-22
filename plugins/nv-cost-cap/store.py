@@ -440,13 +440,13 @@ def get_fleet_default() -> Optional[float]:
 # --- COST-F30: durable exactly-once resolution CAS -------------------------
 
 def _cas_conn():
-    """A ``plugin_db`` connection with MANUAL transaction control + ``busy_timeout``.
+    """A ``plugin_db`` connection with MANUAL transaction control + an explicit ``busy_timeout``.
 
-    ``plugin_db`` sets WAL + ``check_same_thread=False`` but leaves ``busy_timeout``
-    at 0, so a second concurrent writer would fail immediately with "database is
-    locked" instead of waiting for the first ``BEGIN IMMEDIATE`` to commit.
-    ``isolation_level=None`` hands transaction control to the caller so the explicit
-    ``BEGIN IMMEDIATE`` / ``COMMIT`` serialize competing resolvers (AC-1(b)).
+    ``plugin_db`` sets WAL + ``check_same_thread=False``; this sets ``busy_timeout`` EXPLICITLY
+    (rather than relying on the sqlite3 connect default) so a second concurrent writer WAITS for
+    the first ``BEGIN IMMEDIATE`` to commit rather than racing on the default. ``isolation_level=
+    None`` hands transaction control to the caller so the explicit ``BEGIN IMMEDIATE`` / ``COMMIT``
+    serialize competing resolvers (AC-1(b)).
     """
     from plugins.plugin_storage import plugin_db
 
