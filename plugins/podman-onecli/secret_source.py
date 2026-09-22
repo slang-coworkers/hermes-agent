@@ -3,8 +3,14 @@
 Resolves a profile's OneCLI proxy coordinates from the control plane. It never
 resolves a real provider credential: OneCLI returns proxy URLs (carrying the
 ``aoc_`` agent token as userinfo), CA-trust vars, a CA path and a placeholder
-provider key, and this source returns that ``env`` mapping verbatim. The
-lowercase / extra CA aliases are synthesized by the render into
+provider key, and this source returns that ``env`` mapping. It additionally
+exposes the token-bearing proxy URL under all four common proxy spellings
+(FLEET-F62 C1): the render forwards those four NAMES via
+``terminal.docker_forward_env`` (name-only), and the docker client resolves each
+to THIS live value at exec, winning over the tokenless ``docker_env``
+placeholder — so a spelling missing or tokenless here would let curl (which
+gives the lowercase precedence) fall back to a placeholder and fail to reach
+OneCLI. The extra CA aliases are still synthesized by the render into
 ``terminal.docker_env``, not here.
 """
 from __future__ import annotations
@@ -18,6 +24,10 @@ from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource
 from . import oneclient
 
 logger = logging.getLogger(__name__)
+
+# The four common proxy-env spellings. curl gives the lowercase spelling
+# precedence, so the token-bearing value must be present under all four.
+_PROXY_ALIASES = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 
 
 class OneCLISecretSource(SecretSource):
@@ -65,4 +75,13 @@ class OneCLISecretSource(SecretSource):
             result.error_kind = ErrorKind.INTERNAL
             return result
         result.secrets = dict(env)
+        # C1 (FLEET-F62): mirror the token-bearing proxy URL onto all four
+        # spellings. OneCLI may return it under only a subset; the render
+        # forwards all four NAMES, so any spelling left missing/tokenless would
+        # let curl prefer a tokenless placeholder. Only when a proxy value
+        # exists (a keyless / no-proxy setup synthesizes nothing).
+        proxy_value = next((env[k] for k in _PROXY_ALIASES if env.get(k)), "")
+        if proxy_value:
+            for name in _PROXY_ALIASES:
+                result.secrets[name] = proxy_value
         return result

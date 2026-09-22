@@ -14,10 +14,12 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import yaml
 
 from agent.secret_sources.base import ErrorKind
 from agent.secret_sources.registry import get_source
@@ -31,10 +33,14 @@ WRAPPER = PLUGIN_SRC / "bin" / "podman-onecli-wrap"
 SANDBOX_CA = "/etc/ssl/certs/hermes-egress-ca.crt"
 EXPECTED_PROXY = "172.17.0.1:10255"
 PROVIDER_PLACEHOLDER = "onecli-injects-at-egress"
-PROXY_URL_KEYS = {"HTTPS_PROXY", "HTTP_PROXY"}
+# FLEET-F62 C1: the SecretSource exposes the token-bearing proxy value under all four
+# spellings (curl prefers the lowercase), so the lowercase aliases are also proxy URLs.
+PROXY_URL_KEYS = {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
 EXPECTED_SECRET_KEYS = {
     "HTTPS_PROXY",
+    "https_proxy",
     "HTTP_PROXY",
+    "http_proxy",
     "NO_PROXY",
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -66,10 +72,16 @@ class _FakeTransport:
                 return 409, {"error": "agent already exists"}
             self.existing.add(ident)
             return 201, {"identifier": ident}
-        if method == "POST" and path.startswith("/api/agents/") and path.endswith("/secrets"):
-            ident = path[len("/api/agents/"):-len("/secrets")]
+        # FLEET-F62 C1b: set_secrets resolves identifier->uuid (GET /api/agents) then
+        # PUTs secretIds to the UUID-keyed path (the old POST-by-identifier 404s).
+        if method == "GET" and path == "/api/agents":
+            self.calls.append(("list_agents", None))
+            return 200, [{"identifier": i, "id": f"uuid-{i}"} for i in sorted(self.existing)]
+        if method == "PUT" and path.startswith("/api/agents/") and path.endswith("/secrets"):
+            uuid = path[len("/api/agents/"):-len("/secrets")]
+            ident = uuid[len("uuid-"):] if uuid.startswith("uuid-") else uuid
             self.calls.append(("set_secrets", ident))
-            self.secrets[ident] = list((json or {}).get("secrets", []))
+            self.secrets[ident] = list((json or {}).get("secretIds", []))
             return 200, {}
         if method == "GET" and path.startswith("/v1/container-config"):
             ident = parse_qs(urlparse(path).query)["agent"][0]
@@ -94,7 +106,8 @@ class _FakeTransport:
 def _load(tmp_path, monkeypatch):
     hermes_home = tmp_path / "home"
     (hermes_home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     # secrets.onecli.enabled is left unset, so SecretSource.is_enabled() is
     # False and discovery does NOT pull the source (which would need a live
     # transport). Tests install a stub transport and drive fetch()/ensure_agent.
@@ -292,7 +305,7 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
         fake.calls.clear()
         entry["handler_fn"](args)
         kinds = [kind for kind, _ in fake.calls]
-        assert kinds == ["ensure_agent", "set_secrets", "get_container_config"]
+        assert kinds == ["ensure_agent", "list_agents", "set_secrets", "get_container_config"]
         assert fake.secrets["cred-f28-bot-a"] == []
 
     # The 409 tolerance is the REAL client's mapping, not the stub's: a repeat
@@ -302,3 +315,101 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
 
     post = source.fetch({}, profile)
     assert post.ok
+
+
+# The base-URL guard's keyless exact-origin allowance: an unauthenticated OneCLI
+# bridge control plane is reachable over http:// only from an allowlisted exact origin
+# WHEN no bootstrap key is set; a present key, userinfo, or a 401/403 still fails closed.
+
+
+class _FakeResp:
+    def __init__(self, code, body=b"{}"):
+        self._code, self._body = code, body
+
+    def getcode(self):
+        return self._code
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _load_podman_onecli(tmp_path, monkeypatch, origins):
+    """Load podman-onecli through the real discovery path with the bridge base +
+    allowlist in config.yaml, so register(ctx) -> ctx.get_config -> configure(...)
+    actually runs (proving the plumbing, not just the guard function)."""
+    home = tmp_path / "poh"
+    (home / "plugins").mkdir(parents=True)
+    shutil.copytree(PLUGIN_SRC, home / "plugins" / "podman-onecli",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "plugins": {"enabled": ["podman-onecli"], "entries": {"podman-onecli": {"settings": {
+            "gateway_api_base_url": "http://172.17.0.1:10256",
+            "insecure_no_auth_origins": origins,
+            "api_key_env": "ONECLI_API_KEY",
+        }}}},
+    }), encoding="utf-8")
+    bundled = tmp_path / "poh-bundled"
+    bundled.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins["podman-onecli"]
+    assert loaded.enabled and loaded.error is None
+    oneclient = getattr(loaded.module, "oneclient", None) or sys.modules.get("oneclient")
+    assert oneclient is not None, "podman-onecli __init__ must expose its oneclient module"
+    return oneclient
+
+
+@pytest.mark.parametrize("fail_status", [401, 403])
+def test_podman_onecli_optional_api_key_bridge_base(tmp_path, monkeypatch, fail_status):
+    """The podman-onecli base-URL guard, configured through register(ctx)->configure(),
+    permits http:// only to an allowlisted EXACT origin when no bootstrap key is set,
+    still protects a present key, rejects userinfo, and fails closed on 401/403. The
+    exact-origin bound (not host-only) is deliberate: get_container_config returns the
+    aoc_ proxy token as userinfo, so a host-only allowlist would leak it on any other
+    port of the same host."""
+    oneclient = _load_podman_onecli(tmp_path, monkeypatch, ["172.17.0.1:10256"])
+
+    oneclient._require_secure_base("http://172.17.0.1:10256")
+    captured = {}
+
+    def _capture(req, timeout=30):
+        captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        return _FakeResp(200)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", _capture)
+    oneclient.get_container_config(agent="architect")
+    assert "authorization" not in captured["headers"], "no key set => no Authorization header"
+
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:9999")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://10.0.0.5:10256")
+    # userinfo is refused outright on ANY scheme, before every allow branch (a
+    # user:pass@ authority carries a cleartext secret regardless of scheme)
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://user:pass@172.17.0.1:10256")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("https://user:pass@example.com")
+    # https is always allowed; a loopback http base is still allowed (unchanged)
+    oneclient._require_secure_base("https://172.17.0.1:10256")
+    oneclient._require_secure_base("http://127.0.0.1:10256")
+
+    monkeypatch.setenv("ONECLI_API_KEY", "aoc_secret")
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient._require_secure_base("http://172.17.0.1:10256")
+    monkeypatch.delenv("ONECLI_API_KEY", raising=False)
+
+    monkeypatch.setattr(oneclient._OPENER, "open", lambda req, timeout=30: _FakeResp(fail_status))
+    with pytest.raises(oneclient.OneCLIError):
+        oneclient.get_container_config(agent="architect")

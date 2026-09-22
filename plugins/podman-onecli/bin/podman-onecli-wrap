@@ -445,6 +445,12 @@ case "$verb" in
     ps)
         exec_ps "$@"
         ;;
+    exec)
+        # Log the verb only — never argv, which can carry the proxy token — so an
+        # exec-mediation proof can tell a Hermes-mediated exec from a raw `podman exec`.
+        log_line "exec"
+        exec "$PODMAN" "$@"
+        ;;
     *)
         exec "$PODMAN" "$@"
         ;;

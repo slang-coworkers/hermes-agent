@@ -31,7 +31,7 @@ import { startMockServer, type MockServerOptions } from './mock-server'
 import { installErrorBannerGuard } from './test'
 
 const DESKTOP_ROOT = path.resolve(import.meta.dirname, '..')
-const REPO_ROOT = path.resolve(DESKTOP_ROOT, '..', '..')
+export const REPO_ROOT = path.resolve(DESKTOP_ROOT, '..', '..')
 const RELEASE_ROOT = path.join(DESKTOP_ROOT, 'release')
 
 // ─── Credential stripping (matches launch.spec.ts) ──────────────────────
@@ -333,13 +333,20 @@ export async function launchDesktop(
     cwd: DESKTOP_ROOT,
   })
 
-  const page = await app.firstWindow()
+  // Close the app if it launches but never yields a usable first window, so a
+  // post-launch failure leaves no orphaned Electron process behind.
+  try {
+    const page = await app.firstWindow()
 
-  // Install the error-banner guard so any [role="alert"] that appears
-  // during a test is collected and surfaced in afterEach.
-  installErrorBannerGuard(page)
+    // Install the error-banner guard so any [role="alert"] that appears
+    // during a test is collected and surfaced in afterEach.
+    installErrorBannerGuard(page)
 
-  return { app, page }
+    return { app, page }
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
+  }
 }
 
 // ─── Public fixtures ────────────────────────────────────────────────────

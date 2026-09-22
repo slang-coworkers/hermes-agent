@@ -35,7 +35,8 @@ def _load(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     plugins_dir = home / "plugins"
     plugins_dir.mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (home / "config.yaml").write_text(
         yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}), encoding="utf-8"
     )
@@ -165,6 +166,88 @@ def test_docker_forward_env_controlled_rejected(tmp_path, monkeypatch):
         module.compose(str(spec), str(tmp_path / "out"))
 
 
+def test_docker_forward_env_proxy_alias_allowed_and_rendered_as_four(tmp_path, monkeypatch):
+    """FLEET-F62 C1: an EXACT proxy spelling in docker_forward_env is permitted (the render
+    forwards the four proxy NAMES so the live token-bearing value wins over the docker_env
+    placeholder at exec), and the rendered forward_env is EXACTLY the four canonical spellings —
+    the spec's single entry is canonicalized, not duplicated."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-proxy-ok",
+                      spine_config={"terminal": {"docker_forward_env": ["HTTPS_PROXY"]}})
+    rendered = module.compose(str(spec), str(tmp_path / "out"))
+    for rdir in rendered.values():
+        fwd = _config(rdir)["terminal"]["docker_forward_env"]
+        assert set(fwd) == {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}, fwd
+
+
+def test_docker_forward_env_discards_unrelated_names(tmp_path, monkeypatch):
+    """The render OWNS docker_forward_env: a spec-declared non-controlled forward name
+    (allowed past the guard) is overwritten, so the rendered forward_env is EXACTLY the
+    four proxy spellings — never a fifth entry that could ride an unexpected name into
+    the sandbox."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-extra",
+                      spine_config={"terminal": {"docker_forward_env": ["MY_APP_FLAG"]}})
+    rendered = module.compose(str(spec), str(tmp_path / "out"))
+    for rdir in rendered.values():
+        assert _config(rdir)["terminal"]["docker_forward_env"] == [
+            "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"
+        ]
+
+
+def test_docker_forward_env_control_plane_key_rejected(tmp_path, monkeypatch):
+    """The OneCLI control-plane key is never forwardable — it authenticates the render to
+    OneCLI and must stay host-only (§ Security condition 3). It is a controlled egress name,
+    so the four-proxy relax never applies to it and the controlled-name check refuses it."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-onecli",
+                      spine_config={"terminal": {"docker_forward_env": ["ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_env_passthrough_control_plane_key_rejected(tmp_path, monkeypatch):
+    """env_passthrough forwards a NAME (the host value rides into the sandbox at exec), so
+    ONECLI_API_KEY there would leak the control-plane credential — the belt must refuse it
+    on this path too, not only on docker_forward_env (FLEET-F62 C1 'never forwarded')."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="passthrough-onecli",
+                      spine_config={"terminal": {"env_passthrough": ["ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_env_control_plane_key_rejected(tmp_path, monkeypatch):
+    """A spec-set docker_env entry for the control-plane key is refused: the render owns the
+    egress env and the control-plane key must never appear in a sandbox's environment."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="env-onecli",
+                      spine_config={"terminal": {"docker_env": {"ONECLI_API_KEY": "x"}}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_extra_args_control_plane_key_rejected(tmp_path, monkeypatch):
+    """A name-only `-e ONECLI_API_KEY` in docker_extra_args forwards the host value — the
+    same leak vector as env_passthrough — so the extra-args belt refuses the control-plane
+    key as a controlled env name."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="extra-onecli",
+                      spine_config={"terminal": {"docker_extra_args": ["-e", "ONECLI_API_KEY"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
+def test_docker_forward_env_ca_var_still_rejected(tmp_path, monkeypatch):
+    """The relax is EXACTLY the four proxy spellings — a controlled NON-proxy name (a CA-trust
+    var) in docker_forward_env still collides with the render-owned egress posture."""
+    module = _load(tmp_path, monkeypatch)
+    spec = _make_spec(tmp_path, name="fwd-ca",
+                      spine_config={"terminal": {"docker_forward_env": ["SSL_CERT_FILE"]}})
+    with pytest.raises(module.CompositionError):
+        module.compose(str(spec), str(tmp_path / "out"))
+
+
 @pytest.mark.parametrize("extra", [
     ["-e", "HTTPS_PROXY=http://evil:1"],
     ["--env", "SSL_CERT_FILE=/x"],
@@ -258,10 +341,11 @@ def test_default_colon_less_ca_docker_volume_rejected(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("name", ["HTTPS_PROXY", " HTTPS_PROXY ", "NODE_EXTRA_CA_CERTS",
-                                  "HERMES_PROXY_TOKEN_X", "not a name", ""])
+                                  "HERMES_PROXY_TOKEN_X", "ONECLI_API_KEY", "not a name", ""])
 def test_provider_env_reserved_or_malformed_rejected(tmp_path, monkeypatch, name):
     """A provider name that is a reserved control (or malformed) is refused at validation —
-    else the provider loop would clobber the proxy/CA value or emit a forbidden token."""
+    else the provider loop would clobber the proxy/CA value or emit a forbidden token. The
+    OneCLI control-plane key is reserved too, so it can never enter via provider_env."""
     module = _load(tmp_path, monkeypatch)
     egress = dict(BASE_EGRESS, provider_env=[name])
     with pytest.raises(module.CompositionError):

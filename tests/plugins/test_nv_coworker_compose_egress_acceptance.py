@@ -61,7 +61,8 @@ def _load(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     plugins_dir = home / "plugins"
     plugins_dir.mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, plugins_dir / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (home / "config.yaml").write_text(
         yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}), encoding="utf-8"
     )
@@ -241,9 +242,12 @@ def test_ac_iso_f14_3(tmp_path, monkeypatch):
         "spine_rogue_ca": dict(extra_volumes=[f"/tmp/untrusted.crt:{CA_CONTAINER_PATH}:ro"]),  # coworker path (ISO-F13 seal)
         "default_rogue_ca": dict(default_config={  # DEFAULT path — ISO-F13 skips it, ISO-F14 must reject
             "terminal": {"docker_volumes": [f"/tmp/untrusted.crt:{CA_CONTAINER_PATH}:ro"]}}),
-        # host-value re-injection channels ISO-F13 never touches (ISO-F14's unique belt), both paths:
-        "type_forward_env": dict(type_config={"terminal": {"docker_forward_env": ["HTTPS_PROXY"]}}),
-        "default_forward_env": dict(default_config={"terminal": {"docker_forward_env": ["HTTPS_PROXY"]}}),
+        # host-value re-injection channels ISO-F13 never touches (ISO-F14's unique belt), both paths.
+        # FLEET-F62 C1 render-forwards the four proxy spellings by name, so an EXACT proxy spelling in
+        # docker_forward_env is now permitted; a controlled NON-proxy name (CA var, provider key) still
+        # collides, which is what these two cases now assert.
+        "type_forward_env": dict(type_config={"terminal": {"docker_forward_env": ["SSL_CERT_FILE"]}}),
+        "default_forward_env": dict(default_config={"terminal": {"docker_forward_env": ["ANTHROPIC_API_KEY"]}}),
         "default_env_passthrough": dict(default_config={"terminal": {"env_passthrough": ["SSL_CERT_FILE"]}}),
         # docker_env managed-key override — ISO-F13 never touches docker_env for ANY profile;
         # ISO-F14 rejects (a clear fail-closed error) rather than silently force-overwriting:

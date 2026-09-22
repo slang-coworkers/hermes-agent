@@ -34,8 +34,8 @@ plugins:
       settings:
         gateway_api_base_url: "https://onecli.example"   # OneCLI control-plane base URL
         api_key_env: "ONECLI_API_KEY"                      # host env var holding the bootstrap key
-        profile_secret_sets:                               # selective grants; [] = ungranted
-          research-bot: ["ANTHROPIC_API_KEY"]
+        profile_secret_sets:                               # OneCLI secret ids to grant; [] = ungranted
+          research-bot: ["4d1da6ff-4af8-44f3-8831-07b11bfd004f"]
           triage-bot: []
 ```
 
@@ -49,14 +49,45 @@ stays in the host environment and is never rendered into a profile.
 a cleartext-HTTP base. A loopback host (`127.0.0.1`, `localhost`, `::1`) may use
 `http://` for local development only.
 
+### Keyless exact-origin exception (`insecure_no_auth_origins`)
+
+Some deployments run the OneCLI control plane on an **unauthenticated bridge
+endpoint** (e.g. a fleet's `http://172.17.0.1:10256`), reached over the docker
+bridge without a bootstrap key. Because there is then *no key in the request*, the
+TLS requirement that exists to protect the key does not apply. `insecure_no_auth_origins`
+is a list of exact `host:port` origins allowed to use `http://` **only when
+`api_key_env` names an env var that is unset** (no bootstrap key):
+
+```yaml
+plugins:
+  entries:
+    podman-onecli:
+      settings:
+        gateway_api_base_url: "http://172.17.0.1:10256"
+        insecure_no_auth_origins: ["172.17.0.1:10256"]   # exact host:port; keyless only
+        # api_key_env: ONECLI_API_KEY  (left unset -> no Authorization header)
+```
+
+The allowance is deliberately **exact-origin, not host-only**: `get_container_config`
+returns the proxy coordinates carrying the injected `aoc_` proxy token as URL
+userinfo, so a host-only allowance would expose that token in cleartext on *any*
+port of the same host. The exact `host:port` bound limits any cleartext to the one
+operator-blessed bridge endpoint. The guard still **refuses** `http://` to any
+non-loopback, non-allowlisted origin; `http://` to an allowlisted origin when a
+bootstrap key *is* set (the key must never ride cleartext); and any base URL that
+carries userinfo. `https://` is always accepted. Default is `[]` — the TLS
+requirement is unchanged unless an operator opts a specific keyless endpoint in.
+
 ## Onboarding
 
 `hermes onecli-onboard --profile <name|path>` runs, in order:
 
 1. `ensureAgent(identifier=<profile>)` — idempotent (`409 → already exists`, no error).
 2. `set_secrets(identifier=<profile>, secrets=profile_secret_sets[<profile>])` —
-   selective, never mode `all`; an empty list leaves the agent ungranted so an
-   unassigned sibling profile still gets `401`.
+   resolves the identifier to its OneCLI agent UUID (`GET /api/agents`) then
+   `PUT /api/agents/<uuid>/secrets {"secretIds": [...]}` (the secrets endpoint is
+   keyed by UUID, not identifier); selective, never mode `all`; an empty list
+   leaves the agent ungranted so an unassigned sibling profile still gets `401`.
 3. `getContainerConfig(agent=<profile>)` — verifies the identity now resolves.
 
 Every onboarded profile must have a `profile_secret_sets` entry (use `[]` to

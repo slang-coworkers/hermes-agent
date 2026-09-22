@@ -36,6 +36,10 @@ Transport = Callable[..., Tuple[int, Any]]
 _TRANSPORT: Optional[Transport] = None
 _GATEWAY_API_BASE_URL: Optional[str] = None
 _API_KEY_ENV: str = "ONECLI_API_KEY"
+# Exact `host:port` origins allowed to use http:// WHEN no bootstrap key is set
+# (FLEET-F62). Empty by default, so the TLS requirement is unchanged unless an
+# operator opts a specific keyless endpoint in.
+_INSECURE_NO_AUTH_ORIGINS: Tuple[str, ...] = ()
 
 
 class OneCLIError(RuntimeError):
@@ -59,11 +63,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect())
 
 
-def configure(*, gateway_api_base_url: Optional[str], api_key_env: str = "ONECLI_API_KEY") -> None:
+def configure(
+    *,
+    gateway_api_base_url: Optional[str],
+    api_key_env: str = "ONECLI_API_KEY",
+    insecure_no_auth_origins: Optional[list] = None,
+) -> None:
     """Store the real-transport coordinates. Makes no network call."""
-    global _GATEWAY_API_BASE_URL, _API_KEY_ENV
+    global _GATEWAY_API_BASE_URL, _API_KEY_ENV, _INSECURE_NO_AUTH_ORIGINS
     _GATEWAY_API_BASE_URL = gateway_api_base_url
     _API_KEY_ENV = api_key_env or "ONECLI_API_KEY"
+    _INSECURE_NO_AUTH_ORIGINS = tuple(insecure_no_auth_origins or ())
 
 
 def set_transport(fn: Optional[Transport]) -> None:
@@ -82,18 +92,32 @@ def _validate_identifier(identifier: str) -> str:
 
 def _require_secure_base(base: str) -> None:
     """The bootstrap key rides an Authorization: Bearer header, so the base must
-    be TLS. Only a loopback host may use http:// (local-dev gateway)."""
+    be TLS. https:// is always allowed and a loopback host may use http://
+    (local-dev gateway). FLEET-F62: an operator-blessed EXACT ``host:port`` origin
+    may also use http:// WHEN no bootstrap key is set — there is then nothing
+    secret in the request — for the unauthenticated OneCLI bridge control plane.
+    Exact-origin, not host-only, is deliberate: ``get_container_config`` returns the
+    aoc_ proxy token as userinfo, so a host-only allowance would leak it on any
+    other port of the same host; a base carrying userinfo is refused outright."""
     parts = urlsplit(base)
     scheme = (parts.scheme or "").lower()
     host = (parts.hostname or "").lower()
+    # Userinfo in the base is refused outright, before any allow branch: a
+    # user:pass@ authority carries a cleartext secret regardless of scheme.
+    if parts.username is not None or parts.password is not None:
+        raise OneCLIError("gateway_api_base_url must not carry userinfo (user:pass@)")
     if scheme == "https":
         return
     if scheme == "http" and host in _LOOPBACK_HOSTS:
         return
+    if scheme == "http" and host and not _api_key():
+        origin = f"{host}:{parts.port}" if parts.port is not None else host
+        if origin in {o.strip().lower() for o in _INSECURE_NO_AUTH_ORIGINS}:
+            return
     raise OneCLIError(
         "gateway_api_base_url must be https:// (http:// is allowed only for a "
-        f"loopback host); refusing to send the OneCLI bootstrap key over "
-        f"{scheme or '?'}://{host or '?'}"
+        f"loopback host, or an allowlisted keyless origin); refusing to send the "
+        f"OneCLI bootstrap key over {scheme or '?'}://{host or '?'}"
     )
 
 
@@ -153,11 +177,34 @@ def ensure_agent(*, identifier: str) -> dict:
     raise OneCLIError(f"ensure_agent({identifier!r}) failed: HTTP {status}")
 
 
+def _resolve_agent_uuid(identifier: str) -> str:
+    """Map a OneCLI agent identifier to its server-assigned UUID via GET /api/agents.
+    The secrets endpoint is keyed by that UUID, not the identifier."""
+    status, body = _request("GET", "/api/agents", json=None)
+    if status != 200 or not isinstance(body, list):
+        raise OneCLIError(
+            f"resolve agent {identifier!r}: GET /api/agents returned HTTP {status}"
+        )
+    for agent in body:
+        if isinstance(agent, dict) and agent.get("identifier") == identifier:
+            uuid = agent.get("id")
+            if isinstance(uuid, str) and uuid:
+                # The resolved id flows into a request path, so re-validate its grammar.
+                return _validate_identifier(uuid)
+    raise OneCLIError(
+        f"resolve agent {identifier!r}: no matching agent id in GET /api/agents"
+    )
+
+
 def set_secrets(*, identifier: str, secrets) -> Optional[dict]:
-    """POST /api/agents/<identifier>/secrets with the selective provider set."""
+    """Replace a profile's agent secret grants with exactly ``secrets`` (OneCLI
+    secret ids); an empty list revokes all. The secrets endpoint is keyed by the
+    server-assigned agent UUID, so resolve identifier->uuid first, then
+    PUT /api/agents/<uuid>/secrets {"secretIds":[...]}."""
     _validate_identifier(identifier)
+    uuid = _resolve_agent_uuid(identifier)
     status, body = _request(
-        "POST", f"/api/agents/{identifier}/secrets", json={"secrets": list(secrets)}
+        "PUT", f"/api/agents/{uuid}/secrets", json={"secretIds": list(secrets)}
     )
     if status == 200:
         return body

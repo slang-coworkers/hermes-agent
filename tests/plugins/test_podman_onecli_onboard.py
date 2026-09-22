@@ -24,7 +24,8 @@ PLUGIN_SRC = REPO_ROOT / "plugins" / PLUGIN_KEY
 def _load(tmp_path, monkeypatch, profile_secret_sets_yaml: str):
     hermes_home = tmp_path / "home"
     (hermes_home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / PLUGIN_KEY,
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (hermes_home / "config.yaml").write_text(
         "plugins:\n"
         f"  enabled: [{PLUGIN_KEY}]\n"
@@ -59,12 +60,19 @@ class _RecordingTransport:
     def __init__(self, config_status):
         self.calls = []
         self._config_status = config_status
+        self._idents = set()
 
     def __call__(self, method, path, *, json=None, **_):
         if method == "POST" and path == "/api/agents":
+            self._idents.add(json["identifier"])
             self.calls.append(("ensure_agent", json["identifier"]))
             return 201, {"identifier": json["identifier"]}
-        if method == "POST" and path.endswith("/secrets"):
+        # FLEET-F62 C1b: set_secrets resolves identifier->uuid (GET /api/agents) then
+        # PUTs secretIds to the UUID-keyed path (the old POST-by-identifier 404s).
+        if method == "GET" and path == "/api/agents":
+            self.calls.append(("list_agents", None))
+            return 200, [{"identifier": i, "id": f"uuid-{i}"} for i in sorted(self._idents)]
+        if method == "PUT" and path.endswith("/secrets"):
             self.calls.append(("set_secrets", None))
             return 200, {}
         if method == "GET" and path.startswith("/v1/container-config"):
@@ -104,6 +112,7 @@ def test_onboard_raises_when_container_config_unresolved(tmp_path, monkeypatch):
         entry["handler_fn"](args)
     assert [kind for kind, _ in transport.calls] == [
         "ensure_agent",
+        "list_agents",
         "set_secrets",
         "get_container_config",
     ]

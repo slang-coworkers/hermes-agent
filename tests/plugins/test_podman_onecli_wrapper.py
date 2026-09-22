@@ -663,6 +663,40 @@ def test_wrapper_refuses_proxy_authority_in_path(tmp_path):
 
 
 @pytest.mark.linux_only
+def test_wrapper_exec_logs_value_free_marker_and_forwards_argv(tmp_path):
+    """FLEET-F62 C1: a `docker exec` through the wrapper (it IS HERMES_DOCKER_BINARY) logs a
+    value-free `exec` audit marker — the exec-mediation witness that a sandbox command ran
+    through a Hermes exec, not a raw `podman exec` — and forwards its argv unchanged. The
+    marker never carries the exec command, so a token in the command never reaches the log."""
+    stub = _record_stub(tmp_path)
+    rec = tmp_path / "rec.txt"
+    log = tmp_path / "wrapper.log"
+    rec.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+
+    token_cmd = "curl -s http://x:aoc_secret_DO_NOT_LEAK@172.17.0.1:10255/v1/models"
+    argv = ["exec", "hermes-cid", "sh", "-c", token_cmd]
+    result = subprocess.run(
+        [str(WRAPPER), *argv],
+        env={
+            **os.environ,
+            "PODMAN_ONECLI_PODMAN": str(stub),
+            "PODMAN_ONECLI_LOG": str(log),
+            "STUB_REC": str(rec),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0
+    assert "exec hermes-cid sh -c" in rec.read_text(encoding="utf-8")  # argv forwarded unchanged
+    logged = log.read_text(encoding="utf-8")
+    assert "exec" in [line.strip() for line in logged.splitlines() if line.strip()]
+    # Value-free: the exec command (and any token inside it) is never written to the audit log.
+    assert "aoc_secret_DO_NOT_LEAK" not in logged
+
+
+@pytest.mark.linux_only
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the
     podman-3.4.4-compatible {{index .Labels "K"}} before being forwarded."""
