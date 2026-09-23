@@ -117,6 +117,13 @@ def _msg(d):
     return d.get("message") if isinstance(d, dict) else ""
 
 
+class _PredicateCrash(BaseException):
+    """A BaseException that is NOT an Exception. AC-GOV-F22-3 names ``except
+    BaseException`` specifically; raising this pins that breadth — a refactor to
+    ``except Exception`` would let it propagate (core swallows the raising
+    pre_tool_call and the tool proceeds = fail-open), turning the node red."""
+
+
 def test_ac_gov_f22_1(tmp_path, monkeypatch):
     """AC-GOV-F22-1: The veto's restricted set of registry-backed tool names is asserted against
     registry.get_all_tool_names() at load: a missing restricted core name OR an unclassified
@@ -173,9 +180,11 @@ def test_ac_gov_f22_3(tmp_path, monkeypatch):
                         lambda *a, **k: {"from": "worker-a", "to": "orch", "gated": False},
                         raising=True)
     assert _gate(manager, "message_agent", {"target": "orch", "message": "hi"}) is None
-    # same predicate now raises -> the gate's outer BaseException handler fails CLOSED with block.
+    # same predicate now raises a BaseException-only type -> the gate's outer `except BaseException`
+    # fails CLOSED with block. Using a non-Exception BaseException (not RuntimeError) pins the
+    # breadth the criterion names: an `except Exception` refactor would let this escape = fail-open.
     monkeypatch.setattr(loaded.module, "_edges_lookup",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+                        lambda *a, **k: (_ for _ in ()).throw(_PredicateCrash("boom")),
                         raising=True)
     d = _gate(manager, "message_agent", {"target": "orch", "message": "hi"})
     assert _act(d) == "block"
@@ -183,13 +192,31 @@ def test_ac_gov_f22_3(tmp_path, monkeypatch):
 
 
 def test_ac_gov_f22_4(tmp_path, monkeypatch):
-    """AC-GOV-F22-4 (derived): On a partial/still-initializing registry the plugin stays enabled
-    (removing the veto would be fail-open) and the gate-time backstop blocks every call fail-closed
-    until restricted-set integrity is restored."""
+    """AC-GOV-F22-4 (derived): On a partial/still-initializing registry (MORE THAN ONE restricted-
+    core group absent) the plugin stays enabled (removing the veto would be fail-open) and the
+    gate-time backstop blocks every gated call fail-closed until restricted-set integrity is
+    restored. Exercises both the boundary of "more than one" (missing=2) and the extreme, so a
+    one-line bump of _MAX_ABSENT_WHEN_COMPLETE (1->2) — which would fail-LOAD the missing=2 shape
+    (disable the veto = fail-open) — turns this node red."""
     import model_tools
     model_tools.discover_builtin_tools()
-    # a deliberately highly partial registry (one restricted group present — the profile-switch
-    # reload shape) must NOT fail the load: disabling the plugin would remove the veto = fail-open.
+    real = registry.get_all_tool_names  # captured before patching (returns the true full registry)
+
+    # boundary: EXACTLY two restricted-core groups absent (drop terminal + execute_code, keep the
+    # benign read_file for the backstop). missing=2 is just past _MAX_ABSENT_WHEN_COMPLETE=1, so it
+    # must NOT fail the load; a threshold bump to >=2 would fail-load here (disable = fail-open).
+    monkeypatch.setattr(registry, "get_all_tool_names",
+                        lambda *a, **k: [n for n in real() if n not in ("terminal", "execute_code")])
+    mb = _load(tmp_path, monkeypatch, profile="w3")
+    assert mb._plugins[PLUGIN_KEY].enabled is True
+    assert mb._plugins[PLUGIN_KEY].error is None
+    assert "pre_tool_call" in mb._plugins[PLUGIN_KEY].hooks_registered
+    db = _gate(mb, "read_file", {})
+    assert _act(db) == "block"
+    assert "restricted core tools absent at gate time" in _msg(db)
+
+    # extreme: a deliberately highly partial registry (one restricted group present — the profile-
+    # switch reload shape) must NOT fail the load: disabling the plugin would remove the veto.
     monkeypatch.setattr(registry, "get_all_tool_names", lambda *a, **k: ["skill_manage"])
     m = _load(tmp_path, monkeypatch, profile="w4")
     assert m._plugins[PLUGIN_KEY].enabled is True
