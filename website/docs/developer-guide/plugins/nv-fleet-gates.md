@@ -132,6 +132,78 @@ in two places:
 `message_agent` is the one documented exclusion from the presence scan — it is
 injected, not registry-registered, so it is matched by constant in the gate.
 
+## Wired-only agent messaging (A2A-F18)
+
+**Ported behaviour.** In NanoClaw the operator's destinations list is at once the
+**routing map** (which agent may reach which) and the **access-control list** (ACL):
+an un-wired pair cannot exchange a message at all, and a *gated* wiring puts a human in
+the loop before a message crosses that edge. Hermes reaches the same "destinations =
+routing map + ACL" property in three layers; `nv-fleet-gates` supplies the middle,
+per-pair layer, gating the stock `message_agent_tool` entry point through the single
+`pre_tool_call` veto.
+
+### The three layers
+
+- **Base layer — stock coarse ACL (already in Hermes).** `message_agent` validates its
+  `target` against the live roster / registered peers before any delivery and rejects an
+  unknown target. This is an *any-roster-member → any-roster-member* check, not per-pair.
+  Entry point `message_agent_tool`, documented at `website/docs/user-guide/bot-mode.md`
+  ("The tool validates the target against the live roster"). Stock primitives are cited in
+  `tag:`/`main:` form — the pinned release tag `v2026.8.31` is the citation of record; the
+  `main:` anchors are pinned at upstream `main @08b140d14` (which has since moved past
+  them, so they are not "current main" line numbers):
+  - tag: `tools/bot_mode_dm.py:241` (message_agent_tool) | main: `tools/bot_mode_dm.py:174`
+  - tag: `tools/bot_mode_dm.py:187` (_local_roster, the destinations map) | main: `tools/bot_mode_probe.py:71` (_roster)
+- **Wired-only layer — this plugin (the A2A-F18 deliverable).** The WIRING predicate in the
+  single `pre_tool_call` veto refuses a `message_agent` (or `kanban_create`) target that has
+  **no edge** from the caller in the fleet-shared edges store, and lists the caller's wired
+  teammates so the model can recover — `_wiring_block` returns a block whose message reads
+  `wired-only: <from> is not wired to <to>; wired teammates: [...]` (an **unwired** / **not
+  wired** pair is refused outright). A wired **ungated** edge is permitted with no directive.
+  A wired **gated** edge escalates to Hermes' own **human approval** gate: `_wiring_approve`
+  returns an `approve` directive carrying a stable `rule_key` of the form `wire:<from>:<to>`
+  and the message `gated edge <from>-><to> requires human approval`. The edges live in a
+  fleet-shared SQLite store at the managed-scope `edges_db_path` setting (outside any profile
+  home), keyed `PRIMARY KEY (from_profile, to_profile)`. Because the covering surface is on
+  the fork baseline `release/v2026.8.31-e2e-fixed` (merged by LOOP-F37 / PR #5, not present in
+  the pinned release tree), its anchors are baseline-only:
+  - baseline: `plugins/nv-fleet-gates/__init__.py:331` (_wiring_block, unwired → block)
+  - baseline: `plugins/nv-fleet-gates/__init__.py:341` (_wiring_approve, gated → approve)
+  - baseline: `plugins/nv-fleet-gates/__init__.py:604` (the `hermes wire` CLI registration)
+  - baseline: `plugins/nv-fleet-gates/edges.py:36` (add_edge, bidirectional + idempotent)
+- **Cross-gateway layer — complementary.** For peering *across* gateways the a2a platform's
+  `is_trusted_peer` gates by authenticated identity / `A2A_TRUSTED_PEERS`
+  (tag: `plugins/platforms/a2a/security.py:155`). It is not part of this row's proof; named
+  here so the runbook maps the whole "who can reach whom" surface.
+
+### Administering edges — `hermes wire`
+
+Edges are provisioned with the CLI; `add`/`remove` are **bidirectional and idempotent**
+(re-adding an edge is a no-op or flips its gated flag):
+
+```
+hermes wire add bot-a bot-b            # permit bot-a <-> bot-b (ungated)
+hermes wire add bot-a bot-c --gated    # permit, but escalate every traversal to a human
+hermes wire remove bot-a bot-b         # clear both directions
+hermes wire list                       # list all edges and their gated flag
+```
+
+### Outcomes at the gate
+
+| edge state (caller `<from>` → target `<to>`) | `message_agent(target=<to>)` outcome |
+|---|---|
+| no edge (unwired) | **block** — `wired-only: <from> is not wired to <to>; wired teammates: [...]` |
+| wired, ungated | permitted (no directive) |
+| wired, `--gated` | **approve** — escalates to human approval; `rule_key="wire:<from>:<to>"`; message `gated edge <from>-><to> requires human approval` |
+
+**Worked example.** After `hermes wire add bot-a bot-c --gated`, a
+`message_agent(target="bot-c")` from `bot-a` returns
+`{"action": "approve", "rule_key": "wire:bot-a:bot-c", ...}`; Hermes' human approval gate
+then holds the send until the operator approves. The ungated `bot-a <-> bot-b` edge is
+delivered without escalation, and an entirely unwired target is blocked. Block always
+precedes approve in the predicate chain, so a still-un-critiqued marked delivery on a gated
+edge is blocked, not approved.
+
 ## See also
 
 - [Fleet MCP scope](../../user-guide/fleet-mcp-scope.md) — how the compose plugin
