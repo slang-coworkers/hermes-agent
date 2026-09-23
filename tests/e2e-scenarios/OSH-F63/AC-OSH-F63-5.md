@@ -30,13 +30,17 @@ rendered `terminal.ssh_host` = `osh-f63-builder`; the sibling target for the iso
 gate (step 4) is a *different* fleet sandbox, `osh-f63-tester`. Builder is chosen because
 its fixture also carries the stdio-mcp scope.
 
-## ⛔ HOLD — do not run on-box until the operator confirms the lane on this thread
+## ⛔ HOLD — do not run on-box until the operator confirms LANE READY (relayed)
 
-The operator is provisioning the broker lane (ETA per the OSH-F63 thread). Until the
-operator confirms it is ready **on this thread**, do NOT run this scenario on-box and do
-NOT spend a verification round on it — the hermetic floor (AC-OSH-F63-1..4, AC-OSH-F63-6
-+ suite + doctor on both plugins + `plugins list`) proceeds independently. An unprovisioned
-lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infra, not a FAIL.
+The operator is provisioning the broker lane: as of 2026-09-23 it is **built and
+unit-tested but NOT yet mounted** into the tester container. Until the operator posts
+**LANE READY**, do NOT run this scenario on-box and do NOT spend a verification round on
+it — the hermetic floor (AC-OSH-F63-1..4, AC-OSH-F63-6 + suite + doctor on both plugins +
+`plugins list`) proceeds independently. The LANE READY confirmation lands on the
+operator↔orchestrator edge and is relayed **down** (orchestrator → architect → builder →
+tester); the tester never observes it directly and must not self-trigger off a thread
+post. An unprovisioned lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that
+infra, not a FAIL.
 
 ## Common substrate (the OpenShell broker lane, operator-provisioned)
 
@@ -49,9 +53,14 @@ lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infra, not a
 - The gateway admin credentials are admin over ALL sandboxes and **must never** be
   mounted into the tester container, a worker sandbox, `osh-f63-gw`, or `brev-hermes`.
   Auth rides the mTLS proxy, not a mounted operator credential.
-- The pinned `--from` image (operator step 3): a community image (route (a): nothing
-  extra; route (b): ships `sshd`). The exact `--from` value is recorded in the fixtures'
-  spec (`egress.sandbox_image`); the operator replaces it with the immutable digest.
+- The pinned `--from` image (operator step 3) **must be Debian trixie / Ubuntu 24.04 based
+  (glibc ≥ 2.39)**: OpenShell injects PID 1 `/opt/openshell/bin/openshell-sandbox`, which
+  needs glibc ≥ 2.39 — an alpine (musl) or Debian bookworm (glibc 2.36) base restart-loops
+  and the sandbox never reaches Ready. A community image on a trixie/24.04 base (route (a):
+  nothing extra; route (b): ships `sshd`) serves until OSH-F64 ships the worker Dockerfile.
+  The exact `--from` value is recorded in the fixtures' spec (`egress.sandbox_image`) and
+  the glibc/OS constraint in `fixtures/openshell/IMAGE-CONSTRAINT.md`; the operator replaces
+  the value with the immutable digest at LANE READY, keeping it trixie/24.04.
 
 ## Setup (after the fixtures are installed)
 
