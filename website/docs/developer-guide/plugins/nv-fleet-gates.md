@@ -206,6 +206,9 @@ edge is blocked, not approved.
 
 ## See also
 
+- [Fleet-admin scope](../../user-guide/fleet-admin-scope.md) — how the FLEET-ADMIN
+  predicate denies a tool whose canonical name is in the fleet-admin set to any
+  non-orchestrator profile, and why a profile cannot self-elevate its role.
 - [Fleet MCP scope](../../user-guide/fleet-mcp-scope.md) — how the compose plugin
   renders each role's `mcp_servers` and the profile-keyed `mcp_scope` the
   MCP-SCOPE predicate enforces.
