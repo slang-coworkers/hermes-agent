@@ -10,7 +10,11 @@ _REPO = Path(__file__).resolve().parents[2]
 DOC = _REPO / "website" / "docs" / "user-guide" / "features" / "hooks.md"
 HEADING = "## Gating agent-to-agent sends: per-edge human approval"
 
-AC_IDS = ["AC-A2A-F19-1", "AC-A2A-F19-2", "AC-A2A-F19-3",
+# This row's delivered pytest join set (5 ids). The carrier's live id 3
+# (the LOOP-F37 operator-hold scenario) is carrier-owned and NOT tabled by this
+# adopt row, so the doc enumerates these five and documents the live behaviour
+# descriptively — see the ADR's ## Carried criteria section.
+AC_IDS = ["AC-A2A-F19-1", "AC-A2A-F19-2",
           "AC-A2A-F19-4", "AC-A2A-F19-5", "AC-A2A-F19-6"]
 
 # (row locator, exact tag anchor, exact main anchor) — the anchors are the full
@@ -45,7 +49,7 @@ def test_doc_section_present():
 
 
 def test_doc_lists_all_ac_ids():
-    """The section enumerates every AC-A2A-F19 id."""
+    """The section enumerates this row's five delivered AC-A2A-F19 join ids."""
     section = _section()
     assert not [ac for ac in AC_IDS if ac not in section]
 
