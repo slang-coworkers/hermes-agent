@@ -1,0 +1,7 @@
+# `default` is reserved (cannot be installed as a distribution), so Setup merges this
+# fragment into the root config. Allowlisting `orchestrator` lets its scheduler tick.
+gateway:
+  multiplex_profiles: true
+  multiplex_profile_allowlist: [orchestrator, worker]
+plugins:
+  enabled: [nv-coworker-compose]
