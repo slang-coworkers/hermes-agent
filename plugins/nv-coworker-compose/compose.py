@@ -1078,18 +1078,76 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     return {"allow": allow, "sandbox_image": sandbox_image}
 
 
+# Keep policy hardening fixed here so spec data can change only the validated
+# endpoint allow-list.
+_OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
+_OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
+_OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
+_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)
+_OPENSHELL_POLICY_LANDLOCK = "best-effort"
+_OPENSHELL_POLICY_ALLOW_METHOD = "*"
+_OPENSHELL_POLICY_ALLOW_PATH = "/*"
+
+
+def _openshell_hostport(entry: str) -> Tuple[str, int]:
+    """Split an allow-list ``host:port`` string into ``(host, int(port))``. Fails
+    closed (``CompositionError``) on an empty host, a missing/non-numeric port, or a
+    port outside 1..65535 — the endpoint grammar requires a host AND a valid port, so
+    a malformed target must raise rather than emit a half endpoint."""
+    host, sep, port = entry.rpartition(":")
+    if not sep or not host or not port.isdigit() or not (1 <= int(port) <= 65535):
+        raise CompositionError(
+            f"openshell policy endpoint must be host:port with a port in 1..65535, got {entry!r}")
+    return host, int(port)
+
+
+def _openshell_policy_document(allow: List[str]) -> Dict[str, Any]:
+    """Build one profile's OpenShell policy document in the accepted five-section
+    grammar from the three validated egress targets (§D1.3)."""
+    # Endpoint hosts are the egress boundary; emit only the three validated targets.
+    endpoints = [
+        {
+            "host": host,
+            "port": port,
+            "protocol": "rest",
+            "enforcement": "enforce",
+            "rules": [{"allow": {"method": _OPENSHELL_POLICY_ALLOW_METHOD,
+                                 "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
+        }
+        for host, port in (_openshell_hostport(entry) for entry in allow)
+    ]
+    return {
+        "version": 1,
+        "filesystem_policy": {
+            "include_workdir": True,
+            "read_only": list(_OPENSHELL_POLICY_FS_READ_ONLY),
+            "read_write": list(_OPENSHELL_POLICY_FS_READ_WRITE),
+        },
+        "landlock": {"compatibility": _OPENSHELL_POLICY_LANDLOCK},
+        "process": {"run_as_user": _OPENSHELL_SSH_USER, "run_as_group": _OPENSHELL_SSH_USER},
+        "network_policies": {
+            _OPENSHELL_POLICY_NETWORK_NAME: {
+                "name": _OPENSHELL_POLICY_NETWORK_NAME,
+                "binaries": [{"path": _OPENSHELL_POLICY_BINARY}],
+                "endpoints": endpoints,
+            }
+        },
+    }
+
+
 def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str]) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
-    (``policy-<profile>.yaml``) beside its ``config.yaml`` — the allow-listed egress
-    endpoints, exactly the declared set (the render's ``egress.allow`` contract; the
-    operator materialises the on-box ``openshell policy`` from it at provisioning).
+    (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
+    OpenShell grammar whose ``network_policies`` endpoints are exactly the declared
+    allow set (the operator materialises the on-box ``openshell policy`` from it at
+    provisioning).
 
     The policy file is also added to the distribution manifest's ``distribution_owned``
     so ``install_distribution`` carries it into the installed profile rather than
     dropping it. ``config.yaml`` (and thus ``distribution.yaml``) were already written
     by ``_render_coworker`` before this runs."""
     policy_name = f"policy-{profile_name}.yaml"
-    _write_yaml(pdir / policy_name, {"egress": {"allow": list(allow)}})
+    _write_yaml(pdir / policy_name, _openshell_policy_document(allow))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
