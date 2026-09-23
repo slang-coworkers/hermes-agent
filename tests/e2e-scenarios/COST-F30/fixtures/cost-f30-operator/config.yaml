@@ -41,9 +41,12 @@ plugins:
         # value could still be over-ceiling after one Continue for a costly turn.
         escalation_increment_usd: 5.0
         escalation_reconcile_seconds: 3600
-        # estop belt off in the scenario: the block/unblock we assert is the cap_state flag,
-        # and the profile-local sentinel would otherwise gate the whole scenario profile.
-        estop_on_breach: false
+        # estop_on_breach stays at the plugin default (true): AC-6 and AC-8 Part A require a Tier-2
+        # crossing to ENGAGE the profile ESTOP belt so they can assert the never-unlink left-belt
+        # disposition (estop_disposition="left" + manual_resume_required + the verbatim notice). AC-8
+        # Part B re-sets this to false itself via ac8_gateway_drive.py --seed-priced-breach to prove
+        # the no-belt "absent" path, so this default does not affect Part B.
+        estop_on_breach: true
 approvals:
   mode: "off"
 timezone: Asia/Kolkata
