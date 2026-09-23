@@ -1008,34 +1008,79 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
 
 _OPENSHELL_SSH_USER = "sandbox"
 _OPENSHELL_SSH_PORT = 22
-# The OneCLI control plane hop must never be a policy tool-egress allow (only the
-# OneCLI request proxy 172.17.0.1:10255 is); refused if a spec's egress names it.
-_OPENSHELL_CONTROL_PLANE_HOSTPORT = "172.17.0.1:10256"
+# Hosts/host:ports that must never be a policy tool-egress allow. Compared by
+# PARSED (host, port) — a host-only value is matched against _OPENSHELL_FORBIDDEN_HOSTS,
+# a specific hop against _OPENSHELL_FORBIDDEN_HOSTPORTS — so a wildcard CIDR or the
+# gateway/control-plane hop cannot slip past a substring check. :10256 is the OneCLI
+# control plane, :8080 the OpenShell gateway control plane (denied to workers), :22 the
+# ssh control path (INBOUND via the proxy socket, never an egress target).
+_OPENSHELL_FORBIDDEN_HOSTS = frozenset({
+    "host.openshell.internal", "0.0.0.0/0", "::/0", "0.0.0.0", "::", "*",
+})
+_OPENSHELL_FORBIDDEN_HOSTPORTS = frozenset({("172.17.0.1", 10256), ("172.17.0.1", 22)})
 
 
 def _openshell_keys_dir() -> Path:
     """Directory the per-profile ssh key PATHS are rooted at — under the gateway
     ``$HERMES_HOME`` (render-time ``get_hermes_home()``). The render writes a path
-    here per profile; it never writes key material (the builtin ssh backend takes
-    ``-i <path>``, and the operator provisions the key files at that path)."""
+    here per profile AND creates each as an empty 0600 placeholder file; it never
+    writes key material (the builtin ssh backend takes ``-i <path>``, and on the
+    OpenShell lane auth rides the mTLS proxy so the key is present-for-contract,
+    unused)."""
     return get_hermes_home() / "openshell" / "keys"
 
 
 def _openshell_sandbox_name(fleet_name: str, profile_name: str) -> str:
-    """The OpenShell sandbox alias for a profile: ``<fleet>-<profile>``. The single
-    source of this name for the three places that MUST agree — the ssh render
-    (``terminal.ssh_host``), the veto's managed ``expected_ssh_host`` anchor, and the
-    provision plan's ``--name`` — so a create / ssh-config / veto can never drift."""
+    """The BARE OpenShell sandbox name for a profile: ``<fleet>-<profile>``. This is
+    the provision plan's ``openshell sandbox create --name`` / ``ssh-config`` /
+    ``delete`` target."""
     return f"{fleet_name}-{profile_name}"
+
+
+def _openshell_ssh_alias(fleet_name: str, profile_name: str) -> str:
+    """The ssh-config Host alias ``openshell sandbox ssh-config`` emits for a
+    profile's sandbox: ``openshell-<fleet>-<profile>``. This is what the render
+    writes as ``terminal.ssh_host`` AND as the veto's managed ``expected_ssh_host``
+    anchor (they must agree — the veto compares ``TERMINAL_SSH_HOST`` to it); the bare
+    sandbox name (``_openshell_sandbox_name``) is the provision plan's ``--name`` the
+    alias resolves to. AC-4 joins them by requiring ``ssh_host == openshell-<name>``."""
+    return f"openshell-{_openshell_sandbox_name(fleet_name, profile_name)}"
+
+
+def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: List[str]) -> None:
+    """Fail-closed, ALL-OR-NOTHING creation of every profile's ssh_key placeholder,
+    run ONCE before the Phase-B write loop emits any distribution. Two passes: first
+    validate every target (a dangling symlink is invisible to ``Path.exists()``, so a
+    later ``touch`` would follow it and write outside the render-owned keys dir; a
+    pre-existing non-empty or non-regular file is refused), THEN create/chmod each.
+    A collision on ANY profile raises before a single config is written, so a partial
+    fleet can never be left on disk (the placeholder is empty 0600 — no key material;
+    auth rides the mTLS proxy, the builtin ``-i <path>`` contract only needs it to
+    exist)."""
+    keys_dir.mkdir(parents=True, exist_ok=True)
+    targets = [(name, keys_dir / name) for name in profile_names]
+    for profile_name, key_path in targets:
+        if key_path.is_symlink():
+            raise CompositionError(
+                f"{profile_name}: ssh_key placeholder {key_path} is a symlink; refusing to follow it")
+        if key_path.exists() and (not key_path.is_file() or key_path.stat().st_size != 0):
+            raise CompositionError(
+                f"{profile_name}: ssh_key placeholder {key_path} must be an empty regular file")
+    for _profile_name, key_path in targets:
+        if not key_path.exists():
+            key_path.touch(mode=0o600)
+        key_path.chmod(0o600)
 
 
 def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name: str,
                            keys_dir: Path) -> None:
     """Write one coworker's builtin-ssh terminal block for its OWN OpenShell sandbox:
-    a distinct ``ssh_host`` (``<fleet>-<profile>``, the sandbox name), a uniform
-    ``ssh_user``/``ssh_port``, and an ``ssh_key`` PATH under ``keys_dir`` (distinct
-    leaf per profile, never key material)."""
-    _set_dotted(config, "terminal.ssh_host", _openshell_sandbox_name(fleet_name, profile_name))
+    a distinct ``ssh_host`` (the ssh-config alias ``openshell-<fleet>-<profile>``), a
+    uniform ``ssh_user``/``ssh_port``, and an ``ssh_key`` PATH under ``keys_dir``
+    (distinct leaf per profile). Config-only: the placeholder files themselves are
+    created up front by ``_prepare_openshell_ssh_keys`` (all-or-nothing, before any
+    write), so this never mutates the filesystem."""
+    _set_dotted(config, "terminal.ssh_host", _openshell_ssh_alias(fleet_name, profile_name))
     _set_dotted(config, "terminal.ssh_user", _OPENSHELL_SSH_USER)
     _set_dotted(config, "terminal.ssh_port", _OPENSHELL_SSH_PORT)
     _set_dotted(config, "terminal.ssh_key", str(keys_dir / profile_name))
@@ -1045,8 +1090,10 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
     raises ``CompositionError`` rather than emitting a half-formed policy. The policy
-    ALLOW set is EXACTLY {the OneCLI request hop, the inference route, the ssh control
-    path}; a wildcard or the OneCLI control plane (…:10256) is refused."""
+    ALLOW set is EXACTLY {the OneCLI request hop ``proxy_addr``, the inference route
+    ``inference_route``}; the ssh control path is INBOUND via the proxy socket, not an
+    egress target. A wildcard, the OneCLI control plane (…:10256), the OpenShell gateway
+    control plane (host.openshell.internal:8080), and the ssh port are refused."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1064,17 +1111,25 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
 
     proxy_addr = _normalize_proxy_addr(_req_str("proxy_addr"))
     inference_route = _req_str("inference_route")
-    ssh_control_path = _req_str("ssh_control_path")
     sandbox_image = _req_str("sandbox_image")
-    allow = [proxy_addr, inference_route, ssh_control_path]
+    allow = [proxy_addr, inference_route]
     for entry in allow:
-        if "*" in entry:
+        host, port = _openshell_hostport(entry)
+        # Canonicalise the host before the forbidden check so a case / trailing-dot /
+        # IPv6-bracket / wildcard variant of a control-plane or gateway host cannot slip
+        # past: DNS names are case-insensitive, a trailing root dot is equivalent, IPv6
+        # literals arrive bracketed, and any '*' is a wildcard the allow-set never permits.
+        canon = host.strip().casefold()
+        if len(canon) > 1 and canon.endswith("."):
+            canon = canon[:-1]
+        if canon.startswith("[") and canon.endswith("]"):
+            canon = canon[1:-1]
+        if ("*" in canon or canon in _OPENSHELL_FORBIDDEN_HOSTS
+                or (canon, port) in _OPENSHELL_FORBIDDEN_HOSTPORTS):
             raise CompositionError(
-                f"openshell policy allow entry must not be a wildcard, got {entry!r}")
-        if _OPENSHELL_CONTROL_PLANE_HOSTPORT in entry:
-            raise CompositionError(
-                f"openshell policy must not allow the OneCLI control plane "
-                f"{_OPENSHELL_CONTROL_PLANE_HOSTPORT!r} as tool egress, got {entry!r}")
+                f"openshell policy egress target {entry!r} is forbidden (control-plane / "
+                f"gateway / wildcard / inbound-ssh host); egress is exactly proxy_addr + "
+                f"inference_route")
     return {"allow": allow, "sandbox_image": sandbox_image}
 
 
@@ -1084,9 +1139,12 @@ _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
 _OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)
-_OPENSHELL_POLICY_LANDLOCK = "best-effort"
-_OPENSHELL_POLICY_ALLOW_METHOD = "*"
-_OPENSHELL_POLICY_ALLOW_PATH = "/*"
+_OPENSHELL_POLICY_LANDLOCK = "best_effort"
+# The two egress endpoints (OneCLI hop + inference route) are POST-driven REST APIs;
+# emit POST so the coworker's real traffic is admitted. AC-OSH-F63-5 proves the in-policy
+# POST on-box (a GET-only rule would deny it); AC-2 stays verb-agnostic by design.
+_OPENSHELL_POLICY_ALLOW_METHOD = "POST"
+_OPENSHELL_POLICY_ALLOW_PATH = "/**"
 
 
 def _openshell_hostport(entry: str) -> Tuple[str, int]:
@@ -1103,8 +1161,8 @@ def _openshell_hostport(entry: str) -> Tuple[str, int]:
 
 def _openshell_policy_document(allow: List[str]) -> Dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section
-    grammar from the three validated egress targets (§D1.3)."""
-    # Endpoint hosts are the egress boundary; emit only the three validated targets.
+    grammar from the two validated egress targets (§D1.3)."""
+    # Endpoint hosts are the egress boundary; emit only the two validated targets.
     endpoints = [
         {
             "host": host,
@@ -1174,10 +1232,11 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     lines: List[str] = []
     # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
     # that file; the operator materialises it at that name before running the plan). The
-    # create `--name` is the sandbox alias == that profile's rendered `terminal.ssh_host`,
-    # and the ssh-config / delete target that same name — so the plan joins to the render
-    # per profile. All setup lines (create, policy-set, ssh-config) precede all teardown
-    # lines (sandbox-delete, policy-delete).
+    # create `--name` is the BARE sandbox name `<fleet>-<role>`; the profile's rendered
+    # `terminal.ssh_host` is the distinct ssh-config alias `openshell-<fleet>-<role>` that
+    # resolves to it — the two are deliberately different strings. ssh-config / delete
+    # target that same bare name, so the plan joins to the render per profile. All setup
+    # lines (create, policy-set, ssh-config) precede all teardown lines (delete).
     for role in roster:
         lines.append(
             f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
@@ -3235,7 +3294,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         if egress_block is None:
             raise CompositionError(
                 "substrate 'openshell' requires an egress block (the per-profile "
-                "openshell policy allow-set: proxy_addr, inference_route, ssh_control_path)")
+                "openshell policy allow-set: proxy_addr, inference_route)")
         openshell_params = _validate_openshell_egress(egress_block)
         egress_params = None
         fleet_name = _safe_name("project", data.get("project", "fleet"))
@@ -3283,6 +3342,12 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # the DEFAULT union, and the profile-keyed veto policy in every profile), so
     # it runs ONCE here — after Phase A resolve, before the per-profile writes.
     _render_mcp_scope(resolved_by_type, default_config, default_profile)
+
+    # OSH-F63: create every per-profile ssh_key placeholder up front (all-or-nothing,
+    # fail-closed) BEFORE the Phase-B loop writes any distribution — a collision on a
+    # late profile must never leave an earlier profile's config on disk.
+    if is_remote:
+        _prepare_openshell_ssh_keys(keys_dir, list(resolved_by_type))
 
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
@@ -3365,9 +3430,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         for tname in roster
     }
     # Derive the managed authorization map from the same helper used for
-    # terminal.ssh_host so the two values cannot drift.
+    # terminal.ssh_host (the ssh-config alias) so the two values cannot drift — the
+    # veto compares TERMINAL_SSH_HOST (== the rendered ssh_host) to this managed value.
     expected_ssh_host_map = (
-        {tname: _openshell_sandbox_name(fleet_name, tname) for tname in roster}
+        {tname: _openshell_ssh_alias(fleet_name, tname) for tname in roster}
         if is_remote else None
     )
     managed_fragment = _build_managed_fragment(profile_roles_map, expected_ssh_host_map)
