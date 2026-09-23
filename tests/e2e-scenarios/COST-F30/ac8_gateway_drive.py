@@ -24,8 +24,9 @@ drives the hook, and prints one JSON line:
 `resumes` is the plugin's OWN honest predicate `store.session_resumes(session_id)` = own-runnability
 AND NOT `estop.is_engaged()`, read against the REAL on-disk state — NOT a next_call/middleware probe
 (which bypasses the ordinary-inbound ESTOP gate and would falsely report a resume for a belt-left
-session). `estop_disposition`/`manual_resume_required` mirror the plugin's
-result surface; `estop_engaged`/`sentinel_exists` are the on-disk belt proof. The scenario asserts on
+session). `estop_disposition`/`manual_resume_required` are DERIVED from the harness's OWN independent
+on-disk `estop.is_engaged()` read (a stronger corroboration than echoing the plugin's result surface);
+`estop_engaged`/`sentinel_exists` are the raw on-disk belt proof. The scenario asserts on
 `after` (window_start_total advance / blocked / applied rows), `notice`, `hook_result.action`,
 `resumes`, and the belt fields.
 
@@ -153,10 +154,11 @@ async def _run(args) -> int:
             "ac8-priced-seed", provider="anthropic",
         )
         crossed = mod._evaluate_boundary(session_id, today=today, platform=platform_value)
-        try:
-            estop.disengage()  # defensive: guarantee no sentinel regardless of the config read path
-        except Exception:
-            pass
+        # Part B must remain belt-free: any ESTOP state here means estop_on_breach=false was not honoured
+        # by the real boundary evaluation.
+        assert crossed, "priced seed did not cross the ceiling"
+        assert not estop.is_engaged(), "estop_on_breach=false but a profile ESTOP belt engaged"
+        assert not estop.sentinel_path().exists(), "estop_on_breach=false but an ESTOP sentinel was created"
         kinds = sorted({e["kind"] for e in mod.episodes(session_id)})
         print(json.dumps({
             "seeded": session_id, "priced_total": priced_total, "crossed": crossed,

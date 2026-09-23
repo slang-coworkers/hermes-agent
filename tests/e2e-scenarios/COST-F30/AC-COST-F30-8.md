@@ -32,9 +32,10 @@ object (`_session_key_for_source` + `_deliver_platform_notice`) driven by the co
   It is seeded through COST-F29's real accrual path (`record_api_request` + `_evaluate_boundary`) with
   the priced model `claude-opus-4-8`, blocks IN-BAND with NO sentinel, and is resolved through the SAME
   real `pre_gateway_dispatch` callback — no live model call. The resume is proven against the REAL
-  on-disk sentinel ABSENCE, NOT a `next_call` invocation (Orchestrator msg 82 R2).
+  on-disk sentinel ABSENCE, NOT a `next_call` invocation (which bypasses the ordinary-inbound ESTOP
+  gate and so cannot prove a resume).
 
-**Pricing note (F30-R3-2):** Claude Opus 4.8 IS priced in this container (`anthropic`
+**Pricing note:** Claude Opus 4.8 IS priced in this container (`anthropic`
 `usage_pricing.py:211-222`; `bedrock` `:694-703`). The live crossing is nonetheless
 `unknown_pricing` because the fleet live provider identity `aws/anthropic/bedrock-claude-opus-4-8`
 resolves to `billing_mode='unknown'` (`resolve_billing_route` :1086-1089/:1125) and the provider
@@ -54,7 +55,7 @@ real live crossing (Part A); Part B spends no model calls.
 - **Install `nv-cost-cap` into the profile's OWN plugins dir**:
   `$HERMES_HOME/profiles/cost-f30-operator/plugins/nv-cost-cap/`. `hermes -p cost-f30-operator`
   repoints `HERMES_HOME` to the profile, so a plugin present only in the base home's `plugins/`
-  is NOT loaded for the `-p` CLI turn (tester harness-gap, disclosed + fixed round 2). Confirm the
+  is NOT loaded for the `-p` CLI turn. Confirm the
   `-p` turn logs `user: 1 manifest` / `registered hook: pre_gateway_dispatch`.
 - Let `PH=$HERMES_HOME/profiles/cost-f30-operator` (its `plugin-data/nv-cost-cap/data.db` is the
   store the harness and evidence read). The authorized operator principal is the fixture's
@@ -110,8 +111,7 @@ real live crossing (Part A); Part B spends no model calls.
    `manual_resume_required==false`, `estop_engaged==false` / `sentinel_exists==false`. The resume is
    the plugin's honest `session_resumes()` value taken AGAINST THE REAL ON-DISK STATE plus the
    verified ABSENCE of any sentinel (no belt gates the next ordinary inbound) — NOT a `next_call`
-   invocation, which does not gate an ordinary inbound and is rejected as a resume proof
-   (Orchestrator msg 82 R2).
+   invocation, which does not gate an ordinary inbound and is therefore rejected as a resume proof.
 8. Drive the AUTHORIZED `/cost continue` AGAIN on the seeded session (`--session sess-ac8-partB`):
    → expect: `notice` names "already resolved"; `before==after` (still one `applied`, no further advance).
 

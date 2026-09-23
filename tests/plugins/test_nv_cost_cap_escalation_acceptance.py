@@ -309,15 +309,17 @@ def _sentinel_untouched(estop, why):
 
 @contextlib.contextmanager
 def _fail_if_sentinel_unlinked(estop):
-    """MANUAL-RESUME probe: FAIL the test if the plugin invokes any deletion/rename primitive on the
-    ESTOP sentinel, or calls estop.disengage() at all, inside the block. Non-sentinel paths (e.g. an
-    atomic config.yaml write) pass through to the real primitive, so a set-ceiling's config write is
-    unaffected — only a touch of the sentinel path trips it. This is the never-unlink invariant asserted
-    directly (beside the byte+inode canary in _sentinel_untouched)."""
+    """Fail the test if the plugin invokes any deletion/rename primitive on the ESTOP sentinel, or calls
+    estop.disengage(), inside the block. Each such call is recorded and suppressed (the guard returns
+    without performing it and without raising); non-sentinel paths pass through to the real primitive, so a
+    set-ceiling's config.yaml write is unaffected. The recorded attempts are asserted empty AFTER the block
+    and after primitive restoration, so a plugin exception handler around the sentinel touch cannot swallow
+    the failure. Yields the ``attempts`` list for a caller to inspect."""
     import os as _os
     import pathlib
 
     sp = str(estop.sentinel_path())
+    attempts: list[str] = []
     real_path_unlink = pathlib.Path.unlink
     real_os_unlink = _os.unlink
     real_os_remove = _os.remove
@@ -326,28 +328,39 @@ def _fail_if_sentinel_unlinked(estop):
     real_disengage = estop.disengage
 
     def _guard_path_unlink(self, *a, **k):
-        assert str(self) != sp, "plugin invoked Path.unlink on the ESTOP sentinel — never-unlink violated"
+        if str(self) == sp:
+            attempts.append("Path.unlink")
+            return None
         return real_path_unlink(self, *a, **k)
 
     def _guard_os_unlink(path, *a, **k):
-        assert str(path) != sp, "plugin invoked os.unlink on the ESTOP sentinel — never-unlink violated"
+        if str(path) == sp:
+            attempts.append("os.unlink")
+            return None
         return real_os_unlink(path, *a, **k)
 
     def _guard_os_remove(path, *a, **k):
-        assert str(path) != sp, "plugin invoked os.remove on the ESTOP sentinel — never-unlink violated"
+        if str(path) == sp:
+            attempts.append("os.remove")
+            return None
         return real_os_remove(path, *a, **k)
 
     def _guard_os_rename(src, dst, *a, **k):
-        assert str(src) != sp and str(dst) != sp, "plugin renamed the ESTOP sentinel — never-unlink violated"
+        if str(src) == sp or str(dst) == sp:
+            attempts.append("os.rename")
+            return None
         return real_os_rename(src, dst, *a, **k)
 
     def _guard_os_replace(src, dst, *a, **k):
         # os.replace also backs pathlib.Path.replace, so this covers atomic-rename deletions too.
-        assert str(src) != sp and str(dst) != sp, "plugin os.replace'd the ESTOP sentinel — never-unlink violated"
+        if str(src) == sp or str(dst) == sp:
+            attempts.append("os.replace")
+            return None
         return real_os_replace(src, dst, *a, **k)
 
     def _guard_disengage(*a, **k):
-        raise AssertionError("plugin invoked estop.disengage — never-unlink violated")
+        attempts.append("estop.disengage")
+        return None
 
     pathlib.Path.unlink = _guard_path_unlink
     _os.unlink = _guard_os_unlink
@@ -356,7 +369,7 @@ def _fail_if_sentinel_unlinked(estop):
     _os.replace = _guard_os_replace
     estop.disengage = _guard_disengage
     try:
-        yield
+        yield attempts
     finally:
         pathlib.Path.unlink = real_path_unlink
         _os.unlink = real_os_unlink
@@ -364,6 +377,11 @@ def _fail_if_sentinel_unlinked(estop):
         _os.rename = real_os_rename
         _os.replace = real_os_replace
         estop.disengage = real_disengage
+    # Assert after restoring primitives so plugin exception handlers cannot swallow the failure.
+    assert not attempts, (
+        "plugin invoked a sentinel-mutating primitive on the ESTOP sentinel — never-unlink violated: "
+        + ", ".join(attempts)
+    )
 
 
 # Verbatim operator notice a granted Continue must surface while the belt is left.
@@ -934,6 +952,22 @@ def test_ac_cost_f30_10(loaded_plugin):
     assert estop.sentinel_path().exists(), "the fleet-root pause must survive a Continue"
     assert mod.store.estop_receipt() is None, "a fleet-root pause is never adopted as owned"
     _assert_left_belt(res, mod, why="Continue while a fleet-root operator pause is engaged", expect_notice=True)
+
+
+def test_fail_if_sentinel_unlinked_probe_catches_swallowed_unlink(loaded_plugin):
+    """The never-unlink probe must still fail when a sentinel unlink is attempted inside a broad exception
+    handler."""
+    from agent import estop
+
+    estop.engage(reason="never-unlink probe self-test")
+    assert estop.sentinel_path().exists()
+    with pytest.raises(AssertionError, match="never-unlink violated"):
+        with _fail_if_sentinel_unlinked(estop):
+            try:
+                estop.sentinel_path().unlink()
+            except Exception:
+                pass
+    assert estop.sentinel_path().exists(), "the probe must suppress the real unlink while recording it"
 
 
 def test_estop_acquisition_barrier(loaded_plugin, monkeypatch):
