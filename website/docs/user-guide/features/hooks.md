@@ -1954,7 +1954,7 @@ Which edges are gated is decided by the fleet's wiring predicate (the `nv-fleet-
 
 ### The honest limit
 
-With the default approval modes, a gated edge exercised from an **unattended** session — `single_query_mode`, `cron_mode`, or `unattended_mode`, where no human is watching — is **denied, not held**: failing closed turns "no human to ask" into a refusal. Set the relevant mode to `approve` and the same hold auto-approves without a human. So gate an edge only between **interactive** Bot-Chat principals; for durable, unattended cross-bot work, use ungated edges plus the kanban board rather than a per-edge hold that would simply be denied.
+With the default approval modes, a gated edge exercised from an **unattended** session — `single_query_mode`, `cron_mode`, or `unattended_mode`, where no human is watching — is **denied, not held**: failing closed turns "no human to ask" into a refusal. Set the relevant mode to `approve` and the same hold auto-approves without a human. So gate an edge only when the **sending** Bot-Chat session is interactive; for durable, unattended cross-bot work, use ungated edges plus the kanban board rather than a per-edge hold that would simply be denied.
 
 ### Boundary
 
@@ -1984,4 +1984,4 @@ The mechanism is verified by these acceptance criteria:
 - **AC-A2A-F19-5** — a denied, timed-out, or gate-error hold fails closed; an approving decision releases the send.
 - **AC-A2A-F19-6** — an unattended hold is denied under the default deny modes and auto-approves when the relevant mode is set to `approve`.
 
-An operator-facing hold-and-approve flow — a gated send surfaces to the operator and approving it releases the send — is additionally covered end-to-end by a live scenario already merged in the fleet.
+A live scenario additionally verifies that a gated send surfaces to the operator and that approval releases it.
