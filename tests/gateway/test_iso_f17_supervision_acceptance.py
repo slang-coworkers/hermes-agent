@@ -126,8 +126,10 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
 
     mux_actions, mux_scan = _reconcile(multiplex=True)
     coder = mux_scan / "gateway-coder"
-    assert coder.exists() and (coder / "down").exists(), (
-        "coworker slot registered but DOWN under the multiplexer"
+    # Registered (run script written by _register_service, container_boot.py:488) AND held
+    # down under the multiplexer — a skip-registration mutant writes no run file.
+    assert (coder / "run").exists() and (coder / "down").exists(), (
+        "coworker slot registered (run script) but DOWN under the multiplexer"
     )
     # Only the default slot owns inbound: its reconcile action is a start, not down.
     default_started = [
@@ -139,8 +141,12 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
     assert default_started, (
         "the default slot auto-starts (owns inbound) under the multiplexer"
     )
-    # Outside multiplex mode the running coworker starts — a `started` action, not merely
-    # the absence of a down-marker (a skipped registration would leave no slot dir at all).
+    # Outside multiplex mode the running coworker starts. The `started` action alone is
+    # decoupled from the fs write (container_boot.py:205 derives it from should_start
+    # regardless of whether _register_service ran), so assert the POSITIVE artifact:
+    # _register_service writes gateway-coder/run unconditionally (container_boot.py:488),
+    # and its presence proves the slot was actually registered — a skip-registration mutant
+    # leaves no run file. down is absent only in the started (not held-down) case.
     _solo_actions, solo_scan = _reconcile(multiplex=False)
     coder_started = [
         a
@@ -149,6 +155,9 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
         and getattr(a, "action", None) == "started"
     ]
     assert coder_started, "solo mode auto-starts the running coworker"
+    assert (solo_scan / "gateway-coder" / "run").exists(), (
+        "the started coworker's s6 run script is written (slot actually registered)"
+    )
     assert not (solo_scan / "gateway-coder" / "down").exists()
     # A startup_failed coworker stays registered-but-down even in solo mode, with no
     # `started` action (it is not in _AUTOSTART_STATES).
@@ -389,9 +398,16 @@ async def test_ac_iso_f17_6(tmp_path, monkeypatch):
     assert "restart_interrupted" in runner._AUTO_RESUME_REASONS
     assert {"restart_timeout", "shutdown_timeout"} <= set(runner._AUTO_RESUME_REASONS)
 
-    # Skip cases (differentials): NONE of these re-arm, so no additional restart-loop boot
-    # accrues beyond the single happy-path re-arm above (the loop-breaker trips at 3 chained
-    # boots). Reset the claimed slot + pending flag so only the property under test differs.
+    # Skip cases (differentials): none of these should re-arm. The restart-loop breaker
+    # (gateway/run.py:13113, gateway.restart_loop_guard) records a boot for EVERY call that
+    # has candidates and trips at the 3rd, short-circuiting _schedule_resume_pending_sessions
+    # with `return 0` BEFORE the per-entry _is_session_running/auth checks (:13134/:13154) —
+    # which would make the differentials below (esp. the unauthorized case) pass on the
+    # breaker rather than on the property under test. Neutralize it so each call reaches the
+    # candidate loop. Reset the claimed slot + pending flag so only the property differs.
+    import gateway.restart_loop_guard as _rlg
+
+    monkeypatch.setattr(_rlg, "check_and_record", lambda *a, **k: False)
     from gateway.run import _AGENT_PENDING_SENTINEL
 
     # already-running: a claimed slot is not re-armed.
@@ -410,11 +426,22 @@ async def test_ac_iso_f17_6(tmp_path, monkeypatch):
     interrupted.resume_reason = "user_paused"
     assert runner._schedule_resume_pending_sessions(platform=Platform.TELEGRAM) == 0
     interrupted.resume_reason = "restart_interrupted"
-    # unauthorized owner: excluded.
+    # unauthorized owner: excluded BY the auth gate (:13154), not by the breaker. Assert the
+    # auth check actually fires — a mutant that drops the _is_user_authorized filter would
+    # leave auth_calls empty and schedule the session (count 1), so this is non-vacuous.
     runner._running_agents.clear()
     interrupted.resume_pending = True
-    runner._is_user_authorized = lambda _source: False
+    auth_calls = []
+
+    def _deny_auth(source):
+        auth_calls.append(source)
+        return False
+
+    runner._is_user_authorized = _deny_auth
     assert runner._schedule_resume_pending_sessions(platform=Platform.TELEGRAM) == 0
+    assert auth_calls, (
+        "the unauthorized session must be excluded by the auth check, which must run"
+    )
 
     # Exercise the production start() wiring, not only the gating helper above: a real
     # GatewayRunner.start() invokes the resume re-arm at startup (gateway/run.py:14280).
@@ -683,12 +710,12 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
     conn.commit()
     assert kb.check_respawn_guard(conn, au) == "blocker_auth"
 
-    # A quota-only failure (no auth/unauthorized keyword) also yields blocker_auth,
-    # exercising the `quota` alternative in the blocker regex that "invalid api key" masks.
+    # A quota-only failure (no 429/rate/auth token) isolates the `quota` alternative of
+    # _RESPAWN_BLOCKER_RE (kanban_db.py:7997) — dropping `quota|` makes this stop matching.
     quota = kb.create_task(conn, title="quota", assignee="a")
     conn.execute(
         "UPDATE tasks SET last_failure_error=? WHERE id=?",
-        ("429 insufficient_quota: exceeded your current quota", quota),
+        ("insufficient_quota: exceeded your current quota", quota),
     )
     conn.commit()
     assert kb.check_respawn_guard(conn, quota) == "blocker_auth"
