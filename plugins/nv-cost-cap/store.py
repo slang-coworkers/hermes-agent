@@ -18,7 +18,7 @@ Per-profile tables:
   * ``estop_receipt`` — the opaque ownership token the plugin embedded (top-level
     ``nv_cost_cap_receipt``) in the ESTOP sentinel it last published; ``estop_receipt()``
     reports ownership only when the on-disk sentinel still carries that exact token.
-    The plugin NEVER unlinks a sentinel; the token exists for the upstream owner-scoped
+    The plugin NEVER removes a sentinel; the token exists for the upstream owner-scoped
     disengage (UA-28) to identify the plugin's own stop.
 
 The one fleet-uniform value — the owner-pinned fleet-default ceiling — lives in
@@ -656,37 +656,33 @@ def apply_effect(episode_id: str) -> str:
     if decision == "stop":
         # Publish the belt through the OWNED engage seam so the upstream owner-scoped disengage
         # (UA-28) can later tell this stop from an operator pause; the committed blocked=1 above is
-        # the authoritative gate. The plugin never unlinks — the belt is left for a manual resume.
+        # the authoritative gate. The plugin never removes it — the belt is left for a manual resume.
         engage_owned(session_id, reason=f"session {session_id} stopped by operator")
         return _mark_applied(episode_id)
     if decision == "continue":
         # The money-side mutation AND the applied-row write committed together in the one tx above;
-        # the plugin never unlinks the profile ESTOP sentinel, so any engaged belt is LEFT and the
+        # the plugin never removes the profile ESTOP sentinel, so any engaged belt is LEFT and the
         # session resumes only after an operator lifts it.
         return APPLIED
 
-    # ceiling: the config write is a side-effect that must run outside the DB tx; the re-evaluation +
-    # conditional unblock + applied-row write then commit together in _finalize_ceiling_unblock.
+    # ceiling: the config write, re-evaluation, conditional unblock and applied-row write all happen
+    # inside ONE tx in _finalize_ceiling_unblock, so a concurrent generation change can never leave the
+    # profile ceiling written while the resolution cancels as stale (exactly-once / fail-closed).
     if amount_usd is None:
         return DEFERRED
-    try:
-        wrote = bool(write_profile_ceiling(amount_usd))
-    except Exception:
-        logger.warning("nv-cost-cap: ceiling config write failed", exc_info=True)
-        wrote = False
-    if not wrote:
-        return DEFERRED
-    return _finalize_ceiling_unblock(episode_id, session_id, claimed_gen)
+    return _finalize_ceiling_unblock(episode_id, session_id, claimed_gen, amount_usd)
 
 
-def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen):
-    """After the ceiling config write, in ONE tx: re-evaluate the session against the NEW ceiling and
-    clear ``blocked`` ONLY when it is now runnable (``effective_usd - window_start_total <
-    resolved_ceiling()`` — a ceiling at/below current spend leaves ``blocked=1``), then mark the
-    resolution applied. Guarded by the same closed/stale re-check so a ceiling never clears a newer
-    generation's block. Returns APPLIED, or a cancel status (row marked, committed). The plugin never
-    touches the ESTOP sentinel; the profile-ceiling value is already written and is benign even when
-    this cancels.
+def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen, amount_usd):
+    """In ONE tx: re-check closed/stale, THEN write the profile ceiling, re-evaluate the session against
+    the NEW ceiling and clear ``blocked`` ONLY when it is now runnable (``effective_usd -
+    window_start_total < resolved_ceiling()`` — a ceiling at/below current spend leaves ``blocked=1``),
+    then mark the resolution applied. The config write runs under the DB write lock, so it is atomic with
+    the staleness decision: a newer generation that cancels the resolution as stale also prevents the
+    ceiling from being written, and a failed write rolls back with nothing applied. ``write_profile_ceiling``
+    touches only config.yaml (its own file lock), never the plugin_db, so holding BEGIN IMMEDIATE across it
+    cannot self-deadlock. Returns APPLIED, or a cancel/deferred status. The plugin never touches the ESTOP
+    sentinel.
     """
     conn = _cas_conn()
     try:
@@ -702,6 +698,17 @@ def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen):
         if cancelled is not None:
             conn.close()
             return cancelled
+        # Not closed / not stale under the lock: write the ceiling now, so config.yaml is mutated ONLY
+        # when this resolution will be marked applied in the same tx.
+        try:
+            wrote = bool(write_profile_ceiling(amount_usd))
+        except Exception:
+            logger.warning("nv-cost-cap: ceiling config write failed", exc_info=True)
+            wrote = False
+        if not wrote:
+            conn.execute("ROLLBACK")
+            conn.close()
+            return DEFERRED
         state = conn.execute(
             "SELECT effective_usd, window_start_total FROM cap_state WHERE session_id = ?",
             (session_id,),
@@ -782,8 +789,8 @@ def engage_owned(session_id, *, reason=None) -> None:
     """The ONE engage seam (breach AND Stop). Publish an OWNED profile-local ESTOP sentinel by
     ATOMIC no-replace ``os.link`` and record its opaque ``nv_cost_cap_receipt`` token as the ownership
     receipt, so the UPSTREAM owner-scoped disengage (UA-28) can later tell the plugin's own stop from
-    an operator ``hermes pause``. This release NEVER unlinks — the token is written for identification
-    only.
+    an operator ``hermes pause``. This release NEVER removes a sentinel — the token is written for
+    identification only.
 
     A same-dir temp is fully written + fsynced, then ``os.link(temp, sentinel)`` publishes it: if any
     sentinel already exists (an operator pause, or a concurrent engager) the link raises
@@ -792,7 +799,7 @@ def engage_owned(session_id, *, reason=None) -> None:
     link fails for any other reason (hardlinks unsupported, etc.) it falls back to an
     ``O_CREAT|O_EXCL`` empty sentinel (still fail-safe: it engages) and records no receipt. A receipt
     write that fails AFTER a successful link leaves the linked sentinel and adopts no ownership — it
-    never cleanup-unlinks (that would race the lockless core primitive). Idempotent; never raises.
+    never removes it on cleanup (that would race the lockless core primitive). Idempotent; never raises.
     """
     try:
         from agent import estop
@@ -828,7 +835,7 @@ def engage_owned(session_id, *, reason=None) -> None:
             # Remove the same-dir temp — never the sentinel (after a successful link the sentinel is a
             # second name for this inode; on EEXIST it is the operator pause we left untouched).
             try:
-                Path(tmp).unlink(missing_ok=True)
+                Path(tmp).unlink(missing_ok=True)  # ESTOP_sentinel_never: temporary source only
             except OSError:
                 pass
     except Exception:

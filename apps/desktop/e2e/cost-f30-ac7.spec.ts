@@ -18,10 +18,12 @@ import { expect, test } from './test'
 // cost-escalation card ONLY after the full package is installed into the desktop host's
 // $HERMES_HOME/plugins/nv-cost-cap/ and enabled (defaultEnabled:false), over the SAME
 // /api/plugins/nv-cost-cap backend the e2e harness's real `hermes serve` exposes. An
-// unauthorized principal applies no mutation, an authorized operator resolves once, a
-// repeat is a no-op. The backend runs loopback, so the DEFAULT profile opts into the
-// explicit loopback_operator (the single trusted local token authorizes as the operator);
-// the LOCKED profile does not, so a resolve scoped there is refused — the authz boundary.
+// unauthorized principal applies no mutation, an authorized operator resolves Continue once
+// (repeat = no-op), Stop leaves the session blocked, set-ceiling writes the exact value and clears
+// the block, and an immortal (daily) card offers only Continue. The backend runs loopback, so the
+// DEFAULT profile opts into the explicit loopback_operator (the single trusted local token
+// authorizes as the operator); the LOCKED profile does not, so a resolve scoped there is refused —
+// the authz boundary. estop_on_breach=false, so these crossings block per-session with no belt.
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
 const PLUGIN_SRC = path.join(REPO_ROOT, 'plugins', 'nv-cost-cap')
@@ -46,10 +48,12 @@ ${snippet}`
   return execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim()
 }
 
-function seedCrossing(profileHome: string, sessionId: string): string {
+function seedCrossing(profileHome: string, sessionId: string, opts: { immortal?: boolean } = {}): string {
+  const immortal = opts.immortal ? 1 : 0
+  const kind = opts.immortal ? 'daily' : 'breach'
   return runStore(profileHome, `
-store.set_state(${JSON.stringify(sessionId)}, effective_usd=1.0, window_start_total=0.0, day_start_total=0.0, budget_gen=1, blocked=1, immortal=0)
-print(store.record_episode(${JSON.stringify(sessionId)}, 'breach', 1, '2026-09-19', dedup_key=${JSON.stringify(sessionId + ':breach:1')}))`)
+store.set_state(${JSON.stringify(sessionId)}, effective_usd=1.0, window_start_total=0.0, day_start_total=0.0, budget_gen=1, blocked=1, immortal=${immortal})
+print(store.record_episode(${JSON.stringify(sessionId)}, ${JSON.stringify(kind)}, 1, '2026-09-19', dedup_key=${JSON.stringify(sessionId + ':' + kind + ':1')}))`)
 }
 
 function appliedCount(profileHome: string, sessionId: string): number {
@@ -57,6 +61,24 @@ function appliedCount(profileHome: string, sessionId: string): number {
     runStore(profileHome, `print(len([r for r in store.resolutions(${JSON.stringify(sessionId)}) if r['status'] == 'applied']))`),
     10
   )
+}
+
+function appliedDecisionCount(profileHome: string, sessionId: string, decision: string): number {
+  return Number.parseInt(
+    runStore(profileHome, `print(len([r for r in store.resolutions(${JSON.stringify(sessionId)}) if r['status'] == 'applied' and r['decision'] == ${JSON.stringify(decision)}]))`),
+    10
+  )
+}
+
+function isBlocked(profileHome: string, sessionId: string): number {
+  return Number.parseInt(
+    runStore(profileHome, `print(int(bool(dict(store.get_state(${JSON.stringify(sessionId)})).get('blocked'))))`),
+    10
+  )
+}
+
+function resolvedCeiling(profileHome: string): number {
+  return Number.parseFloat(runStore(profileHome, `print(store.resolved_ceiling())`))
 }
 
 async function apiFetch(page: MockBackendFixture['page'], method: string, url: string, body?: unknown) {
@@ -123,7 +145,7 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('AC-COST-F30-7: the desktop escalation card renders after install+enable and resolves exactly once', async () => {
+test('AC-COST-F30-7: the desktop escalation card renders after install+enable; Continue/Stop/set-ceiling resolve and an immortal card is Continue-only', async () => {
   test.setTimeout(600_000)
   const { page, sandbox } = fixture!
   const home = sandbox.hermesHome
@@ -156,7 +178,7 @@ test('AC-COST-F30-7: the desktop escalation card renders after install+enable an
     'the escalation card is visible after opening the right sidebar').toBeVisible({ timeout: 30_000 })
   await page.screenshot({ path: test.info().outputPath('step-2-card.png') })
 
-  // Step 2 (ADR): an unauthorized principal (locked profile: no loopback_operator -> None) applies NOTHING.
+  // An unauthorized principal (locked profile: no loopback_operator -> None) applies NOTHING.
   const denied = await apiFetch(page, 'POST', `/api/plugins/nv-cost-cap/escalations/${lockedEp}/resolve?profile=cost-f30-locked`, { decision: 'continue' })
   expect(
     (denied.status === 403 && denied.body?.detail === 'unauthorized') ||
@@ -165,15 +187,53 @@ test('AC-COST-F30-7: the desktop escalation card renders after install+enable an
   ).toBeTruthy()
   expect(appliedCount(lockedHome, 'sess-cost-f30-ac7-locked'), 'no mutation for the unauthorized principal').toBe(0)
 
-  // Step 3 (ADR): the authorized operator resolves once (Continue via the card).
+  // The authorized operator resolves once (Continue via the card).
   expect(appliedCount(home, 'sess-cost-f30-ac7'), 'no resolution applied yet').toBe(0)
   await page.getByRole('button', { name: /^continue$/i }).first().click()
   await expect.poll(() => appliedCount(home, 'sess-cost-f30-ac7'), { timeout: 30_000 }).toBe(1)
   await page.screenshot({ path: test.info().outputPath('step-3-resolved.png') })
 
-  // Step 4 (ADR): a repeat resolution of the same episode is a reported no-op.
+  // A repeat resolution of the same episode is a reported no-op.
   const repeat = await apiFetch(page, 'POST', `/api/plugins/nv-cost-cap/escalations/${defaultEp}/resolve?profile=default`, { decision: 'continue' })
   expect(repeat.body?.granted === false && repeat.body?.reason === 'already-resolved',
     `repeat is a reported no-op — ${JSON.stringify(repeat)}`).toBeTruthy()
   expect(appliedCount(home, 'sess-cost-f30-ac7'), 'still exactly one increment after the repeat').toBe(1)
+
+  // Stop blocks the session with no resume. A fresh crossing surfaces its own card; the earlier
+  // (resolved) episodes are now note-only rows with no buttons, so the Stop control is unambiguous.
+  seedCrossing(home, 'sess-cost-f30-ac7-stop')
+  await expect(page.getByText(/session sess-cost-f30-ac7-stop/i).first(),
+    'the fresh Stop crossing appears as a card').toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: /^stop$/i }).first().click()
+  await expect.poll(() => appliedDecisionCount(home, 'sess-cost-f30-ac7-stop', 'stop'), { timeout: 30_000 }).toBe(1)
+  expect(isBlocked(home, 'sess-cost-f30-ac7-stop'), 'Stop leaves the session blocked (no resume)').toBe(1)
+  await page.screenshot({ path: test.info().outputPath('step-5-stop.png') })
+
+  // Set-ceiling writes the exact value and clears the block (12.50 > spend 1.0).
+  seedCrossing(home, 'sess-cost-f30-ac7-ceiling')
+  await expect(page.getByText(/session sess-cost-f30-ac7-ceiling/i).first(),
+    'the fresh set-ceiling crossing appears as a card').toBeVisible({ timeout: 30_000 })
+  await page.getByLabel(/exact ceiling usd/i).first().fill('12.50')
+  await page.getByRole('button', { name: /set ceiling/i }).first().click()
+  await expect.poll(() => appliedDecisionCount(home, 'sess-cost-f30-ac7-ceiling', 'ceiling'), { timeout: 30_000 }).toBe(1)
+  expect(resolvedCeiling(home), 'the profile ceiling is written exactly').toBeCloseTo(12.5, 2)
+  expect(isBlocked(home, 'sess-cost-f30-ac7-ceiling'), 'a ceiling above spend clears the money block').toBe(0)
+  await page.screenshot({ path: test.info().outputPath('step-6-ceiling.png') })
+
+  // An immortal (daily) card exposes ONLY Continue — no Stop, no set-ceiling — and a set-ceiling
+  // attempt is refused immortal-continue-only. By now every mortal card is resolved (note-only rows,
+  // no buttons), so the only action controls belong to the immortal card.
+  const immortalEp = seedCrossing(home, 'sess-cost-f30-ac7-immortal', { immortal: true })
+  await expect(page.getByText(/session sess-cost-f30-ac7-immortal/i).first(),
+    'the immortal crossing appears as a card').toBeVisible({ timeout: 30_000 })
+  await expect(page.getByRole('button', { name: /set ceiling/i }),
+    'the immortal card exposes NO set-ceiling control (and prior mortal cards have cleared)').toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^stop$/i }),
+    'the immortal card exposes NO Stop control').toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^continue$/i }),
+    'the immortal card exposes ONLY Continue').toHaveCount(1)
+  const immortalCeiling = await apiFetch(page, 'POST', `/api/plugins/nv-cost-cap/escalations/${immortalEp}/resolve?profile=default`, { decision: 'ceiling', amount_usd: 5.0 })
+  expect(immortalCeiling.body?.granted === false && immortalCeiling.body?.reason === 'immortal-continue-only',
+    `a set-ceiling on an immortal session is refused — ${JSON.stringify(immortalCeiling)}`).toBeTruthy()
+  await page.screenshot({ path: test.info().outputPath('step-7-immortal.png') })
 })

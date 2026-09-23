@@ -52,16 +52,30 @@
   const MANUAL_RESUME_NOTICE = "Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock";
   function outcomeNote(res) {
     if (!res || typeof res !== "object") return "Request failed.";
-    if (res.granted) {
-      if (res.manual_resume_required) {
-        if (res.decision === "ceiling" && res.amount_usd != null)
-          return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}. The per-session cost block is cleared, but the profile ESTOP belt remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`;
-        return MANUAL_RESUME_NOTICE;
+    if (!res.granted) return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`;
+    // manual_resume_required means the profile ESTOP belt (which the plugin never lifts) is still
+    // engaged. It is decision-specific: a Stop is NOT a Continue, so it must never render the
+    // Continue notice — Stop leaves the session blocked outright.
+    const belt = !!res.manual_resume_required;
+    if (res.decision === "stop")
+      return belt
+        ? "Session stopped; the profile ESTOP belt remains engaged (resume via `hermes resume`)."
+        : "Session stopped.";
+    if (res.decision === "ceiling") {
+      const amt = res.amount_usd != null ? ` to $${Number(res.amount_usd).toFixed(2)}` : "";
+      if (!res.money_block_cleared) {
+        // granted (the ceiling IS written) but at/below current spend, so the money block stays set
+        return belt
+          ? `Ceiling set${amt}; the per-session cost block remains active (ceiling not above current spend). The profile ESTOP belt also remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`
+          : `Ceiling set${amt}; the per-session cost block remains active (ceiling not above current spend).`;
       }
-      if (res.decision === "ceiling" && res.amount_usd != null) return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}.`;
-      return "Applied.";
+      return belt
+        ? `Ceiling set${amt}. The per-session cost block is cleared, but the profile ESTOP belt remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`
+        : `Ceiling set${amt}.`;
     }
-    return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`;
+    // continue
+    if (belt) return MANUAL_RESUME_NOTICE;
+    return "Applied.";
   }
 
   function httpStatus(e) {
@@ -78,7 +92,10 @@
     const [items, setItems] = useState([]);
     const [busy, setBusy] = useState({});
     const [amounts, setAmounts] = useState({});
-    const [notes, setNotes] = useState({});
+    // Notes are partitioned by profile so a resolution recorded under one profile never renders after a
+    // switch to another (a resolved episode is absent from the new profile's pending set).
+    const [notesByProfile, setNotesByProfile] = useState({});
+    const [activeProfile, setActiveProfile] = useState(null);
     // Monotonic request token: a slow response for a PREVIOUS profile must not overwrite the
     // current profile's card state after a profile switch (only the latest refresh applies).
     const reqSeq = React.useRef(0);
@@ -93,6 +110,7 @@
         // delayed prior-profile response must not overwrite the current profile's card).
         if (seq !== reqSeq.current || requestedProfile !== (await currentProfile())) return;
         setItems(Array.isArray(rows) ? rows : []);
+        setActiveProfile(requestedProfile);
       } catch (e) {
         // transient (auth/profile switch) — keep the last view, retry on the next tick
       }
@@ -106,15 +124,18 @@
 
     const resolve = useCallback(async (episodeId, decision, amountUsd) => {
       setBusy((b) => ({ ...b, [episodeId]: true }));
+      // Hoisted so the catch records the note under the same profile the request targeted.
+      let profile = activeProfile;
       try {
-        const profile = await currentProfile();
+        profile = await currentProfile();
         const body = { decision };
         if (amountUsd !== undefined && amountUsd !== null) body.amount_usd = amountUsd;
         const res = await SDK.fetchJSON(
           `${API}/escalations/${encodeURIComponent(episodeId)}/resolve?profile=${encodeURIComponent(profile)}`,
           { method: "POST", body: JSON.stringify(body) }
         );
-        setNotes((n) => ({ ...n, [episodeId]: outcomeNote(res) }));
+        // Record under the profile this resolve targeted (captured above), not whatever is active later.
+        setNotesByProfile((m) => ({ ...m, [profile]: { ...(m[profile] || {}), [episodeId]: outcomeNote(res) } }));
       } catch (e) {
         // Reserve the auth message for an explicit 401/403; a 500 / network error is a generic,
         // retryable failure. (An in-band unauthorized RESULT is a 2xx {granted:false,
@@ -123,14 +144,20 @@
         const note = (status === 401 || status === 403)
           ? "Not authorized for this profile."
           : "Could not resolve — please retry.";
-        setNotes((n) => ({ ...n, [episodeId]: note }));
+        setNotesByProfile((m) => ({ ...m, [profile]: { ...(m[profile] || {}), [episodeId]: note } }));
       } finally {
         setBusy((b) => ({ ...b, [episodeId]: false }));
         refresh();
       }
-    }, [refresh]);
+    }, [refresh, activeProfile]);
 
-    if (!items.length) return null;
+    // A granted resolution removes the episode from the pending list on the next refresh; keep its
+    // outcome note visible afterward (esp. the manual-resume notice) as a compact row, so the operator
+    // still sees why the session is paused and how to resume it. Notes are scoped to the active profile.
+    const notes = notesByProfile[activeProfile] || {};
+    const pending = new Set(items.map((it) => it.episode_id));
+    const resolvedNotes = Object.keys(notes).filter((id) => notes[id] && !pending.has(id));
+    if (!items.length && !resolvedNotes.length) return null;
 
     return h(
       "div",
@@ -167,7 +194,12 @@
             "Set ceiling"),
           notes[eid] ? h("span", { role: "status", className: "text-(--ui-text-tertiary)" }, notes[eid]) : null
         );
-      })
+      }),
+      resolvedNotes.map((id) =>
+        h("div",
+          { key: `note-${id}`, className: "flex flex-wrap items-center gap-2 py-1" },
+          h("span", { className: "font-medium" }, "Cost escalation"),
+          h("span", { role: "status", className: "text-(--ui-text-tertiary)" }, notes[id])))
     );
   }
 

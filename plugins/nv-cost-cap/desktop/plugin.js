@@ -34,38 +34,60 @@ const OUTCOME_NOTE = {
 const MANUAL_RESUME_NOTICE = 'Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock'
 function outcomeNote(res) {
   if (!res || typeof res !== 'object') return 'Request failed.'
-  if (res.granted) {
-    if (res.manual_resume_required) {
-      if (res.decision === 'ceiling' && res.amount_usd != null)
-        return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}. The per-session cost block is cleared, but the profile ESTOP belt remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`
-      return MANUAL_RESUME_NOTICE
+  if (!res.granted) return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`
+  // manual_resume_required means the profile ESTOP belt (which the plugin never lifts) is still
+  // engaged; it is decision-specific — a Stop is not a Continue and must never render the Continue
+  // notice (Stop leaves the session blocked outright).
+  const belt = !!res.manual_resume_required
+  if (res.decision === 'stop')
+    return belt
+      ? 'Session stopped; the profile ESTOP belt remains engaged (resume via `hermes resume`).'
+      : 'Session stopped.'
+  if (res.decision === 'ceiling') {
+    const amt = res.amount_usd != null ? ` to $${Number(res.amount_usd).toFixed(2)}` : ''
+    if (!res.money_block_cleared) {
+      // granted (the ceiling IS written) but at/below current spend, so the money block stays set
+      return belt
+        ? `Ceiling set${amt}; the per-session cost block remains active (ceiling not above current spend). The profile ESTOP belt also remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`
+        : `Ceiling set${amt}; the per-session cost block remains active (ceiling not above current spend).`
     }
-    if (res.decision === 'ceiling' && res.amount_usd != null) return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}.`
-    return 'Applied.'
+    return belt
+      ? `Ceiling set${amt}. The per-session cost block is cleared, but the profile ESTOP belt remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`
+      : `Ceiling set${amt}.`
   }
-  return OUTCOME_NOTE[res.reason] || `Not applied (${res.reason}).`
+  // continue
+  if (belt) return MANUAL_RESUME_NOTICE
+  return 'Applied.'
 }
 
-// One card per pending episode. A CHILD component (not an inline map body) so each card
-// can hold its own ceiling-input / outcome-note state via hooks — hooks cannot live in a map callback.
-function EscalationCard({ it, resolve }) {
+// Recover the HTTP status from a rejected ctx.rest call so a network/5xx failure is not mislabelled
+// as an authorization failure (only a real 401/403 tells the operator to change permissions).
+function httpStatus(e) {
+  if (!e) return null
+  if (typeof e.status === 'number') return e.status
+  if (typeof e.statusCode === 'number') return e.statusCode
+  const m = typeof e.message === 'string' ? /^(\d{3})\b/.exec(e.message) : null
+  return m ? Number(m[1]) : null
+}
+function errorNote(e) {
+  const s = httpStatus(e)
+  return (s === 401 || s === 403) ? 'Not authorized for this profile.' : 'Could not resolve — please retry.'
+}
+
+// One card per pending episode. A CHILD component (not an inline map body) so each card can hold its
+// own ceiling-input state via a hook. The OUTCOME note is held at the PANE level (keyed by episode) and
+// passed in, so it survives this card unmounting when the resolved episode leaves the pending list.
+function EscalationCard({ it, note, resolve }) {
   const immortal = !!it.immortal
   const [amount, setAmount] = useState('')
-  const [note, setNote] = useState('')
   const amt = Number.parseFloat(amount)
   const canSet = Number.isFinite(amt) && amt > 0
-
-  const act = (payload) =>
-    resolve.mutateAsync(payload).then(
-      (res) => setNote(outcomeNote(res)),
-      () => setNote('Not authorized for this profile.'),
-    )
 
   const controls = [
     jsx('button', {
       type: 'button',
       className: 'rounded bg-(--ui-accent) px-2 py-0.5 text-white',
-      onClick: () => act({ episodeId: it.episode_id, decision: 'continue' }),
+      onClick: () => resolve(it.episode_id, 'continue'),
       children: 'Continue',
     }, 'continue'),
   ]
@@ -74,7 +96,7 @@ function EscalationCard({ it, resolve }) {
     controls.push(jsx('button', {
       type: 'button',
       className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5',
-      onClick: () => act({ episodeId: it.episode_id, decision: 'stop' }),
+      onClick: () => resolve(it.episode_id, 'stop'),
       children: 'Stop',
     }, 'stop'))
     controls.push(jsx('input', {
@@ -93,7 +115,7 @@ function EscalationCard({ it, resolve }) {
       disabled: !canSet,
       className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5 disabled:opacity-50',
       // decision 'ceiling' is the dashboard backend's set-ceiling verb (plugin_api.py).
-      onClick: () => canSet && act({ episodeId: it.episode_id, decision: 'ceiling', amountUsd: amt }),
+      onClick: () => canSet && resolve(it.episode_id, 'ceiling', amt),
       children: 'Set ceiling',
     }, 'set-ceiling'))
   }
@@ -123,6 +145,9 @@ function EscalationPane(ctx) {
     const profile = useValue(host.state.profile) || 'default'
     const qc = useQueryClient()
     const q = `?profile=${encodeURIComponent(profile)}`
+    // Notes are partitioned by profile so a resolution recorded under one profile never renders after a
+    // switch to another (a resolved episode is absent from the new profile's pending set).
+    const [notesByProfile, setNotesByProfile] = useState({})
 
     const { data } = useQuery({
       queryKey: ['nv-cost-cap', 'escalations', profile],
@@ -130,7 +155,7 @@ function EscalationPane(ctx) {
       refetchInterval: 5000,
     })
 
-    const resolve = useMutation({
+    const resolveMut = useMutation({
       mutationFn: ({ episodeId, decision, amountUsd }) =>
         ctx.rest(`${API}/${encodeURIComponent(episodeId)}/resolve${q}`, {
           method: 'POST',
@@ -139,8 +164,22 @@ function EscalationPane(ctx) {
       onSettled: () => qc.invalidateQueries({ queryKey: ['nv-cost-cap', 'escalations', profile] }),
     })
 
+    // Set the outcome note at PANE level (keyed by episode, under the profile it was resolved against)
+    // so it survives the card unmounting when the resolved episode leaves the pending list on the next
+    // refetch (esp. the manual-resume notice). The request profile is captured for the async outcome.
+    const resolve = (episodeId, decision, amountUsd) => {
+      const p = profile
+      return resolveMut.mutateAsync({ episodeId, decision, amountUsd }).then(
+        (res) => setNotesByProfile((m) => ({ ...m, [p]: { ...(m[p] || {}), [episodeId]: outcomeNote(res) } })),
+        (e) => setNotesByProfile((m) => ({ ...m, [p]: { ...(m[p] || {}), [episodeId]: errorNote(e) } })),
+      )
+    }
+
     const items = Array.isArray(data) ? data : []
-    if (!items.length) {
+    const notes = notesByProfile[profile] || {}
+    const pending = new Set(items.map((it) => it.episode_id))
+    const resolvedNotes = Object.keys(notes).filter((id) => notes[id] && !pending.has(id))
+    if (!items.length && !resolvedNotes.length) {
       return jsx('div', {
         className: 'flex h-full items-center justify-center p-3 text-sm text-(--ui-text-tertiary)',
         children: 'No cost escalations',
@@ -149,7 +188,14 @@ function EscalationPane(ctx) {
 
     return jsx('div', {
       className: 'flex h-full flex-col gap-2 p-3 text-sm',
-      children: items.map((it) => jsx(EscalationCard, { it, resolve }, it.episode_id)),
+      children: [
+        ...items.map((it) => jsx(EscalationCard, { it, note: notes[it.episode_id], resolve }, it.episode_id)),
+        ...resolvedNotes.map((id) => jsx('div', {
+          role: 'status',
+          className: 'rounded border border-(--ui-stroke-secondary) p-2 text-(--ui-text-tertiary)',
+          children: notes[id],
+        }, `note-${id}`)),
+      ],
     })
   }
 }

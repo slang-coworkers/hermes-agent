@@ -24,7 +24,7 @@ drives the hook, and prints one JSON line:
 `resumes` is the plugin's OWN honest predicate `store.session_resumes(session_id)` = own-runnability
 AND NOT `estop.is_engaged()`, read against the REAL on-disk state — NOT a next_call/middleware probe
 (which bypasses the ordinary-inbound ESTOP gate and would falsely report a resume for a belt-left
-session, Orchestrator msg 82 R2). `estop_disposition`/`manual_resume_required` mirror the plugin's
+session). `estop_disposition`/`manual_resume_required` mirror the plugin's
 result surface; `estop_engaged`/`sentinel_exists` are the on-disk belt proof. The scenario asserts on
 `after` (window_start_total advance / blocked / applied rows), `notice`, `hook_result.action`,
 `resumes`, and the belt fields.
@@ -232,7 +232,7 @@ async def _run(args) -> int:
     # on-disk state: session_resumes() = own-runnability AND NOT estop.is_engaged(). It is FALSE while
     # a profile ESTOP belt stands (the plugin never unlinks it), because the belt gates an ordinary new
     # inbound at gateway/run.py:18245-18314. NOT a next_call/middleware probe — a next_call bypasses
-    # that gate and would falsely report a resume for a belt-left session (Orchestrator msg 82 R2).
+    # that gate and would falsely report a resume for a belt-left session.
     resumes = mod.store.session_resumes(session_id)
     engaged = _is_engaged(estop)
     estop_disposition = "left" if engaged else ("absent" if engaged is not None else None)

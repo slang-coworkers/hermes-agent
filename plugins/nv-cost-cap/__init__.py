@@ -314,10 +314,11 @@ def _session_stopped(session_id, *, today, platform=None):
 def _engage_estop(session_id) -> None:
     # Publish the profile-local ESTOP belt through the OWNED engage seam: an atomic no-replace
     # os.link that leaves any pre-existing sentinel (an operator pause, a concurrent engager)
-    # byte-for-byte and records a receipt only for a sentinel this plugin itself published, so a
-    # later authorized clear can tell its own stop from an operator pause. Engage is scoped to the
-    # SERVING profile home; when that profile IS `default` the home is the fleet root, so the belt
-    # is fleet-wide there (docs note this; estop_on_breach: false opts out).
+    # byte-for-byte and records a receipt only for a sentinel this plugin itself published. The
+    # plugin never lifts the belt; the receipt is read only by the UA-28 upstream owner-scoped
+    # resume, so that resume can distinguish the plugin's own cost-stop from an operator pause.
+    # Engage is scoped to the SERVING profile home; when that profile IS `default` the home is the
+    # fleet root, so the belt is fleet-wide there (docs note this; estop_on_breach: false opts out).
     store.engage_owned(session_id)
 
 
@@ -654,6 +655,14 @@ _MANUAL_RESUME_NOTICE = (
     "engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock"
 )
 
+# Appended to a granted set-ceiling outcome when the belt is LEFT, so a ceiling reply never implies the
+# session will run while the profile ESTOP belt (which the plugin never lifts) still gates it. Mirrors
+# the desktop/dashboard card's ceiling belt-left text.
+_CEILING_BELT_LEFT_SUFFIX = (
+    "The per-session cost block is cleared, but the profile ESTOP belt remains engaged; "
+    "resume via `hermes resume` or the UA-28 upstream lock."
+)
+
 
 def _cost_outcome_text(result) -> str:
     """A one-line operator-facing summary of a ``/cost`` resolution outcome."""
@@ -679,9 +688,23 @@ def _cost_outcome_text(result) -> str:
         if decision == "ceiling":
             amount = result.get("amount_usd")
             try:
-                return f"✅ Cost cap: ceiling set to ${float(amount):.2f}."
+                amt = f" to ${float(amount):.2f}"
             except (TypeError, ValueError):
-                return "✅ Cost cap: ceiling set."
+                amt = ""
+            belt_left = result.get("estop_disposition") == "left"
+            if not result.get("money_block_cleared"):
+                # Granted (the ceiling IS written), but a ceiling at/below current spend leaves the
+                # money block set — never claim it cleared.
+                msg = (f"⚠️ Cost cap: ceiling set{amt}; the per-session cost block remains active "
+                       "(ceiling not above current spend).")
+                if belt_left:
+                    msg += (" The profile ESTOP belt also remains engaged; resume via `hermes resume`"
+                            " or the UA-28 upstream lock.")
+                return msg
+            if belt_left:
+                # The money block cleared, but the belt the plugin never lifts still gates the session.
+                return f"⚠️ Cost cap: ceiling set{amt}. {_CEILING_BELT_LEFT_SUFFIX}"
+            return f"✅ Cost cap: ceiling set{amt}."
         return "✅ Cost cap: resolution applied."
     return _COST_OUTCOME_MESSAGES.get(result.get("reason"), f"Cost cap: could not resolve ({result.get('reason')}).")
 

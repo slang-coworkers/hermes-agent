@@ -204,7 +204,7 @@ def _finish(status, decision, episode_id, session_id, **extra):
     runs now (``store.session_resumes`` = own-runnability AND not ``estop.is_engaged()``) — so a surface
     never claims a still-paused (foreign pause / engaged belt / unknown-pricing) session resumed. A Stop
     keeps the session blocked, so it never resumes. When a profile ESTOP belt is engaged the plugin
-    LEAVES it (manual-resume release — the plugin never unlinks the sentinel), so the reply also carries
+    LEAVES it (manual-resume release — the plugin never removes the sentinel), so the reply also carries
     ``estop_disposition='left'`` + ``manual_resume_required=True``: a granted Continue/ceiling clears the
     per-session money block, but the session becomes runnable only after an operator lifts the belt
     (``hermes resume`` / UA-28); a Stop leaves the session blocked outright.
@@ -222,6 +222,10 @@ def _finish(status, decision, episode_id, session_id, **extra):
         )
         result["estop_disposition"] = "left" if belt_engaged else "absent"
         result["manual_resume_required"] = belt_engaged
+        # Whether the per-session MONEY block actually cleared (blocked→0), independent of the belt. A
+        # Stop leaves it set, and a set-ceiling AT/BELOW current spend is granted (the ceiling is written)
+        # yet deliberately LEAVES blocked=1 — so a surface must not claim the block cleared there.
+        result["money_block_cleared"] = not bool(store.get_state(session_id).get("blocked"))
         return result
     reason = {
         store.CANCELLED_CLOSED: "session-closed",
