@@ -621,6 +621,43 @@ Use a bundle when:
 
 A bundle is just a YAML alias — it doesn't install skills for you. The skills themselves must already be present (in `~/.hermes/skills/` or an external skill directory). Otherwise the bundle invocation just skips the missing ones.
 
+## Workflows and overlays (durable multi-step loops): the NanoClaw model, mapped (LOOP-F36)
+
+The NanoClaw coworker model composes an agent from *compose-time workflows* — prose procedure bodies with `{#step-id}` anchors, a `/plan` command in four modes (`plan`, `investigate`, `review`, `research`), an `/implement` command, and per-project specializations — together with *overlays* that are spliced into a workflow by an `applies-to` selector, so each coworker type follows one durable multi-step loop assembled from shared parts. The `nv-coworker-compose` plugin *renders* that model onto Hermes artifacts. This section maps each rendered artifact back to the **stock Hermes runtime primitive it runs on** — the substrate this row (LOOP-F36) verifies — and records what Hermes does not yet port.
+
+### The three runtime primitives
+
+A rendered `skills/<workflow>/SKILL.md` is a **skill**: a reusable procedural workflow body invoked as a `/slash` command that resolves and loads identically on the CLI and on every gateway platform. A rendered `skill-bundles/<type>.yaml` is a **skill bundle**: it composes several skills under one alias and, when the bundle declares an author `instruction:`, prepends that shared text — the overlay — above the composed bodies. And **`/plan`** is a first-class built-in rather than a bundled skill. As `agent/plan_prompt.py:5` records, `/plan` was promoted out of the skill tier because a skill's auto-generated slash command is the tier alphabetically trimmed off the capped Telegram/Discord command menus (`plan` sat past the cutoff, so most installs never saw it); as a core `COMMAND_REGISTRY` entry it now sits in the top-priority menu tier, which the overflow cap fills before any skill (`hermes_cli/commands.py:1157`), so it stays on the menu under the default caps a skill would fall off. Its generated turn is planning-only — no code, no mutating commands — and it instructs the agent to save a durable markdown plan under `.hermes/plans/`. All three primitives are shared across the CLI, the TUI, and every gateway because each surface routes through the same builders (`build_skill_invocation_message`, `build_bundle_invocation_message`, `build_plan_prompt`) rather than reimplementing dispatch.
+
+Each row carries its symbol and two anchors — a pinned-tag anchor (the citation of record, verified firsthand against the release tree at `v2026.8.31` / `29112bef`) and an upstream-main anchor (re-resolved against `upstream/main` at `ea06a2ba75db3223c4c2533adbe3fc0cae81db68` when this section was written, expected to drift as that branch moves):
+
+- `resolve_skill_command_key()` — resolve a `/slash` skill (workflow body) shared by the CLI and the gateway — tag: `agent/skill_commands.py:645` | main: `agent/skill_commands.py:490` — proves AC-LOOP-F36-4
+- `build_skill_invocation_message()` — load the resolved skill body into the turn — tag: `agent/skill_commands.py:664` | main: `agent/skill_commands.py:504` — proves AC-LOOP-F36-4
+- `build_bundle_invocation_message()` — compose N skills and prepend the `instruction:` overlay — tag: `agent/skill_bundles.py:253` | main: `agent/skill_bundles.py:125` — proves AC-LOOP-F36-5
+- `build_plan_prompt()` — the planning-only turn that instructs saving a durable `.hermes/plans/` plan — tag: `agent/plan_prompt.py:78` | main: `agent/plan_prompt.py:60` — proves AC-LOOP-F36-6
+- `resolve_command()` — resolve the first-class `/plan` built-in from `COMMAND_REGISTRY`, shared by every surface — tag: `hermes_cli/commands.py:463` | main: `hermes_cli/commands.py:355` — proves AC-LOOP-F36-6
+
+Supporting seams (named as paths, kept out of the dual-cite parity set): the bundle `instruction:` field is parsed at `agent/skill_bundles.py:151` and rendered as a `Bundle instruction:` prepend at `agent/skill_bundles.py:360`; the `/plan` command is the `CommandDef("plan", …)` row of `COMMAND_REGISTRY` (`hermes_cli/commands.py:230`), the single registry (`hermes_cli/commands.py:5`) from which both the gateway command set `GATEWAY_KNOWN_COMMANDS` (`hermes_cli/commands.py:541`) and the Telegram command list `telegram_bot_commands` (`hermes_cli/commands.py:719`) are derived — which is why `/plan` reaches the model on the CLI and every gateway alike.
+
+### How each primitive delivers the durable multi-step loop
+
+- **The workflow body.** A skill is invoked `/<slug>` on the CLI and on every gateway; the full body loads into the turn as a user message with any trailing text attached, so a multi-step procedure is followed verbatim wherever the coworker is driven. An unknown slug resolves to nothing rather than to a stray body.
+- **The overlay.** A bundle composes its member skills in order and prepends the author `instruction:` once, above the bodies — the mechanism a rendered `skill-bundles/<type>.yaml` uses to layer a type-specific overlay over shared workflow skills. A bundle with no `instruction:` composes the same members with no overlay line.
+- **The plan loop.** `/plan` generates a planning-only turn that mandates writing the plan under `.hermes/plans/` before any implementation — the durable artifact a multi-step loop resumes from — and never itself executes code or mutating commands.
+
+### Inherited render coverage
+
+The *render* side of the NanoClaw model is already merged and proven by the `nv-coworker-compose` plugin (LOOP-F35). `AC-LOOP-F36-1`, `AC-LOOP-F36-2`, and `AC-LOOP-F36-3` cover, respectively: each workflow body rendering to `skills/<workflow>/SKILL.md` in every profile that declares it; each coworker type receiving a `skill-bundles/<type>.yaml` alias whose `instruction:` prepend anchors the type's workflow entry; and overlays being spliced by `applies-to` at render time, so a shipped `SKILL.md` carries overlay text only for the matching type. Those three are not re-minted here. This row (LOOP-F36) adds `AC-LOOP-F36-4`, `AC-LOOP-F36-5`, and `AC-LOOP-F36-6` for the stock runtime substrate the rendered artifacts run on.
+
+### What Hermes does not port here (residual → LOOP-F36.a)
+
+Two NanoClaw behaviours are neither stock Hermes primitives nor registered by the merged `nv-coworker-compose` plugin (which registers only the `coworker` and `onboard` CLI commands plus `/onboard-project` and `/onboard-coworker`), so they are split to the follow-up row **LOOP-F36.a** (`CONFIGURE` if the compose plugin can express them through config, `BUILD` otherwise):
+
+- **The multi-mode `/plan` set.** Stock `build_plan_prompt` is single-behaviour (plan only); there is no `investigate/review/research` mode set in `agent/plan_prompt.py`.
+- **`/implement`.** There is no `implement` entry in `COMMAND_REGISTRY` (`hermes_cli/commands.py`), and the merged plugin does not register one.
+
+Overlay splicing by `applies-to` is **not** part of this residual — it is covered by the merged render criterion above.
+
 ## Agent-Managed Skills (skill_manage tool)
 
 The agent can create, update, and delete its own skills via the `skill_manage` tool. This is the agent's **procedural memory** — when it figures out a non-trivial workflow, it saves the approach as a skill for future reuse.
