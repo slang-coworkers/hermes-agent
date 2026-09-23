@@ -1925,3 +1925,63 @@ Because `delivery_id` and `timestamp` live **inside the signed body**, a verifie
 - **No consent prompt.** Outbound targets execute no code on your machine — they receive data at a URL you configured. `HERMES_SAFE_MODE=1` still skips registration, same as plugins and shell hooks. Note that payloads include tool inputs and event metadata, so only point targets at endpoints you trust, and prefer `https://`.
 
 `hermes hooks list` shows configured outbound targets alongside shell hooks, including whether each target is signed.
+
+## Gating agent-to-agent sends: per-edge human approval
+
+Bot-to-bot messages inside a single gateway (the `message_agent` tool) can be held for a human's approval on a **per-edge** basis — a specific sender→recipient pair — by combining the `pre_tool_call` hook with Hermes's built-in human-approval gate. This realises the per-edge human-approval policy of NanoClaw's `a2a.send` guard, which holds an otherwise-authorized send until a human signs off.
+
+### What NanoClaw did
+
+NanoClaw's `a2a.send` guard paired a **destination check** — self-send allowed, a reply up to a genuine ancestor allowed via session lineage, any other target requiring an explicit destination row, unknown targets denied — with a **per-edge human-approval policy**: when an approval row existed for an edge, even an authorized send was *held* until a human approved it. This section documents how Hermes realises that per-edge human approval.
+
+### How Hermes realises the per-edge human approval
+
+A `pre_tool_call` hook inspects each `message_agent` call and returns the guard's decision for that edge:
+
+- a **gated** edge returns `{"action": "approve", "rule_key": "wire:<from>:<to>"}` — this escalates the send to the human-approval gate instead of letting it through;
+- an **ungated but wired** edge returns nothing, so the send proceeds unheld;
+- an **unwired** edge returns `{"action": "block"}`, refusing the send outright.
+
+Which edges are gated is decided by the fleet's wiring predicate (the `nv-fleet-gates` plugin); this page documents only the *mechanism* that the `approve` directive drives.
+
+### Mechanics
+
+- Every hold is keyed on `pattern_key = plugin_rule:<rule_key>`, so a `wire:<from>:<to>` rule_key becomes the grant key `plugin_rule:wire:<from>:<to>`.
+- A `session` or `always` answer is recorded against that exact key, so approving one edge authorizes **only** that edge — a different sender→recipient pair stays held.
+- The hold **fails closed**: a denial, a timeout, or an error raised inside the gate all block the send. Silence is never consent.
+- The human answers through Hermes's built-in approval prompt — the interactive CLI prompt, or the gateway approvals surface when the send runs under a gateway. The plugin approval path (`request_tool_approval` → `_run_approval_gate`) does **not** route through a plugin-supplied approval transport; that transport extension point is wired into the dangerous-command and execute-code guards, not this gate.
+- The hold is evaluated in the **sender's** live session (the receiver of a Bot-Chat send runs `hermes -p <profile> chat -Q`), so a human must be present at the sender to answer it.
+
+### The honest limit
+
+With the default approval modes, a gated edge exercised from an **unattended** session — `single_query_mode`, `cron_mode`, or `unattended_mode`, where no human is watching — is **denied, not held**: failing closed turns "no human to ask" into a refusal. Set the relevant mode to `approve` and the same hold auto-approves without a human. So gate an edge only when the **sending** Bot-Chat session is interactive; for durable, unattended cross-bot work, use ungated edges plus the kanban board rather than a per-edge hold that would simply be denied.
+
+### Boundary
+
+Hermes supplies the **mechanism** — the `pre_tool_call` → approval-gate escalation and the edge-scoped key. The **policy** (which edges are gated, and how a destination is selected) lives in the `nv-fleet-gates` wiring predicate, and reply-up lineage is a separate concern. Self-send is a **semantic difference**, outside this mechanism: NanoClaw allows an agent to message itself, whereas Hermes's `message_agent` rejects a literal self-send. The guarded send in the single-gateway fleet is `message_agent`; the cross-gateway `a2a_call` is **not** covered by this predicate at the current baseline.
+
+### Native surface
+
+The table catalogs the Hermes approval surfaces this mechanism builds on, dual-cited against the pinned release and the moving default branch. The two approval-transport rows are Hermes's general approval-presentation extension point — consulted by the dangerous-command and execute-code guards, **not** by the `pre_tool_call` gate documented here — and are listed for completeness of the approval surface.
+
+| Behaviour (NanoClaw → Hermes) | Hermes surface (dual-cite) |
+|---|---|
+| `pre_tool_call` → `{action:"approve", rule_key}` escalates to the gate | `pre_tool_call` directive — tag: `website/docs/user-guide/features/hooks.md:529` · main: `website/docs/user-guide/features/hooks.md:529` |
+| Single source of truth for approvals | `tools/approval.py` module — tag: `tools/approval.py:1` · main: `tools/approval.py:1` |
+| General approval-transport extension point (dangerous-command / execute-code guards, not this gate) | `register_approval_transport()` — tag: `hermes_cli/plugins.py:1740` · main: `hermes_cli/plugins.py:423` |
+| Per-edge key `plugin_rule:<rule_key>` | `request_tool_approval()` — tag: `tools/approval.py:4166` · main: `tools/approval.py:914` |
+| Gateway async decision wait | `_await_gateway_decision()` — tag: `tools/approval.py:4549` · main: `tools/approval_gateway_wait.py:105` |
+| Redacted approval-request object an approval transport receives (`command`/`description`/`pattern_key`) | `ApprovalRequest` — tag: `hermes_cli/approval_transport.py:43` · main: `hermes_cli/approval_transport.py:41` |
+| Gated hold evaluated in the sender's live session | receiver runs `hermes -p X chat -Q` — tag: `tools/bot_mode_dm.py:687-688` · main: `tools/bot_mode_dm.py:446` |
+
+### Acceptance criteria
+
+The mechanism is verified by these acceptance criteria:
+
+- **AC-A2A-F19-1** — a gated edge yields `action: approve` with a stable `rule_key: wire:<from>:<to>`, while an ungated wired edge does not approve.
+- **AC-A2A-F19-2** — the gated `approve` directive resolves to a deny under an unattended single-query session.
+- **AC-A2A-F19-4** — the `rule_key` is stable per edge and distinct across edges, the `plugin_rule:wire:<from>:<to>` grant is edge-scoped, and the plugin's `rule_key` is forwarded into the gate end-to-end.
+- **AC-A2A-F19-5** — a denied, timed-out, or gate-error hold fails closed; an approving decision releases the send.
+- **AC-A2A-F19-6** — an unattended hold is denied under the default deny modes and auto-approves when the relevant mode is set to `approve`.
+
+A live scenario additionally verifies that a gated send surfaces to the operator and that approval releases it.
