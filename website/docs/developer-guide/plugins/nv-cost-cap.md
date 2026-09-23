@@ -130,6 +130,17 @@ durable exactly-once compare-and-set on the episode, so a double click (the port
 `escalation_increment_usd` and clears `blocked`; a mortal Stop blocks the session; an
 immortal (`daily`) session is **Continue-only** and a Stop is refused.
 
+**The plugin never lifts the ESTOP belt (manual-resume release).** When a breach also engaged
+the profile **ESTOP** belt (the default `estop_on_breach: true`), resolving the money side does
+**not** disengage it: the plugin never unlinks or removes the ESTOP sentinel on any path —
+Continue, set-ceiling, Stop, or the reconciler all leave it in place. A granted Continue (or a
+runnable set-ceiling) clears the per-session `blocked` flag but leaves the belt engaged, so the
+outcome carries `estop_disposition: "left"` and `manual_resume_required: true` and surfaces a
+manual-resume notice; the session — and the profile's cron/kanban/new inbounds — stay gated until
+an operator runs `hermes resume` (or the UA-28 upstream owner-scoped disengage lands). When no
+belt is engaged the outcome carries `estop_disposition: "absent"` and a granted Continue makes the
+session runnable immediately.
+
 ### Authorization — surface-namespaced operators
 
 Every resolution is authorized against the `operators` list using a **surface-namespaced
@@ -162,11 +173,15 @@ the single trusted local token should authorize as (default off).
 - **Messaging gateways:** `/cost continue | stop | ceiling <exact-usd>` resolves the
   session's pending episode (parsed through the adapter's own command API, so `/cost@bot`
   and iOS em-dash-corrected flags work). The plugin replies on the gateway's own outbound
-  rail with a one-line outcome (`resumed`, `stopped`, `ceiling set to $X`, or the refusal
-  reason), because a resolved command is dropped from dispatch and never becomes a model
-  turn. A blocked session's ordinary inbound is likewise dropped, so the plugin delivers the
-  pause notice naming these commands at that point; after an authorized `/cost continue` the
-  session resumes on its next turn, and a repeat `/cost continue` reports `already-resolved`.
+  rail with a one-line outcome (the Continue outcome, which states whether the session is
+  runnable again; `stopped`; `ceiling set to $X`; or the refusal reason), because a resolved
+  command is dropped from dispatch and never becomes a model turn. A blocked session's ordinary
+  inbound is likewise dropped, so the plugin delivers the pause notice naming these commands at
+  that point. An authorized `/cost continue` always clears the block, but the session resumes on
+  its next turn only when it is actually runnable; if its spend still cannot be measured (unknown
+  pricing), another blocker still holds it, or an ESTOP remains engaged, the outcome reports the
+  Continue as applied without claiming the session resumed. A repeat `/cost continue` reports
+  `already-resolved`.
 - **Orchestrator CLI (fallback):** `hermes cost-cap resolve --profile P --session S
   --episode E --budget-gen G --decision continue|stop|set-ceiling [--amount-usd U]`. Two
   independent gates, both required: it is reachable only from the orchestrator profile (an

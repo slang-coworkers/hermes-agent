@@ -65,8 +65,13 @@ def _pin(profile: str):
     )
     from hermes_constants import set_hermes_home_override
 
-    canon = normalize_profile_name(profile)
-    validate_profile_name(canon)
+    try:
+        canon = normalize_profile_name(profile)
+        validate_profile_name(canon)
+    except ValueError:
+        # A syntactically invalid or path-traversing ?profile is a client error: return a clean
+        # 4xx rather than letting validate_profile_name's ValueError escape as an unhandled 500.
+        raise HTTPException(status_code=400, detail="invalid profile") from None
     # Validate existence BEFORE installing the home override: a subsequent plugin_db/config read
     # materialises <profile>/plugin-data dirs + a data.db, so pinning an unknown profile would
     # create one for any syntactically-valid name an authenticated caller passes. 404 instead.

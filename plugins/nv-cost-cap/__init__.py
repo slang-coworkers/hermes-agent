@@ -312,28 +312,13 @@ def _session_stopped(session_id, *, today, platform=None):
 
 
 def _engage_estop(session_id) -> None:
-    # Engage under the SERVING profile home so a named profile's breach is scoped
-    # to it. When the serving profile IS `default`, that home is the fleet root,
-    # so the belt is fleet-wide there (docs note this; estop_on_breach: false opts out).
-    try:
-        from agent import estop
-
-        # Guard on the PROFILE-LOCAL sentinel, not is_engaged(): is_engaged() is
-        # fleet-root-inclusive (estop.py:93-107), so a pre-existing fleet ESTOP
-        # would short-circuit engage() and leave this profile with no sentinel of
-        # its own — fail-open once the fleet sentinel is lifted. sentinel_path() is
-        # the profile-local path engage() writes; an unreadable stat engages anyway
-        # (fail toward enforcement, mirroring is_engaged's fail-safe).
-        try:
-            profile_estop_written = estop.sentinel_path().exists()
-        except OSError:
-            profile_estop_written = False
-        if not profile_estop_written:
-            estop.engage(
-                reason=f"nv-cost-cap: session {session_id} exceeded the Tier-2 cost ceiling"
-            )
-    except Exception:
-        logger.warning("nv-cost-cap ESTOP engage failed", exc_info=True)
+    # Publish the profile-local ESTOP belt through the OWNED engage seam: an atomic no-replace
+    # os.link that leaves any pre-existing sentinel (an operator pause, a concurrent engager)
+    # byte-for-byte and records a receipt only for a sentinel this plugin itself published, so a
+    # later authorized clear can tell its own stop from an operator pause. Engage is scoped to the
+    # SERVING profile home; when that profile IS `default` the home is the fleet root, so the belt
+    # is fleet-wide there (docs note this; estop_on_breach: false opts out).
+    store.engage_owned(session_id)
 
 
 def _record_escalation(session_id, budget_gen, today) -> None:
@@ -661,6 +646,15 @@ _COST_OUTCOME_MESSAGES = {
 }
 
 
+# Verbatim operator notice a granted Continue surfaces while a profile ESTOP belt remains engaged.
+# The plugin never unlinks the sentinel (manual-resume release), so the money block clears but the
+# session stays paused until an operator lifts the belt.
+_MANUAL_RESUME_NOTICE = (
+    "Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains "
+    "engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock"
+)
+
+
 def _cost_outcome_text(result) -> str:
     """A one-line operator-facing summary of a ``/cost`` resolution outcome."""
     if not isinstance(result, dict):
@@ -668,6 +662,10 @@ def _cost_outcome_text(result) -> str:
     if result.get("granted"):
         decision = result.get("decision")
         if decision == "continue":
+            if result.get("estop_disposition") == "left":
+                # Surface the verbatim manual-resume notice so the reply is honest that the session
+                # stays paused behind the belt and names how an operator lifts it.
+                return f"⚠️ Cost cap: {_MANUAL_RESUME_NOTICE}."
             # "resumed" names a blocked→runnable transition, so it requires BOTH a prior block
             # (was_blocked) AND runnability now (resumes). A never-blocked but runnable Continue is
             # "runnable"; a still-paused one (resumes false) is a plain "Continue applied."
@@ -743,8 +741,9 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
         # COST-F30: intercept `/cost <continue|stop|ceiling ...>` and resolve it in-plugin
         # BEFORE the boundary/skip logic — a blocked session would otherwise skip its own
         # `/cost`. The command is dropped from dispatch (never a wasted model turn); the
-        # outcome is delivered back on the gateway rail immediately (_deliver_notice), and an
-        # authorized Continue also resumes the session on its next turn.
+        # outcome is delivered back on the gateway rail immediately (_deliver_notice). An authorized
+        # Continue clears the per-session money block, but if a profile ESTOP belt is engaged the
+        # plugin leaves it, so the notice reports manual_resume_required rather than a resume.
         cost_text = _cost_command_text(event)
         if cost_text is not None:
             session_id = _resolve_session_id(event, gateway, session_store)

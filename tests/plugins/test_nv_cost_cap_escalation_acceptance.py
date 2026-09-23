@@ -18,15 +18,26 @@ The matrix proves C's FULL scope, not just the escalation kind:
     (the pill-double-grant P0 under a real race, not just sequentially).
   * AC-4 uses the REAL immortal kind ``daily`` (Continue-only, Stop refused) AND an ordinary
     mortal escalation Stop (honored: blocks the session; a later Continue loses the CAS).
-  * AC-2 proves the surface-NAMESPACED-principal authz on BOTH surfaces that funnel through the
-    chokepoint — `dashboard:<provider>:<org_id>:<user_id>` from the server session
-    (`principal_from_request`) and `gateway:<platform.value>:<scope>:<user_id>` from the event
-    (`principal_from_event`) — never a client-supplied one; a BARE un-namespaced user_id AND a
-    same-user DIFFERENT-workspace principal are both refused (cross-surface + workspace isolation).
+  * AC-2 proves the surface-NAMESPACED-principal authz on ALL THREE principal classes that funnel
+    through the one chokepoint — `dashboard:<provider>:<org_id>:<user_id>` from the server session
+    (`principal_from_request`), `gateway:<platform.value>:<scope>:<user_id>` from the event
+    (`principal_from_event`), and `cli:<orchestrator-profile>:<fleet-admin-id>` from the CLI —
+    never a client-supplied one; a BARE un-namespaced user_id, a same-user DIFFERENT-workspace
+    principal, AND a `cli:`-namespaced non-operator are all refused (cross-surface + workspace
+    isolation + no CLI operator-check bypass).
     Operators are read context-free via load_config_readonly() so the ctx-free dashboard-import
     path authorizes identically.
   * AC-8 (the live gateway path via a real `pre_gateway_dispatch` `/cost` event) is the
     scenario artifact in the ADR, not a function here.
+  * AC-10 (the never-unlink safety invariant) proves the plugin NEVER unlinks or disengages the
+    profile ESTOP sentinel on ANY resolution path (Continue / runnable set-ceiling / Stop / reconcile):
+    the sentinel REMAINS byte-for-byte + inode across each, a fails-if-unlink-invoked probe FAILS if any
+    deletion primitive touches it, and a granted Continue surfaces estop_disposition="left" +
+    manual_resume_required=true (resumes=false). The belt is lifted only by UA-28 or a manual `hermes
+    resume`. Two engage-side regressions ride beside it: test_estop_acquisition_barrier (a concurrent
+    operator pause racing the plugin's os.link publish, driven through the real resolve_escalation("stop")
+    engage) and test_estop_engage_fault_injection (os.link unsupported -> O_EXCL fallback no receipt;
+    linked-but-unrecorded sentinel treated foreign, never cleanup-unlinked).
 
 COST-F30 (Option C) API the builder re-exports at the ``nv-cost-cap`` package level:
   * store.claim_resolution(episode_id, session_id, budget_gen, decision, actor, amount_usd=None) -> bool
@@ -62,6 +73,9 @@ COST-F30 (Option C) API the builder re-exports at the ``nv-cost-cap`` package le
 
 Fails on the stock (COST-F29) tree — those symbols do not exist. Behavior contract, no
 network, nothing under ~/.hermes.
+
+Drop-in artifact: the builder copies it to tests/plugins/test_nv_cost_cap_escalation_acceptance.py
+before running; repo-root discovery for the plugin dir assumes that location.
 """
 
 import contextlib
@@ -87,6 +101,11 @@ OPERATOR = "gateway:slack:ws-1:op-1"
 STRANGER = "gateway:slack:ws-1:stranger"
 OTHER_SCOPE = "gateway:slack:ws-2:op-1"
 BARE_OP = "op-1"
+# CLI_OP is the orchestrator's fleet-admin principal for `hermes cost-cap resolve`; it funnels through
+# the SAME operator-list authz as the panel/gateway surfaces (no bypass) and must be a configured
+# operator. CLI_STRANGER is a cli:-namespaced non-operator (denied like any other non-operator).
+CLI_OP = "cli:orch-1:fleet-admin"
+CLI_STRANGER = "cli:orch-1:not-admin"
 # PROFA_OP is the target profile's operator, DISJOINT from the default config's operators:
 # its user_id "profa-op" is absent from the default set (op-1), so a default-only principal can be
 # proved DENIED for a profa request — the router MUST authorize against the pinned ?profile, not default.
@@ -124,7 +143,7 @@ def loaded_plugin(tmp_path, monkeypatch):
             "entries": {
                 PLUGIN_KEY: {
                     "settings": {
-                        "operators": [OP_DASH, OPERATOR],
+                        "operators": [OP_DASH, OPERATOR, CLI_OP],
                         "escalation_increment_usd": INCREMENT_USD,
                         "escalation_reconcile_seconds": 3600,
                     }
@@ -148,7 +167,7 @@ def loaded_plugin(tmp_path, monkeypatch):
     assert loaded.enabled is True, getattr(loaded, "error", None)
     assert loaded.error is None
     assert loaded.module is not None
-    assert {"pre_gateway_dispatch", "on_session_finalize"} <= set(loaded.hooks_registered)
+    assert {"pre_gateway_dispatch", "on_session_end", "on_session_finalize"} <= set(loaded.hooks_registered)
     return loaded
 
 
@@ -255,6 +274,118 @@ def _fake_event(platform_value, scope_id, user_id):
     return SimpleNamespace(source=source)
 
 
+def _engage_owned(mod, session_id):
+    """Engage the profile-local ESTOP as an nv-cost-cap-owned sentinel through the plugin's real engage
+    seam (store.engage_owned, atomic no-replace os.link publish), so a per-engagement receipt is recorded
+    in plugin_db. Under MANUAL-RESUME the plugin never consults the receipt to clear (it never clears);
+    the receipt exists solely so UA-28's upstream disengage_owned can later identify the plugin's own
+    sentinel. A direct estop.engage() records no receipt and is therefore foreign to the plugin."""
+    mod.store.engage_owned(session_id)
+
+
+@contextlib.contextmanager
+def _sentinel_untouched(estop, why):
+    """Fail if the profile-local sentinel is deleted, replaced, or its bytes change across the block.
+    A canary hardlink pins the original inode, so a delete-and-identical-rewrite (which byte-equality
+    alone would miss) changes st_ino and is caught; where hardlinks are unsupported it degrades to byte
+    verification (the design itself has a hardlink-unavailable fallback)."""
+    sp = estop.sentinel_path()
+    before = sp.read_bytes()
+    canary = sp.with_name(sp.name + ".nvcc-canary")
+    try:
+        canary.hardlink_to(sp)
+    except (OSError, NotImplementedError):
+        canary = None
+    try:
+        orig_ino = canary.stat().st_ino if canary is not None else None
+        yield
+        assert sp.exists() and sp.read_bytes() == before, f"{why} (bytes changed)"
+        if orig_ino is not None:
+            assert sp.stat().st_ino == orig_ino, f"{why} (deleted-and-rewritten)"
+    finally:
+        if canary is not None:
+            canary.unlink()
+
+
+@contextlib.contextmanager
+def _fail_if_sentinel_unlinked(estop):
+    """MANUAL-RESUME probe: FAIL the test if the plugin invokes any deletion/rename primitive on the
+    ESTOP sentinel, or calls estop.disengage() at all, inside the block. Non-sentinel paths (e.g. an
+    atomic config.yaml write) pass through to the real primitive, so a set-ceiling's config write is
+    unaffected — only a touch of the sentinel path trips it. This is the never-unlink invariant asserted
+    directly (beside the byte+inode canary in _sentinel_untouched)."""
+    import os as _os
+    import pathlib
+
+    sp = str(estop.sentinel_path())
+    real_path_unlink = pathlib.Path.unlink
+    real_os_unlink = _os.unlink
+    real_os_remove = _os.remove
+    real_os_rename = _os.rename
+    real_os_replace = _os.replace
+    real_disengage = estop.disengage
+
+    def _guard_path_unlink(self, *a, **k):
+        assert str(self) != sp, "plugin invoked Path.unlink on the ESTOP sentinel — never-unlink violated"
+        return real_path_unlink(self, *a, **k)
+
+    def _guard_os_unlink(path, *a, **k):
+        assert str(path) != sp, "plugin invoked os.unlink on the ESTOP sentinel — never-unlink violated"
+        return real_os_unlink(path, *a, **k)
+
+    def _guard_os_remove(path, *a, **k):
+        assert str(path) != sp, "plugin invoked os.remove on the ESTOP sentinel — never-unlink violated"
+        return real_os_remove(path, *a, **k)
+
+    def _guard_os_rename(src, dst, *a, **k):
+        assert str(src) != sp and str(dst) != sp, "plugin renamed the ESTOP sentinel — never-unlink violated"
+        return real_os_rename(src, dst, *a, **k)
+
+    def _guard_os_replace(src, dst, *a, **k):
+        # os.replace also backs pathlib.Path.replace, so this covers atomic-rename deletions too.
+        assert str(src) != sp and str(dst) != sp, "plugin os.replace'd the ESTOP sentinel — never-unlink violated"
+        return real_os_replace(src, dst, *a, **k)
+
+    def _guard_disengage(*a, **k):
+        raise AssertionError("plugin invoked estop.disengage — never-unlink violated")
+
+    pathlib.Path.unlink = _guard_path_unlink
+    _os.unlink = _guard_os_unlink
+    _os.remove = _guard_os_remove
+    _os.rename = _guard_os_rename
+    _os.replace = _guard_os_replace
+    estop.disengage = _guard_disengage
+    try:
+        yield
+    finally:
+        pathlib.Path.unlink = real_path_unlink
+        _os.unlink = real_os_unlink
+        _os.remove = real_os_remove
+        _os.rename = real_os_rename
+        _os.replace = real_os_replace
+        estop.disengage = real_disengage
+
+
+# Verbatim operator notice a granted Continue must surface while the belt is left.
+MANUAL_RESUME_NOTICE = (
+    "Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains "
+    "engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock"
+)
+
+
+def _assert_left_belt(res, mod, *, why, expect_notice=False):
+    """A granted resolution whose profile ESTOP belt remains engaged must surface it honestly: the money
+    block cleared, but the belt stands so the session is not runnable and the operator must resume it.
+    A Continue additionally renders the verbatim manual-resume notice through _cost_outcome_text; the
+    set-ceiling verb differs, so its notice text is left to the plugin and only the fields are asserted."""
+    assert res.get("resumes") is False, f"{why}: resumes must be False while a sentinel is engaged"
+    assert res.get("estop_disposition") == "left", f"{why}: estop_disposition must be 'left' ({res!r})"
+    assert res.get("manual_resume_required") is True, f"{why}: manual_resume_required must be True ({res!r})"
+    if expect_notice:
+        rendered = mod._cost_outcome_text(res)
+        assert MANUAL_RESUME_NOTICE in rendered, f"{why}: verbatim manual-resume notice absent ({rendered!r})"
+
+
 # --- acceptance tests ------------------------------------------------------
 
 
@@ -310,7 +441,7 @@ def test_ac_cost_f30_1(loaded_plugin, kind, immortal, blocked, baseline):
 
 
 def test_ac_cost_f30_2(loaded_plugin):
-    """AC-COST-F30-2: A resolution is authorized against structured operators using a surface-namespaced principal on both surfaces; a non-operator, a bare un-namespaced user_id, or the same user_id in a different workspace scope applies no effect while a matching namespaced operator is granted."""
+    """AC-COST-F30-2: A resolution is authorized against structured operators using a surface-namespaced principal on all three resolution surfaces (dashboard, gateway, CLI) through one chokepoint with no bypass; a non-operator, a bare un-namespaced user_id, the same user_id in a different workspace scope, or a cli:-namespaced non-operator applies no effect while a matching namespaced operator is granted."""
     mod = loaded_plugin.module
 
     # Dashboard seam: the namespaced principal is built from the server session, never the body.
@@ -350,6 +481,21 @@ def test_ac_cost_f30_2(loaded_plugin):
     assert ggranted["granted"] is True, ggranted
     assert len(_applied(mod, gsid)) == 1
 
+    # CLI seam: `hermes cost-cap resolve` funnels through the SAME chokepoint with a
+    # cli:<orchestrator-profile>:<fleet-admin-id> principal that must be a configured operator — no
+    # bypass. A cli:-namespaced NON-operator is denied exactly like any other non-operator; the
+    # configured CLI operator grants. (The cli_scope operational gate is the fleet's separate plugin.)
+    csid = "sess-f30-2-cli"
+    cep = _seed_episode(mod, csid, kind="breach")
+    cli_before = dict(mod.store.get_state(csid))
+    denied_cli = mod.resolve_escalation(csid, cep, 1, "continue", CLI_STRANGER)
+    assert denied_cli["granted"] is False and denied_cli.get("reason") == "unauthorized", denied_cli
+    assert mod.store.resolutions(csid) == []
+    assert dict(mod.store.get_state(csid)) == cli_before
+    granted_cli = mod.resolve_escalation(csid, cep, 1, "continue", CLI_OP)
+    assert granted_cli["granted"] is True, granted_cli
+    assert len(_applied(mod, csid)) == 1
+
     # The dashboard-namespaced operator grants through the same chokepoint.
     granted = mod.resolve_escalation(sid, ep, 1, "continue", OP_DASH)
     assert granted["granted"] is True, granted
@@ -378,14 +524,19 @@ def test_ac_cost_f30_3(loaded_plugin):
     assert _profile_ceiling("profb") == pytest.approx(9.0), "unauthorized must not touch profb"
     assert _base_ceiling() is None, "unauthorized must not touch base"
 
+    # set-ceiling is a RESOLUTION, not just a config write: on a Tier-2 blocked breach (spend 10.0) an
+    # exact ceiling of 12.50 (> spend) applies the resolution row AND clears the block so the session runs.
     ok_session = "sess-f30-3-ok"
     with _pinned_home("profa"):
-        ok_ep = _seed_episode(mod, ok_session, budget_gen=1)
+        ok_ep = _seed_episode(mod, ok_session, kind="breach", budget_gen=1)
+        assert dict(mod.store.get_state(ok_session))["blocked"] == 1, "a breach starts blocked"
     exact = mod.set_episode_ceiling("profa", ok_session, ok_ep, 1, "12.50", OPERATOR)
     assert exact["granted"] is True, exact
     with _pinned_home("profa"):
         rows = mod.store.resolutions(ok_session)
+        assert dict(mod.store.get_state(ok_session))["blocked"] == 0, "a ceiling above spend clears the Tier-2 block"
     assert len(rows) == 1 and rows[0]["decision"] == "ceiling"
+    assert rows[0]["status"] == "applied", rows[0]
     assert rows[0]["amount_usd"] == pytest.approx(12.50), rows[0]
     assert _profile_ceiling("profa") == pytest.approx(12.50), "target profile ceiling written exactly"
     assert _profile_ceiling("profb") == pytest.approx(9.0), "other profile must be unchanged"
@@ -408,12 +559,16 @@ def test_ac_cost_f30_3(loaded_plugin):
     for bad in ("2x", "x2", "+50%", "1e999", "-3", "0"):
         bad_session = f"sess-f30-3-{bad}"
         with _pinned_home("profa"):
-            bad_ep = _seed_episode(mod, bad_session, budget_gen=1)
+            # seed as a blocked breach so a stray unblock/baseline change before the invalid-amount return
+            # is caught by the FULL-state compare, not only the resolution-row/ceiling checks.
+            bad_ep = _seed_episode(mod, bad_session, kind="breach", budget_gen=1)
+            bad_before = dict(mod.store.get_state(bad_session))
         rejected = mod.set_episode_ceiling("profa", bad_session, bad_ep, 1, bad, OPERATOR)
         assert rejected["granted"] is False, (bad, rejected)
         assert rejected.get("reason") == "invalid-amount", (bad, rejected)
         with _pinned_home("profa"):
             assert mod.store.resolutions(bad_session) == [], bad
+            assert dict(mod.store.get_state(bad_session)) == bad_before, (bad, "invalid amount must not mutate cap_state")
     assert _profile_ceiling("profa") == pytest.approx(3.25), "rejected args must not change the last-set ceiling"
 
     # The dashboard imports plugin_api.py WITHOUT register(ctx), so the ceiling write must be
@@ -434,7 +589,7 @@ def test_ac_cost_f30_3(loaded_plugin):
 
 
 def test_ac_cost_f30_4(loaded_plugin):
-    """AC-COST-F30-4: The immortal decision uses the real F29 immortal kind — an immortal 'daily' episode is Continue-only (Stop refused, Continue advances day_start_total) while an ordinary mortal Stop is honored and blocks the session."""
+    """AC-COST-F30-4: The immortal decision uses the real F29 immortal kind — an immortal 'daily' episode is Continue-ONLY (BOTH Stop and set-ceiling refused with no mutation, Continue advances day_start_total) while an ordinary mortal Stop is honored and blocks the session."""
     mod = loaded_plugin.module
 
     # Immortal daily (the real F29 immortal kind): Stop refused, Continue advances the day baseline.
@@ -443,6 +598,20 @@ def test_ac_cost_f30_4(loaded_plugin):
     stopped = mod.resolve_escalation(imm, dep, 1, "stop", OPERATOR)
     assert stopped["granted"] is False and stopped.get("reason") == "immortal-continue-only", stopped
     assert mod.store.resolutions(imm) == []
+
+    # Continue-ONLY means set-ceiling is ALSO refused on an immortal episode (not just Stop), with no
+    # mutation — else an impl that allowed immortal set-ceiling would slip through. Seeded in a pinned
+    # profile so set_episode_ceiling (which pins the profile to find the episode) locates it, then refuses.
+    _write_profile_ceiling("immceil", 100.0)
+    with _pinned_home("immceil"):
+        ceil_ep = _seed_episode(mod, "sess-f30-4-immceil", kind="daily")
+        imm_before = dict(mod.store.get_state("sess-f30-4-immceil"))
+    ceil_refused = mod.set_episode_ceiling("immceil", "sess-f30-4-immceil", ceil_ep, 1, "12.50", OPERATOR)
+    assert ceil_refused["granted"] is False and ceil_refused.get("reason") == "immortal-continue-only", ceil_refused
+    with _pinned_home("immceil"):
+        assert dict(mod.store.get_state("sess-f30-4-immceil")) == imm_before, "immortal set-ceiling must not mutate"
+        assert mod.store.resolutions("sess-f30-4-immceil") == [], "immortal set-ceiling must record no resolution"
+
     cont = mod.resolve_escalation(imm, dep, 1, "continue", OPERATOR)
     assert cont["granted"] is True, cont
     assert _baseline(mod, imm, "day_start_total") == pytest.approx(INCREMENT_USD), imm
@@ -458,6 +627,14 @@ def test_ac_cost_f30_4(loaded_plugin):
     late = mod.resolve_escalation(mortal, mep, 1, "continue", OPERATOR)
     assert late["granted"] is False and late.get("reason") == "already-resolved", late
     assert dict(mod.store.get_state(mortal))["blocked"] == 1, "Stop stays winning under the CAS"
+
+    # The gateway `/cost stop` PARSER routes to a mortal Stop through the same chokepoint (proves the
+    # decision set is Stop-capable on the gateway surface, not just Continue).
+    gw_stop = "sess-f30-4-gwstop"
+    _seed_episode(mod, gw_stop, kind="escalation", blocked=False)
+    gw = mod.handle_cost_command(gw_stop, "/cost stop", OPERATOR)
+    assert gw["granted"] is True and gw.get("decision") == "stop", gw
+    assert dict(mod.store.get_state(gw_stop))["blocked"] == 1, "gateway /cost stop must block the session"
 
 
 def test_ac_cost_f30_5(loaded_plugin):
@@ -514,7 +691,7 @@ def test_ac_cost_f30_5(loaded_plugin):
 
 
 def test_ac_cost_f30_9(loaded_plugin):
-    """AC-COST-F30-9 (derived): profile isolation through the REAL ctx-free dashboard router —
+    """AC-COST-F30-9: (derived) profile isolation through the REAL ctx-free dashboard router —
     running from the DEFAULT home, GET/authz/CAS act on the TARGET ?profile only. A DEFAULT-profile
     operator is DENIED for a profa request (no mutation) while profa's DISJOINT operator SUCCEEDS
     (exactly one increment); this DETECTS an impl that authorizes against the default before pinning."""
@@ -576,8 +753,11 @@ def test_ac_cost_f30_9(loaded_plugin):
     #     request: the router authorizes against the pinned-profa operators, not the default's. The
     #     denial must be an explicit unauthorized RESPONSE (not merely a no-op / an unrelated 5xx),
     #     AND no store effect.
+    # a decoy body carrying forged identity fields must be IGNORED — the route derives its principal
+    # from request.state.session (op-1, not a profa operator), never the body, so it still denies.
     r_deny = client.post(f"{base}/escalations/{episode}/resolve?profile=profa",
-                         json={"decision": "continue"}, headers={"x-test-user": "op-1"})
+                         json={"decision": "continue", "principal": PROFA_OP, "actor": PROFA_OP,
+                               "user_id": "profa-op"}, headers={"x-test-user": "op-1"})
     denied = r_deny.json()
     assert (
         r_deny.status_code == 403 and denied.get("detail") == "unauthorized"
@@ -590,6 +770,25 @@ def test_ac_cost_f30_9(loaded_plugin):
         after_deny = dict(mod.store.get_state("sess-f30-9"))
         assert _applied(mod, "sess-f30-9") == [], "default operator applied no effect in profa"
     assert after_deny == before, (r_deny.status_code, r_deny.text)
+
+    # (c) an encoded traversal profile is rejected with a CLEAN 4xx (not a 500) and creates NO escaped
+    #     profile dir/db — validate_profile_name must reject BEFORE get_profile_dir/set_hermes_home_override.
+    escaped = Path(os.environ["HERMES_HOME"]).parent / "nvcc-escape-probe"
+    assert not escaped.exists(), "precondition: the escape target must not exist"
+    r_trav = client.get(f"{base}/escalations?profile=..%2f..%2fnvcc-escape-probe", headers={"x-test-user": "op-1"})
+    assert 400 <= r_trav.status_code < 500, ("traversal must be a clean 4xx rejection, not a 500", r_trav.status_code, r_trav.text)
+    assert not escaped.exists(), "a traversal profile must not create an escaped profile dir"
+    assert not (escaped / "plugin-data" / PLUGIN_KEY / "data.db").exists(), "no escaped plugin db"
+
+    # (c2) the MUTATION-bearing resolve POST must ALSO reject a traversal profile with a clean 4xx,
+    #      no escaped dir, no store effect (validation precedes every read/authz/CAS/config op).
+    r_trav_post = client.post(f"{base}/escalations/{episode}/resolve?profile=..%2f..%2fnvcc-escape-probe",
+                              json={"decision": "continue"}, headers={"x-test-user": "profa-op"})
+    assert 400 <= r_trav_post.status_code < 500, ("POST traversal must be a clean 4xx", r_trav_post.status_code, r_trav_post.text)
+    assert not escaped.exists(), "the resolve POST must not create an escaped profile dir"
+    with _pinned_home("profa"):
+        assert dict(mod.store.get_state("sess-f30-9")) == before, "traversal POST must not mutate profa"
+        assert _applied(mod, "sess-f30-9") == [], "traversal POST must apply nothing"
 
     # (b) profa's DISJOINT operator SUCCEEDS — exactly one increment, blocked cleared.
     r_ok = client.post(f"{base}/escalations/{episode}/resolve?profile=profa",
@@ -604,93 +803,258 @@ def test_ac_cost_f30_9(loaded_plugin):
 
 
 def test_ac_cost_f30_10(loaded_plugin):
-    """AC-COST-F30-10 (derived, safety): on the default estop_on_breach=true a granted Continue lifts the shared profile-local ESTOP sentinel ONLY when it is nv-cost-cap-owned (reason begins 'nv-cost-cap:') AND no non-immortal OPEN session in the profile — including the just-resolved one — remains blocked/unpriced/over-ceiling; a FOREIGN (hermes pause) sentinel and a still-needed multi-session belt (a second session blocked, over-ceiling, or recon-unpriced) are both LEFT while the resolution is still applied, and the sentinel is unlinked only when owned and the belt is clear."""
+    """AC-COST-F30-10: (derived, safety) the plugin NEVER unlinks or disengages the profile ESTOP
+    sentinel on ANY resolution path. A granted Continue, a runnable set-ceiling, a granted Stop, and a
+    reconcile pass each apply the per-session cap_state resolution but LEAVE the sentinel byte-for-byte
+    with its inode unchanged — owned, foreign, or fleet-root alike — the result reports
+    estop_disposition='left' + manual_resume_required=true (resumes=false) while a sentinel is engaged,
+    and a probe FAILS the test if the plugin touches the sentinel via Path.unlink/os.unlink/os.remove/
+    os.rename/estop.disengage on any path. The belt is lifted only upstream or by a manual `hermes
+    resume`, never by the plugin, so a cost-cap resolution can never silently lift an operator pause."""
     from agent import estop
 
     mod = loaded_plugin.module
 
-    # Each sub-case runs in its OWN pinned profile so cap_state and the profile-local ESTOP
-    # sentinel (estop.sentinel_path() = get_hermes_home()/ESTOP, honouring the override) are
-    # isolated; each profile carries the namespaced operators and a high ceiling so a resolved
-    # session is provably runnable (spent well under the ceiling, not over-ceiling).
-    for name in ("estopf", "estopb", "estopc", "estopd"):
+    # Each sub-case runs in its OWN pinned profile so cap_state and the profile-local ESTOP sentinel
+    # (estop.sentinel_path() = get_hermes_home()/ESTOP, honouring the override) are isolated. Ownership
+    # is an unguessable per-engagement receipt recorded in plugin_db when the plugin engages (atomic
+    # link-publish) — never the reason text; _engage_owned records one, estop.engage() (foreign) does not.
+    # Because the plugin never inspects ownership to decide a clear (it never clears), the never-unlink
+    # probe holds identically for owned, foreign, and fleet-root sentinels — the receipt exists only so
+    # the upstream owner-scoped disengage can later identify the plugin's own sentinel.
+    for name in ("estopi", "estopif", "estopceil", "estopstop", "estoprec", "estopacq"):
         _write_profile_ceiling(name, 100.0)
 
-    # (i) FOREIGN sentinel preserved: a `hermes pause`-style sentinel (reason without the
-    # 'nv-cost-cap:' prefix) must survive an authorized Continue even when the belt is otherwise
-    # clear — a cost-cap resolution must never lift an operator pause.
-    with _pinned_home("estopf"):
-        ep = _seed_episode(mod, "sess-f30-10-foreign", kind="breach")
-        estop.engage(reason="operator maintenance window")  # foreign: no 'nv-cost-cap:' prefix
-        assert estop.sentinel_path().exists()
-        res = mod.resolve_escalation("sess-f30-10-foreign", ep, 1, "continue", OPERATOR)
+    # (i) granted CONTINUE on the blocked session, OWNED sentinel: the money block clears (blocked=0)
+    # but the sentinel REMAINS byte-for-byte and inode-identical, no deletion primitive is invoked, the
+    # result surfaces the left belt with the verbatim notice, and the recorded receipt is still present.
+    with _pinned_home("estopi"):
+        ep_i = _seed_episode(mod, "sess-f30-10-cont", kind="breach")
+        _engage_owned(mod, "sess-f30-10-cont")  # OWNED via the plugin (receipt recorded)
+        with _sentinel_untouched(estop, "Continue must leave the OWNED sentinel"), \
+                _fail_if_sentinel_unlinked(estop):
+            res = mod.resolve_escalation("sess-f30-10-cont", ep_i, 1, "continue", OPERATOR)
         assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-foreign"))["blocked"] == 0, "resolution IS applied"
-        assert estop.sentinel_path().exists(), "a FOREIGN (hermes pause) sentinel must be left intact"
+        assert dict(mod.store.get_state("sess-f30-10-cont"))["blocked"] == 0, "the money block clears"
+        assert estop.sentinel_path().exists(), "the belt is LEFT after a granted Continue"
+        assert mod.store.estop_receipt() is not None, "the plugin's own receipt is preserved (never cleared)"
+        _assert_left_belt(res, mod, why="Continue on an owned engaged belt", expect_notice=True)
 
-    # (ii) Multi-session belt preserved: with an nv-cost-cap-owned sentinel and TWO non-immortal
-    # blocked sessions, resolving ONE must LEAVE the sentinel because the other session is still
-    # blocked — clearing it would resume cron/kanban for the profile during an active breach.
-    with _pinned_home("estopb"):
-        ep_a = _seed_episode(mod, "sess-f30-10-belt-a", kind="breach")
-        _seed_episode(mod, "sess-f30-10-belt-b", kind="breach")  # stays blocked
-        estop.engage(reason="nv-cost-cap: session sess-f30-10-belt-a exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-f30-10-belt-a", ep_a, 1, "continue", OPERATOR)
+    # (i-foreign) same, but a FOREIGN operator pause (no receipt): equally never touched, and the plugin
+    # never adopts it — estop_receipt() stays None. A cost-cap resolution must never lift an operator pause.
+    with _pinned_home("estopif"):
+        ep_if = _seed_episode(mod, "sess-f30-10-cont-f", kind="breach")
+        estop.engage(reason="operator maintenance window")  # foreign: no plugin receipt
+        with _sentinel_untouched(estop, "Continue must leave a FOREIGN pause byte-for-byte"), \
+                _fail_if_sentinel_unlinked(estop):
+            res = mod.resolve_escalation("sess-f30-10-cont-f", ep_if, 1, "continue", OPERATOR)
         assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-belt-a"))["blocked"] == 0
-        assert dict(mod.store.get_state("sess-f30-10-belt-b"))["blocked"] == 1, "the other session stays blocked"
-        assert estop.sentinel_path().exists(), "the shared belt must be left while another session is still blocked"
+        assert dict(mod.store.get_state("sess-f30-10-cont-f"))["blocked"] == 0, "resolution IS applied"
+        assert mod.store.estop_receipt() is None, "a foreign pause is never adopted as owned"
+        _assert_left_belt(res, mod, why="Continue while a foreign operator pause is engaged", expect_notice=True)
 
-    # (iii) Cleared when owned AND belt-clear: the sole owned breach, once resolved and runnable,
-    # DOES lift the sentinel — the guard is not over-conservative, which is what lets an authorized
-    # Continue on the sole priced breach resume (cf. AC-8 Part B).
-    with _pinned_home("estopc"):
-        ep_c = _seed_episode(mod, "sess-f30-10-clear", kind="breach")
-        estop.engage(reason="nv-cost-cap: session sess-f30-10-clear exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-f30-10-clear", ep_c, 1, "continue", OPERATOR)
+    # (ii) runnable SET-CEILING (an exact ceiling above spend clears the block) with an OWNED sentinel:
+    # the resolution still applies and clears the money block, but the sentinel is LEFT. The config.yaml
+    # write is a non-sentinel path, so the unlink probe passes it through.
+    with _pinned_home("estopceil"):
+        ep_ceil = _seed_episode(mod, "sess-f30-10-ceil", kind="breach")
+        _engage_owned(mod, "sess-f30-10-ceil")  # OWNED via the plugin (receipt recorded)
+        # set_episode_ceiling pins "estopceil" internally; that pin nests under this one (same profile),
+        # so estop.sentinel_path() here resolves to estopceil's sentinel and the guards watch it.
+        with _sentinel_untouched(estop, "runnable set-ceiling must leave the sentinel"), \
+                _fail_if_sentinel_unlinked(estop):
+            res = mod.set_episode_ceiling("estopceil", "sess-f30-10-ceil", ep_ceil, 1, "12.50", OPERATOR)
         assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-clear"))["blocked"] == 0
-        assert not estop.sentinel_path().exists(), "an owned sentinel with a clear belt must be lifted"
+        assert dict(mod.store.get_state("sess-f30-10-ceil"))["blocked"] == 0, "ceiling above spend clears the block"
+        assert estop.sentinel_path().exists(), "the belt is LEFT after a runnable set-ceiling"
+        # the set-ceiling verb differs from Continue, so only the structured left-belt fields are asserted.
+        _assert_left_belt(res, mod, why="runnable set-ceiling on an owned engaged belt")
 
-    # (iv) BODY-LESS sentinel preserved: engage()'s touch() fail-safe can leave a sentinel with no
-    # JSON body; an unreadable/empty body is not provably nv-cost-cap-owned, so it must be treated
-    # as foreign and survive an authorized Continue even with a clear belt.
-    with _pinned_home("estopd"):
-        ep_d = _seed_episode(mod, "sess-f30-10-empty", kind="breach")
-        estop.sentinel_path().write_text("", encoding="utf-8")  # body-less: json.loads fails -> foreign
-        assert estop.sentinel_path().exists()
-        res = mod.resolve_escalation("sess-f30-10-empty", ep_d, 1, "continue", OPERATOR)
+    # (iii) granted STOP, OWNED sentinel: Stop keeps the session blocked and (re-)engages via the same
+    # atomic link-publish — it NEVER unlinks. The sentinel remains and no deletion primitive fires.
+    with _pinned_home("estopstop"):
+        ep_stop = _seed_episode(mod, "sess-f30-10-stop", kind="escalation", blocked=False)
+        _engage_owned(mod, "sess-f30-10-stop")  # OWNED via the plugin (receipt recorded)
+        with _sentinel_untouched(estop, "Stop must never unlink the sentinel"), \
+                _fail_if_sentinel_unlinked(estop):
+            res = mod.resolve_escalation("sess-f30-10-stop", ep_stop, 1, "stop", OPERATOR)
         assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-empty"))["blocked"] == 0
-        assert estop.sentinel_path().exists(), "a body-less/unreadable sentinel must be treated as foreign and left"
+        assert dict(mod.store.get_state("sess-f30-10-stop"))["blocked"] == 1, "a mortal Stop blocks the session"
+        assert estop.sentinel_path().exists(), "Stop leaves the sentinel engaged"
+        assert res.get("resumes") is False, "a Stop never resumes the session"
 
-    # (v) OVER-CEILING belt-holder: with an owned sentinel, a SECOND non-immortal session that is
-    # not blocked but is over its ceiling still holds the belt, so resolving a runnable session
-    # LEAVES the sentinel — the belt honours over-ceiling, not only blocked.
-    _write_profile_ceiling("estope", 8.0)
-    with _pinned_home("estope"):
-        ep_e = _seed_episode(mod, "sess-f30-10-ceil", kind="breach")  # after Continue: spent 5 < 8 -> runnable
-        mod.store.set_state("sess-f30-10-ceil-holder", effective_usd=50.0, window_start_total=0.0,
-                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0)  # spent 50 >= 8 -> over-ceiling
-        estop.engage(reason="nv-cost-cap: session sess-f30-10-ceil exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-f30-10-ceil", ep_e, 1, "continue", OPERATOR)
-        assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-ceil"))["blocked"] == 0
-        assert estop.sentinel_path().exists(), "a non-blocked over-ceiling session must hold the belt"
+    # (iv) RECONCILE over a pinned profile whose sole blocker closed unresolved, OWNED sentinel: the
+    # reconciler finalises the closed-unresolved episode but LEAVES the sentinel byte-for-byte AND
+    # inode-identical — it performs no ESTOP clear of any kind. reconcile_once() runs while pinned to
+    # estoprec (it enumerates + pins profiles itself; list_profiles ignores the override), so the guard
+    # watches estoprec's sentinel.
+    with _pinned_home("estoprec"):
+        _seed_episode(mod, "sess-f30-10-rec", kind="breach")
+        _engage_owned(mod, "sess-f30-10-rec")  # OWNED via the plugin (receipt recorded)
+        mod._on_session_finalize(session_id="sess-f30-10-rec")  # sole blocker closed unresolved
+        with _sentinel_untouched(estop, "reconcile must leave the sentinel byte-for-byte and inode-identical"), \
+                _fail_if_sentinel_unlinked(estop):
+            acted = mod.reconcile_once()
+        # reconcile must ACT (finalize the closed-unresolved episode), not no-op: a no-op reconciler
+        # leaves the sentinel untouched too, so the retained-sentinel assertion alone would false-green.
+        assert isinstance(acted, int) and acted >= 1, acted
+        rec_rows = mod.store.resolutions("sess-f30-10-rec")
+        assert len(rec_rows) == 1 and rec_rows[0]["actor"] == "reconciler", rec_rows
+        assert rec_rows[0]["status"] == "cancelled" and rec_rows[0]["reason"] == "session-closed", rec_rows
+        assert estop.sentinel_path().exists(), "reconcile must LEAVE the sentinel"
 
-    # (vi) RECON-UNPRICED belt-holder: a reconcile-only unknown-pricing session (recon_unpriced=1,
-    # no unpriced call rows) still holds the belt — the belt must honour the recon marker the
-    # evaluator uses, not only the calls-table unpriced_count, or AC-8 Part A regresses.
-    _write_profile_ceiling("estopg", 100.0)
-    with _pinned_home("estopg"):
-        ep_g = _seed_episode(mod, "sess-f30-10-recon", kind="breach")  # runnable after Continue
-        mod.store.set_state("sess-f30-10-recon-holder", effective_usd=0.0, window_start_total=0.0,
-                            day_start_total=0.0, budget_gen=1, blocked=0, immortal=0, recon_unpriced=1)
-        estop.engage(reason="nv-cost-cap: session sess-f30-10-recon exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-f30-10-recon", ep_g, 1, "continue", OPERATOR)
+    # (vi) ACQUISITION SAFETY (deterministic): engage-on-breach must never overwrite an operator pause
+    # that already exists. With a foreign pause in place, _engage_owned publishes via atomic no-replace
+    # link, which EEXIST-leaves the existing sentinel and records NO receipt (estop_receipt() stays None)
+    # — so the operator bytes are untouched and a subsequent resolve reads FOREIGN and leaves it. The
+    # concurrent publication race is test_estop_acquisition_barrier.
+    with _pinned_home("estopacq"):
+        ep_q = _seed_episode(mod, "sess-f30-10-acq", kind="breach")
+        estop.engage(reason="operator pause before the plugin engages")  # pre-existing foreign pause
+        with _sentinel_untouched(estop, "engage-on-breach must not clobber an existing operator pause"):
+            _engage_owned(mod, "sess-f30-10-acq")  # link-publish EEXIST-leaves; records no receipt
+        assert mod.store.estop_receipt() is None, "an EEXIST-leave must record no ownership"
+        with _sentinel_untouched(estop, "the operator pause must survive the resolve"), \
+                _fail_if_sentinel_unlinked(estop):
+            res = mod.resolve_escalation("sess-f30-10-acq", ep_q, 1, "continue", OPERATOR)
         assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-f30-10-recon"))["blocked"] == 0
-        assert estop.sentinel_path().exists(), "a recon-unpriced (recon_unpriced=1) session must hold the belt"
+        assert estop.sentinel_path().exists(), "the pre-existing operator pause must survive"
+        _assert_left_belt(res, mod, why="Continue while a foreign pre-existing operator pause is engaged", expect_notice=True)
+
+    # (vii) FLEET-ROOT pause: an unqualified operator `hermes pause` writes the fleet-root sentinel (the
+    # BASE home = fleet root, no override). is_engaged() is fleet-root-inclusive, so a Continue resolved
+    # in the base home leaves resumes=false, the fleet-root sentinel untouched, no receipt adopted, and no
+    # deletion primitive invoked — the plugin never lifts a fleet-root pause either.
+    ep_fr = _seed_episode(mod, "sess-f30-10-fleet", kind="breach")
+    estop.engage(reason="unqualified operator fleet-root pause")  # base home => fleet-root sentinel
+    with _sentinel_untouched(estop, "Continue must leave a FLEET-ROOT pause byte-for-byte"), \
+            _fail_if_sentinel_unlinked(estop):
+        res = mod.resolve_escalation("sess-f30-10-fleet", ep_fr, 1, "continue", OPERATOR)
+    assert res["granted"] is True, res
+    assert estop.sentinel_path().exists(), "the fleet-root pause must survive a Continue"
+    assert mod.store.estop_receipt() is None, "a fleet-root pause is never adopted as owned"
+    _assert_left_belt(res, mod, why="Continue while a fleet-root operator pause is engaged", expect_notice=True)
+
+
+def test_estop_acquisition_barrier(loaded_plugin, monkeypatch):
+    """Concurrent-publication race on a REAL production engage path (discriminator for the atomic-publish
+    engage): a mortal resolve_escalation("stop") engages the profile-local sentinel through
+    store.engage_owned's atomic no-replace os.link — the SAME seam the breach path uses, not a synthetic
+    engage. With os.link intercepted to block immediately before the real link, an operator estop.engage()
+    lands FIRST, so the plugin's link raises EEXIST, EEXIST-leaves the operator bytes/inode, and records
+    NO matching receipt. The unsafe O_EXCL-create-then-write would clobber the operator pause here, so this
+    distinguishes the fix from that bug. Runs on the base (unpinned) home so both threads observe the same
+    sentinel without copying the ContextVar override."""
+    import os
+
+    from agent import estop
+
+    mod = loaded_plugin.module
+    ep = _seed_episode(mod, "sess-f30-acq-bar", kind="escalation", blocked=False)
+    real_link = os.link
+    at_link = threading.Event()
+    release = threading.Event()
+
+    def _blocking_link(src, dst, *args, **kwargs):
+        # block the plugin's publish immediately before the real link so an operator pause can race in
+        if str(dst) == str(estop.sentinel_path()):
+            at_link.set()
+            release.wait(5)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", _blocking_link)
+    box = {}
+
+    def _drive_stop():
+        try:
+            # A mortal Stop engages the profile-local sentinel through store.engage_owned's link-publish
+            # — the SAME production engage seam the breach path uses — so driving it drives real logic.
+            box["res"] = mod.resolve_escalation("sess-f30-acq-bar", ep, 1, "stop", OPERATOR)
+        except Exception as exc:          # noqa: BLE001 — EEXIST must be handled INTERNALLY; any leak is a defect
+            box["err"] = exc
+
+    t = threading.Thread(target=_drive_stop)
+    t.start()
+    assert at_link.wait(5), "the Stop engage never reached os.link — it must publish via os.link(temp, sentinel)"
+    estop.engage(reason="operator pause during the plugin publish")  # lands while the plugin is blocked
+    op_bytes = estop.sentinel_path().read_bytes()
+    op_ino = estop.sentinel_path().stat().st_ino
+    release.set()
+    t.join(5)
+    assert not t.is_alive(), "Stop thread hung"
+    assert box.get("err") is None, ("resolve_escalation must handle EEXIST internally, not raise", box)
+    # SAFETY: the operator pause survives byte-for-byte and is not deleted-and-rewritten by the plugin.
+    assert estop.sentinel_path().read_bytes() == op_bytes, "operator pause clobbered by the plugin's link"
+    assert estop.sentinel_path().stat().st_ino == op_ino, "operator pause deleted-and-rewritten"
+    assert mod.store.estop_receipt() is None, "the EEXIST-leave must record no ownership"
+    # the plugin owns nothing: a FRESH resolve reads FOREIGN and does not resume.
+    ep2 = _seed_episode(mod, "sess-f30-acq-bar-2", kind="breach")
+    res2 = mod.resolve_escalation("sess-f30-acq-bar-2", ep2, 1, "continue", OPERATOR)
+    assert res2.get("resumes") is False, "a foreign operator pause must not be owned or resumed"
+
+
+def test_estop_engage_fault_injection(loaded_plugin, monkeypatch):
+    """Fault-injection on the engage path — the plugin NEVER cleanup-unlinks (a cleanup unlink would race
+    the lockless core primitive), and never adopts ownership it does not hold:
+    (A) os.link unsupported (OSError) -> the plugin falls back to an O_EXCL empty-payload engage that still
+        fail-safe engages (the sentinel EXISTS) but records NO receipt, so a later resolve reads it FOREIGN
+        (resumes=false) and never unlinks it.
+    (B) the receipt write fails AFTER a successful os.link -> the plugin LEAVES the linked sentinel, records
+        NO ownership (estop_receipt() is None), and issues NO cleanup unlink.
+    Runs on the base (unpinned) home. os.link and the receipt-write seam are patched inside scoped
+    monkeypatch contexts so the fixture's HERMES_HOME/HOME env is never disturbed."""
+    import os
+
+    from agent import estop
+
+    mod = loaded_plugin.module
+
+    # (A) os.link raises -> O_EXCL fail-safe fallback engages, no receipt; no unlink primitive is invoked.
+    # The os.link patch is scoped so it never reaches the later resolve, and the fixture env is untouched.
+    ep_a = _seed_episode(mod, "sess-f30-fault-a", kind="breach")
+
+    def _no_link(*a, **k):
+        raise OSError("hardlinks unsupported on this filesystem")
+
+    with monkeypatch.context() as link_patch:
+        link_patch.setattr(os, "link", _no_link)
+        with _fail_if_sentinel_unlinked(estop):
+            _engage_owned(mod, "sess-f30-fault-a")  # link raises -> O_EXCL empty fallback engages fail-safe
+    assert estop.sentinel_path().exists(), "engage must fail-safe (fallback engages) even without os.link"
+    assert mod.store.estop_receipt() is None, "the O_EXCL fallback records no ownership"
+    with _fail_if_sentinel_unlinked(estop):
+        res = mod.resolve_escalation("sess-f30-fault-a", ep_a, 1, "continue", OPERATOR)
+    assert res["granted"] is True, res
+    assert estop.sentinel_path().exists(), "the fallback sentinel (no receipt) is FOREIGN -> left"
+    _assert_left_belt(res, mod, why="resolve over an unowned O_EXCL fallback sentinel", expect_notice=True)
+
+    # Isolate case B: the plugin never lifts the belt, so the test clears case A's fallback sentinel via the
+    # operator core API. Otherwise case B's engage would find an existing sentinel, take the no-replace EEXIST
+    # path, and never reach the patched receipt-write seam — leaving the fault untested.
+    estop.disengage()
+    assert not estop.sentinel_path().exists()
+
+    # (B) inject a receipt-write failure AFTER os.link succeeds by making the discrete record_estop_receipt
+    # seam raise, then engage through the real Stop path (resolve_escalation("stop") -> store.engage_owned):
+    # the sentinel must be LEFT (linked), estop_receipt() None (no ownership adopted), and NO deletion
+    # primitive invoked. A cleanup unlink after a receipt failure would race the primitive and is a defect.
+    ep_b = _seed_episode(mod, "sess-f30-fault-b", kind="escalation", blocked=False)
+    receipt_writes = 0
+
+    def _raise_receipt(*a, **k):
+        nonlocal receipt_writes
+        receipt_writes += 1
+        raise RuntimeError("plugin_db receipt write failed after os.link")
+
+    with monkeypatch.context() as receipt_patch:
+        receipt_patch.setattr(mod.store, "record_estop_receipt", _raise_receipt)
+        with _fail_if_sentinel_unlinked(estop):
+            res_b = mod.resolve_escalation("sess-f30-fault-b", ep_b, 1, "stop", OPERATOR)
+    assert res_b["granted"] is True, res_b
+    assert receipt_writes == 1, "case B did not reach the post-link receipt-write seam exactly once"
+    assert dict(mod.store.get_state("sess-f30-fault-b"))["blocked"] == 1, "the Stop money-side resolution still applies"
+    assert estop.sentinel_path().exists(), "a receipt-write failure must LEAVE the linked sentinel"
+    assert mod.store.estop_receipt() is None, "a receipt-write failure must adopt NO ownership"
 
 
 def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
@@ -719,163 +1083,6 @@ def test_daily_rollover_supersedes_stale_daily_generation(loaded_plugin):
     )
     rows = mod.store.resolutions(sid)
     assert rows and all(r["status"] == "cancelled" for r in rows), rows
-
-
-# --- Guarded ESTOP-clear behavior contracts (beside AC-COST-F30-10) ---------------------------
-# Finer guard conditions AC-10 does not itself assert: the ceiling call-site guards the same way,
-# the clear leaves a fleet-root pause and keeps resumes false, the notice claims resume only on a
-# real blocked→runnable transition, a failed unlink defers and the reconciler recovers, a
-# concurrent breach that commits before the scan keeps the belt, and the reconciler clears an
-# owned sentinel once its sole blocker closes.
-
-
-def test_estop_clear_ceiling_call_site_guards_foreign(loaded_plugin):
-    """Regression (F30-REV-1): the CEILING resolve call-site guards the ESTOP clear too — a FOREIGN
-    (non-nv-cost-cap) sentinel is LEFT by a granted set-ceiling, exactly as on the Continue path."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopceil", 100.0)
-    with _pinned_home("estopceil"):
-        ep = _seed_episode(mod, "sess-ceil-foreign", kind="breach")
-        estop.engage(reason="operator maintenance window")  # foreign: no 'nv-cost-cap:' prefix
-        assert estop.sentinel_path().exists()
-        res = mod.set_episode_ceiling("estopceil", "sess-ceil-foreign", ep, 1, "80.0", OPERATOR)
-        assert res["granted"] is True, res
-        assert dict(mod.store.get_state("sess-ceil-foreign"))["blocked"] == 0
-        assert estop.sentinel_path().exists(), "a foreign sentinel must survive a set-ceiling resolve"
-
-
-def test_estop_leaves_fleet_root_pause_and_resumes_false(loaded_plugin):
-    """Regression (F30-REV-1): clearing our OWN profile-local sentinel does NOT lift a FLEET-ROOT
-    operator pause, and the just-resolved session reports resumes=false while any pause is engaged
-    (resumes is decoupled from the profile clear, via the fleet-root-inclusive is_engaged())."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopfleet", 100.0)
-    with _pinned_home("estopfleet"):
-        ep = _seed_episode(mod, "sess-fleet", kind="breach")
-        fleet = estop._canonical_root() / "ESTOP"  # a DIFFERENT path from the profile-local sentinel
-        fleet.parent.mkdir(parents=True, exist_ok=True)
-        fleet.write_text('{"reason": "operator fleet pause"}', encoding="utf-8")
-        assert fleet.resolve() != estop.sentinel_path().resolve(), "fleet-root must differ from profile-local"
-        estop.engage(reason="nv-cost-cap: session sess-fleet exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-fleet", ep, 1, "continue", OPERATOR)
-        assert res["granted"] is True, res
-        assert not estop.sentinel_path().exists(), "our owned profile-local sentinel is cleared"
-        assert fleet.exists(), "the fleet-root operator pause must be left intact"
-        assert res.get("resumes") is False, "a still-engaged fleet-root pause keeps resumes false"
-        fleet.unlink(missing_ok=True)
-
-
-def test_cost_outcome_text_claims_resume_only_when_stopped_then_resumed(loaded_plugin):
-    """Regression (F30-REV-2): the notice claims "session resumed" ONLY for a real blocked→runnable
-    transition (was_blocked AND resumes); a never-blocked but runnable Continue reads "runnable"
-    (not "resumed"); a still-paused Continue reads a plain "Continue applied." with no false claim."""
-    mod = loaded_plugin.module
-    resumed = mod._cost_outcome_text(
-        {"granted": True, "decision": "continue", "resumes": True, "was_blocked": True})
-    runnable = mod._cost_outcome_text(
-        {"granted": True, "decision": "continue", "resumes": True, "was_blocked": False})
-    still_paused = mod._cost_outcome_text(
-        {"granted": True, "decision": "continue", "resumes": False, "was_blocked": True})
-    assert "resumed" in resumed.lower(), resumed
-    assert "resumed" not in runnable.lower() and "runnable" in runnable.lower(), runnable
-    assert "resumed" not in still_paused.lower(), still_paused
-    assert "continue applied" in still_paused.lower(), still_paused
-
-
-def test_estop_unlink_failure_defers_then_reconciler_clears(loaded_plugin, monkeypatch):
-    """Regression (F30-REV-1): a failing guarded unlink DEFERS (row stays pending, tx1 unblock
-    durable), and a later reconcile_once() re-runs the guarded clear and lifts the owned sentinel."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopdefer", 100.0)
-    orig_unlink = mod.store._unlink_local_sentinel
-    with _pinned_home("estopdefer"):
-        ep = _seed_episode(mod, "sess-defer", kind="breach")
-        estop.engage(reason="nv-cost-cap: session sess-defer exceeded the Tier-2 cost ceiling")
-        monkeypatch.setattr(mod.store, "_unlink_local_sentinel", lambda: False)
-        res = mod.resolve_escalation("sess-defer", ep, 1, "continue", OPERATOR)
-        assert res["granted"] is False and res["reason"] == "deferred", res
-        assert dict(mod.store.get_state("sess-defer"))["blocked"] == 0, "tx1 unblock is durable"
-        assert estop.sentinel_path().exists(), "sentinel still present after the deferred unlink"
-        assert len(_applied(mod, "sess-defer")) == 0, "the resolution row stays pending, not applied"
-        # Restore ONLY the unlink patch — monkeypatch.undo() would also revert the loaded_plugin
-        # fixture's HERMES_HOME setenv (same monkeypatch instance), sending reconcile_once() to the
-        # wrong home where this profile does not exist.
-        monkeypatch.setattr(mod.store, "_unlink_local_sentinel", orig_unlink)
-    acted = mod.reconcile_once()
-    assert acted >= 1, acted
-    with _pinned_home("estopdefer"):
-        assert not estop.sentinel_path().exists(), "reconcile_once re-runs the guarded clear and lifts it"
-        assert len(_applied(mod, "sess-defer")) == 1, "the reconciler finalises the pending resolution"
-
-
-def test_estop_belt_held_by_second_session_keeps_resumes_false(loaded_plugin):
-    """Regression (F30-REV-1, multi-session belt): while another non-immortal session is still
-    blocked, resolving one LEAVES the shared sentinel AND the resolved session reports
-    resumes=false (the shared belt pauses the whole profile)."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopbelt2", 100.0)
-    with _pinned_home("estopbelt2"):
-        ep_a = _seed_episode(mod, "sess-belt2-a", kind="breach")
-        _seed_episode(mod, "sess-belt2-b", kind="breach")  # stays blocked
-        estop.engage(reason="nv-cost-cap: session sess-belt2-a exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-belt2-a", ep_a, 1, "continue", OPERATOR)
-        assert res["granted"] is True, res
-        assert estop.sentinel_path().exists(), "the belt is left while another session is blocked"
-        assert dict(mod.store.get_state("sess-belt2-b"))["blocked"] == 1
-        assert res.get("resumes") is False, "the shared belt keeps the resolved session non-resumed"
-
-
-def test_estop_reconciler_clears_after_sole_blocker_closes(loaded_plugin):
-    """Regression (F30-REV-1, step d): an owned sentinel whose SOLE blocker CLOSED without a
-    resolution is lifted by reconcile_once()'s guarded clear (closed rows are excluded from the
-    belt) — no stuck belt."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopclosed", 100.0)
-    with _pinned_home("estopclosed"):
-        _seed_episode(mod, "sess-closed", kind="breach")
-        estop.engage(reason="nv-cost-cap: session sess-closed exceeded the Tier-2 cost ceiling")
-        assert estop.sentinel_path().exists()
-        mod.store.mark_session_closed("sess-closed")  # closed without a resolution
-    acted = mod.reconcile_once()
-    assert acted >= 1, acted
-    with _pinned_home("estopclosed"):
-        assert not estop.sentinel_path().exists(), "reconcile lifts an owned sentinel whose blocker closed"
-
-
-def test_estop_breach_after_unlink_reengages_sentinel(loaded_plugin):
-    """Regression (F30-REV-1, after-unlink arm): once tx2 clears an owned sentinel on a clear belt,
-    a subsequent breach re-engages the shared profile sentinel through _engage_estop's exists()
-    guard, so the belt is restored — the "re-engages AFTER the unlink" writer order the amended ADR
-    names, complementing the before-scan arm (a session already blocked at scan time keeps the belt,
-    proved by test_estop_belt_held_by_second_session_keeps_resumes_false). Deterministic and faithful
-    to the real breach writer (store.set_state + _engage_estop, as _evaluate_boundary uses)."""
-    from agent import estop
-
-    mod = loaded_plugin.module
-    _write_profile_ceiling("estopreeng", 100.0)
-    with _pinned_home("estopreeng"):
-        ep = _seed_episode(mod, "sess-reeng", kind="breach")
-        estop.engage(reason="nv-cost-cap: session sess-reeng exceeded the Tier-2 cost ceiling")
-        res = mod.resolve_escalation("sess-reeng", ep, 1, "continue", OPERATOR)
-        assert res["granted"] is True and res.get("resumes") is True, res
-        assert not estop.sentinel_path().exists(), "owned + belt-clear -> tx2 unlinked the sentinel"
-        # A later Tier-2 crossing on a new session re-engages the shared belt exactly as
-        # _evaluate_boundary does (store.set_state blocked=1 then _engage_estop).
-        mod.store.set_state("sess-reeng-2", effective_usd=0.0, window_start_total=0.0,
-                            day_start_total=0.0, budget_gen=1, blocked=1, immortal=0)
-        mod._engage_estop("sess-reeng-2")
-        assert estop.sentinel_path().exists(), "a post-unlink breach re-engages the profile sentinel"
-        assert dict(mod.store.get_state("sess-reeng-2"))["blocked"] == 1
 
 
 def test_cli_resolve_orchestrator_gate_pin_and_principal(loaded_plugin, monkeypatch):

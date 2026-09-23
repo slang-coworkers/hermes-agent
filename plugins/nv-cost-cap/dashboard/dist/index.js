@@ -46,9 +46,18 @@
     "session-closed": "Session already closed.",
     deferred: "Retrying — check again shortly."
   };
+  // Verbatim manual-resume notice surfaced when a granted resolution LEAVES an engaged ESTOP belt
+  // (the plugin never unlinks it), so the card never collapses to a bare "Applied." that hides the
+  // retained pause. Matches the backend _cost_outcome_text notice exactly.
+  const MANUAL_RESUME_NOTICE = "Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock";
   function outcomeNote(res) {
     if (!res || typeof res !== "object") return "Request failed.";
     if (res.granted) {
+      if (res.manual_resume_required) {
+        if (res.decision === "ceiling" && res.amount_usd != null)
+          return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}. The per-session cost block is cleared, but the profile ESTOP belt remains engaged; resume via \`hermes resume\` or the UA-28 upstream lock.`;
+        return MANUAL_RESUME_NOTICE;
+      }
       if (res.decision === "ceiling" && res.amount_usd != null) return `Ceiling set to $${Number(res.amount_usd).toFixed(2)}.`;
       return "Applied.";
     }

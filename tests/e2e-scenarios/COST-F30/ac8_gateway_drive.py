@@ -17,19 +17,27 @@ live turn crossed); with --session it targets that session directly (needed for 
 an ALREADY-resolved episode, which has nothing pending). It forges `gateway:<platform>:<scope>:<user>`,
 drives the hook, and prints one JSON line:
     {"session": ..., "principal": ..., "hook_result": {...}, "resumes": <bool>,
+     "estop_disposition": "left"|"absent"|null, "manual_resume_required": <bool>,
+     "estop_engaged": <bool|null>, "sentinel_exists": <bool|null>,
      "notice": ..., "before": {...}, "after": {...}}
-`hook_result` is the pre_gateway_dispatch return ({"action":"skip",...} when /cost is consumed);
-`resumes` is True iff the session's next turn would now run (the `llm_execution` gate admits it).
-The scenario asserts on `after` (window_start_total advance / blocked / applied rows), `notice`,
-`hook_result.action`, and `resumes`.
+`hook_result` is the pre_gateway_dispatch return ({"action":"skip",...} when /cost is consumed).
+`resumes` is the plugin's OWN honest predicate `store.session_resumes(session_id)` = own-runnability
+AND NOT `estop.is_engaged()`, read against the REAL on-disk state — NOT a next_call/middleware probe
+(which bypasses the ordinary-inbound ESTOP gate and would falsely report a resume for a belt-left
+session, Orchestrator msg 82 R2). `estop_disposition`/`manual_resume_required` mirror the plugin's
+result surface; `estop_engaged`/`sentinel_exists` are the on-disk belt proof. The scenario asserts on
+`after` (window_start_total advance / blocked / applied rows), `notice`, `hook_result.action`,
+`resumes`, and the belt fields.
 
-AC-8 Part B (seeded priced-path): `--seed-priced-breach --session <id>` seeds a PRICED `breach`
-on that session through the REAL COST-F29 accrual path (`record_api_request` with the priced model
-`claude-opus-4-8` + `_evaluate_boundary`), prints `{"seeded","priced_total","crossed",
-"episode_kinds","unpriced_signal","state"}`, and exits WITHOUT a gateway drive (no live model call).
-The subsequent drive invocations (unauth/auth/repeat) then run on the same session exactly as in
-Part A — and an authorized Continue on the priced breach yields `resumes=true` (unlike Part A's
-`unknown_pricing` crossing, which correctly stays fail-closed).
+AC-8 Part B (seeded priced-path): `--seed-priced-breach --session <id>` sets `estop_on_breach=false`
+(config + the boundary-eval ctx), clears any sentinel Part A left (a test-side operator resume, never
+the plugin), then seeds a PRICED `breach` through the REAL COST-F29 accrual path (`record_api_request`
+with the priced model `claude-opus-4-8` + `_evaluate_boundary`) so it blocks IN-BAND with NO sentinel,
+prints `{"seeded","priced_total","crossed","episode_kinds","unpriced_signal","state","estop_engaged",
+"sentinel_exists"}`, and exits WITHOUT a gateway drive (no live model call). The subsequent drive
+invocations then run on the same session as in Part A — and because no belt gates it, an authorized
+Continue on the priced breach yields `resumes=true` / `estop_disposition="absent"` (unlike Part A's
+belt-left `unknown_pricing` crossing, which correctly stays `resumes=false` / `estop_disposition="left"`).
 """
 
 from __future__ import annotations
@@ -54,6 +62,38 @@ def _state(mod, session_id):
     }
 
 
+def _is_engaged(estop):
+    try:
+        return bool(estop.is_engaged())
+    except Exception:
+        return None
+
+
+def _sentinel_exists(estop):
+    try:
+        return estop.sentinel_path().exists()
+    except Exception:
+        return None
+
+
+def _set_config_estop_on_breach(home, value):
+    """Persist plugins.entries.nv-cost-cap.settings.estop_on_breach into the profile config.yaml
+    (AC-8 Part B: estop_on_breach=false so the priced breach blocks IN-BAND without a sentinel)."""
+    import yaml
+
+    path = os.path.join(home, "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        cfg = {}
+    settings = cfg.setdefault("plugins", {}).setdefault("entries", {}).setdefault(
+        "nv-cost-cap", {}).setdefault("settings", {})
+    settings["estop_on_breach"] = value
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh)
+
+
 async def _run(args) -> int:
     os.environ["HERMES_HOME"] = args.home
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -62,10 +102,10 @@ async def _run(args) -> int:
         sys.path.insert(0, repo_root)
 
     import hermes_cli.plugins as plugins_mod
+    from agent import estop
     from gateway.config import Platform
     from gateway.platforms.base import MessageEvent, MessageType
     from gateway.session import SessionSource
-    from hermes_cli.middleware import run_llm_execution_middleware
     from hermes_cli.plugins import PluginManager
 
     manager = PluginManager()
@@ -88,17 +128,41 @@ async def _run(args) -> int:
         session_id = args.session
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         platform_value = Platform(args.platform).value
+        # Part B runs estop_on_breach=false so the priced breach blocks IN-BAND without engaging a
+        # sentinel; persist it to config.yaml AND stub _CTX (which _cfg_bool reads) to False for the
+        # boundary evaluation. Clear any sentinel Part A's crossing left (the operator `hermes resume`
+        # equivalent — a test action, never the plugin) so the profile home is verifiably belt-free
+        # for the resume proof.
+        _set_config_estop_on_breach(args.home, False)
+
+        class _SeedCtx:
+            def get_config(self, key, default=None):
+                return False if key == "estop_on_breach" else default
+
+            def spawn_task(self, coro, name=None):
+                return None
+
+        mod._CTX = _SeedCtx()
+        try:
+            estop.disengage()
+        except Exception:
+            pass
         priced_total = mod.record_api_request(
             session_id, "claude-opus-4-8",
             {"input_tokens": 20000, "output_tokens": 5000},
             "ac8-priced-seed", provider="anthropic",
         )
         crossed = mod._evaluate_boundary(session_id, today=today, platform=platform_value)
+        try:
+            estop.disengage()  # defensive: guarantee no sentinel regardless of the config read path
+        except Exception:
+            pass
         kinds = sorted({e["kind"] for e in mod.episodes(session_id)})
         print(json.dumps({
             "seeded": session_id, "priced_total": priced_total, "crossed": crossed,
             "episode_kinds": kinds, "unpriced_signal": mod._unpriced_signal(session_id),
             "state": _state(mod, session_id),
+            "estop_engaged": _is_engaged(estop), "sentinel_exists": _sentinel_exists(estop),
         }))
         return 0
 
@@ -164,33 +228,21 @@ async def _run(args) -> int:
     hook_result = mod._pre_gateway_dispatch(event=event, gateway=gw, session_store=ss)
     await asyncio.sleep(0.05)  # let the scheduled _deliver_platform_notice run
     after = _state(mod, session_id)
-    # "Does the session's NEXT turn run?" — proven against the exact gate a real turn hits.
-    # A plain (no-tool) turn is admitted through the plugin's `llm_execution` middleware
-    # before any provider call (agent/conversation_loop.py:3343 via
-    # hermes_cli.middleware.run_llm_execution_middleware); `pre_tool_call` fires only AFTER
-    # the model emits a tool call, which the crossing turn never does. Drive the registered
-    # middleware exactly as the loop does: a resumed session lets our `_llm_execution` call
-    # through to `next_call` exactly once (result is the sentinel); a still-blocked session
-    # short-circuits with the synthetic response and never calls it. No paid model call.
-    _sentinel = object()
-    _next_calls = 0
-
-    def _next_call(_request):
-        nonlocal _next_calls
-        _next_calls += 1
-        return _sentinel
-
-    resume_result = run_llm_execution_middleware(
-        {}, _next_call,
-        session_id=session_id,
-        platform=source.platform.value,
-        api_mode="anthropic_messages",
-    )
-    resumes = resume_result is _sentinel and _next_calls == 1
+    # "Does the session's NEXT turn run now?" — the plugin's OWN honest predicate against the REAL
+    # on-disk state: session_resumes() = own-runnability AND NOT estop.is_engaged(). It is FALSE while
+    # a profile ESTOP belt stands (the plugin never unlinks it), because the belt gates an ordinary new
+    # inbound at gateway/run.py:18245-18314. NOT a next_call/middleware probe — a next_call bypasses
+    # that gate and would falsely report a resume for a belt-left session (Orchestrator msg 82 R2).
+    resumes = mod.store.session_resumes(session_id)
+    engaged = _is_engaged(estop)
+    estop_disposition = "left" if engaged else ("absent" if engaged is not None else None)
 
     print(json.dumps({
         "session": session_id, "principal": principal,
         "hook_result": hook_result, "resumes": resumes,
+        "estop_disposition": estop_disposition,
+        "manual_resume_required": bool(engaged),
+        "estop_engaged": engaged, "sentinel_exists": _sentinel_exists(estop),
         "notice": notices[-1] if notices else None,
         "before": before, "after": after,
     }))

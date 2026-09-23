@@ -200,15 +200,28 @@ def _finish(status, decision, episode_id, session_id, **extra):
     every other status is a fail-closed ``granted: False`` so no surface reports success
     for an effect that did not land.
 
-    On a granted Continue/ceiling the reply carries ``resumes`` — whether the JUST-RESOLVED
-    session actually runs now (F30-REV-1: ``store.session_resumes``, decoupled from the profile
-    ESTOP-clear decision and computed AFTER any unlink) — so ``_cost_outcome_text`` never claims a
-    still-paused (foreign-pause / belt-held / unknown-pricing) session resumed (F30-REV-2).
+    On a granted resolution the reply carries ``resumes`` — whether the JUST-RESOLVED session actually
+    runs now (``store.session_resumes`` = own-runnability AND not ``estop.is_engaged()``) — so a surface
+    never claims a still-paused (foreign pause / engaged belt / unknown-pricing) session resumed. A Stop
+    keeps the session blocked, so it never resumes. When a profile ESTOP belt is engaged the plugin
+    LEAVES it (manual-resume release — the plugin never unlinks the sentinel), so the reply also carries
+    ``estop_disposition='left'`` + ``manual_resume_required=True``: a granted Continue/ceiling clears the
+    per-session money block, but the session becomes runnable only after an operator lifts the belt
+    (``hermes resume`` / UA-28); a Stop leaves the session blocked outright.
     """
     if status == store.APPLIED:
         result = {"granted": True, "decision": decision, "episode_id": episode_id, **extra}
-        if decision in ("continue", "ceiling"):
-            result["resumes"] = store.session_resumes(session_id)
+        # Sample the ESTOP belt ONCE and derive both resumes and the disposition from it, so a
+        # concurrent pause/resume can never return contradictory fields. The plugin never lifts the
+        # belt: report its disposition on EVERY granted resolution — "left" (with
+        # manual_resume_required) while a sentinel is engaged, else "absent".
+        belt_engaged = store.estop_engaged()
+        result["resumes"] = (
+            store.session_resumes(session_id, belt_engaged=belt_engaged)
+            if decision in ("continue", "ceiling") else False
+        )
+        result["estop_disposition"] = "left" if belt_engaged else "absent"
+        result["manual_resume_required"] = belt_engaged
         return result
     reason = {
         store.CANCELLED_CLOSED: "session-closed",
@@ -396,14 +409,10 @@ def reconcile_once() -> int:
                 acted += store.finalise_closed_unresolved()
             except Exception:
                 logger.warning("nv-cost-cap reconcile finalise failed", exc_info=True)
-            # (d) F30-REV-1: re-run the guarded profile ESTOP-clear AFTER apply/finalise, so an
-            # owned sentinel whose SOLE blocker CLOSED without a resolution (its row now finalised
-            # above, ended_at set → excluded from the belt) is eventually lifted — no stuck belt.
-            try:
-                if store._clear_profile_estop() == store.CLEARED:
-                    acted += 1
-            except Exception:
-                logger.warning("nv-cost-cap reconcile ESTOP-clear failed", exc_info=True)
+            # Manual-resume release: the plugin NEVER lifts a profile ESTOP belt, not even for an
+            # owned sentinel whose sole blocker closed unresolved. The belt is left for an operator
+            # (`hermes resume`) or the UA-28 upstream owner-scoped disengage; the reconciler only
+            # finalises the money-side episode state.
         finally:
             reset_hermes_home_override(token)
     return acted
