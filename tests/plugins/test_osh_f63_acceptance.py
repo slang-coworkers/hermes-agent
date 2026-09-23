@@ -21,6 +21,7 @@ ship in the same PR under tests/e2e-scenarios/OSH-F63/.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -212,7 +213,10 @@ def test_ac_osh_f63_1(tmp_path):
         host = _dotted(cfg, "terminal.ssh_host")
         key = str(_dotted(cfg, "terminal.ssh_key") or "")
         assert host, f"{profile}: no ssh_host"
-        assert _dotted(cfg, "terminal.ssh_user"), f"{profile}: no ssh_user"
+        # ssh_host is the ssh-config alias `openshell-osh-f63-<profile>`; AC-4
+        # proves the join to the bare provision-plan `--name` (`osh-f63-<profile>`).
+        assert host == f"openshell-osh-f63-{profile}", f"{profile}: ssh_host {host!r} != openshell-osh-f63-{profile}"
+        assert _dotted(cfg, "terminal.ssh_user") == "sandbox", f"{profile}: ssh_user must be 'sandbox' (OpenShell sandbox user), got {_dotted(cfg, 'terminal.ssh_user')!r}"
         assert _dotted(cfg, "terminal.ssh_port"), f"{profile}: no ssh_port"
         assert key, f"{profile}: no ssh_key"
         # ssh_key is a PATH (never key material), absolute, co-located under one
@@ -223,6 +227,10 @@ def test_ac_osh_f63_1(tmp_path):
         # contained under the gateway $HERMES_HOME (render-time get_hermes_home()
         # == the render's HERMES_HOME == `home`): a leaked path outside it fails.
         assert Path(key).resolve().is_relative_to(home.resolve()), f"{profile}: ssh_key {key!r} not under gateway HERMES_HOME {home}"
+        # the render creates the key file as an empty placeholder so it EXISTS
+        # (the builtin `-i <path>` contract); the mTLS ProxyCommand never reads it.
+        assert Path(key).is_file(), f"{profile}: ssh_key {key!r} does not exist on disk (render must create the placeholder)"
+        assert b"PRIVATE KEY" not in Path(key).read_bytes(), f"{profile}: ssh_key {key!r} contains key material — it must be an unused placeholder"
         key_parents.add(str(Path(key).parent))
         term = _dotted(cfg, "terminal") or {}
         assert not any(k.startswith("docker_") for k in term), f"{profile}: docker_* present under ssh"
@@ -232,7 +240,6 @@ def test_ac_osh_f63_1(tmp_path):
     assert len(keys) == len(COWORKER_PROFILES), f"ssh_key not distinct per profile: {keys}"
     assert len(key_parents) == 1, f"ssh_key paths not co-located under one gateway keys dir: {key_parents}"
 
-    # local appears in NO profile's terminal.backend (all profiles incl default).
     for prof_dir in _all_profile_dirs(out):
         cfg = yaml.safe_load((prof_dir / "config.yaml").read_text(encoding="utf-8"))
         assert _dotted(cfg, "terminal.backend") != "local", f"{prof_dir.name}: backend is local"
@@ -282,6 +289,15 @@ def test_ac_osh_f63_1(tmp_path):
 # not exactly this five-section shape is rejected before any runtime enforcement.
 _GRAMMAR_TOP_KEYS = {"version", "filesystem_policy", "landlock", "process", "network_policies"}
 _WILDCARD_HOSTS = {"0.0.0.0/0", "::/0", "*", "0.0.0.0", "::"}
+# a rule method must be a real HTTP verb or the "*" wildcard — not free text.
+_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"}
+# the broker permits only this exact base image as --from.
+_PINNED_IMAGE = "osh-f63-base:trixie"
+# the two egress targets the render must emit — the OneCLI hop and the inference
+# route; AC-2 pins them literally so a fixture swapping in a forbidden target
+# (e.g. the ssh control path 172.17.0.1:22) cannot pass by deriving "expected"
+# from the same editable fixture.
+_EXPECTED_EGRESS_HP = {("172.17.0.1", "10255"), ("inference-api.nvidia.com", "443")}
 
 
 def _hostport(value) -> tuple:
@@ -312,7 +328,8 @@ def _assert_grammar_shape(profile: str, policy: dict) -> list:
     assert "read_only" in fsp and isinstance(fsp["read_only"], list), f"{profile}: filesystem_policy.read_only must be a present list"
     assert "read_write" in fsp and isinstance(fsp["read_write"], list), f"{profile}: filesystem_policy.read_write must be a present list"
     landlock = policy.get("landlock")
-    assert isinstance(landlock, dict) and landlock.get("compatibility"), f"{profile}: landlock.compatibility missing"
+    assert isinstance(landlock, dict), f"{profile}: landlock must be a mapping"
+    assert landlock.get("compatibility") == "best_effort", f"{profile}: landlock.compatibility must be 'best_effort' (working-example value), got {landlock.get('compatibility')!r}"
     proc = policy.get("process")
     assert isinstance(proc, dict), f"{profile}: process must be a mapping"
     assert proc.get("run_as_user") == "sandbox", f"{profile}: process.run_as_user must be 'sandbox', got {proc.get('run_as_user')!r}"
@@ -328,6 +345,9 @@ def _assert_grammar_shape(profile: str, policy: dict) -> list:
         assert isinstance(bins, list) and bins, f"{profile}: network_policy {name!r} needs a non-empty binaries[]"
         for b in bins:
             assert isinstance(b, dict) and b.get("path"), f"{profile}: {name} binary {b!r} needs a path"
+        # the working example scopes the network policy to the egress tool; curl
+        # is the coworker's HTTP egress binary, so it must be among the binaries.
+        assert "/usr/bin/curl" in {b["path"] for b in bins}, f"{profile}: {name} binaries must include /usr/bin/curl, got {[b.get('path') for b in bins]}"
         eps = np.get("endpoints")
         assert isinstance(eps, list) and eps, f"{profile}: network_policy {name!r} needs a non-empty endpoints[]"
         for ep in eps:
@@ -341,6 +361,11 @@ def _assert_grammar_shape(profile: str, policy: dict) -> list:
             for rule in rules:
                 allow = rule.get("allow") if isinstance(rule, dict) else None
                 assert isinstance(allow, dict) and allow.get("method") and allow.get("path"), f"{profile}: {name}: rule {rule!r} needs allow.method + allow.path"
+                # method is a real HTTP verb or "*", path is rooted — no free text.
+                # (exact verbs per endpoint are the render's; AC-5 proves the real
+                # allowed traffic on-box, incl. an in-policy POST.)
+                assert allow["method"] in _HTTP_METHODS, f"{profile}: {name}: rule method {allow['method']!r} is not an HTTP verb or '*'"
+                assert str(allow["path"]).startswith("/"), f"{profile}: {name}: rule path {allow['path']!r} must be rooted at '/'"
             endpoints.append(ep)
     return endpoints
 
@@ -349,31 +374,29 @@ def test_ac_osh_f63_2(tmp_path):
     """AC-OSH-F63-2: the render emits one policy-<profile>.yaml per profile
     conforming to the required OpenShell policy grammar (version/filesystem_policy/
     landlock/process/network_policies, no top-level egress/allow), whose
-    network_policies endpoints are exactly the three allowed targets (OneCLI
-    hop, inference route, ssh control path) — each protocol: rest, enforcement:
-    enforce, with an allow rule — and 172.17.0.1:10256 and wildcard hosts
-    absent."""
+    network_policies endpoints are exactly the two allowed targets (OneCLI
+    hop, inference route) — each protocol: rest, enforcement: enforce, with an
+    allow rule — and 172.17.0.1:10256, host.openshell.internal:8080, and
+    wildcard hosts absent. The ssh control path is inbound via the proxy
+    socket, not an egress endpoint (operator, LANE READY 2026-09-23)."""
     home = _bootstrap_home(tmp_path)
     out = tmp_path / "out"
     assert _render(OPENSHELL_SPEC, out, home).returncode == 0
 
-    # The three allowed endpoints are spec data (egress section), read back so
-    # the assertion is a behaviour contract, not a hard-coded snapshot. Two of
-    # them MAY share a host on different ports — the contract is three host:port
-    # records, not three distinct hosts.
+    # The fixture names the two egress targets under `proxy_addr` and
+    # `inference_route`; both the fixture values and the rendered endpoints are
+    # pinned to the mandated set, so a fixture that swaps in a forbidden target
+    # cannot pass by defining its own "expected". ssh_control_path is
+    # deliberately not an egress target: ssh is inbound through the proxy socket.
     spec = yaml.safe_load(OPENSHELL_SPEC.read_text(encoding="utf-8"))
     egress = spec.get("egress", {})
-    required = [
-        egress.get("proxy_addr") or egress.get("onecli_hop"),
-        egress.get("inference_route"),
-        egress.get("ssh_control_path"),
-    ]
+    assert "ssh_control_path" not in egress, "spec egress must not carry ssh_control_path (ssh is inbound via the proxy socket, not an egress target)"
+    assert "onecli_hop" not in egress, "spec egress names the hop as `proxy_addr`; the `onecli_hop` alias must not be used"
+    required = [egress.get("proxy_addr"), egress.get("inference_route")]
     required = [r for r in required if r]
-    assert len(required) == 3, f"spec egress must name exactly three endpoints: {required}"
+    assert len(required) == 2, f"spec egress must name exactly two endpoints (proxy_addr + inference_route): {required}"
     required_hp = {_hostport(r) for r in required}
-    assert len(required_hp) == 3, f"the three egress targets must be distinct host:port records: {required_hp}"
-    for host, port in required_hp:
-        assert port is not None, f"egress target {host!r} must name a port (grammar requires host+port): {required}"
+    assert required_hp == _EXPECTED_EGRESS_HP, f"spec egress targets {sorted(required_hp)} != the mandated set {sorted(_EXPECTED_EGRESS_HP)}"
 
     # exactly one policy file per profile, named policy-<profile>.yaml — a
     # duplicate in another dir must be caught, not silently collapsed.
@@ -384,8 +407,8 @@ def test_ac_osh_f63_2(tmp_path):
 
     # AC-2 is a STRUCTURAL contract on the landed OpenShell grammar (§D1.3): the
     # full five-section shape (every named policy well-formed), and the endpoints
-    # == exactly the three allowed targets, each enforce/rest with an allow rule.
-    # The allow-vs-deny SEMANTICS (only these three admitted, all else denied) are
+    # == exactly the two allowed targets, each enforce/rest with an allow rule.
+    # The allow-vs-deny SEMANTICS (only these two admitted, all else denied) are
     # proven on-box by AC-OSH-F63-5's `openshell sandbox create --policy`/`prove`.
     for profile in COWORKER_PROFILES:
         policy = yaml.safe_load(policy_files[f"policy-{profile}.yaml"].read_text(encoding="utf-8"))
@@ -397,12 +420,17 @@ def test_ac_osh_f63_2(tmp_path):
 
         endpoints = _assert_grammar_shape(profile, policy)
         # raw list (NOT a set) so a duplicated endpoint fails the count.
-        assert len(endpoints) == 3, f"{profile}: expected exactly 3 endpoint records, got {len(endpoints)}: {endpoints}"
+        assert len(endpoints) == 2, f"{profile}: expected exactly 2 endpoint records, got {len(endpoints)}: {endpoints}"
         emitted_hp = {(str(ep.get("host")), str(ep.get("port"))) for ep in endpoints}
-        assert emitted_hp == required_hp, f"{profile}: endpoints {sorted(emitted_hp)} != allowed targets {sorted(required_hp)}"
+        assert emitted_hp == _EXPECTED_EGRESS_HP, f"{profile}: endpoints {sorted(emitted_hp)} != mandated targets {sorted(_EXPECTED_EGRESS_HP)}"
 
+        # control-plane endpoints and wildcards forbidden: the OneCLI control
+        # plane (:10256) and the OpenShell gateway control plane
+        # (host.openshell.internal:8080, denied to workers — AC-5 step 4).
         assert ("172.17.0.1", "10256") not in emitted_hp, f"{profile}: OneCLI control plane 172.17.0.1:10256 present as an endpoint"
+        assert ("host.openshell.internal", "8080") not in emitted_hp, f"{profile}: OpenShell gateway control plane host.openshell.internal:8080 present as an endpoint"
         emitted_hosts = {h for h, _ in emitted_hp}
+        assert "host.openshell.internal" not in emitted_hosts, f"{profile}: OpenShell gateway host present as an endpoint"
         assert not (emitted_hosts & _WILDCARD_HOSTS), f"{profile}: wildcard host present: {emitted_hosts & _WILDCARD_HOSTS}"
 
 
@@ -644,30 +672,48 @@ def test_ac_osh_f63_4(tmp_path):
         assert len(hits) == 1, f"{' '.join(subcmd)} referencing {needle!r}: expected exactly one line, got {[h[1] for h in hits]}"
         return hits[0]
 
-    # no nested container engine anywhere in the plan (the P7 "no nested podman").
+    # no nested container engine anywhere in the plan (the P7 "no nested podman"),
+    # and none of the broker-refused flags (--gateway/--upload/--forward).
+    forbidden_flags = {"--gateway", "--upload", "--forward"}
     for t in tokens:
         assert t and t[0] == "openshell", f"provision plan runs a non-openshell command: {t}"
+        assert not (forbidden_flags & set(t)), f"provision plan uses a broker-refused flag: {t}"
+
+    # the pinned image is spec data (egress.sandbox_image) and the broker refuses
+    # any other --from, so assert both the spec pins it and the plan's --from
+    # matches (below, per profile).
+    spec_image = yaml.safe_load(OPENSHELL_SPEC.read_text(encoding="utf-8")).get("egress", {}).get("sandbox_image")
+    assert spec_image == _PINNED_IMAGE, f"spec egress.sandbox_image {spec_image!r} must be the pinned {_PINNED_IMAGE!r} (the broker refuses any other --from)"
+
+    def _positional(toks, subcmd):
+        # the sandbox name is the trailing positional right after the subcmd verbs.
+        return toks[len(subcmd)] if len(toks) > len(subcmd) else None
 
     for profile in COWORKER_PROFILES:
         policy = f"policy-{profile}.yaml"
         ci, create = _find(["openshell", "sandbox", "create"], policy)
         name = _arg(create, "--name")
-        # the create --name must equal the profile's RENDERED terminal.ssh_host
-        # (the sandbox alias Hermes ssh's to) — so a plan cannot create one name
-        # while the render points Hermes at another host containing the profile.
+        # the create --name is the bare sandbox name `osh-f63-<profile>`; the
+        # profile's rendered terminal.ssh_host must resolve to it via the
+        # `openshell sandbox ssh-config` alias `openshell-<name>`, so a plan
+        # cannot create one name while the render points Hermes at another.
+        assert name == f"osh-f63-{profile}", f"{profile}: create --name {name!r} != osh-f63-{profile}"
         rendered_host = _dotted(_profile_config(tmp_path / "o1", profile), "terminal.ssh_host")
-        assert name and name == rendered_host, f"{profile}: create --name {name!r} != rendered ssh_host {rendered_host!r}"
-        assert "--from" in create, f"{profile}: create missing --from: {create}"
-        # ssh-config and delete must target the SAME sandbox name the create used.
-        si, _ = _find(["openshell", "sandbox", "ssh-config"], name)
-        di, _ = _find(["openshell", "sandbox", "delete"], name)
-        psi, _ = _find(["openshell", "policy", "set"], policy)
-        pdi, _ = _find(["openshell", "policy", "delete"], policy)
+        assert rendered_host == f"openshell-{name}", f"{profile}: rendered ssh_host {rendered_host!r} != the created sandbox's ssh-config alias openshell-{name}"
+        assert _arg(create, "--policy") == policy, f"{profile}: create --policy {_arg(create, '--policy')!r} != {policy!r}"
+        assert _arg(create, "--from") == spec_image, f"{profile}: create --from {_arg(create, '--from')!r} != spec sandbox_image {spec_image!r}"
+        si, ssh_cfg = _find(["openshell", "sandbox", "ssh-config"], name)
+        di, delete = _find(["openshell", "sandbox", "delete"], name)
+        assert _positional(ssh_cfg, ["openshell", "sandbox", "ssh-config"]) == name, f"{profile}: ssh-config positional target {ssh_cfg!r} is not the created name {name!r}"
+        assert _positional(delete, ["openshell", "sandbox", "delete"]) == name, f"{profile}: delete positional target {delete!r} is not the created name {name!r}"
+        psi, pset = _find(["openshell", "policy", "set"], policy)
+        pdi, pdel = _find(["openshell", "policy", "delete"], policy)
+        assert _positional(pset, ["openshell", "policy", "set"]) == policy, f"{profile}: policy-set positional {pset!r} is not {policy!r}"
+        assert _positional(pdel, ["openshell", "policy", "delete"]) == policy, f"{profile}: policy-delete positional {pdel!r} is not {policy!r}"
         assert max(ci, si, psi) < min(di, pdi), (
             f"{profile}: a teardown command precedes setup (create={ci} ssh-config={si} policy-set={psi}; sandbox-delete={di} policy-delete={pdi})"
         )
 
-    # exactly one of each command per profile.
     for subcmd in (
         ["openshell", "sandbox", "create"], ["openshell", "policy", "set"],
         ["openshell", "sandbox", "ssh-config"], ["openshell", "sandbox", "delete"],
@@ -678,11 +724,15 @@ def test_ac_osh_f63_4(tmp_path):
 
 
 def test_ac_osh_f63_6():
-    """AC-OSH-F63-6: website/docs/user-guide/fleet-openshell.md exists and
-    covers architecture, why-not-nested-podman, both ssh routes + chosen,
-    route-(a) admissibility, prerequisites, provisioning plan, teardown."""
+    """AC-OSH-F63-6: website/docs/user-guide/fleet-openshell.md exists, covers
+    architecture, why-not-nested-podman, both ssh routes + chosen, route-(a)
+    admissibility, prerequisites, provisioning plan, teardown, distinguishes the
+    ssh-config alias from the bare sandbox name, AND its policy example parses as
+    the two-endpoint five-section grammar (not the superseded three-endpoint
+    egress:allow shape the CLI rejects)."""
     assert DOC_PAGE.exists(), f"{DOC_PAGE} missing"
-    text = DOC_PAGE.read_text(encoding="utf-8").lower()
+    raw = DOC_PAGE.read_text(encoding="utf-8")
+    text = raw.lower()
     required = [
         "sandbox per profile",   # architecture
         "nested podman",         # why-not
@@ -691,7 +741,7 @@ def test_ac_osh_f63_6():
         "chosen route",          # WHICH route is chosen (and why)
         "admissib",              # route-(a) admissibility rule
         "sibling",               # sibling-sandbox denial is the isolation gate
-        "openshell_endpoint",    # the gateway endpoint the policy must deny to workers
+        "host.openshell.internal",  # the gateway control-plane endpoint the policy must deny to workers
         "operator gateway credentials",  # named subject of the prohibition
         "worker sandbox",
         "must never",            # the gateway-admin credential prohibition, explicitly
@@ -702,12 +752,48 @@ def test_ac_osh_f63_6():
         "session",               # the deferred session scope + its provider home
         "default",               # the documented default (profile)
         "defer",                 # session is deferred / fail-closed
+        "network_policies",      # the accepted five-section grammar top-level key
+        "enforcement",           # per-endpoint enforce — a five-section-grammar marker
+        "--from osh-f63-base:trixie",   # the pinned provisioning --from marker
+        "openshell-osh-f63-",           # the ssh-config alias form (§D1.2)
+        "--name osh-f63-",              # the bare sandbox create name, distinct from the alias (§D1.2/D1.4)
     ]
     missing = [k for k in required if k not in text]
     assert not missing, f"fleet-openshell.md missing required topics: {missing}"
+    # the runbook must not teach the superseded three-endpoint egress:allow shape
+    # (rejected by `openshell sandbox create --policy`), the old sandbox image, or
+    # the dropped OPENSHELL_ENDPOINT escape hatch — each would mislead an operator.
+    forbidden = [
+        "hermes-openshell-sandbox:pinned", "ssh_control_path", "172.17.0.1:22",
+        "openshell_endpoint", "exactly three endpoints",
+    ]
+    stale = [k for k in forbidden if k in text]
+    assert not stale, f"fleet-openshell.md still teaches the superseded design: {stale}"
+
+    # Parse the doc's fenced YAML and validate the policy example is REAL shipped
+    # grammar: a substring check alone passes a doc that ALSO shows a stale flat
+    # egress:allow block, the exact operator hazard AC-6 exists to prevent.
+    yaml_docs = []
+    for block in re.findall(r"```ya?ml[^\n]*\n(.*?)```", raw, flags=re.IGNORECASE | re.DOTALL):
+        parsed = yaml.safe_load(block)
+        if isinstance(parsed, dict):
+            yaml_docs.append(parsed)
+    egress_docs = [d["egress"] for d in yaml_docs if isinstance(d.get("egress"), dict)]
+    assert len(egress_docs) == 1, f"expected exactly one spec `egress` YAML block, got {len(egress_docs)}"
+    egress = egress_docs[0]
+    assert set(egress) == {"proxy_addr", "inference_route", "sandbox_image"}, f"spec egress keys {sorted(egress)} != proxy_addr/inference_route/sandbox_image (no ssh_control_path, no flat allow)"
+    assert {_hostport(egress["proxy_addr"]), _hostport(egress["inference_route"])} == _EXPECTED_EGRESS_HP, f"documented spec egress targets != the mandated {sorted(_EXPECTED_EGRESS_HP)}"
+    assert egress["sandbox_image"] == _PINNED_IMAGE, f"documented spec egress sandbox_image {egress['sandbox_image']!r} != {_PINNED_IMAGE!r}"
+    policy_docs = [d for d in yaml_docs if "network_policies" in d]
+    assert len(policy_docs) == 1, f"expected exactly one rendered-policy YAML block with network_policies, got {len(policy_docs)}"
+    policy = policy_docs[0]
+    assert set(policy) == _GRAMMAR_TOP_KEYS, f"documented policy top-level keys {sorted(policy)} != {sorted(_GRAMMAR_TOP_KEYS)}"
+    doc_endpoints = _assert_grammar_shape("documented policy", policy)
+    assert len(doc_endpoints) == 2, f"documented policy must show exactly 2 endpoints, got {len(doc_endpoints)}"
+    assert {(str(ep.get("host")), str(ep.get("port"))) for ep in doc_endpoints} == _EXPECTED_EGRESS_HP, "documented policy endpoints != the two mandated targets"
 
 
-# --- Fail-closed regressions (not AC ids) ---------------------------
+# --- Fail-closed regressions (not AC ids) -----------------------------------
 def test_openshell_rejects_container_mount_fields(tmp_path):
     """Unit (not an AC id): the openshell substrate fails CLOSED — not a silent
     no-op — when a spec sets a container-only mount field the remote-ssh substrate
@@ -768,3 +854,96 @@ def test_openshell_egress_rejects_control_char_image(tmp_path):
     assert proc.returncode != 0, "a control-char sandbox_image must be rejected"
     assert "control character" in (proc.stdout + proc.stderr).lower()
     assert not list(out.glob("*/config.yaml")), "no distribution may be written on the bad-image refusal"
+
+
+# a control-plane / gateway / wildcard / inbound-ssh host must be refused as an egress
+# target, in EITHER configurable position, before any profile is written.
+_FORBIDDEN_EGRESS_TARGETS = (
+    "host.openshell.internal:8080",   # OpenShell gateway control plane (denied to workers)
+    "172.17.0.1:10256",               # OneCLI control plane
+    "172.17.0.1:22",                  # ssh control path — INBOUND via the proxy socket, never egress
+    "0.0.0.0/0:443",                  # IPv4 wildcard CIDR
+    "::/0:443",                       # IPv6 wildcard CIDR
+    "0.0.0.0:443",                    # IPv4 unspecified
+    "*:443",                          # bare wildcard host
+    "*.example.com:443",              # wildcard subdomain — a '*' anywhere is refused
+    "HOST.OPENSHELL.INTERNAL:8080",   # case variant of the gateway control plane (DNS is case-insensitive)
+    "host.openshell.internal.:8080",  # trailing-root-dot variant of the gateway control plane
+    "[::]:443",                       # IPv6 unspecified, bracketed
+)
+
+
+def test_openshell_egress_rejects_forbidden_hosts(tmp_path):
+    """Unit (not an AC id): the render fails CLOSED when a spec's egress names a
+    control-plane / gateway / wildcard / inbound-ssh host — in EITHER position
+    (proxy_addr or inference_route) — so a tampered spec cannot render worker access
+    to a forbidden host. A pure substring wildcard check would miss 0.0.0.0/0:<port>
+    and host.openshell.internal:8080; the parsed (host, port) refusal catches them."""
+    home = _bootstrap_home(tmp_path)
+    for position in ("proxy_addr", "inference_route"):
+        for i, target in enumerate(_FORBIDDEN_EGRESS_TARGETS):
+            spec_dir = tmp_path / f"openshell-forbidden-{position}-{i}"
+            shutil.copytree(OPENSHELL_SPEC.parent, spec_dir)
+            spec = spec_dir / OPENSHELL_SPEC.name
+            data = yaml.safe_load(spec.read_text(encoding="utf-8"))
+            data["egress"][position] = target
+            spec.write_text(yaml.safe_dump(data), encoding="utf-8")
+            out = tmp_path / f"out-forbidden-{position}-{i}"
+            proc = _render(spec, out, home)
+            assert proc.returncode != 0, f"{position}={target!r}: render must reject a forbidden egress target"
+            assert not list(out.glob("*/config.yaml")), f"{position}={target!r}: no distribution may be written on the refusal"
+
+
+def test_openshell_ssh_key_placeholder_empty_0600(tmp_path):
+    """Unit (not an AC id): the render creates each terminal.ssh_key as an empty,
+    mode-0600, non-symlink regular file (never key material), and fails CLOSED on a
+    pre-existing non-empty file or a dangling symlink at that path (a dangling symlink
+    is invisible to Path.exists(), so a naive touch would follow it and write outside
+    the render-owned keys dir). All-or-nothing: a collision on ANY profile — including a
+    LATE one in write order — aborts before a single profile config is written, so a
+    partial fleet can never be left on disk."""
+    import stat as _stat
+
+    # happy path: every rendered ssh_key is an empty 0600 regular file
+    home = _bootstrap_home(tmp_path)
+    out = tmp_path / "out"
+    assert _render(OPENSHELL_SPEC, out, home).returncode == 0
+    for profile in COWORKER_PROFILES:
+        key = Path(_dotted(_profile_config(out, profile), "terminal.ssh_key"))
+        assert key.is_file() and not key.is_symlink(), f"{profile}: ssh_key {key} is not a regular file"
+        assert key.stat().st_size == 0, f"{profile}: ssh_key {key} is not empty ({key.stat().st_size} bytes)"
+        assert _stat.S_IMODE(key.stat().st_mode) == 0o600, f"{profile}: ssh_key {key} mode != 0600"
+
+    # fail-closed: a pre-existing NON-EMPTY file at the first profile's key path
+    home2 = _bootstrap_home(tmp_path / "h2")
+    keys2 = home2 / "openshell" / "keys"
+    keys2.mkdir(parents=True, exist_ok=True)
+    (keys2 / COWORKER_PROFILES[0]).write_text("not-a-placeholder", encoding="utf-8")
+    out2 = tmp_path / "out2"
+    proc2 = _render(OPENSHELL_SPEC, out2, home2)
+    assert proc2.returncode != 0, "render must fail on a pre-existing non-empty ssh_key"
+    assert not list(out2.glob("*/config.yaml")), "no distribution may be written on the non-empty-key refusal"
+
+    # fail-closed: a DANGLING SYMLINK at the first profile's key path — render must
+    # raise WITHOUT following it (no target file created) and write no config.
+    home3 = _bootstrap_home(tmp_path / "h3")
+    keys3 = home3 / "openshell" / "keys"
+    keys3.mkdir(parents=True, exist_ok=True)
+    target = home3 / "escape-target"
+    (keys3 / COWORKER_PROFILES[0]).symlink_to(target)
+    out3 = tmp_path / "out3"
+    proc3 = _render(OPENSHELL_SPEC, out3, home3)
+    assert proc3.returncode != 0, "render must fail on a dangling ssh_key symlink"
+    assert not target.exists(), "render must NOT follow the symlink and create its target"
+    assert not list(out3.glob("*/config.yaml")), "no distribution may be written on the symlink refusal"
+
+    # fail-closed ALL-OR-NOTHING: a collision on a LATER profile (last in COWORKER_PROFILES)
+    # must abort before any profile config is written.
+    home4 = _bootstrap_home(tmp_path / "h4")
+    keys4 = home4 / "openshell" / "keys"
+    keys4.mkdir(parents=True, exist_ok=True)
+    (keys4 / COWORKER_PROFILES[-1]).write_text("not-a-placeholder", encoding="utf-8")
+    out4 = tmp_path / "out4"
+    proc4 = _render(OPENSHELL_SPEC, out4, home4)
+    assert proc4.returncode != 0, "render must fail on a non-empty ssh_key for a LATE profile"
+    assert not list(out4.glob("*/config.yaml")), "no profile config may be written when a LATER profile's key collides (all-or-nothing)"
