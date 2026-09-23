@@ -277,27 +277,103 @@ def test_ac_osh_f63_1(tmp_path):
     assert not list(sess_out.glob("*/config.yaml")), "no distribution may be written on the session refusal"
 
 
+# OpenShell's `sandbox create --policy` rejects any top-level key outside this
+# set (`unknown field <k>, expected one of ...`), so a generated policy that is
+# not exactly this five-section shape is rejected before any runtime enforcement.
+_GRAMMAR_TOP_KEYS = {"version", "filesystem_policy", "landlock", "process", "network_policies"}
+_WILDCARD_HOSTS = {"0.0.0.0/0", "::/0", "*", "0.0.0.0", "::"}
+
+
+def _hostport(value) -> tuple:
+    """Normalise a spec egress target to ``(host, port)`` with port a string.
+    Accepts a ``{host, port}`` mapping or a scalar ``host:port`` / bare ``host``
+    (port ``None`` only for a bare host — the grammar requires a port on every
+    endpoint, so a target reaching the render without one is a fixture defect
+    the caller surfaces)."""
+    if isinstance(value, dict):
+        port = value.get("port")
+        return str(value.get("host")), (str(port) if port is not None else None)
+    text = str(value)
+    head, sep, tail = text.rpartition(":")
+    if sep and tail.isdigit():
+        return head, tail
+    return text, None
+
+
+def _assert_grammar_shape(profile: str, policy: dict) -> list:
+    """Validate the required documented grammar structure (§D1.3) and return
+    the raw list of endpoint records — NOT de-duplicated, so a duplicated
+    endpoint stays visible to the caller's count check. Every named policy is
+    ``{name, binaries:[{path}], endpoints:[{host, port, protocol, enforcement,
+    rules:[{allow:{method, path}}]}]}``."""
+    fsp = policy.get("filesystem_policy")
+    assert isinstance(fsp, dict), f"{profile}: filesystem_policy must be a mapping"
+    assert fsp.get("include_workdir") is True, f"{profile}: filesystem_policy.include_workdir must be true, got {fsp.get('include_workdir')!r}"
+    assert "read_only" in fsp and isinstance(fsp["read_only"], list), f"{profile}: filesystem_policy.read_only must be a present list"
+    assert "read_write" in fsp and isinstance(fsp["read_write"], list), f"{profile}: filesystem_policy.read_write must be a present list"
+    landlock = policy.get("landlock")
+    assert isinstance(landlock, dict) and landlock.get("compatibility"), f"{profile}: landlock.compatibility missing"
+    proc = policy.get("process")
+    assert isinstance(proc, dict), f"{profile}: process must be a mapping"
+    assert proc.get("run_as_user") == "sandbox", f"{profile}: process.run_as_user must be 'sandbox', got {proc.get('run_as_user')!r}"
+    assert proc.get("run_as_group") == "sandbox", f"{profile}: process.run_as_group must be 'sandbox', got {proc.get('run_as_group')!r}"
+
+    nps = policy.get("network_policies")
+    assert isinstance(nps, dict) and nps, f"{profile}: network_policies must be a non-empty mapping"
+    endpoints = []
+    for name, np in nps.items():
+        assert isinstance(np, dict), f"{profile}: network_policy {name!r} must be a mapping"
+        assert np.get("name") == name, f"{profile}: network_policy {name!r} name field {np.get('name')!r} != map key"
+        bins = np.get("binaries")
+        assert isinstance(bins, list) and bins, f"{profile}: network_policy {name!r} needs a non-empty binaries[]"
+        for b in bins:
+            assert isinstance(b, dict) and b.get("path"), f"{profile}: {name} binary {b!r} needs a path"
+        eps = np.get("endpoints")
+        assert isinstance(eps, list) and eps, f"{profile}: network_policy {name!r} needs a non-empty endpoints[]"
+        for ep in eps:
+            assert isinstance(ep, dict), f"{profile}: {name}: each endpoint must be a mapping"
+            assert ep.get("protocol") == "rest", f"{profile}: {name}: endpoint {ep!r} protocol must be 'rest'"
+            assert ep.get("enforcement") == "enforce", f"{profile}: {name}: endpoint {ep!r} enforcement must be 'enforce'"
+            assert ep.get("host"), f"{profile}: {name}: endpoint missing host"
+            assert ep.get("port") is not None, f"{profile}: {name}: endpoint {ep.get('host')!r} missing port"
+            rules = ep.get("rules")
+            assert isinstance(rules, list) and rules, f"{profile}: {name}: endpoint {ep.get('host')} needs a non-empty rules[]"
+            for rule in rules:
+                allow = rule.get("allow") if isinstance(rule, dict) else None
+                assert isinstance(allow, dict) and allow.get("method") and allow.get("path"), f"{profile}: {name}: rule {rule!r} needs allow.method + allow.path"
+            endpoints.append(ep)
+    return endpoints
+
+
 def test_ac_osh_f63_2(tmp_path):
-    """AC-OSH-F63-2: the render emits one well-formed policy-<profile>.yaml per
-    profile that contains each of the three required endpoint literals (OneCLI
-    hop, inference route, ssh control path) and excludes 10256 and wildcard
-    egress (0.0.0.0/0, ::/0) — schema-independent checks; the allow-vs-deny
-    semantics are proven on-box by AC-OSH-F63-5."""
+    """AC-OSH-F63-2: the render emits one policy-<profile>.yaml per profile
+    conforming to the required OpenShell policy grammar (version/filesystem_policy/
+    landlock/process/network_policies, no top-level egress/allow), whose
+    network_policies endpoints are exactly the three allowed targets (OneCLI
+    hop, inference route, ssh control path) — each protocol: rest, enforcement:
+    enforce, with an allow rule — and 172.17.0.1:10256 and wildcard hosts
+    absent."""
     home = _bootstrap_home(tmp_path)
     out = tmp_path / "out"
     assert _render(OPENSHELL_SPEC, out, home).returncode == 0
 
     # The three allowed endpoints are spec data (egress section), read back so
-    # the assertion is a behaviour contract, not a hard-coded snapshot.
+    # the assertion is a behaviour contract, not a hard-coded snapshot. Two of
+    # them MAY share a host on different ports — the contract is three host:port
+    # records, not three distinct hosts.
     spec = yaml.safe_load(OPENSHELL_SPEC.read_text(encoding="utf-8"))
     egress = spec.get("egress", {})
-    expected_allowed = {
+    required = [
         egress.get("proxy_addr") or egress.get("onecli_hop"),
         egress.get("inference_route"),
         egress.get("ssh_control_path"),
-    }
-    expected_allowed.discard(None)
-    assert len(expected_allowed) == 3, f"spec egress must name exactly three endpoints: {expected_allowed}"
+    ]
+    required = [r for r in required if r]
+    assert len(required) == 3, f"spec egress must name exactly three endpoints: {required}"
+    required_hp = {_hostport(r) for r in required}
+    assert len(required_hp) == 3, f"the three egress targets must be distinct host:port records: {required_hp}"
+    for host, port in required_hp:
+        assert port is not None, f"egress target {host!r} must name a port (grammar requires host+port): {required}"
 
     # exactly one policy file per profile, named policy-<profile>.yaml — a
     # duplicate in another dir must be caught, not silently collapsed.
@@ -306,20 +382,28 @@ def test_ac_osh_f63_2(tmp_path):
     assert {p.name for p in policy_paths} == {f"policy-{p}.yaml" for p in COWORKER_PROFILES}, f"policy files != one per profile: {sorted(p.name for p in policy_paths)}"
     policy_files = {p.name: p for p in policy_paths}
 
-    # AC-2 is a SCHEMA-INDEPENDENT contract: the exact OpenShell policy grammar
-    # is pinned by operator step 2 (external, no release-tree citation), so this
-    # asserts only what holds regardless of structure — each required endpoint is
-    # present, the control plane and obvious wildcards are absent — and defers the
-    # allow-vs-deny SEMANTICS (only these three admitted, everything else denied)
-    # to AC-OSH-F63-5's on-box `openshell policy prove` (§Scenario outlines).
+    # AC-2 is a STRUCTURAL contract on the landed OpenShell grammar (§D1.3): the
+    # full five-section shape (every named policy well-formed), and the endpoints
+    # == exactly the three allowed targets, each enforce/rest with an allow rule.
+    # The allow-vs-deny SEMANTICS (only these three admitted, all else denied) are
+    # proven on-box by AC-OSH-F63-5's `openshell sandbox create --policy`/`prove`.
     for profile in COWORKER_PROFILES:
-        raw = policy_files[f"policy-{profile}.yaml"].read_text(encoding="utf-8")
-        assert yaml.safe_load(raw) is not None, f"{profile}: policy is not well-formed YAML"
-        for endpoint in expected_allowed:
-            assert endpoint in raw, f"{profile}: required endpoint {endpoint!r} absent from the emitted policy"
-        assert "10256" not in raw, f"{profile}: OneCLI control plane 10256 present in policy"
-        for wildcard in ("0.0.0.0/0", "::/0"):
-            assert wildcard not in raw, f"{profile}: wildcard egress {wildcard!r} present in policy"
+        policy = yaml.safe_load(policy_files[f"policy-{profile}.yaml"].read_text(encoding="utf-8"))
+        assert isinstance(policy, dict), f"{profile}: policy is not a YAML mapping"
+        assert policy.get("version") == 1, f"{profile}: policy version must be 1, got {policy.get('version')!r}"
+        assert "egress" not in policy, f"{profile}: placeholder top-level 'egress' key present (openshell create --policy rejects it)"
+        assert "allow" not in policy, f"{profile}: placeholder top-level 'allow' key present"
+        assert set(policy) == _GRAMMAR_TOP_KEYS, f"{profile}: top-level keys {sorted(policy)} != grammar {sorted(_GRAMMAR_TOP_KEYS)}"
+
+        endpoints = _assert_grammar_shape(profile, policy)
+        # raw list (NOT a set) so a duplicated endpoint fails the count.
+        assert len(endpoints) == 3, f"{profile}: expected exactly 3 endpoint records, got {len(endpoints)}: {endpoints}"
+        emitted_hp = {(str(ep.get("host")), str(ep.get("port"))) for ep in endpoints}
+        assert emitted_hp == required_hp, f"{profile}: endpoints {sorted(emitted_hp)} != allowed targets {sorted(required_hp)}"
+
+        assert ("172.17.0.1", "10256") not in emitted_hp, f"{profile}: OneCLI control plane 172.17.0.1:10256 present as an endpoint"
+        emitted_hosts = {h for h, _ in emitted_hp}
+        assert not (emitted_hosts & _WILDCARD_HOSTS), f"{profile}: wildcard host present: {emitted_hosts & _WILDCARD_HOSTS}"
 
 
 def _scope(manager, monkeypatch, active: Path, launch: Path):
@@ -623,9 +707,7 @@ def test_ac_osh_f63_6():
     assert not missing, f"fleet-openshell.md missing required topics: {missing}"
 
 
-# --- fail-closed unit tests (not AC ids; safety regressions) ----------------
-
-
+# --- Fail-closed regressions (not AC ids) ---------------------------
 def test_openshell_rejects_container_mount_fields(tmp_path):
     """Unit (not an AC id): the openshell substrate fails CLOSED — not a silent
     no-op — when a spec sets a container-only mount field the remote-ssh substrate
