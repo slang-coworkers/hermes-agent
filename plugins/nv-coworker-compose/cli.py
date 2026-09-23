@@ -24,6 +24,29 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
              "(sandbox create/policy set/ssh-config + teardown) for a substrate: openshell spec",
     )
 
+    # Idempotently install the fleet under the openshell substrate into an existing
+    # sandbox (compose + per-profile installs + backed-up in-place default edit + managed
+    # fragment + rooms + wires + restart). Entry point openshell/install-into-sandbox.sh;
+    # logic in the pure planner openshell/installer.py.
+    install_osh_p = subs.add_parser(
+        "install-openshell",
+        help="Install the fleet under substrate: openshell into an existing sandbox",
+    )
+    install_osh_p.add_argument("spec", help="Path to coworker-types.yaml (substrate: openshell)")
+    install_osh_p.add_argument(
+        "--ref", required=True,
+        help="Full 40-character commit SHA the per-plugin installs pin to",
+    )
+    install_osh_p.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the ordered install plan (Phase A + Phase B) without applying it",
+    )
+    install_osh_p.add_argument(
+        "--gateway-url", default=None,
+        help="Loopback gateway /api/ws URL with a ?token or ?ticket credential; required for "
+             "a real run (rooms are probed/created against the live gateway), unused with --dry-run",
+    )
+
 
 def setup_onboard(parser: argparse.ArgumentParser) -> None:
     """Build ``hermes onboard <subcommand>``."""

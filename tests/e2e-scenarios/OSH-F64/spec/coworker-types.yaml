@@ -1,0 +1,90 @@
+# OSH-F64 fleet spec (openshell substrate). The full FLEET-F62 five-coworker fleet
+# composed under substrate: openshell (OSH-F63's remote-ssh render, unchanged).
+# `wires` (a ring that never includes orchestrator<->builder, so AC-4's unwired->wired
+# negative control holds) is the OSH-F64 installer input the AC-1 acceptance test reads.
+# plugins.enabled is declared ONLY in the spine config (spines/base.yaml) — the set
+# compose renders from and the set the installer bootstraps; there is NO top-level
+# plugins.enabled mirror (AC-1 asserts its absence; compose reads neither top-level key).
+project: osh-f64
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+install_surfaces: []
+
+egress:
+  proxy_addr: "172.17.0.1:10255"
+  inference_route: "inference-api.nvidia.com:443"
+  ssh_control_path: "172.17.0.1:22"
+  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "OSH-F64 orchestrator — the elevated fleet-admin coworker on the OpenShell substrate. Receives the human's change request over Bot Chat, dispatches it to the builder over the wired edge, and closes the loop when the reviewer approves."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+    config:
+      skills:
+        external_dirs:
+          - /opt/hermes-fleet/shared-learnings/skills
+  architect:
+    extends: [base]
+    identity: "OSH-F64 architect — designs the change and hands a plan+spec to the builder over the wired edge; its tool calls run in its own OpenShell ssh sandbox."
+    ui_meta: {title: "Architect", description: "Fleet architect", shape: "square"}
+    config:
+      skills:
+        external_dirs:
+          - /opt/hermes-fleet/shared-learnings/skills
+  builder:
+    extends: [base]
+    identity: "OSH-F64 builder — applies the change inside its own OpenShell ssh worker sandbox and replies P7-BUILT:<nonce> in the room."
+    ui_meta: {title: "Builder", description: "Fleet builder", shape: "square"}
+    config:
+      skills:
+        external_dirs:
+          - /opt/hermes-fleet/shared-learnings/skills
+  tester:
+    extends: [base]
+    identity: "OSH-F64 tester — runs the checks in its own OpenShell ssh sandbox and replies P7-TESTED:<nonce>:PASS."
+    ui_meta: {title: "Tester", description: "Fleet tester", shape: "square"}
+    config:
+      skills:
+        external_dirs:
+          - /opt/hermes-fleet/shared-learnings/skills
+  reviewer:
+    extends: [base]
+    identity: "OSH-F64 reviewer — reads the diff in its own OpenShell ssh sandbox and replies P7-REVIEW:<nonce>:APPROVE to the orchestrator."
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+    config:
+      skills:
+        external_dirs:
+          - /opt/hermes-fleet/shared-learnings/skills
+
+rooms:  # PRESERVED from FLEET-F62 unchanged — AC-1 asserts spec.rooms == FLEET-F62 spec.rooms
+  fleet-room:
+    name: "FLEET-F62 Fleet"
+    members: [orchestrator, architect, builder, tester, reviewer]
+  review-room:
+    name: "FLEET-F62 Review"
+    members: [builder, tester, reviewer]
+
+wires:
+  - [orchestrator, architect]
+  - [architect, builder]
+  - [builder, tester]
+  - [tester, reviewer]
+  - [reviewer, orchestrator]
+
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false

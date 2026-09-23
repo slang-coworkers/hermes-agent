@@ -1,0 +1,18 @@
+{
+  "row": "OSH-F64",
+  "substrate": "openshell",
+  "backend": "ssh",
+  "sandbox_scope": "profile",
+  "enabled_plugins": ["nv-coworker-compose", "nv-fleet-gates", "podman-onecli"],
+  "distributions": ["default", "orchestrator", "architect", "builder", "tester", "reviewer"],
+  "egress_endpoints": ["172.17.0.1:10255", "inference-api.nvidia.com:443", "172.17.0.1:22"],
+  "checks": [
+    {"op": "equals", "key": "terminal.backend", "value": "ssh"},
+    {"op": "equals", "key": "plugins.entries.nv-fleet-gates.settings.expected_backend", "value": "ssh"}
+  ],
+  "notes": [
+    "The OSH-F64 spec is FLEET-F62's full five-coworker fleet with substrate: openshell flipped; every non-substrate key equals the committed FLEET-F62 podman render (AC-OSH-F64-2).",
+    "provision.dry-run.txt and policy-<role>.yaml are the deterministic, path-independent OpenShell provisioning references; the full per-profile render is verified LIVE by AC-OSH-F64-2, not committed as a byte snapshot (change-detector prohibition, AGENTS.md).",
+    "dockerfile.worker.lint.txt is the reference report the vendored dockerfile_lint checker must reproduce for AC-OSH-F64-1."
+  ]
+}

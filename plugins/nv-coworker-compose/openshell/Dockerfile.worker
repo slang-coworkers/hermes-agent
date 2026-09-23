@@ -1,0 +1,31 @@
+# Worker-sandbox image — one per served profile, reached over the builtin ssh terminal
+# backend. Route (a): the gateway brokers ssh via `ProxyCommand openshell ssh-proxy` and
+# auth rides the OpenShell mTLS proxy, so this image carries NO sshd and NO key material;
+# the rendered `terminal.ssh_key` need only EXIST for the `-i` contract, never for auth.
+#
+# The base is pinned by immutable digest so the sandbox is reproducible. This is the same
+# published, digest-pinned image the release build uses (release Dockerfile:43); the
+# worker only needs a shell + the tools its terminal calls use (hermes runs on the
+# gateway, not in the worker), so no Hermes runtime is installed here. An operator on a
+# different registry substitutes their own digest-pinned base at provisioning (see
+# website/docs/user-guide/fleet-openshell.md § "install into an existing NemoClaw sandbox").
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The tools a profile's terminal calls need inside its sandbox. No upgrade (the base is
+# pinned), --no-install-recommends, and the apt lists are dropped to keep the image lean.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+      ca-certificates \
+      curl \
+      git \
+      ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Run as an unprivileged user — a profile's terminal calls never need root in the sandbox.
+RUN useradd --create-home --uid 10001 --shell /bin/bash sandbox \
+ && chown -R sandbox:sandbox /workspace
+USER sandbox

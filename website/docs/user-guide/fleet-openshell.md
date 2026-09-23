@@ -194,3 +194,69 @@ The top-level `sandbox_scope` key selects how many OpenShell sandboxes back the 
   `create_environment` that mints one sandbox per session and reaps it on idle) with
   `terminal.backend: openshell` — a CORE-CHANGE-free plugin path that OSH-F63 does not
   build. Until that provider ships, use `sandbox_scope: profile`.
+
+## install into an existing NemoClaw sandbox
+
+The demo runs the FLEET-F62 five-profile fleet on the OpenShell substrate INSIDE an
+existing NemoClaw Hermes sandbox — the shape of the user's `brev-hermes` — without ever
+touching that user box by hand. The two-phase entrypoint is
+`plugins/nv-coworker-compose/openshell/install-into-sandbox.sh`, staged into the sandbox
+at create time (`openshell sandbox create --upload`) or via `openshell sandbox exec`.
+
+### What the operator runs (on `brev-hermes`)
+
+Preview first — `install-into-sandbox.sh <spec> --ref <40-char-sha> --dry-run` prints the
+full ordered plan and changes nothing. Then run it for real, adding the sandbox's loopback
+gateway credential URL: `install-into-sandbox.sh <spec> --ref <40-char-sha> --gateway-url <ws-url>`.
+Phase B probes and creates the fleet rooms against the live gateway over that authenticated
+WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`. The script:
+
+- **Phase A** installs the fleet plugins (`nv-coworker-compose`, `nv-fleet-gates`,
+  `podman-onecli`) at the pinned commit so `hermes coworker` exists.
+- **Phase B** (`hermes coworker install-openshell`) composes the fleet under
+  `substrate: openshell` and provisions **five worker sandboxes** — one per served
+  coworker — each Ready under a per-bot `openshell policy` (that bot's APF: exactly the
+  three allowed endpoints, nothing else).
+- It also installs the fleet plugins under **each** served profile (a profile
+  distribution excludes plugins, so the veto must be installed per profile or it is
+  absent there).
+- It **edits the existing default profile in place**, taking a deterministic **backup**
+  of the original `$HERMES_HOME/config.yaml` FIRST — before any `plugins install --enable`
+  rewrites it — and writing the managed fragment to the managed dir as a separate file.
+  It must **never run `profile install default`**: `get_profile_dir("default")` resolves
+  to `$HERMES_HOME` itself (the user's running Hermes), so the default is edited, never
+  reinstalled.
+- It creates the fleet rooms and wires, then restarts the gateway via the shipped
+  `hermes gateway restart`.
+- The dashboard or desktop app then attaches to the running gateway through the desktop
+  forward (`openshell forward start osh-f64-gw <local>:<port>`) — one gateway connection
+  for the whole app, listing the served profiles.
+
+**Gateway-sandbox preflight (shared learnings).** Each served profile's process runs in
+the gateway sandbox and reads `skills.external_dirs`, so `/opt/hermes-fleet/shared-learnings/skills`
+must exist IN the gateway sandbox before boot (stage or mount it there). The remote-ssh
+substrate binds no container mount, so this is a gateway-sandbox prerequisite, not a
+worker-image one; the orchestrator wiki-fold stays an operator opt-in under openshell.
+
+### Rollback
+
+To back the change out and leave the existing default exactly as before:
+
+- **Restore the default `config.yaml` backup** and the managed-config backup taken in
+  Phase A (this reverts the in-place default edit).
+- **Remove the five coworker profiles** (`hermes profile remove <role>` per role) — the
+  profiles the install added, never the default profile.
+- **Uninstall the fleet plugins** that were newly installed (default + per-profile); a
+  plugin that pre-existed at the pinned ref is left as the operator had it.
+- **Restart the gateway** so it re-reads the restored default.
+- **Delete** the `osh-f64-*` worker sandboxes and their policies (`openshell sandbox
+  delete` + `openshell policy delete`), and the `osh-f64-gw` gateway sandbox when it was
+  a throwaway.
+
+### What the NemoClaw dashboard / APF shows afterwards
+
+The NemoClaw dashboard shows one running worker sandbox per served coworker, and its APF
+view shows one `openshell policy` per sandbox — the three allowed endpoints per bot, with
+an off-policy egress attempt denied and logged. The whole fleet is one gateway on one
+bound port; the per-profile `hermes -p <profile> chat` helper processes bind no external
+port.
