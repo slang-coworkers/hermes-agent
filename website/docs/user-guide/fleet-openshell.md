@@ -35,11 +35,14 @@ profile's **tool** execution. `hermes coworker compose <spec>` with
   sandbox host** via the worker-unforgeable managed `expected_ssh_host` map (a sibling
   host, an absent host, or an absent/malformed map is refused *before* the readiness
   gate connects) — and denies `local`, cross-profile, an unready backend, and stdio MCP.
-- a per-profile ssh block: `terminal.ssh_host` (the sandbox name `<fleet>-<profile>`,
-  distinct per profile), `terminal.ssh_user`, `terminal.ssh_port`, and
-  `terminal.ssh_key` — a **path** under the gateway `$HERMES_HOME` (never key material;
-  in the fleet testbed that root is under `/workspace/extra/hermes-fleet-testbed/`, never
-  `/opt`). On the OpenShell lane `openshell sandbox ssh-config` emits `User sandbox` + a
+- a per-profile ssh block: `terminal.ssh_host` (the ssh-config **alias**
+  `openshell-osh-f63-<profile>`, distinct per profile, which resolves through the
+  OpenShell `ProxyCommand` to the sandbox created under the bare `--name osh-f63-<profile>`
+  — the alias and the bare sandbox name are deliberately *different* strings, not equal),
+  `terminal.ssh_user` (`sandbox`), `terminal.ssh_port`, and
+  `terminal.ssh_key` — a **path** under the gateway `$HERMES_HOME` (never key material —
+  the render creates it as an empty mode-0600 placeholder file; in the fleet testbed that
+  root is under `/workspace/extra/hermes-fleet-testbed/`, never `/opt`). On the OpenShell lane `openshell sandbox ssh-config` emits `User sandbox` + a
   `ProxyCommand` and **no `IdentityFile`** (auth rides the mTLS proxy), so the key file
   need only EXIST — present for the builtin `ssh -i <path>` contract, not used for auth.
 - a per-profile `policy-<profile>.yaml` — the `openshell policy` allow-set for that
@@ -76,15 +79,16 @@ Reaching a per-profile sandbox over ssh has two candidate routes:
 ### Route (a) admissibility
 
 Route (a) is **admissible only if the rendered per-profile `openshell policy` denies
-the OpenShell gateway endpoint (`OPENSHELL_ENDPOINT`) for the worker's tool egress.**
-The mounted mTLS identity is gateway-admin over *all* siblings, so a worker that could
-reach `OPENSHELL_ENDPOINT` could list/create/connect to sibling sandboxes — breaking
-profile isolation (topology rule 3, a MUST). The per-profile policy therefore allows
-**exactly** the OneCLI request hop, the inference route, and the ssh control path, and
-**`OPENSHELL_ENDPOINT` is never a tool-egress allow.** AC-OSH-F63-5 proves this at
-runtime with a worker-side negative control: from inside a policy-constrained sandbox,
-an attempt to `sandbox list` / connect to a sibling via `OPENSHELL_ENDPOINT` must be
-**denied** (nonzero exit, no sibling metadata). A worker that *can* reach a sibling is
+the OpenShell gateway control plane (`host.openshell.internal:8080`) for the worker's
+tool egress.** The mounted mTLS identity is gateway-admin over *all* siblings, so a
+worker that could reach `host.openshell.internal:8080` could list/create/connect to
+sibling sandboxes — breaking profile isolation (topology rule 3, a MUST). The
+per-profile policy therefore allows **exactly two endpoints** — the OneCLI request hop
+and the inference route — and **`host.openshell.internal:8080` is never an endpoint.**
+AC-OSH-F63-5 proves this at runtime with a worker-side negative control: from inside a
+policy-constrained sandbox, an attempt to `sandbox list` / connect to a sibling via
+`host.openshell.internal:8080` must be **denied** (nonzero exit, no sibling metadata).
+A worker that *can* reach a sibling is
 an unconditional isolation failure — the row falls back to route (b) or a genuinely
 `<prefix>-*`-scoped OpenShell identity, which must be *implemented* (not merely
 documented) before the row can pass.
@@ -95,39 +99,54 @@ rests on the policy denying the gateway endpoint, not on the identity being scop
 
 ## Egress policy: one `openshell policy` per profile
 
-The render emits one `policy-<profile>.yaml` per coworker profile. Its allow-set is
-**exactly three endpoints**, taken from the spec's `egress` block:
+The render emits one `policy-<profile>.yaml` per coworker profile, in the OpenShell
+policy grammar the `openshell sandbox create --policy` CLI accepts — top-level
+`version`, `filesystem_policy`, `landlock`, `process`, and `network_policies` (an
+earlier flat `egress: {allow: […]}` shape is rejected with `unknown field egress`). Its
+`network_policies` allow-set is **exactly two endpoints**, taken from the spec's
+`egress` block:
 
 ```yaml
 egress:
-  proxy_addr: "172.17.0.1:10255"          # the OneCLI request hop (allowed)
+  proxy_addr: "172.17.0.1:10255"                    # the OneCLI request hop (allowed)
   inference_route: "inference-api.nvidia.com:443"   # the model inference route (allowed)
-  ssh_control_path: "172.17.0.1:22"        # the ssh control path (allowed)
-  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"   # the --from image for provisioning
+  sandbox_image: "osh-f63-base:trixie"              # the --from image (broker-pinned; Debian trixie, glibc 2.41)
 ```
 
-renders, per profile:
+The ssh path is **not** an egress target — ssh arrives INBOUND through the OpenShell
+proxy socket, not outbound — so the ssh control endpoint is not in the allow-set. Per
+profile the render emits:
 
 ```yaml
 # policy-builder.yaml
-egress:
-  allow:
-    - "172.17.0.1:10255"
-    - "inference-api.nvidia.com:443"
-    - "172.17.0.1:22"
+version: 1
+filesystem_policy: {include_workdir: true, read_only: [/usr, /bin, /lib, /etc], read_write: [/tmp]}
+landlock: {compatibility: best_effort}
+process: {run_as_user: sandbox, run_as_group: sandbox}
+network_policies:
+  worker-egress:
+    name: worker-egress
+    binaries: [{path: /usr/bin/curl}]
+    endpoints:
+      - {host: 172.17.0.1, port: 10255, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
+      - {host: inference-api.nvidia.com, port: 443, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
 ```
 
-Nothing else is allowed: **no wildcard**, and the OneCLI control plane
-(`172.17.0.1:10256`) is never in the allow-set (only the request hop `:10255` is).
-`OPENSHELL_ENDPOINT` is added only if the policy grammar requires it for the sandbox's
-own control connection (an on-box question, established at provisioning), and even then
-never as a tool-egress allow. The render writes this `egress.allow` file as
-`policy-<profile>.yaml` beside the profile's config (carried into the installed profile
-via `distribution_owned`) — the **canonical allow-set** the provisioning plan names on
-its bare `--policy policy-<profile>.yaml` argument. **AC-OSH-F63-5 validates this emitted
-file unchanged:** if the pinned OpenShell CLI rejects it (`openshell policy set` /
-`prove`), the criterion FAILS and the renderer must be corrected — do not regenerate or
-hand-edit the policy during verification.
+Nothing else is allowed: **no wildcard host**, the OneCLI control plane
+(`172.17.0.1:10256`) is never an endpoint, and the OpenShell gateway control plane
+**`host.openshell.internal:8080`** is never an endpoint — denying that gateway endpoint
+to the policy-constrained worker is exactly what makes route (a) admissible (a worker
+must not reach the gateway to list or connect to sibling sandboxes; AC-OSH-F63-5 step 4
+proves that denial on-box). The `POST` method is the coworker's real traffic to both
+REST endpoints; the exact per-endpoint verb/path is proven on-box by AC-5, not frozen
+into the hermetic AC-2 check. The render writes this file as `policy-<profile>.yaml`
+beside the profile's config (carried into the installed profile via `distribution_owned`)
+— the **canonical allow-set** the provisioning plan names on its bare
+`--policy policy-<profile>.yaml` argument. **AC-OSH-F63-5 validates this emitted file
+unchanged:** if the pinned OpenShell CLI rejects it (`openshell policy set` / `prove`) or
+fails to enforce it — admitting the in-policy POST while denying
+`host.openshell.internal:8080` — the criterion FAILS and the renderer must be corrected;
+do not regenerate or hand-edit the policy during verification.
 
 ## Operator prerequisites
 
@@ -141,10 +160,14 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
    `<prefix>-gw`, or `brev-hermes`.
 2. Confirmation of which `openshell logs --source` (gateway vs sandbox) records a
    policy denial, and whether `openshell policy` governs the sandbox's own mTLS control
-   connection to `OPENSHELL_ENDPOINT` (this decides whether route (a) is admissible).
-3. A **pinned `--from` image**: replace the placeholder `sandbox_image` with the exact
-   immutable image reference (a digest) for the target platform. For route (a) a
-   community image suffices; for route (b) the image must ship `sshd`.
+   connection to the gateway control plane `host.openshell.internal:8080` (this decides
+   whether route (a) is admissible).
+3. The **pinned `--from osh-f63-base:trixie`** image (Debian trixie, glibc 2.41):
+   OpenShell injects PID 1 `/opt/openshell/bin/openshell-sandbox`, linked against
+   glibc ≥ 2.39, so an alpine (musl) or Debian bookworm (glibc 2.36) base restart-loops
+   and never reaches Ready. This `--from` tag is broker-pinned — not an operator-swappable
+   placeholder; re-pinning it means updating both the broker's allowed `--from` and the
+   spec's `egress.sandbox_image`. For route (b) the image must additionally ship `sshd`.
 4. The rendered per-profile ssh config installed into the gateway user's OpenSSH
    configuration (the `openshell sandbox ssh-config <name>` output), so `terminal.ssh_host`
    resolves through the OpenShell `ProxyCommand`, and the per-profile key path referenced
@@ -163,18 +186,23 @@ a deterministic provisioning plan (identical across runs and across `--out` dirs
 `--out` path appears) — the create, policy-set, and ssh-config lines per profile, then
 the teardown lines. Each `--policy` names the bare `policy-<profile>.yaml` (the operator
 materialises it at that name from the profile's `distribution_owned` before running the
-plan), and each create `--name` is the sandbox alias == that profile's rendered
-`terminal.ssh_host` (so create / ssh-config / delete all target the same sandbox):
+plan). Each `openshell sandbox create --name` uses the **bare sandbox name**
+`osh-f63-<profile>`, while that profile's rendered `terminal.ssh_host` is the distinct
+ssh-config **alias** `openshell-osh-f63-<profile>` that resolves to it through the
+OpenShell `ProxyCommand` — the two are deliberately *different* strings. `create`,
+`ssh-config`, and `delete` all take the bare name, so they target the same sandbox
+(shown below for the `builder` profile: alias `openshell-osh-f63-builder`, sandbox
+`osh-f63-builder`):
 
 ```
-openshell sandbox create --name <fleet>-<profile> --from <pinned image> --policy policy-<profile>.yaml
+openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie --policy policy-builder.yaml
 ...
-openshell policy set policy-<profile>.yaml
+openshell policy set policy-builder.yaml
 ...
-openshell sandbox ssh-config <fleet>-<profile>
+openshell sandbox ssh-config osh-f63-builder
 ...
-openshell sandbox delete <fleet>-<profile>
-openshell policy delete policy-<profile>.yaml
+openshell sandbox delete osh-f63-builder
+openshell policy delete policy-builder.yaml
 ```
 
 The plan runs **no** container engine. The teardown lines delete each per-profile
