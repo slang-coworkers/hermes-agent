@@ -72,10 +72,11 @@ the caller is not the orchestrator, and returns `None` (deferring to the rest of
 the chain) otherwise. The incoming `tool_name` is first run through
 `canonicalise()` (`plugins/nv-fleet-gates/aliases.py:24-28`), so a legacy
 spelling is matched identically to its canonical name. Per the stock contract,
-the first valid `block` directive wins for `pre_tool_call`
-(`website/docs/user-guide/features/hooks.md:441`, tag `v2026.8.31`), and a block
-must carry a non-empty `message` or core drops it
-(`hooks.md:550`, tag) — every block outcome is minted with one.
+the first valid `block` or `approve` directive wins for `pre_tool_call`
+(`website/docs/user-guide/features/hooks.md:441`, tag `v2026.8.31`) — the chain's
+own tail is an `approve` path (`_wiring_approve`) — and a `block` must carry a
+non-empty `message` or core drops it (`hooks.md:555`, tag) — every block outcome
+is minted with one.
 
 ## 4. The fleet-admin set
 
@@ -147,8 +148,9 @@ half-built registry that would mask it.
    `:3044-3048`).
 3. Set the denied set: `plugins.entries.nv-fleet-gates.settings.admin_tools`.
 
-The veto denies **only** the tool names present in
-`admin_tools ∪ {cronjob_manage}`. Populating `admin_tools` with the full admin
+The FLEET-ADMIN predicate denies **only** the tool names present in
+`admin_tools ∪ {cronjob_manage}` (the rest of the chain independently denies
+sandbox, wiring, MCP-scope and gate violations). Populating `admin_tools` with the full admin
 surface for every non-orchestrator profile — and pinning it managed so a worker
 cannot empty its own set — is the fleet render's job, tracked as **GOV-F26.a**
 (CONFIGURE|BUILD). The vendored `cronjob_manage` is denied regardless of config.
