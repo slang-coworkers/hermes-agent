@@ -1,0 +1,8 @@
+name: cost-f30-operator
+version: 0.1.0
+description: "COST-F30 scenario profile — a single Bot-Mode profile with the merged nv-cost-cap plugin enabled and a very low Tier-2 ceiling, so a stub turn (AC-6 web card) or a real live turn (AC-8 gateway /cost) crosses immediately and raises a cost-escalation episode. operators lists the surface-namespaced principals the panel and the gateway seam authorize against (a dashboard:<provider>:<org_id>:<user_id> for the OAuth panel operator and a gateway:<platform.value>:<scope>:<user_id> for the messaging-gateway operator) — never a bare user_id. The live provider block routes to inference-api.nvidia.com via the OneCLI proxy with a dummy ANTHROPIC_API_KEY; the AC-6 harness swaps the model for the hermetic stub."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

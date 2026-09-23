@@ -1,0 +1,54 @@
+# COST-F30 scenario fixture (cost-f30-operator).
+#
+# Live provider block (A2A-F21 §Scenario-outlines form): a single interactive Bot
+# Chat, so the key resolves from THIS profile's own .env via key_env. The dummy
+# ANTHROPIC_API_KEY is written post-install by the scenario Setup (a committed .env is
+# gitignored and excluded from profile install); the real credential is injected by the
+# OneCLI egress proxy at the inference-api.nvidia.com hop. The AC-6 (ui, stub) harness
+# points the model at the hermetic stub instead — this block is for AC-8 (live).
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    api: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    model: aws/anthropic/bedrock-claude-opus-4-8
+    key_env: ANTHROPIC_API_KEY
+plugins:
+  enabled:
+    - nv-cost-cap
+  entries:
+    nv-cost-cap:
+      settings:
+        # Surface-namespaced operators (never a bare user_id): the OAuth panel operator
+        # (AC-6 dashboard, AC-7 desktop) and the messaging-gateway operator (AC-8). Align
+        # the gateway id with the operator account's real gateway:<platform.value>:<scope>:<user_id>.
+        operators:
+          - "dashboard:oauth:org-1:op-1"
+          - "gateway:slack:ws-1:op-1"
+        # The testbed dashboard runs in loopback (no OAuth IDP in-container), so it carries
+        # no per-user session and principal_from_request returns None. Opt the single trusted
+        # local token in as the panel operator so AC-6 can resolve hermetically; this is the
+        # explicit, default-off fail-closed escape hatch the plugin documents. It does NOT
+        # affect AC-8 (the gateway path derives its principal from the event, not this).
+        loopback_operator: "dashboard:oauth:org-1:op-1"
+        # A very low Tier-2 ceiling so the first turn crosses and raises an episode.
+        default_ceiling_usd: 0.02
+        # Headroom granted per Continue. Large enough to clear a single live turn's spend so
+        # ONE authorized Continue actually resumes the session (its own `llm_execution`
+        # turn-admission gate admits the next turn again) — the AC-8 resume proof; a smaller
+        # value could still be over-ceiling after one Continue for a costly turn.
+        escalation_increment_usd: 5.0
+        escalation_reconcile_seconds: 3600
+        # estop_on_breach stays at the plugin default (true): AC-6 and AC-8 Part A require a Tier-2
+        # crossing to ENGAGE the profile ESTOP belt so they can assert the never-unlink left-belt
+        # disposition (estop_disposition="left" + manual_resume_required + the verbatim notice). AC-8
+        # Part B re-sets this to false itself via ac8_gateway_drive.py --seed-priced-breach to prove
+        # the no-belt "absent" path, so this default does not affect Part B.
+        estop_on_breach: true
+approvals:
+  mode: "off"
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

@@ -11,3 +11,4 @@ provides_hooks:
   - pre_tool_call
   - on_session_start
   - pre_gateway_dispatch
+  - on_session_finalize
