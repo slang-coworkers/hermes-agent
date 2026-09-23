@@ -90,7 +90,10 @@ def test_ac_loop_f36_5(env):
     _make_bundle_yaml(bundles_dir, "loop-f36-team",
                       skills=["loop-f36-a", "loop-f36-b"],
                       instruction="Apply the LOOP-F36 review overlay.")
-    _make_bundle_yaml(bundles_dir, "loop-f36-plain", skills=["loop-f36-a"])
+    # Same members as the team bundle, minus the instruction — isolates the
+    # overlay from the member set for the differential below.
+    _make_bundle_yaml(bundles_dir, "loop-f36-plain",
+                      skills=["loop-f36-a", "loop-f36-b"])
     scan_bundles()
 
     result = build_bundle_invocation_message("/loop-f36-team")
@@ -99,15 +102,21 @@ def test_ac_loop_f36_5(env):
     assert loaded == ["loop-f36-a", "loop-f36-b"]
     assert missing == []
     assert "BODY A CONTENT" in msg and "BODY B CONTENT" in msg
-    assert "Bundle instruction: Apply the LOOP-F36 review overlay." in msg
+    # The overlay is prepended ABOVE the composed bodies, in member order — an
+    # append mutant or a member-reorder mutant flips this ordering (index() also
+    # asserts the overlay line is present).
+    assert (msg.index("Bundle instruction: Apply the LOOP-F36 review overlay.")
+            < msg.index("BODY A CONTENT") < msg.index("BODY B CONTENT"))
 
-    # Differential control: a bundle with no instruction composes its member but
-    # carries NO overlay line — a mutant that always prepends, or never reads the
-    # instruction field, flips one of these two branches.
+    # Differential control: the same-member bundle with no instruction composes
+    # the SAME members with NO overlay line — a mutant that drops a member only
+    # when the instruction is absent flips loaded2; one that always prepends the
+    # overlay flips the "not in" assertion.
     plain = build_bundle_invocation_message("/loop-f36-plain")
     assert plain is not None
     msg2, loaded2, _missing2 = plain
-    assert loaded2 == ["loop-f36-a"]
+    assert loaded2 == ["loop-f36-a", "loop-f36-b"]
+    assert "BODY A CONTENT" in msg2 and "BODY B CONTENT" in msg2
     assert "Bundle instruction:" not in msg2
 
 
