@@ -1,8 +1,8 @@
-openshell sandbox create --name osh-f63-architect --from localhost/hermes-openshell-sandbox:pinned --policy policy-architect.yaml
-openshell sandbox create --name osh-f63-builder --from localhost/hermes-openshell-sandbox:pinned --policy policy-builder.yaml
-openshell sandbox create --name osh-f63-orchestrator --from localhost/hermes-openshell-sandbox:pinned --policy policy-orchestrator.yaml
-openshell sandbox create --name osh-f63-reviewer --from localhost/hermes-openshell-sandbox:pinned --policy policy-reviewer.yaml
-openshell sandbox create --name osh-f63-tester --from localhost/hermes-openshell-sandbox:pinned --policy policy-tester.yaml
+openshell sandbox create --name osh-f63-architect --from osh-f63-base:trixie --policy policy-architect.yaml
+openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie --policy policy-builder.yaml
+openshell sandbox create --name osh-f63-orchestrator --from osh-f63-base:trixie --policy policy-orchestrator.yaml
+openshell sandbox create --name osh-f63-reviewer --from osh-f63-base:trixie --policy policy-reviewer.yaml
+openshell sandbox create --name osh-f63-tester --from osh-f63-base:trixie --policy policy-tester.yaml
 openshell policy set policy-architect.yaml
 openshell policy set policy-builder.yaml
 openshell policy set policy-orchestrator.yaml

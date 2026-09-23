@@ -1,22 +1,19 @@
-# OpenShell sandbox `--from` image constraint (operator step 3)
+# OpenShell sandbox `--from` image constraint (operator step 3, LANE READY 2026-09-23)
 
 The pinned `--from` image the OSH-F63 provisioning plan uses
-(`egress.sandbox_image` in the spec, currently
-`localhost/hermes-openshell-sandbox:pinned`) **must be Debian trixie / Ubuntu 24.04
-based — glibc ≥ 2.39.**
+(`egress.sandbox_image` in the spec) is **`osh-f63-base:trixie`** — image id
+`06f0220e7810`, Debian **trixie**, glibc **2.41**.
 
-Why: OpenShell injects PID 1 `/opt/openshell/bin/openshell-sandbox` into every
-sandbox, and that binary is linked against glibc ≥ 2.39. On an alpine (musl) or
-Debian bookworm (glibc 2.36) base it restart-loops and the sandbox never reaches
-Ready.
+Why the trixie / glibc ≥ 2.39 base: OpenShell injects PID 1
+`/opt/openshell/bin/openshell-sandbox` into every sandbox, and that binary is linked
+against glibc ≥ 2.39. On an alpine (musl) or Debian bookworm (glibc 2.36) base it
+restart-loops and the sandbox never reaches Ready.
 
-Until OSH-F64 ships the dedicated worker Dockerfile, use a community image on a
-trixie / 24.04 base (route (a): nothing extra; route (b): ships `sshd`).
-
-**The operator supplies the immutable `--from` digest at LANE READY** and replaces
-the placeholder tag with it, keeping the base trixie / 24.04. A maintainer re-pinning
-the image must preserve this glibc/OS constraint — record the new digest here and in
-`spec/openshell/coworker-types.yaml` (`egress.sandbox_image`).
+**The broker refuses any `--from` other than the exact `osh-f63-base:trixie`**, so
+the tag is broker-pinned — it is NOT an operator-swappable placeholder and must not be
+replaced with a different tag or digest. A maintainer changing the base image must
+re-pin the broker's allowed `--from` and preserve the glibc/OS constraint, updating
+both this note and `spec/openshell/coworker-types.yaml` (`egress.sandbox_image`).
 
 This constraint is proven on-box by AC-OSH-F63-5 (an image that violates it fails
 step 1: the sandbox never reaches Ready).

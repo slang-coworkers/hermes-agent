@@ -9,7 +9,7 @@ filesystem_policy:
   read_write:
   - /tmp
 landlock:
-  compatibility: best-effort
+  compatibility: best_effort
 process:
   run_as_user: sandbox
   run_as_group: sandbox
@@ -25,21 +25,13 @@ network_policies:
       enforcement: enforce
       rules:
       - allow:
-          method: '*'
-          path: /*
+          method: POST
+          path: /**
     - host: inference-api.nvidia.com
       port: 443
       protocol: rest
       enforcement: enforce
       rules:
       - allow:
-          method: '*'
-          path: /*
-    - host: 172.17.0.1
-      port: 22
-      protocol: rest
-      enforcement: enforce
-      rules:
-      - allow:
-          method: '*'
-          path: /*
+          method: POST
+          path: /**

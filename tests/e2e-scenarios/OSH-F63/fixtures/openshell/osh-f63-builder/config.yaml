@@ -38,7 +38,7 @@ plugins:
         orchestrator_profile: orchestrator
 terminal:
   backend: ssh
-  ssh_host: osh-f63-builder
+  ssh_host: openshell-osh-f63-builder
   ssh_user: sandbox
   ssh_port: 22
   ssh_key: /workspace/extra/hermes-fleet-testbed/osh-f63/openshell/keys/builder

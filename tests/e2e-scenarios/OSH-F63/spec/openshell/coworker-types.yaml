@@ -17,18 +17,19 @@ skills_root: skills
 workflows_root: workflows
 overlays_root: overlays
 
-# OpenShell egress: exactly the three endpoints the per-profile `openshell policy`
-# allows — the OneCLI hop, the inference route, and the ssh control path. The
-# OneCLI control plane (172.17.0.1:10256) is deliberately NOT here. sandbox_image
-# is the pinned `--from` for the provisioning plan; it MUST be Debian trixie /
-# Ubuntu 24.04 based (glibc >= 2.39, or OpenShell's PID1 restart-loops — see
-# fixtures/openshell/IMAGE-CONSTRAINT.md), and the operator records/replaces it
-# with the immutable digest at provisioning (AC-OSH-F63-5 operator step 3).
+# OpenShell egress: exactly the TWO endpoints the per-profile `openshell policy`
+# allows — the OneCLI hop and the inference route. The ssh control path is INBOUND
+# via the OpenShell proxy socket, not an egress target (LANE READY 2026-09-23), so it
+# is not listed. The OneCLI control plane (172.17.0.1:10256) and the OpenShell gateway
+# control plane (host.openshell.internal:8080) are deliberately NOT here. sandbox_image
+# is the pinned `--from` for the provisioning plan; it MUST be `osh-f63-base:trixie`
+# (id 06f0220e7810, Debian trixie, glibc 2.41 — OpenShell's PID1 restart-loops on
+# older glibc; see fixtures/openshell/IMAGE-CONSTRAINT.md). The broker refuses any
+# other `--from`, so this tag is broker-pinned (AC-OSH-F63-5 operator step 3).
 egress:
   proxy_addr: "172.17.0.1:10255"
   inference_route: "inference-api.nvidia.com:443"
-  ssh_control_path: "172.17.0.1:22"
-  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
+  sandbox_image: "osh-f63-base:trixie"
 
 spines:
   base:
