@@ -1,7 +1,7 @@
 """Acceptance contract for OBS-F48 — Fleet metrics and outcome analytics (adopt-track).
 
-AC-1..AC-3 characterize shipped Hermes behaviour (native gateway/process + active-
-profile-cron health telemetry and per-profile usage/cost analytics); AC-4 asserts
+AC-OBS-F48-4..-6 characterize shipped Hermes behaviour (native gateway/process + active-
+profile-cron health telemetry and per-profile usage/cost analytics); AC-OBS-F48-7 asserts
 the doc deliverable. Behaviour
 contracts only — no model lists / version literals / enumeration counts, no network,
 nothing written under ~/.hermes.
@@ -83,8 +83,8 @@ _EXPORT_CFG = {
 }
 
 
-def test_ac_obs_f48_1(monkeypatch, tmp_path):
-    """Summarizes AC-OBS-F48-1: the native health-metrics plane produces gateway/process + active-profile-cron gauges, registers them on the OTLP metric path, and its event egress is opt-in, fail-open and subscriber-isolated."""
+def test_ac_obs_f48_4(monkeypatch, tmp_path):
+    """Summarizes AC-OBS-F48-4: the native health-metrics plane produces gateway/process + active-profile-cron gauges, registers them on the OTLP metric path, and its event egress is opt-in, fail-open and subscriber-isolated."""
     gw = build_gateway_health_snapshot(
         {"gateway_state": "running", "active_agents": 1,
          "platforms": {"telegram": {"state": "connected"}}},
@@ -153,7 +153,7 @@ def test_ac_obs_f48_1(monkeypatch, tmp_path):
     assert seen[0]["name"] == "gw"
 
 
-def test_ac_obs_f48_2():
+def test_ac_obs_f48_5():
     """The OTLP export plane is closed to unknown event kinds."""
     assert _gateway_health_event({"event": "gateway_health"}) is True
     assert _gateway_health_event({"event": "cron_execution"}) is True
@@ -174,7 +174,7 @@ def test_ac_obs_f48_2():
     assert unknown == {"hermes.event": "plugin_custom"}
 
 
-def test_ac_obs_f48_3(tmp_path):
+def test_ac_obs_f48_6(tmp_path):
     """Native usage/cost analytics attribute tokens/cost per model across a profile's sessions."""
     db = SessionDB(db_path=tmp_path / "obs.db")
     try:
@@ -217,7 +217,7 @@ def test_ac_obs_f48_3(tmp_path):
     )
 
 
-def test_ac_obs_f48_4():
+def test_ac_obs_f48_7():
     """The adopt doc page exists and maps NanoClaw fleet-metrics onto Hermes."""
     repo_root = Path(__file__).resolve().parents[2]
     page = repo_root / "website" / "docs" / "user-guide" / "fleet-metrics.md"
