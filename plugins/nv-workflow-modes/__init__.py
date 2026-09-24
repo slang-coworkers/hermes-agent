@@ -28,16 +28,25 @@ def _bundled_skills_dir() -> Path:
     return Path(__file__).resolve().parent / "skills"
 
 
+def _has_our_marker(dest_mode: Path) -> bool:
+    """The dir was created by this plugin: a WHOLE line of its marker equals the
+    plugin key exactly. Line-exact (not substring) so a foreign marker such as
+    'not-nv-workflow-modes' is never mistaken for ours, and byte-compared so a
+    line-ending difference cannot flip the answer."""
+    marker = dest_mode / _MARKER
+    return marker.is_file() and PLUGIN_KEY.encode("utf-8") in marker.read_bytes().splitlines()
+
+
 def _is_ours(dest_mode: Path, src_skill: Path) -> bool:
     """A dest dir is safe to overwrite only when this plugin created it (its
     ownership marker names us) or its body is byte-identical to what we ship —
-    otherwise it is a user's own skill and must not be touched without --force."""
-    marker = dest_mode / _MARKER
-    if marker.is_file() and PLUGIN_KEY in marker.read_text(encoding="utf-8"):
+    otherwise it is a user's own skill and must not be touched without --force.
+    Compared as bytes so a CRLF/LF difference is treated as divergent, not equal."""
+    if _has_our_marker(dest_mode):
         return True
     dest_skill = dest_mode / "SKILL.md"
     if dest_skill.is_file() and src_skill.is_file():
-        return dest_skill.read_text(encoding="utf-8") == src_skill.read_text(encoding="utf-8")
+        return dest_skill.read_bytes() == src_skill.read_bytes()
     return False
 
 
@@ -64,8 +73,11 @@ def _install(force: bool) -> int:
     dest_dir = get_hermes_home() / "skills"
     to_copy, conflicts = build_install_plan(src_dir, dest_dir, force)
 
-    # Atomic preflight: a single unmarked/divergent dir refuses the WHOLE install
-    # (nothing below runs) so a user's own skill is never partially clobbered.
+    # Conflict-preflight atomicity: a single unmarked/divergent dir refuses the
+    # WHOLE install (nothing below runs) so a user's own skill is never clobbered
+    # and no subset of modes is written on a conflict. (This guards against
+    # clobbering user data, not against an I/O error mid-copy — a failed copy
+    # leaves our own dirs partially written and is fixed by re-running install.)
     if conflicts:
         print(
             "workflow-modes: refusing to install — these skill dirs already exist "
@@ -96,8 +108,7 @@ def _list() -> int:
     print("workflow-modes — ported plan-mode / implement workflow bodies:")
     for mode in MODES:
         dest_mode = dest_dir / mode
-        marker = dest_mode / _MARKER
-        if marker.is_file() and PLUGIN_KEY in marker.read_text(encoding="utf-8"):
+        if _has_our_marker(dest_mode):
             state = "installed"
         elif dest_mode.exists():
             state = "present (not ours)"
