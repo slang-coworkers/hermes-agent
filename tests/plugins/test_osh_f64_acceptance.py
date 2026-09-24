@@ -275,6 +275,12 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     lint = _import_file(repo_openshell / "dockerfile_lint.py", "osh_f64_lint")
     result = lint.lint(str(repo_openshell / "Dockerfile.worker"))
     assert result.errors == 0, f"Dockerfile.worker has {result.errors} error-level findings"
+    dockerfile_text = (repo_openshell / "Dockerfile.worker").read_text(encoding="utf-8")
+    # iproute2 must be INSTALLED (in a RUN apt/apt-get install command), not merely mentioned in a comment.
+    logical_dockerfile = re.sub(r"\\\s*\n", " ", dockerfile_text)
+    install_commands = [ln for ln in logical_dockerfile.splitlines() if ln.lstrip().startswith("RUN ")]
+    assert any(re.search(r"\b(?:apt-get|apt)\s+install\b.*\biproute2\b", ln) for ln in install_commands), \
+        "Dockerfile.worker must install iproute2 in a RUN apt/apt-get install command (OpenShell 0.0.72 needs it)"
     ref_report = root / "tests" / "e2e-scenarios" / "OSH-F64" / "fixtures" / "dockerfile.worker.lint.txt"
     assert result.report == ref_report.read_text(encoding="utf-8")
 
@@ -503,8 +509,24 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
     assert len(hosts) == len(COWORKERS) and len(keys) == len(COWORKERS)
 
     spec_egress = (yaml.safe_load(osh_spec.read_text(encoding="utf-8")) or {}).get("egress", {})
-    endpoints = _endpoint_values(spec_egress)
-    assert len(endpoints) == 3, f"egress must declare exactly three endpoints, got {endpoints}"
+    # OpenShell 0.0.72: the OneCLI request-proxy hop is 172.17.0.1:18255 (10255 is hard-blocked;
+    # podman keeps 10255). The demo additionally declares the additive broker hop 172.17.0.1:18777
+    # and the read-only lane. Bind each field to its exact required value so a proxy/broker swap or a
+    # drifted value FAILS; the 10256 control plane stays FORBIDDEN (OSH-F63 guard held, item 3 deferred).
+    assert spec_egress.get("proxy_addr") == "172.17.0.1:18255", "openshell OneCLI hop must be 18255 (0.0.72), not 10255"
+    assert spec_egress.get("broker_addr") == "172.17.0.1:18777", "spec must declare the additive broker hop 18777"
+    assert spec_egress.get("inference_route"), "spec egress must name the inference route"
+    assert spec_egress.get("ssh_control_path"), "spec egress must name the ssh control path"
+    assert spec_egress.get("filesystem_read_only") == ["/opt/osh-lane"], "filesystem_read_only must be exactly ['/opt/osh-lane']"
+    assert spec_egress.get("sandbox_image") == "localhost/hermes-openshell-sandbox:pinned", "worker sandbox_image must be the pinned openshell image"
+    # The rendered allow is EXACTLY these four, in order — not merely the same set: an out-of-order
+    # or swapped entry FAILS, and 10256 must never appear.
+    expected_allow = [
+        spec_egress["proxy_addr"],
+        spec_egress["inference_route"],
+        spec_egress["ssh_control_path"],
+        spec_egress["broker_addr"],
+    ]
     policy_files = list(out_osh.rglob("policy-*.yaml"))
     assert len(policy_files) == len(COWORKERS), f"expected {len(COWORKERS)} policy files, got {len(policy_files)}"
     policy_paths = {p.name: p for p in policy_files}
@@ -512,8 +534,19 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
     for name, path in policy_paths.items():
         text = path.read_text(encoding="utf-8")
         doc = yaml.safe_load(text) or {}
-        # EXACT set — a policy admitting the three plus a fourth (e.g. evil.example.com) must FAIL
-        assert _endpoint_values(doc) == endpoints, f"{name}: policy endpoint set drift {_endpoint_values(doc)}"
+        allow = list(((doc.get("egress") or {}).get("allow")) or [])
+        assert allow == expected_allow, f"{name}: policy allow must be exactly {expected_allow} in order, got {allow}"
+        assert not any("*" in str(a) for a in allow), f"{name}: no wildcard egress allow entry"
+        # Additive filesystem_policy: the lane is read-only (write-denied) — exact path, never writable.
+        fsp = doc.get("filesystem_policy") or {}
+        assert list(fsp.get("read_only") or []) == ["/opt/osh-lane"], f"{name}: filesystem_policy.read_only must be exactly ['/opt/osh-lane'], got {fsp.get('read_only')}"
+        read_write = fsp.get("read_write") or []
+        assert isinstance(read_write, list), f"{name}: filesystem_policy.read_write must be a list"
+        lane = Path("/opt/osh-lane")
+        for writable in read_write:
+            writable_path = Path(writable)
+            assert writable_path != lane and writable_path not in lane.parents, \
+                f"{name}: writable path {writable!r} exposes read-only lane {lane} (write-denied, no ancestor)"
         for bad in FORBIDDEN_EGRESS:
             assert bad not in text
 
@@ -533,7 +566,7 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         sandbox_name = osh_cfgs[prof]["terminal"]["ssh_host"]  # create --name MUST equal the rendered ssh_host
         policy_file = f"policy-{prof}.yaml"
         create = next(o for o in verbs[("sandbox", "create")] if _opt(o, "--name") == sandbox_name)
-        assert _opt(create, "--from") and (_opt(create, "--policy") or "").endswith(policy_file)
+        assert _opt(create, "--from") == spec_egress["sandbox_image"] and (_opt(create, "--policy") or "").endswith(policy_file)
         policy_set = next(o for o in verbs[("policy", "set")] if any(o_t.endswith(policy_file) for o_t in o))
         ssh_config = next(o for o in verbs[("sandbox", "ssh-config")] if sandbox_name in o)
         delete = next(o for o in verbs[("sandbox", "delete")] if sandbox_name in o)
@@ -577,6 +610,40 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         "openshell managed must NOT carry the container proxy belt — egress is the per-profile openshell policy"
     assert _drop_substrate_managed(osh_managed) == _drop_substrate_managed(baseline_managed), \
         "managed fragment drifted from the committed FLEET-F62 render (beyond the substrate deltas)"
+
+
+def test_openshell_render_backcompat_without_extension_fields(tmp_path, monkeypatch):
+    """Behavioural back-compat (Orchestrator guardrail): an openshell spec WITHOUT the OSH-F64
+    additive egress fields renders OSH-F63's policy shape unchanged — three-slot egress.allow,
+    no broker entry, no filesystem_policy. Proves the new fields are optional/default-absent."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch)
+    manager = _load_manager()
+    assert yaml is not None
+
+    spec_data = yaml.safe_load(_osh_spec(root).read_text(encoding="utf-8")) or {}
+    egress = spec_data.get("egress") or {}
+    egress.pop("broker_addr", None)
+    egress.pop("filesystem_read_only", None)
+    spec_data["egress"] = egress
+    stripped = tmp_path / "spec-backcompat" / "coworker-types.yaml"
+    # compose reads each spine `source` RELATIVE to the spec file's dir and unconditionally
+    # (_safe_join(spec_dir, source) then read_text), so a bare stripped spec with no spines/
+    # raises FileNotFoundError before rendering. Materialize the full spec dir (incl. spines/)
+    # beside the stripped spec, then overwrite coworker-types.yaml with the stripped egress.
+    shutil.copytree(_osh_spec(root).parent, stripped.parent, dirs_exist_ok=True)
+    stripped.write_text(yaml.safe_dump(spec_data, sort_keys=False), encoding="utf-8")
+
+    out = tmp_path / "out_backcompat"
+    _run_coworker(manager, ["compose", str(stripped), "--out", str(out)])
+    policy_files = list(out.rglob("policy-*.yaml"))
+    assert len(policy_files) == len(COWORKERS), f"expected {len(COWORKERS)} policy files, got {len(policy_files)}"
+    expected_allow = [egress["proxy_addr"], egress["inference_route"], egress["ssh_control_path"]]
+    for path in policy_files:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        # Shape-identical to OSH-F63: exactly the three-slot allow and nothing else — no broker
+        # entry, no filesystem_policy. Proves the additive fields are default-absent (back-compat).
+        assert doc == {"egress": {"allow": expected_allow}}, f"{path.name}: back-compat policy drift {doc}"
 
 
 def test_ac_osh_f64_6(tmp_path, monkeypatch):

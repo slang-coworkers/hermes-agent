@@ -15,11 +15,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # The tools a profile's terminal calls need inside its sandbox. No upgrade (the base is
 # pinned), --no-install-recommends, and the apt lists are dropped to keep the image lean.
+# iproute2 (`ip`) is required by OpenShell 0.0.72: without it the sandbox never reaches
+# Ready (supervisor: "trusted ip helper not found; checked /usr/sbin/ip").
 RUN apt-get update \
  && apt-get install --no-install-recommends -y \
       ca-certificates \
       curl \
       git \
+      iproute2 \
       ripgrep \
  && rm -rf /var/lib/apt/lists/*
 

@@ -1009,7 +1009,8 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
 _OPENSHELL_SSH_USER = "sandbox"
 _OPENSHELL_SSH_PORT = 22
 # The OneCLI control plane hop must never be a policy tool-egress allow (only the
-# OneCLI request proxy 172.17.0.1:10255 is); refused if a spec's egress names it.
+# OneCLI request proxy is — 10255 on podman, 18255 on OpenShell 0.0.72); refused if a
+# spec's egress names it.
 _OPENSHELL_CONTROL_PLANE_HOSTPORT = "172.17.0.1:10256"
 
 
@@ -1044,9 +1045,15 @@ def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name
 def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
-    raises ``CompositionError`` rather than emitting a half-formed policy. The policy
-    ALLOW set is EXACTLY {the OneCLI request hop, the inference route, the ssh control
-    path}; a wildcard or the OneCLI control plane (…:10256) is refused."""
+    raises ``CompositionError`` rather than emitting a half-formed policy.
+
+    The policy ALLOW set is the OneCLI request hop, the inference route and the ssh
+    control path, PLUS the optional OpenShell-0.0.72 ``broker_addr`` when the spec
+    declares it (default-absent → OSH-F63's exact three-slot policy). A wildcard or the
+    OneCLI control plane (…:10256) is refused on every allow entry, broker included. An
+    optional ``filesystem_read_only`` list of absolute paths (no wildcard / no ``..``)
+    is returned for the write-denied ``filesystem_policy.read_only`` render; absent →
+    ``None`` (no ``filesystem_policy`` key)."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1067,6 +1074,10 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     ssh_control_path = _req_str("ssh_control_path")
     sandbox_image = _req_str("sandbox_image")
     allow = [proxy_addr, inference_route, ssh_control_path]
+    # Append the optional broker to the allow-set before the refusal loop, so it gets the
+    # same wildcard / control-plane (10256) checks as every other allow entry.
+    if "broker_addr" in egress:
+        allow.append(_normalize_proxy_addr(_req_str("broker_addr")))
     for entry in allow:
         if "*" in entry:
             raise CompositionError(
@@ -1075,21 +1086,68 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
             raise CompositionError(
                 f"openshell policy must not allow the OneCLI control plane "
                 f"{_OPENSHELL_CONTROL_PLANE_HOSTPORT!r} as tool egress, got {entry!r}")
-    return {"allow": allow, "sandbox_image": sandbox_image}
+    # An ABSENT key means no filesystem_policy render (OSH-F63 back-compat); a PRESENT key
+    # (incl. an explicit null) is validated and fail-closes if malformed.
+    read_only: Optional[List[str]] = None
+    if "filesystem_read_only" in egress:
+        read_only = _validate_openshell_read_only(egress["filesystem_read_only"])
+    return {
+        "allow": allow,
+        "sandbox_image": sandbox_image,
+        "filesystem_read_only": read_only,
+    }
 
 
-def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str]) -> None:
+def _validate_openshell_read_only(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.filesystem_read_only`` into the paths the policy's
+    ``filesystem_policy.read_only`` admits: a non-empty list of absolute paths, each free
+    of control characters, wildcards and ``..`` traversal (write-denied lanes). Called
+    only when the key is present — an absent key means no ``filesystem_policy`` render, so
+    a present ``null`` / non-list / empty list is malformed and fail-closes."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.filesystem_read_only must be a non-empty list of absolute paths, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must be non-empty strings, got {entry!r}")
+        # Reject any C0/C1 control char or DEL on the RAW entry (before strip): these paths
+        # are written into the policy file the operator materialises, so a control char is
+        # malformed input, not a valid lane.
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must not contain control characters, got {entry!r}")
+        path = entry.strip()
+        if not path.startswith("/") or "*" in path or ".." in path.split("/"):
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must be absolute paths without a wildcard "
+                f"or '..', got {path!r}")
+        out.append(path)
+    return out
+
+
+def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str],
+                              filesystem_read_only: Optional[List[str]] = None) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the allow-listed egress
     endpoints, exactly the declared set (the render's ``egress.allow`` contract; the
     operator materialises the on-box ``openshell policy`` from it at provisioning).
+
+    When ``filesystem_read_only`` is present (OSH-F64 / OpenShell 0.0.72), a
+    ``filesystem_policy.read_only`` block of write-denied lanes is added; absent → the
+    doc stays OSH-F63's exact three-slot ``{egress: {allow: […]}}`` shape (back-compat),
+    so no ``filesystem_policy`` key is emitted.
 
     The policy file is also added to the distribution manifest's ``distribution_owned``
     so ``install_distribution`` carries it into the installed profile rather than
     dropping it. ``config.yaml`` (and thus ``distribution.yaml``) were already written
     by ``_render_coworker`` before this runs."""
     policy_name = f"policy-{profile_name}.yaml"
-    _write_yaml(pdir / policy_name, {"egress": {"allow": list(allow)}})
+    policy: Dict[str, Any] = {"egress": {"allow": list(allow)}}
+    if filesystem_read_only:
+        policy["filesystem_policy"] = {"read_only": list(filesystem_read_only)}
+    _write_yaml(pdir / policy_name, policy)
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
@@ -3270,7 +3328,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
-            _enforce_openshell_policy(pdir, tname, openshell_params["allow"])
+            _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
+                                      openshell_params["filesystem_read_only"])
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)

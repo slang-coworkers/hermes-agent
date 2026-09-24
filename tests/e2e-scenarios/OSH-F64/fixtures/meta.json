@@ -5,7 +5,8 @@
   "sandbox_scope": "profile",
   "enabled_plugins": ["nv-coworker-compose", "nv-fleet-gates", "podman-onecli"],
   "distributions": ["default", "orchestrator", "architect", "builder", "tester", "reviewer"],
-  "egress_endpoints": ["172.17.0.1:10255", "inference-api.nvidia.com:443", "172.17.0.1:22"],
+  "egress_endpoints": ["172.17.0.1:18255", "inference-api.nvidia.com:443", "172.17.0.1:22", "172.17.0.1:18777"],
+  "filesystem_read_only": ["/opt/osh-lane"],
   "checks": [
     {"op": "equals", "key": "terminal.backend", "value": "ssh"},
     {"op": "equals", "key": "plugins.entries.nv-fleet-gates.settings.expected_backend", "value": "ssh"}
@@ -13,6 +14,7 @@
   "notes": [
     "The OSH-F64 spec is FLEET-F62's full five-coworker fleet with substrate: openshell flipped; every non-substrate key equals the committed FLEET-F62 podman render (AC-OSH-F64-2).",
     "provision.dry-run.txt and policy-<role>.yaml are the deterministic, path-independent OpenShell provisioning references; the full per-profile render is verified LIVE by AC-OSH-F64-2, not committed as a byte snapshot (change-detector prohibition, AGENTS.md).",
-    "dockerfile.worker.lint.txt is the reference report the vendored dockerfile_lint checker must reproduce for AC-OSH-F64-1."
+    "dockerfile.worker.lint.txt is the reference report the vendored dockerfile_lint checker must reproduce for AC-OSH-F64-1.",
+    "OpenShell 0.0.72 amendment: the OneCLI request hop is 172.17.0.1:18255 (podman keeps 10255); egress.broker_addr (172.17.0.1:18777) is appended to the policy allow, and egress.filesystem_read_only (/opt/osh-lane) renders filesystem_policy.read_only (write-denied). The control-plane 172.17.0.1:10256 remains refused. A spec absent broker_addr/filesystem_read_only renders OSH-F63's exact three-slot policy (back-compat)."
   ]
 }

@@ -95,14 +95,18 @@ rests on the policy denying the gateway endpoint, not on the identity being scop
 
 ## Egress policy: one `openshell policy` per profile
 
-The render emits one `policy-<profile>.yaml` per coworker profile. Its allow-set is
-**exactly three endpoints**, taken from the spec's `egress` block:
+The render emits one `policy-<profile>.yaml` per coworker profile. Its allow-set is the
+endpoints the spec's `egress` block names — the OneCLI request hop, the inference route
+and the ssh control path — plus, on OpenShell 0.0.72, the optional `broker_addr` when the
+spec declares it:
 
 ```yaml
 egress:
-  proxy_addr: "172.17.0.1:10255"          # the OneCLI request hop (allowed)
+  proxy_addr: "172.17.0.1:18255"          # the OneCLI request hop (allowed) — OpenShell 0.0.72; podman keeps 10255
   inference_route: "inference-api.nvidia.com:443"   # the model inference route (allowed)
   ssh_control_path: "172.17.0.1:22"        # the ssh control path (allowed)
+  broker_addr: "172.17.0.1:18777"          # OPTIONAL (OpenShell 0.0.72): the broker hop, appended to the allow-set
+  filesystem_read_only: ["/opt/osh-lane"]  # OPTIONAL: write-denied lanes -> filesystem_policy.read_only
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"   # the --from image for provisioning
 ```
 
@@ -112,13 +116,21 @@ renders, per profile:
 # policy-builder.yaml
 egress:
   allow:
-    - "172.17.0.1:10255"
+    - "172.17.0.1:18255"
     - "inference-api.nvidia.com:443"
     - "172.17.0.1:22"
+    - "172.17.0.1:18777"
+filesystem_policy:
+  read_only:
+    - "/opt/osh-lane"
 ```
 
-Nothing else is allowed: **no wildcard**, and the OneCLI control plane
-(`172.17.0.1:10256`) is never in the allow-set (only the request hop `:10255` is).
+The two OpenShell-0.0.72 fields are **additive and default-absent**: a spec without
+`broker_addr` and `filesystem_read_only` renders the OSH-F63 shape unchanged — exactly the
+three-slot `egress.allow` and no `filesystem_policy` block (the behavioural back-compat
+guarantee). Nothing else is allowed: **no wildcard**, and the OneCLI control plane
+(`172.17.0.1:10256`) is never in the allow-set (only the request hop — `:18255` on
+OpenShell 0.0.72, `:10255` on podman — and, when declared, the broker hop `:18777`, are).
 `OPENSHELL_ENDPOINT` is added only if the policy grammar requires it for the sandbox's
 own control connection (an on-box question, established at provisioning), and even then
 never as a tool-egress allow. The render writes this `egress.allow` file as
@@ -216,7 +228,10 @@ WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`. 
 - **Phase B** (`hermes coworker install-openshell`) composes the fleet under
   `substrate: openshell` and provisions **five worker sandboxes** — one per served
   coworker — each Ready under a per-bot `openshell policy` (that bot's APF: exactly the
-  three allowed endpoints, nothing else).
+  endpoints the spec's `egress` names — the OneCLI request hop, the inference route, the
+  ssh control path, and the OpenShell-0.0.72 broker hop — plus the write-denied
+  `/opt/osh-lane` read-only lane, and nothing else; the control plane `:10256` is never
+  allowed).
 - It also installs the fleet plugins under **each** served profile (a profile
   distribution excludes plugins, so the veto must be installed per profile or it is
   absent there).
@@ -229,8 +244,9 @@ WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`. 
 - It creates the fleet rooms and wires, then restarts the gateway via the shipped
   `hermes gateway restart`.
 - The dashboard or desktop app then attaches to the running gateway through the desktop
-  forward (`openshell forward start osh-f64-gw <local>:<port>`) — one gateway connection
-  for the whole app, listing the served profiles.
+  forward (`openshell forward start <29xxx-port> osh-f64-gw` — brokered, `-d`, bind
+  `172.17.0.1`, port in 29000–29999) — one gateway connection for the whole app, listing
+  the served profiles.
 
 **Gateway-sandbox preflight (shared learnings).** Each served profile's process runs in
 the gateway sandbox and reads `skills.external_dirs`, so `/opt/hermes-fleet/shared-learnings/skills`
@@ -256,7 +272,7 @@ To back the change out and leave the existing default exactly as before:
 ### What the NemoClaw dashboard / APF shows afterwards
 
 The NemoClaw dashboard shows one running worker sandbox per served coworker, and its APF
-view shows one `openshell policy` per sandbox — the three allowed endpoints per bot, with
-an off-policy egress attempt denied and logged. The whole fleet is one gateway on one
+view shows one `openshell policy` per sandbox — the four allowed endpoints per bot plus the
+`/opt/osh-lane` read-only lane, with an off-policy egress attempt denied and logged. The whole fleet is one gateway on one
 bound port; the per-profile `hermes -p <profile> chat` helper processes bind no external
 port.

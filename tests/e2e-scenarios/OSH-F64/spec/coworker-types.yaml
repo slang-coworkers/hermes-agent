@@ -1,5 +1,7 @@
 # OSH-F64 fleet spec (openshell substrate). The full FLEET-F62 five-coworker fleet
-# composed under substrate: openshell (OSH-F63's remote-ssh render, unchanged).
+# composed under substrate: openshell — OSH-F63's remote-ssh render ADDITIVELY EXTENDED
+# for OpenShell 0.0.72 (optional egress.broker_addr + egress.filesystem_read_only). A
+# spec absent those optional fields retains OSH-F63's exact three-slot policy (back-compat).
 # `wires` (a ring that never includes orchestrator<->builder, so AC-4's unwired->wired
 # negative control holds) is the OSH-F64 installer input the AC-1 acceptance test reads.
 # plugins.enabled is declared ONLY in the spine config (spines/base.yaml) — the set
@@ -16,9 +18,11 @@ overlays_root: overlays
 install_surfaces: []
 
 egress:
-  proxy_addr: "172.17.0.1:10255"
+  proxy_addr: "172.17.0.1:18255"          # OneCLI request hop — OpenShell 0.0.72 (podman keeps 10255)
   inference_route: "inference-api.nvidia.com:443"
   ssh_control_path: "172.17.0.1:22"
+  broker_addr: "172.17.0.1:18777"         # OpenShell 0.0.72 broker hop (additive → appended to policy allow)
+  filesystem_read_only: ["/opt/osh-lane"] # write-denied lane → filesystem_policy.read_only (exact path)
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
 
 spines:

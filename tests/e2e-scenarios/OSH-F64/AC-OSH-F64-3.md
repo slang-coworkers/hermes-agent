@@ -42,10 +42,13 @@ not a shared-process turn.
 This scenario provisions and tears down its OWN throwaway fleet (it does not depend on any
 other scenario having left one standing). Confirm the broker lane answers `openshell
 sandbox list` for `osh-f64-*`; render the OSH-F64 spec (AC-2 output) so `policy-<profile>.yaml`
-and the provision plan exist; `openshell sandbox create --name osh-f64-gw --from <gateway
-image>` (the pinned Hermes-runtime image or the `Dockerfile.worker`-built image); a live
-OneCLI agent per served profile exists (operator prerequisite). Start the sandbox's Hermes
-gateway and capture its loopback credential URL as `$GW_URL`
+and the provision plan exist (the tester's lane stages the policies under
+`/workspace/extra/hermes-fleet-testbed/`); `openshell sandbox create --name osh-f64-gw --from
+nemoclaw-hermes-sandbox:local` (the GATEWAY image, §D1 — the worker sandboxes below create
+`--from localhost/hermes-openshell-sandbox:pinned`); a live OneCLI agent per served COWORKER
+profile exists — 5 (orchestrator/architect/builder/tester/reviewer); the gateway/`default`
+profile issues no live turn so it needs no dedicated OneCLI agent (operator prerequisite).
+Start the sandbox's Hermes gateway and capture its loopback credential URL as `$GW_URL`
 (`ws://127.0.0.1:<port>/api/ws?token=<cred>`); Phase B probes and creates the fleet rooms
 against it. No fixture is re-installed here — the tester has already installed the
 `fixtures:` list.

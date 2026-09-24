@@ -34,12 +34,14 @@ OSH-F63 §D2). This scenario provisions and tears down its OWN throwaway `osh-f6
 (same shape as AC-3's; it does NOT depend on AC-3 having left a fleet standing).
 
 ## Setup
-Provision `osh-f64-gw`, start its Hermes gateway and capture its loopback credential URL as
-`$GW_URL`, then run `install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL"`
-(a real run requires `--gateway-url`) so `orchestrator` + `builder` are served with their
-worker sandboxes Ready; both have a live OneCLI agent; the fleet-admin veto
-(`nv-fleet-gates`, `enforce_sandbox: true`, orchestrator-only admin) is live from the
-composed spec. No fixture is re-installed here.
+Provision `osh-f64-gw` (`openshell sandbox create --name osh-f64-gw --from
+nemoclaw-hermes-sandbox:local`, the GATEWAY image, §D1; the `orchestrator`/`builder` worker
+sandboxes create `--from localhost/hermes-openshell-sandbox:pinned`), start its Hermes gateway
+and capture its loopback credential URL as `$GW_URL`, then run `install-into-sandbox.sh <spec>
+--ref <sha> --gateway-url "$GW_URL"` (a real run requires `--gateway-url`) so `orchestrator` +
+`builder` are served with their worker sandboxes Ready; both have a live OneCLI agent; the
+fleet-admin veto (`nv-fleet-gates`, `enforce_sandbox: true`, orchestrator-only admin) is live
+from the composed spec. No fixture is re-installed here.
 
 ## Steps
 1. Human → orchestrator Bot Chat: "run change P7-<nonce>" (`message_agent` in the one
