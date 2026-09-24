@@ -1,8 +1,8 @@
 """Acceptance test for LOOP-F38 — Plan gate, intent router, workflow-state reset, buddy monitor.
 
-ADOPT-verify row (ex-MERGE->LOOP-F37): no plugin, no core edit. Each test exercises
-a native Hermes surface through its real public import against a sandboxed HERMES_HOME
-and asserts a differential a one-line regression would flip.
+ADOPT-verify row: no plugin, no core edit. Each test exercises a native Hermes surface
+through its real public import against a sandboxed HERMES_HOME and asserts a differential
+a one-line regression would flip.
 
 Target on the fork: tests/plugins/test_loop_f38_acceptance.py
 Run with: scripts/run_tests.sh tests/plugins/test_loop_f38_acceptance.py
@@ -15,6 +15,8 @@ page is absent) and passes once the page is committed. The other eight pass on s
 """
 from __future__ import annotations
 
+import threading
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -54,8 +56,12 @@ def test_ac_loop_f38_1() -> None:
 
 
 def test_ac_loop_f38_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Edit-tracking + verify-on-stop: an unverified edit yields a bounded nudge naming it."""
-    from agent.verification_evidence import mark_workspace_edited
+    """Edit-tracking + verify-on-stop: an edit post-dating a passing run yields a bounded nudge naming it."""
+    from agent.verification_evidence import (
+        mark_workspace_edited,
+        record_verify_run,
+        verification_status,
+    )
     from agent.verification_stop import build_verify_on_stop_nudge
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -67,7 +73,15 @@ def test_ac_loop_f38_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (project / "pnpm-lock.yaml").write_text("", encoding="utf-8")
     changed = str(project / "src" / "app.ts")
 
+    # The load-bearing differential: a passing verify run suppresses the nudge; an edit
+    # recorded *after* it flips verification_status to "stale". Delete mark_workspace_edited
+    # and the state stays "passed" — so this exercises edit-tracking, not just the nudge builder.
+    record_verify_run(root=project, session_id="s1", ok=True, output="passed")
+    assert build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed]) is None
+
     mark_workspace_edited(session_id="s1", cwd=project, paths=[changed])
+    assert verification_status(session_id="s1", cwd=project)["status"] == "stale"
+
     nudge = build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed])
     assert nudge is not None
     assert "fresh passing verification evidence" in nudge
@@ -92,10 +106,8 @@ def test_ac_loop_f38_3() -> None:
         cli.agent = MagicMock()
         cli.agent.session_id = "loop-f38-session"
         cli.new_session(silent=True)
-        # The core reset: new_session zeroes session state and swaps in a fresh TodoStore.
         cli.agent.reset_session_state.assert_called_once()
         assert isinstance(cli.agent._todo_store, TodoStore)
-        # The on_session_reset hook fires around that boundary as a plugin signal.
         assert any(
             c.args == ("on_session_reset",)
             and c.kwargs.get("session_id") == cli.session_id
@@ -105,9 +117,10 @@ def test_ac_loop_f38_3() -> None:
 
 
 def test_ac_loop_f38_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Per-turn re-entry: pre_llm_call delivers is_first_turn (True then False) to a plugin."""
+    """Per-turn re-entry: build_turn_context fires pre_llm_call with is_first_turn (True then False)."""
     import yaml
 
+    from agent.turn_context import TurnContext, build_turn_context
     from hermes_cli.plugins import PluginManager
 
     home = tmp_path / "hermes_test"
@@ -132,12 +145,133 @@ def test_ac_loop_f38_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mgr = PluginManager()
     mgr.discover_and_load()
 
-    first = mgr.invoke_hook("pre_llm_call", session_id="s1", user_message="hi",
-                            conversation_history=[], is_first_turn=True, model="test")
-    later = mgr.invoke_hook("pre_llm_call", session_id="s1", user_message="again",
-                            conversation_history=[], is_first_turn=False, model="test")
-    assert first[0]["context"] == "first=True"
-    assert later[0]["context"] == "first=False"
+    # Fake agent adapted from tests/agent/test_turn_context.py — the minimal stand-in
+    # build_turn_context needs to run without a real AIAgent.
+    class _FakeTodoStore:
+        def has_items(self):
+            return True
+
+        def _hydrate(self, *_a, **_k):
+            pass
+
+    class _FakeGuardrails:
+        def __init__(self):
+            self.reset_called = False
+
+        def reset_for_turn(self):
+            self.reset_called = True
+
+    class _FakeAgent:
+        def __init__(self):
+            self.session_id = "sess-1"
+            self.model = "test/model"
+            self.provider = "openrouter"
+            self.requested_provider = "openrouter"
+            self.base_url = "https://openrouter.ai/api/v1"
+            self.api_key = "sk-x"
+            self.api_mode = "chat_completions"
+            self.platform = "cli"
+            self.quiet_mode = True
+            self.max_iterations = 90
+            self.tools = []
+            self.valid_tool_names = set()
+            self.enabled_toolsets = None
+            self.disabled_toolsets = None
+            self._skip_mcp_refresh = False
+            self.compression_enabled = False
+            self.context_compressor = types.SimpleNamespace(
+                protect_first_n=2, protect_last_n=2)
+
+            def _fake_should_compress(tokens=None):
+                return False
+
+            def _fake_should_compress_info(tokens=None):
+                return (False, None)
+
+            self.context_compressor.should_compress = _fake_should_compress
+            self.context_compressor.should_compress_info = _fake_should_compress_info
+            self._cached_system_prompt = "SYSTEM"
+            self._memory_store = None
+            self._memory_manager = None
+            self._memory_nudge_interval = 0
+            self._turns_since_memory = 0
+            self._user_turn_count = 0
+            self._todo_store = _FakeTodoStore()
+            self._tool_guardrails = _FakeGuardrails()
+            self._compression_warning = None
+            self._emit_warning = MagicMock()
+            self._last_ctx_overflow_warn = None
+            self._interrupt_requested = False
+            self._memory_write_origin = "assistant_tool"
+            self._stream_context_scrubber = None
+            self._stream_think_scrubber = None
+            self._invalid_tool_retries = -1
+            self._vision_supported = None
+            self._persist_calls = 0
+            self._session_messages = []
+            self._pending_cli_user_message = None
+            self._session_persist_lock = threading.RLock()
+            self._ensure_db_prompt_at_call = "<unset>"
+
+        def _warn_context_overflow_blocked(self, *_a, **_k):
+            pass
+
+        def _clear_context_overflow_warn(self):
+            self._last_ctx_overflow_warn = None
+
+        def _ensure_db_session(self):
+            self._ensure_db_prompt_at_call = self._cached_system_prompt
+
+        def _restore_primary_runtime(self):
+            pass
+
+        def _cleanup_dead_connections(self):
+            return False
+
+        def _emit_status(self, _msg):
+            pass
+
+        def _replay_compression_warning(self):
+            pass
+
+        def _hydrate_todo_store(self, *_a, **_k):
+            pass
+
+        def _safe_print(self, *_a, **_k):
+            pass
+
+        def _persist_session(self, *_a, **_k):
+            self._persist_calls += 1
+
+    def _build(agent, **overrides):
+        kwargs = dict(
+            agent=agent,
+            user_message="hello",
+            system_message=None,
+            conversation_history=None,
+            task_id=None,
+            stream_callback=None,
+            persist_user_message=None,
+            restore_or_build_system_prompt=lambda *a, **k: None,
+            install_safe_stdio=lambda: None,
+            sanitize_surrogates=lambda s: s,
+            summarize_user_message_for_log=lambda s: s,
+            set_session_context=lambda _sid: None,
+            set_current_write_origin=lambda _o: None,
+            ra=lambda: types.SimpleNamespace(_set_interrupt=lambda *a, **k: None),
+        )
+        kwargs.update(overrides)
+        return build_turn_context(**kwargs)
+
+    with patch("agent.auxiliary_client.set_runtime_main", lambda *a, **k: None), \
+            patch("hermes_cli.lifecycle.invoke_hook", side_effect=mgr.invoke_hook):
+        first = _build(_FakeAgent(), conversation_history=None)
+        later = _build(_FakeAgent(),
+                       conversation_history=[{"role": "user", "content": "prior"}])
+
+    assert isinstance(first, TurnContext)
+    assert first.plugin_user_context == "first=True"
+    assert later.plugin_user_context == "first=False"
 
 
 def test_ac_loop_f38_5() -> None:
@@ -190,7 +324,6 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0]),
         ]
 
-    # Valid assignees: each decomposed child is routed to the specialist the aux model named.
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="ship a feature", triage=True)
     payload = jsonlib.dumps({"fanout": True, "rationale": "split", "tasks": [
@@ -212,7 +345,6 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         assert kb.get_task(conn, outcome.child_ids[0]).assignee == "researcher"
         assert kb.get_task(conn, outcome.child_ids[1]).assignee == "engineer"
 
-    # Invalid assignee: routing falls back to the configured default.
     with kb.connect() as conn:
         tid2 = kb.create_task(conn, title="route me", triage=True)
     payload2 = jsonlib.dumps({"fanout": False, "rationale": "single",
@@ -262,12 +394,31 @@ def test_ac_loop_f38_7() -> None:
 
 
 def test_ac_loop_f38_8() -> None:
-    """Buddy monitor: the post-turn background_review fork is gated by its config master switch."""
-    from agent.background_review import is_background_review_enabled
+    """Buddy monitor: the automatic post-turn background_review fork consults its config master switch."""
+    import run_agent
     from hermes_cli.config import DEFAULT_CONFIG
 
-    assert is_background_review_enabled({"enabled": True}) is True
-    assert is_background_review_enabled({"enabled": False}) is False
+    agent = object.__new__(run_agent.AIAgent)
+    agent._delegate_depth = 0
+    snapshot = [{"role": "user", "content": "hi"}]
+
+    # The gate under test: _spawn_background_review consults load_background_review_settings and
+    # returns before prepare_background_review_run when the switch is off. prep returns None so the
+    # "on" branch spawns no thread either — the observable is only whether prep was called.
+    prep = MagicMock(return_value=None)
+    with patch("agent.background_review.prepare_background_review_run", prep):
+        with patch("agent.background_review.load_background_review_settings",
+                   return_value=(False, {})):
+            run_agent.AIAgent._spawn_background_review(
+                agent, messages_snapshot=snapshot, review_memory=True)
+        prep.assert_not_called()
+
+        with patch("agent.background_review.load_background_review_settings",
+                   return_value=(True, {})):
+            run_agent.AIAgent._spawn_background_review(
+                agent, messages_snapshot=snapshot, review_memory=True)
+        prep.assert_called_once()
+
     assert isinstance(
         DEFAULT_CONFIG["auxiliary"]["background_review"]["enabled"], bool)
 
@@ -280,8 +431,6 @@ def test_ac_loop_f38_9() -> None:
     for marker in ("Plan gate", "Workflow-state reset", "Intent router", "Buddy monitor"):
         assert marker in text, f"doc missing behaviour section: {marker!r}"
 
-    # The equivalence caveats must survive in the delivered page: cross-turn gate
-    # deferred to LOOP-F37, no automatic intent classifier, per-section caveats.
     for caveat in ("LOOP-F37", "classifier", "Caveat"):
         assert caveat in text, f"doc missing equivalence caveat: {caveat!r}"
 
