@@ -1,9 +1,12 @@
-"""Ownership tests for the nv-workflow-modes installer planner.
+"""Ownership and safety tests for the nv-workflow-modes installer.
 
-A foreign marker that merely contains the plugin key as a substring, and a body
-that differs only in line endings, are user-owned conflicts and must never be
-silently overwritten. These call the plugin's pure functions directly; no
-HERMES_HOME or network is touched.
+Two groups: pure-planner tests that call build_install_plan / the ownership
+predicate directly, and installer tests that drive _install() against a
+temp-profile HERMES_HOME. A foreign marker that merely contains the plugin key
+as a substring, a body that differs only in line endings, and a symlinked
+destination are all user-owned/unsafe and must never be silently followed or
+overwritten; a containment failure must refuse before any destructive op. No
+network is touched.
 """
 
 from __future__ import annotations
@@ -141,6 +144,23 @@ def test_symlinked_dest_force_replaced_in_profile_external_untouched(tmp_path, m
     assert (dest / "SKILL.md").read_bytes() == (SRC / "implement" / "SKILL.md").read_bytes()
     assert (external / "SKILL.md").read_bytes() == user_body, "external data was clobbered"
     assert not (external / ".installed-by").exists(), "wrote a marker outside the profile"
+
+
+def test_containment_refusal_is_preflight_and_destroys_nothing(tmp_path, monkeypatch):
+    """A destination that fails the profile-containment check is refused BEFORE any
+    destructive op: an existing dir at a to-copy mode path must survive the refusal
+    (ordering guard — no unlink/rmtree before the containment gate)."""
+    profile = tmp_path / "profile"
+    victim = profile / "skills" / "plan-investigate"  # first mode processed
+    victim.mkdir(parents=True)
+    (victim / "SENTINEL").write_text("keep me", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr(M, "_within", lambda base, p: False)
+
+    rc = M._install(force=True)
+
+    assert rc not in (None, 0), "must refuse when a dest escapes the skills tree"
+    assert (victim / "SENTINEL").is_file(), "destroyed an existing dir before the containment refusal"
 
 
 def test_installed_bodies_are_byte_complete(tmp_path, monkeypatch):

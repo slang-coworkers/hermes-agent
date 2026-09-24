@@ -110,6 +110,17 @@ def _install(force: bool) -> int:
         return 2
 
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Containment preflight BEFORE any destructive op: a non-symlink dest that
+    # resolves outside the skills tree cannot be made safe, so refuse before we
+    # unlink/rmtree anything (a symlink is exempt here — the write loop replaces
+    # it rather than following it, so it never escapes).
+    for mode in to_copy:
+        dest_mode = dest_dir / mode
+        if not dest_mode.is_symlink() and not _within(dest_dir, dest_mode):
+            print(f"workflow-modes: refusing — {mode} resolves outside {dest_dir}.")
+            return 2
+
     for mode in to_copy:
         dest_mode = dest_dir / mode
         # Never write THROUGH a symlink or a file (that would escape the profile
@@ -119,9 +130,6 @@ def _install(force: bool) -> int:
             dest_mode.unlink()
         elif dest_mode.is_dir():
             shutil.rmtree(dest_mode)
-        if not _within(dest_dir, dest_mode):
-            print(f"workflow-modes: refusing — {mode} resolves outside {dest_dir}.")
-            return 2
         shutil.copytree(src_dir / mode, dest_mode)
         (dest_mode / _MARKER).write_text(PLUGIN_KEY + "\n", encoding="utf-8")
 
