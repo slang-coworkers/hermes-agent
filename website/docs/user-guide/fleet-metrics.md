@@ -10,7 +10,8 @@ compute outcome/usage analytics across all my bots"* — onto the features Herme
 already ships. It is an **adopt**-track mapping: the health-telemetry plane and
 the per-profile usage/cost analytics are native to Hermes at v2026.8.31, so
 there is **no plugin** to install and nothing to build to get them — you turn on
-config and point your observability stack at the endpoint. The one capability
+config and set the OTLP endpoint to your observability stack's receiver, which
+Hermes exports to. The one capability
 Hermes genuinely lacks (publishing a plugin's *own* custom monitoring
 event/gauge through the shipped OTLP exporter) is recorded below as an upstream
 ask, not worked around.
@@ -119,8 +120,10 @@ $ hermes monitoring status
 (`hermes monitoring status` handler: `hermes_cli/main.py:12976`, parser
 `hermes_cli/subcommands/monitoring.py:31`.)
 
-**Operator wiring is config-only, no code:** point an OTel Collector, Grafana
-Agent or DataDog agent at the OTLP endpoint. Nothing is persisted locally on the
+**Operator wiring is config-only, no code:** set `monitoring.export.otlp.endpoint`
+to the OTLP receiver exposed by your OTel Collector / Grafana Agent / Datadog Agent.
+Hermes is the OTLP **exporter** — it *pushes* telemetry to that endpoint; it exposes
+no receiver of its own for a collector to scrape. Nothing is persisted locally on the
 Hermes side, and if the `[otlp]` extra is absent the plane fails open (export
 reports `enabled=false`, `reason="otlp_unavailable"`) rather than crashing the
 gateway.
@@ -132,8 +135,9 @@ Per-session and per-profile token/cost analytics are computed natively by the
 `session_model_usage` table
 (tag: `agent/insights.py:140` | main: `agent/insights.py:1`;
 `InsightsEngine` class at `agent/insights.py:97`, DDL at
-`hermes_state_common.py:483`). `InsightsEngine.generate()` returns
-`{overview, models, platforms, tools, skills, activity, top_sessions}`, attributing
+`hermes_state_common.py:483`). `InsightsEngine.generate()` returns a report that
+includes `overview, models, platforms, tools, skills, activity, top_sessions` (plus
+metadata keys), attributing
 tokens and cost to the model that actually incurred them — a mid-session model
 switch is split across the two models, not dumped on the initial one — and the
 overview cost equals the sum of the per-model costs.
@@ -168,8 +172,10 @@ The GitHub-funnel **outcome** analytics — the
 `outcomes(artifact, terminal_outcome, cost_usd, profile)` ledger and the
 `hermes outcomes funnel | winrate | cost-per-merge` CLI verbs — are **not** part
 of this page's native surface. They are delivered by the **`nv-artifact`** plugin
-under **GOV-F25**; this row does not rebuild them. `hermes outcomes --json` (from
-`nv-artifact`) is the machine-readable feed those verbs expose, referenced in the
+under **GOV-F25**; this row does not rebuild them. `hermes outcomes funnel --json`
+(and the `winrate` / `cost-per-merge` verbs, from `nv-artifact` — `--json` is a flag
+on each verb, not a top-level `hermes outcomes` option) is the machine-readable feed
+those verbs expose, referenced in the
 gap section below only as the source for an interim Grafana-parity recipe. This
 page covers only what Hermes ships natively (health telemetry + usage/cost
 analytics); the outcome ledger's home is GOV-F25.
@@ -194,13 +200,17 @@ attribute **allow-list**, verified first-hand in the release tree:
   `otlp_exporter.py:140`).
 - **Frozen resource/diagnostic sets + hardcoded gauge list.** The resource and
   diagnostic attribute key sets are `frozenset`s
-  (`agent/monitoring/gateway_health_export.py:22`), and the exported gauge names are
+  (`agent/monitoring/gateway_health_export.py:22` and `:33`), and the exported gauge names are
   a hardcoded list turned into observable gauges (`:437`, `:467`) with no config key
   or plugin hook to append one.
 
 Consequently, **plugin-emitted fleet-outcome gauges are not publishable through the
-shipped OTLP exporter** — the closed event set and attribute allow-list mean such a
-gauge or event exports nothing even if forced through. (The `PluginContext.register_*`
+shipped OTLP exporter**. The two mechanisms fail differently: the span streamer
+*drops* custom event kinds before a span is emitted, and even an event forced past
+the filter to the span mapper carries only its `hermes.event` kind (zero payload
+attributes — the content-free `{"hermes.event": <kind>}` span above), never the
+plugin's own metric data; and a custom numeric *gauge* has no registration path at
+all. (The `PluginContext.register_*`
 surface exposes no monitoring/gauge/emitter-subscriber registration and there is no
 `VALID_HOOKS` entry for a monitoring event, so this cannot be closed from a plugin.)
 The minimal generic fix is an additive, generic registration seam upstream — an
@@ -211,8 +221,9 @@ this row records it for the Orchestrator to file and builds nothing for it.
 
 **Interim Grafana parity (recipe, not shipped).** Until the P8 seam exists, the
 honest way to get fleet-outcome gauges into Grafana/Prometheus is a **script-only**
-cron job that writes a **Prometheus textfile** from `hermes outcomes --json` (the
-`nv-artifact` / GOV-F25 feed) for the node-exporter textfile collector to scrape.
+cron job that writes a **Prometheus textfile** from `hermes outcomes funnel --json`
+(and the `winrate` / `cost-per-merge` verbs; the `nv-artifact` / GOV-F25 feed) for
+the node-exporter textfile collector to scrape.
 This is a deployment recipe, not an OBS-F48 deliverable and not part of the OTLP
 plane; it is documented here only as the sanctioned interim while the gap remains
 open.

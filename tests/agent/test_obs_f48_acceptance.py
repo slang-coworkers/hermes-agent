@@ -237,7 +237,7 @@ def test_ac_obs_f48_7():
         "usage_totals",
         "nv-artifact",
         "GOV-F25",
-        "hermes outcomes --json",
+        "hermes outcomes funnel --json",
     ):
         assert marker in text, f"doc page missing required topic: {marker}"
 
