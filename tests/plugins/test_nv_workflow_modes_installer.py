@@ -9,6 +9,7 @@ HERMES_HOME or network is touched.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,61 @@ def test_has_our_marker_is_line_exact(tmp_path):
     assert M._has_our_marker(dest / "implement") is True
     _seed(dest, "plan-review", b"x", marker="prefix-nv-workflow-modes-suffix\n")
     assert M._has_our_marker(dest / "plan-review") is False
+
+
+def test_symlinked_dest_nonforce_refused_no_write_outside_profile(tmp_path, monkeypatch):
+    """AC-6 profile-scoped: a symlinked mode dir (even one whose target body is
+    byte-identical to the shipped one) is refused without --force, and NOTHING is
+    written through it — no marker outside the profile, external target untouched,
+    and no other mode written (atomic)."""
+    profile = tmp_path / "profile"
+    (profile / "skills").mkdir(parents=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    shutil.copyfile(SRC / "implement" / "SKILL.md", external / "SKILL.md")  # the byte-identical trap
+    (profile / "skills" / "implement").symlink_to(external, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    rc = M._install(force=False)
+
+    assert rc not in (None, 0), "non-force must refuse a symlinked dest"
+    assert (profile / "skills" / "implement").is_symlink(), "the symlink was disturbed"
+    assert not (external / ".installed-by").exists(), "wrote a marker outside the profile"
+    assert sorted(p.name for p in external.iterdir()) == ["SKILL.md"], "external dir mutated"
+    for mode in ("plan-investigate", "plan-review", "plan-research"):
+        assert not (profile / "skills" / mode).exists(), f"refusal not atomic — {mode} written"
+
+
+def test_symlinked_dest_force_replaced_in_profile_external_untouched(tmp_path, monkeypatch):
+    """AC-6 never-clobbers: with --force a symlinked mode dir is replaced by a real
+    dir UNDER the profile; the write never follows the symlink, so external user
+    data is left byte-for-byte intact."""
+    profile = tmp_path / "profile"
+    (profile / "skills").mkdir(parents=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    user_body = b"EXTERNAL USER DATA -- must not be clobbered\n"
+    (external / "SKILL.md").write_bytes(user_body)
+    (profile / "skills" / "implement").symlink_to(external, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    rc = M._install(force=True)
+
+    assert rc in (None, 0), f"--force install failed (rc={rc!r})"
+    dest = profile / "skills" / "implement"
+    assert not dest.is_symlink() and dest.is_dir(), "symlink not replaced by a real dir"
+    assert (dest / ".installed-by").is_file(), "marker missing after --force"
+    assert (dest / "SKILL.md").read_bytes() == (SRC / "implement" / "SKILL.md").read_bytes()
+    assert (external / "SKILL.md").read_bytes() == user_body, "external data was clobbered"
+    assert not (external / ".installed-by").exists(), "wrote a marker outside the profile"
+
+
+def test_installed_bodies_are_byte_complete(tmp_path, monkeypatch):
+    """The full shipped workflow body is installed byte-for-byte for every mode."""
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    rc = M._install(force=False)
+    assert rc in (None, 0)
+    for mode in M.MODES:
+        installed = (profile / "skills" / mode / "SKILL.md").read_bytes()
+        assert installed == (SRC / mode / "SKILL.md").read_bytes(), f"{mode} body not byte-complete"

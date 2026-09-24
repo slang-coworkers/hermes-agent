@@ -50,18 +50,33 @@ def _is_ours(dest_mode: Path, src_skill: Path) -> bool:
     return False
 
 
+def _within(base: Path, p: Path) -> bool:
+    """True iff p, with symlinks in its existing prefix resolved, sits inside base.
+    The profile-scoped invariant: every write must land under base (the skills
+    tree), never escape it through a symlink."""
+    try:
+        p.resolve().relative_to(base.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def build_install_plan(src_dir: Path, dest_dir: Path, force: bool) -> tuple[list[str], list[str]]:
     """Pure planner, no side effects. Returns ``(to_copy, conflicts)``.
 
-    Per mode: dest absent -> copy; dest present and ours/byte-identical -> copy
-    (idempotent); a user-owned/divergent dir -> conflict. With ``force`` every
+    Per mode: a symlinked dest is never ours — writing through it would escape the
+    profile, so it is a conflict (refused) unless ``--force`` replaces the symlink
+    itself. Otherwise: dest absent -> copy; dest present and ours/byte-identical ->
+    copy (idempotent); a user-owned/divergent dir -> conflict. With ``force`` every
     mode is copied and there are no conflicts.
     """
     to_copy: list[str] = []
     conflicts: list[str] = []
     for mode in MODES:
         dest_mode = dest_dir / mode
-        if force or not dest_mode.exists() or _is_ours(dest_mode, src_dir / mode / "SKILL.md"):
+        if dest_mode.is_symlink():
+            (to_copy if force else conflicts).append(mode)
+        elif force or not dest_mode.exists() or _is_ours(dest_mode, src_dir / mode / "SKILL.md"):
             to_copy.append(mode)
         else:
             conflicts.append(mode)
@@ -71,27 +86,43 @@ def build_install_plan(src_dir: Path, dest_dir: Path, force: bool) -> tuple[list
 def _install(force: bool) -> int:
     src_dir = _bundled_skills_dir()
     dest_dir = get_hermes_home() / "skills"
+
+    # The skills dir itself must be a real dir inside the profile: never write
+    # through a symlinked skills/ that escapes get_hermes_home().
+    if dest_dir.is_symlink():
+        print(f"workflow-modes: refusing — {dest_dir} is a symlink; will not write through it.")
+        return 2
+
     to_copy, conflicts = build_install_plan(src_dir, dest_dir, force)
 
-    # Conflict-preflight atomicity: a single unmarked/divergent dir refuses the
-    # WHOLE install (nothing below runs) so a user's own skill is never clobbered
-    # and no subset of modes is written on a conflict. (This guards against
-    # clobbering user data, not against an I/O error mid-copy — a failed copy
-    # leaves our own dirs partially written and is fixed by re-running install.)
+    # Conflict-preflight atomicity: a single unmarked/divergent/symlinked dir
+    # refuses the WHOLE install (nothing below runs) so a user's own skill is
+    # never clobbered and no subset of modes is written on a conflict. (This
+    # guards against clobbering user data, not against an I/O error mid-copy —
+    # a failed copy leaves our own dirs partially written; re-run to finish.)
     if conflicts:
         print(
             "workflow-modes: refusing to install — these skill dirs already exist "
             "and were not created by this plugin:\n  "
             + "\n  ".join(str(dest_dir / m) for m in conflicts)
-            + "\nRe-run with --force to replace them (their contents will be lost)."
+            + "\nRe-run with --force to replace them (the whole dir is removed and rewritten)."
         )
         return 2
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     for mode in to_copy:
         dest_mode = dest_dir / mode
-        dest_mode.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src_dir / mode / "SKILL.md", dest_mode / "SKILL.md")
+        # Never write THROUGH a symlink or a file (that would escape the profile
+        # or clobber external data); fully replace a real dir so no stale files
+        # from a replaced skill survive. Every write lands on a fresh real dir.
+        if dest_mode.is_symlink() or dest_mode.is_file():
+            dest_mode.unlink()
+        elif dest_mode.is_dir():
+            shutil.rmtree(dest_mode)
+        if not _within(dest_dir, dest_mode):
+            print(f"workflow-modes: refusing — {mode} resolves outside {dest_dir}.")
+            return 2
+        shutil.copytree(src_dir / mode, dest_mode)
         (dest_mode / _MARKER).write_text(PLUGIN_KEY + "\n", encoding="utf-8")
 
     print(
