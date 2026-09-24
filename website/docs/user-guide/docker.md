@@ -9,7 +9,7 @@ description: "Running Hermes Agent in Docker and using Docker as a terminal back
 There are two distinct ways Docker intersects with Hermes Agent:
 
 1. **Running Hermes IN Docker** — the agent itself runs inside a container (this page's primary focus)
-2. **Docker as a terminal backend** — the agent runs on your host but executes every command inside a single, persistent Docker sandbox container that survives across tool calls, `/new`, and subagents for the life of the Hermes process (see [Configuration → Docker Backend](./configuration.md#docker-backend))
+2. **Docker as a terminal backend** — the agent runs on your host but executes every command inside a Docker sandbox container (see [Configuration → Docker Backend](./configuration.md#docker-backend)). By default (`container_persistent: true`) this is a single, profile-shared container that survives across tool calls, `/new`, and subagents for the life of the Hermes process; setting `container_persistent: false` instead gives one container **per session** (see [Per-session container isolation](#per-session-container-isolation-the-nanoclaw-model-mapped-iso-f10) below)
 
 This page covers option 1. The container stores all user data (config, API keys, sessions, skills, memories) in a single directory mounted from the host at `/opt/data`. The image itself is stateless and can be upgraded by pulling a new version without losing any configuration.
 
@@ -577,9 +577,53 @@ persisted config manually before letting the new image rewrite it.
 
 ## Skills and credential files
 
-When using Docker as the execution environment (not the methods above, but when the agent runs commands inside a Docker sandbox — see [Configuration → Docker Backend](./configuration.md#docker-backend)), Hermes reuses a single long-lived container for all tool calls and automatically bind-mounts the skills directory (`~/.hermes/skills/`) and any credential files declared by skills into that container as read-only volumes. Skill scripts, templates, and references are available inside the sandbox without manual configuration, and because the container persists for the life of the Hermes process, any dependencies you install or files you write stay around for the next tool call.
+When using Docker as the execution environment (not the methods above, but when the agent runs commands inside a Docker sandbox — see [Configuration → Docker Backend](./configuration.md#docker-backend)), Hermes by default (`container_persistent: true`) reuses a single long-lived container — shared per profile — for all tool calls and automatically bind-mounts the skills directory (`~/.hermes/skills/`) and any credential files declared by skills into that container as read-only volumes. Skill scripts, templates, and references are available inside the sandbox without manual configuration, and because the container persists for the life of the Hermes process, any dependencies you install or files you write stay around for the next tool call. When `container_persistent: false` selects [one container per session](#per-session-container-isolation-the-nanoclaw-model-mapped-iso-f10) instead, each session gets its own sandbox and these skills/credential bind-mounts are set up per session.
 
 The same syncing happens for SSH and Modal backends — skills and credential files are uploaded via rsync or the Modal mount API before each command.
+
+## Per-session container isolation: the NanoClaw model, mapped (ISO-F10)
+
+NanoClaw isolates each agent session in its own OS container: the agent runner lives **inside** that container, the host and container exchange work through a durable two-database mailbox (a separate inbound and outbound database with strictly-owned writers), agent-facing message ids follow an even/odd sequence-number scheme, and a heartbeat owned by the in-container runner reports liveness. Hermes reaches the same *isolation property* by a different architecture — the conversation loop is host-resident and only tool execution is sandboxed — so the per-session container is opt-in and the mailbox/sequence/runner-heartbeat pieces have no Hermes analogue (see [What Hermes does not port](#what-hermes-does-not-port-core-change--p8-upstream-ask) below).
+
+**How the per-session mode maps onto stock Hermes surfaces** (each row names the surface, then its citation of record in the pinned release tree and the corresponding location on the moving upstream branch):
+
+- `container_persistent: false` — select one container per session — tag: `website/docs/user-guide/configuration.md:282` | main: `website/docs/user-guide/configuration.md:284`
+- `_session_isolation_enabled` — the isolation predicate — tag: `tools/terminal_tool.py:1372` | main: `tools/terminal_tool.py:394`
+- `_resolve_container_task_id` — per-session container identity — tag: `tools/terminal_tool.py:1482` | main: `tools/terminal_tool.py:399`
+- `_session_scoped` — docker `__init__` session-scoped marker — tag: `tools/environments/docker.py:929` | main: `tools/environments/docker.py:495`
+- `_docker_persistent_profile_scoped` — default one container per profile — tag: `tools/terminal_tool.py:1408` | main: `tools/terminal_tool.py:380`
+- one shared long-lived container — the default profile-scoped mode — tag: `website/docs/user-guide/docker.md:578` | main: `website/docs/user-guide/docker.md:575`
+- `create_environment` — dispatches tool calls; the agent loop stays host-side — tag: `website/docs/developer-guide/terminal-environment-plugin.md:19` | main: `website/docs/developer-guide/terminal-environment-plugin.md:19`
+- `TerminalEnvironmentProvider` — provider ABC (execute/upload/cleanup only) — tag: `agent/terminal_env_provider.py:72` | main: `agent/terminal_env_provider.py:20`
+- `session_isolated_when_nonpersistent` — per-session isolation opt-in flag — tag: `website/docs/developer-guide/terminal-environment-plugin.md:28` | main: `website/docs/developer-guide/terminal-environment-plugin.md:28`
+- `find_docker` + `HERMES_DOCKER_BINARY` — container runtime (docker OR podman drop-in) — tag: `tools/environments/docker.py:309` | main: `tools/environments/docker.py:209`
+
+### Turning on per-session containers
+
+On the Docker backend the mode is chosen by a single setting:
+
+- **Default — one shared container per profile.** With `container_persistent: true` (or the key unset), every session in a profile shares one long-lived sandbox that lives for the Hermes process, as described under [Skills and credential files](#skills-and-credential-files) above. `_docker_persistent_profile_scoped()` reports this mode and `_resolve_container_task_id()` collapses every session onto one shared container identity.
+- **Per session — one container each.** Set `container_persistent: false` on the Docker backend to give every session (desktop chat, gateway conversation, TUI session) its own fresh container, created on that session's first terminal/file call, reused for the life of the session, and removed when the session closes or goes idle. `_session_isolation_enabled()` reports this mode and `_resolve_container_task_id()` returns a distinct identity per session, so tearing one session's container down leaves another's intact.
+
+```yaml
+terminal:
+  backend: docker
+  container_persistent: false
+```
+
+Podman is honored as a drop-in runtime for either mode: `find_docker()` uses an explicit `HERMES_DOCKER_BINARY` override when set and otherwise falls back to podman on `PATH` when docker is absent.
+
+This behaviour is proven by the ADOPT-verify acceptance contracts **AC-ISO-F10-3**, **AC-ISO-F10-4**, **AC-ISO-F10-5**, and **AC-ISO-F10-6** (`tests/tools/test_iso_f10_session_isolation_adopt.py`), which pass on the stock release tree — that is the adopt claim.
+
+### What Hermes does not port (CORE-CHANGE / P8 upstream ask)
+
+Hermes provides the per-session **container**, but not the rest of NanoClaw's isolation machinery, and this is recorded as a **P8** **upstream ask** rather than shipped as a plugin, because it is an architectural property with no plugin seam — a **CORE-CHANGE**, not a generic widening. Hermes has no analogue for:
+
+- the two-database mailbox — a separate `inbound.db` and `outbound.db` with **exclusive host/container writer ownership**;
+- the **even/odd sequence-number protocol** that supplies the agent-facing message ids;
+- the **in-container session runner** and its **runner-owned heartbeat**.
+
+The conversation loop is host-resident (terminal environments execute tool calls only), so there is no seam to run the loop inside the per-session container, and sessions persist in one profile-scoped state database with a single writer rather than a two-database inbound/outbound split. WAL-vs-DELETE journalling is **not** part of this gap: it is already configurable through `database.journal_mode` (default `wal`), so do not conflate it with the missing mailbox protocol.
 
 ## Installing more tools in the container
 
