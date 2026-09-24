@@ -396,7 +396,13 @@ def test_ac_loop_f38_7() -> None:
 def test_ac_loop_f38_8() -> None:
     """Buddy monitor: the automatic post-turn background_review fork consults its config master switch."""
     import run_agent
+    from agent.background_review import is_background_review_enabled
     from hermes_cli.config import DEFAULT_CONFIG
+
+    # is_background_review_enabled is the documented public predicate; assert it directly, then
+    # drive the real spawn gate below (both surfaces are cited in the loop-controls doc page).
+    assert is_background_review_enabled({"enabled": True}) is True
+    assert is_background_review_enabled({"enabled": False}) is False
 
     agent = object.__new__(run_agent.AIAgent)
     agent._delegate_depth = 0
