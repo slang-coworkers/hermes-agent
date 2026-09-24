@@ -593,9 +593,9 @@ NanoClaw isolates each agent session in its own OS container: the agent runner l
 - `_session_scoped` — docker `__init__` session-scoped marker — tag: `tools/environments/docker.py:929` | main: `tools/environments/docker.py:495`
 - `_docker_persistent_profile_scoped` — default one container per profile — tag: `tools/terminal_tool.py:1408` | main: `tools/terminal_tool.py:380`
 - one shared long-lived container — the default profile-scoped mode — tag: `website/docs/user-guide/docker.md:578` | main: `website/docs/user-guide/docker.md:575`
-- `create_environment` — dispatches tool calls; the agent loop stays host-side — tag: `website/docs/developer-guide/terminal-environment-plugin.md:20` | main: `website/docs/developer-guide/terminal-environment-plugin.md:20`
-- `TerminalEnvironmentProvider` — provider ABC (execute/upload/cleanup only) — tag: `agent/terminal_env_provider.py:58` | main: `agent/terminal_env_provider.py:1`
-- `session_isolated_when_nonpersistent` — per-session isolation opt-in flag — tag: `website/docs/developer-guide/terminal-environment-plugin.md:31` | main: `website/docs/developer-guide/terminal-environment-plugin.md:31`
+- `create_environment` — dispatches tool calls; the agent loop stays host-side — tag: `website/docs/developer-guide/terminal-environment-plugin.md:19` | main: `website/docs/developer-guide/terminal-environment-plugin.md:19`
+- `TerminalEnvironmentProvider` — provider ABC (execute/upload/cleanup only) — tag: `agent/terminal_env_provider.py:72` | main: `agent/terminal_env_provider.py:20`
+- `session_isolated_when_nonpersistent` — per-session isolation opt-in flag — tag: `website/docs/developer-guide/terminal-environment-plugin.md:28` | main: `website/docs/developer-guide/terminal-environment-plugin.md:28`
 - `find_docker` + `HERMES_DOCKER_BINARY` — container runtime (docker OR podman drop-in) — tag: `tools/environments/docker.py:309` | main: `tools/environments/docker.py:209`
 
 ### Turning on per-session containers

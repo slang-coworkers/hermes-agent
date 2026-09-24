@@ -43,12 +43,12 @@ DUAL_CITES = [
     ("one shared long-lived container",
      "website/docs/user-guide/docker.md:578", "website/docs/user-guide/docker.md:575"),
     ("create_environment",
-     "website/docs/developer-guide/terminal-environment-plugin.md:20",
-     "website/docs/developer-guide/terminal-environment-plugin.md:20"),
-    ("TerminalEnvironmentProvider", "agent/terminal_env_provider.py:58", "agent/terminal_env_provider.py:1"),
+     "website/docs/developer-guide/terminal-environment-plugin.md:19",
+     "website/docs/developer-guide/terminal-environment-plugin.md:19"),
+    ("TerminalEnvironmentProvider", "agent/terminal_env_provider.py:72", "agent/terminal_env_provider.py:20"),
     ("session_isolated_when_nonpersistent",
-     "website/docs/developer-guide/terminal-environment-plugin.md:31",
-     "website/docs/developer-guide/terminal-environment-plugin.md:31"),
+     "website/docs/developer-guide/terminal-environment-plugin.md:28",
+     "website/docs/developer-guide/terminal-environment-plugin.md:28"),
     ("find_docker", "tools/environments/docker.py:309", "tools/environments/docker.py:209"),
 ]
 
