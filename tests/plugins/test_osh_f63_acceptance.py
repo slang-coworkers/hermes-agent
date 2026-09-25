@@ -293,11 +293,14 @@ _WILDCARD_HOSTS = {"0.0.0.0/0", "::/0", "*", "0.0.0.0", "::"}
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"}
 # the broker permits only this exact base image as --from.
 _PINNED_IMAGE = "osh-f63-base:trixie"
-# the two egress targets the render must emit — the OneCLI hop and the inference
-# route; AC-2 pins them literally so a fixture swapping in a forbidden target
-# (e.g. the ssh control path 172.17.0.1:22) cannot pass by deriving "expected"
-# from the same editable fixture.
-_EXPECTED_EGRESS_HP = {("172.17.0.1", "10255"), ("inference-api.nvidia.com", "443")}
+# the two egress targets the render must emit for the OpenShell substrate — the
+# OneCLI DATA-PLANE hop 172.17.0.1:18255 (a source-preserving DNAT alias of
+# onecli-lego:10255; the OpenShell substrate hard-blocks 10255 as a control-plane
+# port, so the data plane is 18255) and the inference route. AC-2 pins them
+# literally so a fixture swapping in a forbidden target (the ssh control path
+# 172.17.0.1:22, or the OpenShell-blocked 10255 / the OneCLI control-plane 10256) cannot pass by
+# deriving "expected" from the same editable fixture.
+_EXPECTED_EGRESS_HP = {("172.17.0.1", "18255"), ("inference-api.nvidia.com", "443")}
 
 
 def _hostport(value) -> tuple:
@@ -409,7 +412,7 @@ def test_ac_osh_f63_2(tmp_path):
     # full five-section shape (every named policy well-formed), and the endpoints
     # == exactly the two allowed targets, each enforce/rest with an allow rule.
     # The allow-vs-deny SEMANTICS (only these two admitted, all else denied) are
-    # proven on-box by AC-OSH-F63-5's `openshell sandbox create --policy`/`prove`.
+    # proven on-box by AC-OSH-F63-5 (create-Ready + steps 3-4 runtime enforcement).
     for profile in COWORKER_PROFILES:
         policy = yaml.safe_load(policy_files[f"policy-{profile}.yaml"].read_text(encoding="utf-8"))
         assert isinstance(policy, dict), f"{profile}: policy is not a YAML mapping"
@@ -425,9 +428,12 @@ def test_ac_osh_f63_2(tmp_path):
         assert emitted_hp == _EXPECTED_EGRESS_HP, f"{profile}: endpoints {sorted(emitted_hp)} != mandated targets {sorted(_EXPECTED_EGRESS_HP)}"
 
         # control-plane endpoints and wildcards forbidden: the OneCLI control
-        # plane (:10256) and the OpenShell gateway control plane
-        # (host.openshell.internal:8080, denied to workers — AC-5 step 4).
+        # plane (:10256), the OpenShell-blocked control-plane port (:10255 — the
+        # substrate hard-blocks it, so it is never a valid data-plane endpoint),
+        # and the OpenShell gateway control plane (host.openshell.internal:8080,
+        # denied to workers — AC-5 step 4).
         assert ("172.17.0.1", "10256") not in emitted_hp, f"{profile}: OneCLI control plane 172.17.0.1:10256 present as an endpoint"
+        assert ("172.17.0.1", "10255") not in emitted_hp, f"{profile}: OpenShell-blocked control-plane port 172.17.0.1:10255 present as an endpoint (data plane is 18255)"
         assert ("host.openshell.internal", "8080") not in emitted_hp, f"{profile}: OpenShell gateway control plane host.openshell.internal:8080 present as an endpoint"
         emitted_hosts = {h for h, _ in emitted_hp}
         assert "host.openshell.internal" not in emitted_hosts, f"{profile}: OpenShell gateway host present as an endpoint"
@@ -757,6 +763,10 @@ def test_ac_osh_f63_6():
         "--from osh-f63-base:trixie",   # the pinned provisioning --from marker
         "openshell-osh-f63-",           # the ssh-config alias form (§D1.2)
         "--name osh-f63-",              # the bare sandbox create name, distinct from the alias (§D1.2/D1.4)
+        "172.17.0.1:18255",             # the OpenShell OneCLI DATA-PLANE hop (not the blocked 10255)
+        "10.200.0.1:3128",              # the in-sandbox egress proxy address
+        "http_proxy",                   # the mechanism: in-sandbox clients reach declared hops via HTTP_PROXY, not just the bare address
+        "not routable",                 # the caveat: direct 172.17.0.1 connections are not routable from a sandbox
     ]
     missing = [k for k in required if k not in text]
     assert not missing, f"fleet-openshell.md missing required topics: {missing}"
