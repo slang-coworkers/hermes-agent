@@ -1,13 +1,9 @@
-"""Fail-closed regressions for OSH-F63 (nv-coworker-compose) — NOT AC ids.
+"""Fail-closed regression tests for OSH-F63 OpenShell rendering — not AC ids.
 
-Kept in a separate module so tests/plugins/test_osh_f63_acceptance.py stays
-byte-identical to the architect's checksum-bound authoritative artifact
-(sha256 d537095e…). These guard nv-coworker-compose behaviour the authoritative
-acceptance test does not cover: the canonical forbidden-egress rejection in
-_validate_openshell_egress (in EITHER egress position), and the all-or-nothing
-mode-0600 ssh_key placeholder. The few helpers below are duplicated (not
-imported from the acceptance module) so this file runs standalone under the
-per-file subprocess isolation of scripts/run_tests.sh.
+They guard two nv-coworker-compose behaviours: _validate_openshell_egress rejecting
+a forbidden host in either egress position, and the all-or-nothing mode-0600 ssh_key
+placeholder. Helpers are local because the test runner isolates each file in its own
+subprocess.
 """
 
 from __future__ import annotations
