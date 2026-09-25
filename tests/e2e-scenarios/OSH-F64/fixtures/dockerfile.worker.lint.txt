@@ -1,0 +1,6 @@
+OSH-F64 worker Dockerfile lint — Dockerfile.worker
+checks: apt-no-install-recommends, from-pinned-digest, no-apt-upgrade, no-key-material, no-secret-arg-env, no-sshd, non-root-user, pip-pinned, workdir-absolute
+errors: 0
+warnings: 0
+findings:
+  none
