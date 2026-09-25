@@ -1216,8 +1216,8 @@ def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str]) -
 
 def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> List[str]:
     """Build the deterministic ``openshell`` provisioning plan for a remote-ssh fleet:
-    per coworker profile, a sandbox-create + policy-set + ssh-config line, then the
-    teardown (sandbox-delete + policy-delete). Returns ``[]`` for any non-remote-ssh
+    per coworker profile, a sandbox-create + ssh-config line, then the
+    teardown (sandbox-delete). Returns ``[]`` for any non-remote-ssh
     substrate (only openshell has a plan). Computed from spec DATA only (roster, fleet
     name, pinned image) so it is byte-stable across runs — no ``--out`` path appears,
     and no container engine (podman/docker) is invoked."""
@@ -1236,19 +1236,17 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     # `terminal.ssh_host` is the distinct ssh-config alias `openshell-<fleet>-<role>` that
     # resolves to it — the two are deliberately different strings. ssh-config / delete
     # target that same bare name, so the plan joins to the render per profile. All setup
-    # lines (create, policy-set, ssh-config) precede all teardown lines (delete).
+    # lines (create, ssh-config) precede all teardown lines (delete). No `openshell
+    # policy` verb appears: `sandbox create --policy` binds+enforces the policy inline
+    # (so `policy set` is redundant) and the broker has no `policy delete` verb.
     for role in roster:
         lines.append(
             f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
             f"--from {image} --policy policy-{role}.yaml")
     for role in roster:
-        lines.append(f"openshell policy set policy-{role}.yaml")
-    for role in roster:
         lines.append(f"openshell sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
     for role in roster:
         lines.append(f"openshell sandbox delete {_openshell_sandbox_name(fleet_name, role)}")
-    for role in roster:
-        lines.append(f"openshell policy delete policy-{role}.yaml")
     return lines
 
 
