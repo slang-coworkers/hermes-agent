@@ -194,7 +194,7 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
 
 `hermes coworker compose <spec> --provision-dry-run` renders the fleet and then prints
 a deterministic provisioning plan (identical across runs and across `--out` dirs — no
-`--out` path appears) — the create, policy-set, and ssh-config lines per profile, then
+`--out` path appears) — the create and ssh-config lines per profile, then
 the teardown lines. Each `--policy` names the bare `policy-<profile>.yaml` (the operator
 materialises it at that name from the profile's `distribution_owned` before running the
 plan). Each `openshell sandbox create --name` uses the **bare sandbox name**
@@ -208,16 +208,13 @@ OpenShell `ProxyCommand` — the two are deliberately *different* strings. `crea
 ```
 openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie --policy policy-builder.yaml
 ...
-openshell policy set policy-builder.yaml
-...
 openshell sandbox ssh-config osh-f63-builder
 ...
 openshell sandbox delete osh-f63-builder
-openshell policy delete policy-builder.yaml
 ```
 
 The plan runs **no** container engine. The teardown lines delete each per-profile
-sandbox and its policy, freeing that profile's resources.
+sandbox, freeing that profile's resources.
 
 ## Sandbox scope
 

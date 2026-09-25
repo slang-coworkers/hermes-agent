@@ -49,8 +49,10 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
 - A name-scoped OpenShell **broker** reachable from the tester container: a unix socket
   `/workspace/extra/osh-broker/osh.sock` (rw) fronted by the `openshell` **shim on PATH at
   `/workspace/extra/osh-broker-bin/openshell` (ro)** — the scoped way to run `openshell
-  sandbox create|exec|delete|ssh-config`, `openshell policy set`, and `openshell
-  logs`. (There is no `openshell policy prove` verb — policy acceptance is proven by
+  sandbox create|exec|delete|ssh-config` and `openshell
+  logs`. (The plan emits no `openshell policy` line — `sandbox create --policy`
+  binds+enforces the policy inline, and the broker has no `policy delete` verb; there is
+  likewise no `openshell policy prove` verb, so policy acceptance is proven by
   `sandbox create --policy` reaching Ready. An earlier probe of
   `/workspace/extra/osh-bin/openshell` was the stale path; use
   `/workspace/extra/osh-broker-bin/openshell` only.)
@@ -109,9 +111,9 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
    /workspace/extra/hermes-fleet-testbed/policy-tester.yaml` — **the sibling** → expect:
    both reach **Ready**. **Create-Ready IS the grammar-acceptance proof** — the real binary
    parses the render's five-section structure and loads its allow/deny rules (`--policy` on
-   `create` loads the policy, so no separate `policy set` step is needed; the shim exposes no
-   `openshell policy prove` verb, and acceptance is not provable by AC-2's hermetic
-   structural check). The broker's `openshell sandbox create --no-tty -- true` returns when
+   `create` loads the policy inline, so the plan needs no separate policy-application step
+   and no teardown policy step; the shim exposes no `openshell policy prove` verb, and
+   acceptance is not provable by AC-2's hermetic structural check). The broker's `openshell sandbox create --no-tty -- true` returns when
    the sandbox is Ready (~3s locally, no image pull), so a `create` that returns has reached
    Ready; poll `openshell sandbox list` to confirm both.
 2. **Install the RENDERED ssh-config, then reach the probe through it:**
