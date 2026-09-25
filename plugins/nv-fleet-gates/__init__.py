@@ -169,6 +169,26 @@ def _managed_profile_roles():
     return roles
 
 
+def _managed_expected_ssh_host():
+    """Return the managed per-profile SSH host map, or ``None`` when absent.
+
+    Read it on every gate call so local profile config cannot authorize a target.
+    Invalid maps raise and are converted to a block by ``_gate``.
+    """
+    from hermes_cli import managed_scope
+
+    mc = managed_scope.load_managed_config() or {}
+    settings = (
+        ((mc.get("plugins") or {}).get("entries") or {}).get(PLUGIN_KEY) or {}
+    ).get("settings") or {}
+    if "expected_ssh_host" not in settings:
+        return None
+    hosts = settings["expected_ssh_host"]
+    if not isinstance(hosts, dict):
+        raise RuntimeError("managed nv-fleet-gates expected_ssh_host is not a mapping")
+    return hosts
+
+
 def _status_ok(status) -> bool:
     if status is None or status is True:
         return True
@@ -287,10 +307,20 @@ def register(ctx) -> None:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
             )
+        # Check the managed host before readiness because ensure_task_env()
+        # eagerly connects to and caches TERMINAL_SSH_HOST.
+        if expected_backend == "ssh":
+            resolved = os.getenv("TERMINAL_SSH_HOST")
+            expected = (_managed_expected_ssh_host() or {}).get(_current_profile())
+            if not expected or resolved != expected:
+                return _block(
+                    f"sandbox: refused — ssh target host {resolved!r} is not this "
+                    f"profile's sandbox {expected!r}"
+                )
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
-            return _block("sandbox: container task environment is not ready — refusing")
+            return _block("sandbox: task environment is not ready — refusing")
         if canon in ("terminal", "execute_code"):
             if predicates.is_dangerous_command(predicates.command_text(canon, args)):
                 return _block(

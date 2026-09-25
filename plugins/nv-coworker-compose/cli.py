@@ -18,6 +18,11 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
     compose_p = subs.add_parser("compose", help="Render coworker profile distributions from a coworker-types.yaml spec")
     compose_p.add_argument("spec", help="Path to coworker-types.yaml")
     compose_p.add_argument("--out", default=None, help="Output directory for the rendered distributions")
+    compose_p.add_argument(
+        "--provision-dry-run", action="store_true",
+        help="After rendering, print the deterministic OpenShell provisioning plan "
+             "(sandbox create/ssh-config/delete) for a substrate: openshell spec",
+    )
 
 
 def setup_onboard(parser: argparse.ArgumentParser) -> None:

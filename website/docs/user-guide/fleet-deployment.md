@@ -20,10 +20,12 @@ hermes coworker compose fleet/coworker-types.yaml --out /srv/fleet/render
 The spec's top-level **`substrate:`** field selects the sandbox backend. `podman`
 (the default when the key is absent, for back-compat with existing specs) renders
 `terminal.backend: docker` driven through the podman-onecli wrapper; an unknown value
-fails closed before any distribution is written. `openshell` is the documented FUTURE
-value (P7, OSH-F63/F64): where podman cannot run nested, each profile gets an
-OpenShell-native sandbox via `terminal.backend: ssh` with egress policed by
-`openshell policy`. Only `podman` ships today.
+fails closed before any distribution is written. `openshell` (P7, OSH-F63) is the
+substrate for boxes where podman cannot run nested: each profile gets an OpenShell-native
+sandbox reached over `terminal.backend: ssh`, with egress policed by a per-profile
+`openshell policy` — see the [OpenShell fleet substrate](./fleet-openshell.md) runbook.
+It renders `sandbox_scope: profile` (one sandbox per profile); `sandbox_scope: session`
+is recognised but deferred (fails closed) pending its provider.
 
 The render enforces the fleet invariants regardless of what the spec declares:
 
@@ -33,10 +35,14 @@ The render enforces the fleet invariants regardless of what the spec declares:
   the DEFAULT profile (so `hermes gateway install` emits `Type=notify` + `WatchdogSec`,
   not `Type=simple`). A below-floor or absent spec value is raised to 30; a higher value
   is kept.
-- **Per-profile sandbox**: every coworker renders `terminal.backend: docker`, a pinned
-  `terminal.docker_image`, policed `terminal.docker_volumes` (every host source outside
-  `$HERMES_HOME` and every profile dir), `terminal.docker_shared_container_key: ""`
-  (per-profile container identity), the OneCLI egress env, and `--memory`/`--pids-limit`.
+- **Per-profile sandbox** (shape is substrate-specific): under `podman`, every coworker
+  renders `terminal.backend: docker`, a pinned `terminal.docker_image`, policed
+  `terminal.docker_volumes` (every host source outside `$HERMES_HOME` and every profile
+  dir), `terminal.docker_shared_container_key: ""` (per-profile container identity), the
+  OneCLI egress env, and `--memory`/`--pids-limit`. Under `openshell` it is instead
+  `terminal.backend: ssh` + the per-profile ssh block (host/user/port/key-path) + a
+  per-profile `openshell policy` file, with no `terminal.docker_*` key (see the
+  [OpenShell fleet substrate](./fleet-openshell.md) runbook).
 - **The veto's settings**: `plugins.entries.nv-fleet-gates.settings` carries
   `enforce_sandbox: true`, `expected_backend` (render-derived from the substrate, so it
   cannot drift from `terminal.backend`), an absolute `edges_db_path` outside every home,
@@ -199,6 +205,8 @@ outside `$HERMES_HOME`; that is a test/scenario choice, not a production recomme
 
 The substrate is a data switch (§1). The veto, the per-profile identity, and the mount
 and egress **policy** are substrate-agnostic; only the `terminal.*` key **names** the
-render serializes into, and the podman wrapper, are substrate-specific. Adding a future
-column (e.g. `openshell`) is a new substrate-descriptor entry plus its fixtures — the
-veto, identities, and mount/egress policy are unchanged.
+render serializes into, and the podman wrapper, are substrate-specific. Adding a column
+is a new substrate-descriptor entry plus its fixtures — the veto, identities, and
+mount/egress policy are unchanged. The `openshell` remote-ssh column (OSH-F63) is the
+worked example: a descriptor with `kind: remote_ssh` whose render emits the per-profile
+ssh block + `openshell policy` instead of the container `docker_*` keys.

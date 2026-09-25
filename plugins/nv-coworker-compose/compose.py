@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,7 +26,7 @@ import yaml
 
 from gateway.config import Platform, coerce_systemd_watchdog_seconds, platform_binds_port
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
-from hermes_constants import get_default_hermes_root
+from hermes_constants import get_default_hermes_root, get_hermes_home
 
 # Spec-controlled names become directory/file components and profile names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -447,6 +448,12 @@ class _SubstrateDescriptor:
     substrate: str
     backend: str          # terminal.backend value; the veto's expected_backend is this same value
     terminal_prefix: str  # substrate-specific terminal.* key prefix (podman -> "docker")
+    # How the fleet reaches the sandbox: "container" (a local rootless container the
+    # docker-prefixed egress/mount writers configure) or "remote_ssh" (an OpenShell
+    # sandbox reached over the builtin ssh backend, whose egress is a per-profile
+    # `openshell policy` file, not a `docker_*` env). The render branches on this so
+    # no container-mount key is emitted for a remote backend.
+    kind: str = "container"
 
     def key(self, leaf: str) -> str:
         """Dotted config key a substrate-specific terminal leaf serialises into."""
@@ -459,7 +466,13 @@ class _SubstrateDescriptor:
 
 _DEFAULT_SUBSTRATE = "podman"
 _SUBSTRATE_DESCRIPTORS: Dict[str, _SubstrateDescriptor] = {
-    "podman": _SubstrateDescriptor(substrate="podman", backend="docker", terminal_prefix="docker"),
+    "podman": _SubstrateDescriptor(
+        substrate="podman", backend="docker", terminal_prefix="docker", kind="container"),
+    # OSH-F63: OpenShell-native sandbox per profile, reached over the builtin ssh
+    # backend (terminal.backend: ssh; the veto's render-derived expected_backend is
+    # this same "ssh"). No nested podman — egress is a per-profile openshell policy.
+    "openshell": _SubstrateDescriptor(
+        substrate="openshell", backend="ssh", terminal_prefix="ssh", kind="remote_ssh"),
 }
 _FLEET_GATES_PLUGIN = "nv-fleet-gates"
 _FLEET_GATES_SETTINGS = "plugins.entries.nv-fleet-gates.settings"
@@ -482,6 +495,55 @@ def _resolve_substrate(data: Dict[str, Any]) -> _SubstrateDescriptor:
     )
 
 
+def _validate_sandbox_scope(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
+    """Validate the top-level ``sandbox_scope`` DATA field for the remote-ssh
+    substrate, at the TOP of ``compose`` before any distribution is written.
+
+    OSH-F63 delivers ``profile`` (one OpenShell sandbox per profile; the default).
+    ``session`` is a RECOGNISED value that fails closed — its per-session provider is
+    deferred to the ``register_terminal_environment_provider`` path — so it raises
+    naming that deferral rather than silently mis-rendering as ``profile``. Any other
+    value is unknown. The container substrate has no ``sandbox_scope`` (its scope is
+    container-per-session already), so the key is ignored there."""
+    if descriptor.kind != "remote_ssh":
+        return
+    scope = data.get("sandbox_scope", "profile")
+    if scope == "profile":
+        return
+    if scope == "session":
+        raise CompositionError(
+            "sandbox_scope 'session' is a recognised value but is deferred: its "
+            "per-session OpenShell sandbox is rendered by the "
+            "register_terminal_environment_provider provider path, which OSH-F63 does "
+            "not build. Use sandbox_scope: profile (the default; one OpenShell sandbox "
+            "per profile) — 'session' support ships with that provider."
+        )
+    raise CompositionError(
+        f"unknown sandbox_scope {scope!r}: the openshell substrate supports "
+        f"[profile]; 'session' is recognised but deferred to the provider path"
+    )
+
+
+def _reject_openshell_container_fields(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
+    """Refuse a remote-ssh spec that sets container-only mount fields. The
+    remote-ssh substrate skips the docker mount/egress writers, so honouring these
+    would be impossible — failing closed here is safer than silently ignoring them."""
+    if descriptor.kind != "remote_ssh":
+        return
+    unsupported = [
+        key for key in ("shared_learnings_root", "workspace_root")
+        if data.get(key) not in (None, "")
+    ]
+    if data.get("install_surfaces") not in (None, []):
+        unsupported.append("install_surfaces")
+    if unsupported:
+        raise CompositionError(
+            f"substrate 'openshell' does not support container mount fields: "
+            f"{', '.join(unsupported)}; these bind into a local container that the "
+            f"remote-ssh substrate does not create"
+        )
+
+
 def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
                             descriptor: _SubstrateDescriptor) -> None:
     """Force the fleet session-driver invariants onto one profile's ``config``
@@ -490,12 +552,14 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
     ``terminal.backend`` is forced to ``descriptor.backend``: an omitted key is
     written (overriding the stock ``local`` default) and an explicit matching value
     is kept, but any other value — any other string or any non-string — raises
-    ``CompositionError``. The substrate's shared-container-key
+    ``CompositionError``. For a **container** substrate the shared-container-key
     (``terminal.<prefix>_shared_container_key``) is forced to the empty string: only
     an omitted key or the exact string ``""`` is accepted; every other value is
     refused the same way, including falsey non-strings (``False``/``0``/``[]``/
     ``{}``/``None``) that the config->env bridge would serialise to a NON-empty env
-    string and so collapse per-profile container identity to one shared container.
+    string and so collapse per-profile container identity to one shared container. A
+    **remote-ssh** substrate has no local container, so no shared-container-key is
+    written and any inherited ``terminal.docker_*`` key is refused outright.
     The content type-check runs before any comparison, so a non-string YAML value
     raises ``CompositionError`` rather than a raw ``TypeError``. FLEET-F62 also
     derives the veto's ``expected_backend`` from ``descriptor.backend`` here — the
@@ -504,7 +568,6 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
     veto, so a non-fleet spec gets no orphan settings block.
     """
     backend = descriptor.backend
-    shared_key_leaf = descriptor.leaf("shared_container_key")
     terminal = config.get("terminal")
     if isinstance(terminal, dict):
         if "backend" in terminal and not (
@@ -516,16 +579,36 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
                 f"(the fleet's per-profile {descriptor.substrate} sandbox backend); "
                 f"got {terminal['backend']!r}"
             )
-        if shared_key_leaf in terminal and not (
-            isinstance(terminal[shared_key_leaf], str)
-            and terminal[shared_key_leaf] == ""
-        ):
-            raise CompositionError(
-                f"{profile_name}: terminal.{shared_key_leaf} must be "
-                f"empty; got {terminal[shared_key_leaf]!r}"
+        # A remote-ssh substrate has no local container, so any inherited/spec-declared
+        # terminal.docker_* key cannot be honoured — refuse it rather than silently
+        # serialize a dead key (fail closed, and keep the no-docker_* invariant true).
+        if descriptor.kind == "remote_ssh":
+            docker_keys = sorted(
+                k for k in terminal if isinstance(k, str) and k.startswith("docker_")
             )
+            if docker_keys:
+                raise CompositionError(
+                    f"{profile_name}: substrate 'openshell' does not support container "
+                    f"terminal keys {docker_keys}; the remote-ssh backend has no local "
+                    f"container to configure"
+                )
+        # The shared-container-key is a container-substrate concept: a remote-ssh
+        # sandbox has no shared-container identity to collapse, so the guard and the
+        # empty-string write below are container-only (no terminal.<prefix>_* key is
+        # emitted for the remote-ssh substrate).
+        if descriptor.kind == "container":
+            shared_key_leaf = descriptor.leaf("shared_container_key")
+            if shared_key_leaf in terminal and not (
+                isinstance(terminal[shared_key_leaf], str)
+                and terminal[shared_key_leaf] == ""
+            ):
+                raise CompositionError(
+                    f"{profile_name}: terminal.{shared_key_leaf} must be "
+                    f"empty; got {terminal[shared_key_leaf]!r}"
+                )
     _set_dotted(config, "terminal.backend", backend)
-    _set_dotted(config, descriptor.key("shared_container_key"), "")
+    if descriptor.kind == "container":
+        _set_dotted(config, descriptor.key("shared_container_key"), "")
     if _FLEET_GATES_PLUGIN in ((config.get("plugins") or {}).get("enabled") or []):
         _set_dotted(config, f"{_FLEET_GATES_SETTINGS}.expected_backend", backend)
 
@@ -913,6 +996,260 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
         kept.append(v)
     kept.append(ca_mount)
     _set_dotted(config, descriptor.key("volumes"), kept)
+
+
+# --- OSH-F63 openshell (remote-ssh) substrate render -----------------------
+#
+# The openshell substrate reaches one OpenShell sandbox per profile over the
+# builtin ssh backend. Unlike the container path there is no local container to
+# configure: the per-profile egress posture is a standalone `openshell policy`
+# file, and the terminal block carries the builtin ssh coordinates (host/user/
+# port/key-path). Materialising the on-box `openshell policy` from that file, and
+# installing the ssh-config/ProxyCommand, are operator provisioning steps — not
+# render steps.
+
+_OPENSHELL_SSH_USER = "sandbox"
+_OPENSHELL_SSH_PORT = 22
+# Hosts/host:ports that must never be a policy tool-egress allow. Compared by
+# PARSED (host, port) — a host-only value is matched against _OPENSHELL_FORBIDDEN_HOSTS,
+# a specific hop against _OPENSHELL_FORBIDDEN_HOSTPORTS — so a wildcard CIDR or the
+# gateway/control-plane hop cannot slip past a substring check. :10256 is the OneCLI
+# control plane, :8080 the OpenShell gateway control plane (denied to workers), :22 the
+# ssh control path (INBOUND via the proxy socket, never an egress target).
+_OPENSHELL_FORBIDDEN_HOSTS = frozenset({
+    "host.openshell.internal", "0.0.0.0/0", "::/0", "0.0.0.0", "::", "*",
+})
+_OPENSHELL_FORBIDDEN_HOSTPORTS = frozenset({("172.17.0.1", 10256), ("172.17.0.1", 22)})
+
+
+def _openshell_keys_dir() -> Path:
+    """Directory the per-profile ssh key PATHS are rooted at — under the gateway
+    ``$HERMES_HOME`` (render-time ``get_hermes_home()``). The render writes a path
+    here per profile AND creates each as an empty 0600 placeholder file; it never
+    writes key material (the builtin ssh backend takes ``-i <path>``, and on the
+    OpenShell lane auth rides the mTLS proxy so the key is present-for-contract,
+    unused)."""
+    return get_hermes_home() / "openshell" / "keys"
+
+
+def _openshell_sandbox_name(fleet_name: str, profile_name: str) -> str:
+    """The BARE OpenShell sandbox name for a profile: ``<fleet>-<profile>``. This is
+    the provision plan's ``openshell sandbox create --name`` / ``ssh-config`` /
+    ``delete`` target."""
+    return f"{fleet_name}-{profile_name}"
+
+
+def _openshell_ssh_alias(fleet_name: str, profile_name: str) -> str:
+    """The ssh-config Host alias ``openshell sandbox ssh-config`` emits for a
+    profile's sandbox: ``openshell-<fleet>-<profile>``. This is what the render
+    writes as ``terminal.ssh_host`` AND as the veto's managed ``expected_ssh_host``
+    anchor (they must agree — the veto compares ``TERMINAL_SSH_HOST`` to it); the bare
+    sandbox name (``_openshell_sandbox_name``) is the provision plan's ``--name`` the
+    alias resolves to. AC-4 joins them by requiring ``ssh_host == openshell-<name>``."""
+    return f"openshell-{_openshell_sandbox_name(fleet_name, profile_name)}"
+
+
+def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: List[str]) -> None:
+    """Fail-closed, ALL-OR-NOTHING creation of every profile's ssh_key placeholder,
+    run ONCE before the Phase-B write loop emits any distribution. Two passes: first
+    validate every target (a dangling symlink is invisible to ``Path.exists()``, so a
+    later ``touch`` would follow it and write outside the render-owned keys dir; a
+    pre-existing non-empty or non-regular file is refused), THEN create/chmod each.
+    A collision on ANY profile raises before a single config is written, so a partial
+    fleet can never be left on disk (the placeholder is empty 0600 — no key material;
+    auth rides the mTLS proxy, the builtin ``-i <path>`` contract only needs it to
+    exist)."""
+    keys_dir.mkdir(parents=True, exist_ok=True)
+    targets = [(name, keys_dir / name) for name in profile_names]
+    for profile_name, key_path in targets:
+        if key_path.is_symlink():
+            raise CompositionError(
+                f"{profile_name}: ssh_key placeholder {key_path} is a symlink; refusing to follow it")
+        if key_path.exists() and (not key_path.is_file() or key_path.stat().st_size != 0):
+            raise CompositionError(
+                f"{profile_name}: ssh_key placeholder {key_path} must be an empty regular file")
+    for _profile_name, key_path in targets:
+        if not key_path.exists():
+            key_path.touch(mode=0o600)
+        key_path.chmod(0o600)
+
+
+def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name: str,
+                           keys_dir: Path) -> None:
+    """Write one coworker's builtin-ssh terminal block for its OWN OpenShell sandbox:
+    a distinct ``ssh_host`` (the ssh-config alias ``openshell-<fleet>-<profile>``), a
+    uniform ``ssh_user``/``ssh_port``, and an ``ssh_key`` PATH under ``keys_dir``
+    (distinct leaf per profile). Config-only: the placeholder files themselves are
+    created up front by ``_prepare_openshell_ssh_keys`` (all-or-nothing, before any
+    write), so this never mutates the filesystem."""
+    _set_dotted(config, "terminal.ssh_host", _openshell_ssh_alias(fleet_name, profile_name))
+    _set_dotted(config, "terminal.ssh_user", _OPENSHELL_SSH_USER)
+    _set_dotted(config, "terminal.ssh_port", _OPENSHELL_SSH_PORT)
+    _set_dotted(config, "terminal.ssh_key", str(keys_dir / profile_name))
+
+
+def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
+    """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
+    parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
+    raises ``CompositionError`` rather than emitting a half-formed policy. The policy
+    ALLOW set is EXACTLY {the OneCLI request hop ``proxy_addr``, the inference route
+    ``inference_route``}; the ssh control path is INBOUND via the proxy socket, not an
+    egress target. A wildcard, the OneCLI control plane (…:10256), the OpenShell gateway
+    control plane (host.openshell.internal:8080), and the ssh port are refused."""
+    if not isinstance(egress, dict):
+        raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
+
+    def _req_str(key: str) -> str:
+        val = egress.get(key)
+        if not isinstance(val, str) or not val.strip():
+            raise CompositionError(f"egress.{key} must be a non-empty string, got {val!r}")
+        # No newline/CR/NUL: these values are interpolated into the provisioning plan,
+        # so a control char could inject an extra command line (defeating the
+        # no-container-engine guarantee). The provision plan also shlex-quotes them.
+        if any(c in val for c in "\n\r\x00"):
+            raise CompositionError(
+                f"egress.{key} must not contain control characters, got {val!r}")
+        return val.strip()
+
+    proxy_addr = _normalize_proxy_addr(_req_str("proxy_addr"))
+    inference_route = _req_str("inference_route")
+    sandbox_image = _req_str("sandbox_image")
+    allow = [proxy_addr, inference_route]
+    for entry in allow:
+        host, port = _openshell_hostport(entry)
+        # Canonicalise the host before the forbidden check so a case / trailing-dot /
+        # IPv6-bracket / wildcard variant of a control-plane or gateway host cannot slip
+        # past: DNS names are case-insensitive, a trailing root dot is equivalent, IPv6
+        # literals arrive bracketed, and any '*' is a wildcard the allow-set never permits.
+        canon = host.strip().casefold()
+        if len(canon) > 1 and canon.endswith("."):
+            canon = canon[:-1]
+        if canon.startswith("[") and canon.endswith("]"):
+            canon = canon[1:-1]
+        if ("*" in canon or canon in _OPENSHELL_FORBIDDEN_HOSTS
+                or (canon, port) in _OPENSHELL_FORBIDDEN_HOSTPORTS):
+            raise CompositionError(
+                f"openshell policy egress target {entry!r} is forbidden (control-plane / "
+                f"gateway / wildcard / inbound-ssh host); egress is exactly proxy_addr + "
+                f"inference_route")
+    return {"allow": allow, "sandbox_image": sandbox_image}
+
+
+# Keep policy hardening fixed here so spec data can change only the validated
+# endpoint allow-list.
+_OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
+_OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
+_OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
+_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)
+_OPENSHELL_POLICY_LANDLOCK = "best_effort"
+# The two egress endpoints (OneCLI hop + inference route) are POST-driven REST APIs;
+# emit POST so the coworker's real traffic is admitted. AC-OSH-F63-5 proves the in-policy
+# POST on-box (a GET-only rule would deny it); AC-2 stays verb-agnostic by design.
+_OPENSHELL_POLICY_ALLOW_METHOD = "POST"
+_OPENSHELL_POLICY_ALLOW_PATH = "/**"
+
+
+def _openshell_hostport(entry: str) -> Tuple[str, int]:
+    """Split an allow-list ``host:port`` string into ``(host, int(port))``. Fails
+    closed (``CompositionError``) on an empty host, a missing/non-numeric port, or a
+    port outside 1..65535 — the endpoint grammar requires a host AND a valid port, so
+    a malformed target must raise rather than emit a half endpoint."""
+    host, sep, port = entry.rpartition(":")
+    if not sep or not host or not port.isdigit() or not (1 <= int(port) <= 65535):
+        raise CompositionError(
+            f"openshell policy endpoint must be host:port with a port in 1..65535, got {entry!r}")
+    return host, int(port)
+
+
+def _openshell_policy_document(allow: List[str]) -> Dict[str, Any]:
+    """Build one profile's OpenShell policy document in the accepted five-section
+    grammar from the two validated egress targets (§D1.3)."""
+    # Endpoint hosts are the egress boundary; emit only the two validated targets.
+    endpoints = [
+        {
+            "host": host,
+            "port": port,
+            "protocol": "rest",
+            "enforcement": "enforce",
+            "rules": [{"allow": {"method": _OPENSHELL_POLICY_ALLOW_METHOD,
+                                 "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
+        }
+        for host, port in (_openshell_hostport(entry) for entry in allow)
+    ]
+    return {
+        "version": 1,
+        "filesystem_policy": {
+            "include_workdir": True,
+            "read_only": list(_OPENSHELL_POLICY_FS_READ_ONLY),
+            "read_write": list(_OPENSHELL_POLICY_FS_READ_WRITE),
+        },
+        "landlock": {"compatibility": _OPENSHELL_POLICY_LANDLOCK},
+        "process": {"run_as_user": _OPENSHELL_SSH_USER, "run_as_group": _OPENSHELL_SSH_USER},
+        "network_policies": {
+            _OPENSHELL_POLICY_NETWORK_NAME: {
+                "name": _OPENSHELL_POLICY_NETWORK_NAME,
+                "binaries": [{"path": _OPENSHELL_POLICY_BINARY}],
+                "endpoints": endpoints,
+            }
+        },
+    }
+
+
+def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str]) -> None:
+    """Write one coworker's per-profile ``openshell policy`` file
+    (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
+    OpenShell grammar whose ``network_policies`` endpoints are exactly the declared
+    allow set (the operator materialises the on-box ``openshell policy`` from it at
+    provisioning).
+
+    The policy file is also added to the distribution manifest's ``distribution_owned``
+    so ``install_distribution`` carries it into the installed profile rather than
+    dropping it. ``config.yaml`` (and thus ``distribution.yaml``) were already written
+    by ``_render_coworker`` before this runs."""
+    policy_name = f"policy-{profile_name}.yaml"
+    _write_yaml(pdir / policy_name, _openshell_policy_document(allow))
+    dist_path = pdir / "distribution.yaml"
+    dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
+    owned = dist.get("distribution_owned")
+    if isinstance(owned, list) and policy_name not in owned:
+        owned.append(policy_name)
+        _write_yaml(dist_path, dist)
+
+
+def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> List[str]:
+    """Build the deterministic ``openshell`` provisioning plan for a remote-ssh fleet:
+    per coworker profile, a sandbox-create + ssh-config line, then the
+    teardown (sandbox-delete). Returns ``[]`` for any non-remote-ssh
+    substrate (only openshell has a plan). Computed from spec DATA only (roster, fleet
+    name, pinned image) so it is byte-stable across runs — no ``--out`` path appears,
+    and no container engine (podman/docker) is invoked."""
+    if descriptor.kind != "remote_ssh":
+        return []
+    fleet_name = _safe_name("project", data.get("project", "fleet"))
+    # shlex-quote the spec-supplied image so a metachar cannot alter the plan (the
+    # egress validator already refuses control chars). fleet/role names are
+    # _safe_name-validated, so they carry no shell metachars.
+    image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
+    roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
+    lines: List[str] = []
+    # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
+    # that file; the operator materialises it at that name before running the plan). The
+    # create `--name` is the BARE sandbox name `<fleet>-<role>`; the profile's rendered
+    # `terminal.ssh_host` is the distinct ssh-config alias `openshell-<fleet>-<role>` that
+    # resolves to it — the two are deliberately different strings. ssh-config / delete
+    # target that same bare name, so the plan joins to the render per profile. All setup
+    # lines (create, ssh-config) precede all teardown lines (delete). No `openshell
+    # policy` verb appears: `sandbox create --policy` binds+enforces the policy inline
+    # (so `policy set` is redundant) and the broker has no `policy delete` verb.
+    for role in roster:
+        lines.append(
+            f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
+            f"--from {image} --policy policy-{role}.yaml")
+    for role in roster:
+        lines.append(f"openshell sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
+    for role in roster:
+        lines.append(f"openshell sandbox delete {_openshell_sandbox_name(fleet_name, role)}")
+    return lines
 
 
 # Container path the shared-learnings clone is mounted at (MEM-F43). Kept OUTSIDE
@@ -1365,7 +1702,8 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
 
 
-def _build_managed_fragment(profile_roles: Dict[str, str]) -> Dict[str, Any]:
+def _build_managed_fragment(profile_roles: Dict[str, str],
+                            expected_ssh_host: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build the machine-wide managed-scope fragment: the eight fleet-uniform
     approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
     this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
@@ -1376,11 +1714,18 @@ def _build_managed_fragment(profile_roles: Dict[str, str]) -> Dict[str, Any]:
     nv-fleet-gates settings at the MANAGED scope, not per-profile config, because the
     veto's fleet-admin gate reads the role from there — a worker must not be able to
     rewrite its own role by editing its own config (nv-fleet-gates prefers the managed
-    map over the per-profile fallback)."""
+    map over the per-profile fallback).
+
+    ``expected_ssh_host`` ({profile: sandbox host}), for the remote-ssh substrate
+    (OSH-F63), is pinned at the same managed scope so the veto's host-binding predicate
+    anchors each profile to its OWN sandbox host from a map a worker cannot forge via
+    its per-profile config."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
+    if expected_ssh_host:
+        _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.expected_ssh_host", dict(expected_ssh_host))
     return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
@@ -2884,8 +3229,12 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     data = load_spec(spec)
 
     # Resolve the sandbox substrate BEFORE any output dir / spine read, so an unknown
-    # value fails closed naming the value with no partial fleet on disk.
+    # value fails closed naming the value with no partial fleet on disk. The
+    # remote-ssh substrate's scope + container-field checks fail closed here too.
     descriptor = _resolve_substrate(data)
+    _validate_sandbox_scope(data, descriptor)
+    _reject_openshell_container_fields(data, descriptor)
+    is_remote = descriptor.kind == "remote_ssh"
 
     out_root = Path(out)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -2919,12 +3268,14 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
 
     # ISO-F15 session-driver seam, enforced as an all-or-nothing pre-pass: force
-    # terminal.backend: docker + terminal.docker_shared_container_key: "" on EVERY
-    # rendered profile (every coworker type AND the DEFAULT multiplexer) and reject
-    # any other backend or a non-empty shared key. Validated + normalised here,
-    # before the Phase-B write loop, so a violation on a later-resolved profile
-    # (DEFAULT is resolved and written last) raises before out_root holds any
-    # config.yaml — no partial fleet on disk.
+    # terminal.backend to the substrate's backend (descriptor.backend — `docker` for
+    # the container substrate, `ssh` for openshell) on EVERY rendered profile (every
+    # coworker type AND the DEFAULT multiplexer) and reject any other backend. For the
+    # container substrate the shared-container-key is also forced to ""; the remote-ssh
+    # substrate has no local container, so it writes no shared key and refuses any
+    # terminal.docker_* key. Validated + normalised here, before the Phase-B write loop,
+    # so a violation on a later-resolved profile (DEFAULT is resolved and written last)
+    # raises before out_root holds any config.yaml — no partial fleet on disk.
     for driver_tname, driver_resolved in resolved_by_type.items():
         _reject_malformed_terminal(driver_resolved["config"], driver_tname)
         _enforce_session_driver(driver_resolved["config"], driver_tname, descriptor)
@@ -2937,7 +3288,24 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # Phase-B loop below. An absent egress block leaves enforcement off, so dev/test
     # specs render unchanged.
     egress_block = data.get("egress")
-    egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
+    if is_remote:
+        # OSH-F63: the remote-ssh substrate's egress is a per-profile `openshell
+        # policy` file (not the container docker_* env), so an openshell fleet must
+        # declare its egress; the container egress pipeline stays off (egress_params
+        # None). fleet_name/keys_dir feed the per-profile ssh block + provision plan.
+        if egress_block is None:
+            raise CompositionError(
+                "substrate 'openshell' requires an egress block (the per-profile "
+                "openshell policy allow-set: proxy_addr, inference_route)")
+        openshell_params = _validate_openshell_egress(egress_block)
+        egress_params = None
+        fleet_name = _safe_name("project", data.get("project", "fleet"))
+        keys_dir = _openshell_keys_dir()
+    else:
+        egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
+        openshell_params = None
+        fleet_name = None
+        keys_dir = None
 
     # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never on
     # the DEFAULT/multiplexer gateway root. Mount composition (ISO-F13) owns each
@@ -2977,13 +3345,23 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # it runs ONCE here — after Phase A resolve, before the per-profile writes.
     _render_mcp_scope(resolved_by_type, default_config, default_profile)
 
+    # OSH-F63: create every per-profile ssh_key placeholder up front (all-or-nothing,
+    # fail-closed) BEFORE the Phase-B loop writes any distribution — a collision on a
+    # late profile must never leave an earlier profile's config on disk.
+    if is_remote:
+        _prepare_openshell_ssh_keys(keys_dir, list(resolved_by_type))
+
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
     rendered: Dict[str, str] = {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
-        if shared_learnings_root:
+        # The shared-learnings clone and mount composition are container-substrate
+        # writers of terminal.docker_volumes; the remote-ssh substrate has no local
+        # container to bind into (container-mount fields are refused up front), so
+        # both are skipped for it — no docker_* key is emitted for openshell.
+        if shared_learnings_root and not is_remote:
             _enforce_shared_learnings(
                 resolved["config"], str(shared_learnings_root),
                 is_orchestrator=(tname == orchestrator_profile),
@@ -2991,11 +3369,12 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # The single, final owner of terminal.docker_volumes — runs after
         # _enforce_shared_learnings (the only earlier writer) so it composes the closed
         # policed set on top of the permitted clone mount.
-        _enforce_mount_composition(
-            resolved["config"], tname, workspace_root, install_surfaces,
-            shared_learnings_root, is_orchestrator=(tname == orchestrator_profile),
-            descriptor=descriptor,
-        )
+        if not is_remote:
+            _enforce_mount_composition(
+                resolved["config"], tname, workspace_root, install_surfaces,
+                shared_learnings_root, is_orchestrator=(tname == orchestrator_profile),
+                descriptor=descriptor,
+            )
         _enforce_memory_policy(resolved["config"])
         _enforce_curator(resolved["config"])
         _validate_approval_lists(resolved["config"], include_allowlist=True)
@@ -3008,8 +3387,15 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _forbid_coworker_webhook_routes(resolved["config"], tname)
         if egress_params is not None:
             _enforce_egress(resolved["config"], egress_params, tname, descriptor)
+        # OSH-F63: the builtin-ssh terminal block must be written BEFORE the config
+        # is serialized; the per-profile openshell policy is a separate file written
+        # AFTER (so _render_coworker does not need to know about it).
+        if is_remote:
+            _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
+        if is_remote:
+            _enforce_openshell_policy(pdir, tname, openshell_params["allow"])
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
@@ -3045,7 +3431,14 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         tname: ("orchestrator" if tname == orchestrator_profile else "worker")
         for tname in roster
     }
-    managed_fragment = _build_managed_fragment(profile_roles_map)
+    # Derive the managed authorization map from the same helper used for
+    # terminal.ssh_host (the ssh-config alias) so the two values cannot drift — the
+    # veto compares TERMINAL_SSH_HOST (== the rendered ssh_host) to this managed value.
+    expected_ssh_host_map = (
+        {tname: _openshell_ssh_alias(fleet_name, tname) for tname in roster}
+        if is_remote else None
+    )
+    managed_fragment = _build_managed_fragment(profile_roles_map, expected_ssh_host_map)
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology

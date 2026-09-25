@@ -37,7 +37,15 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 from hermes_cli.profiles import get_active_profile_name, get_profile_dir
 from utils import is_truthy_value
 
-from .compose import WIKI_MOUNT, CompositionError, _safe_name, compose, load_spec
+from .compose import (
+    WIKI_MOUNT,
+    CompositionError,
+    _resolve_substrate,
+    _safe_name,
+    build_provision_plan,
+    compose,
+    load_spec,
+)
 from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -891,9 +899,16 @@ def _cli_coworker(args, **_kwargs) -> int:
     if getattr(args, "coworker_command", None) == "compose":
         out = getattr(args, "out", None) or "coworkers-out"
         rendered = compose(args.spec, out)
-        print(json.dumps({"ok": True, "rendered": rendered}, indent=2))
+        if getattr(args, "provision_dry_run", False):
+            # Deterministic, spec-derived provisioning plan ONLY — no rendered --out
+            # path is printed, so two runs of the same spec are byte-identical.
+            data = load_spec(args.spec)
+            plan = build_provision_plan(data, _resolve_substrate(data))
+            print("\n".join(plan))
+        else:
+            print(json.dumps({"ok": True, "rendered": rendered}, indent=2))
         return 0
-    print("usage: hermes coworker compose <coworker-types.yaml> [--out DIR]")
+    print("usage: hermes coworker compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]")
     return 2
 
 
