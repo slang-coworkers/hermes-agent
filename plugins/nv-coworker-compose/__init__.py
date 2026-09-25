@@ -895,6 +895,35 @@ async def _slash_onboard_project(args: str = "", **_kwargs) -> str:
     return json.dumps(result)
 
 
+def _apply_openshell(installer, spec: str, ref: str, gateway_url: str) -> None:
+    """Run the openshell install with the standalone gateway context bound (as
+    ``onboard_coworker`` does), so the room ``groups.state``/``groups.create`` calls the
+    plan makes reach the LIVE gateway over the authenticated WS requester — a standalone
+    ``hermes coworker install-openshell`` process has no in-process hosted-room service, so
+    without this binding ``_dispatch_rpc`` would fall through to the local handler and room
+    creation would fail. The preflight refuses before any mutation."""
+    def _room_present(room_id):
+        return _room_exists(_dispatch_rpc("groups.state", {"room_id": room_id}))
+
+    def _room_creator(room_id, name, members):
+        # The plan already drops present rooms; this existence check is race protection.
+        if _room_present(room_id):
+            return
+        _dispatch_rpc("groups.create", {"room_id": room_id, "name": name, "members": members})
+
+    _pending_ws_requester.set(None)
+    ok, reason = _gateway_preflight(gateway_url)
+    if not ok:
+        raise RuntimeError(f"gateway preflight failed: {reason}")
+    requester = _pending_ws_requester.get()
+    _pending_ws_requester.set(None)
+    token = _standalone_ctx.set({"url": gateway_url, "requester": requester})
+    try:
+        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present)
+    finally:
+        _close_standalone(token)
+
+
 def _cli_coworker(args, **_kwargs) -> int:
     if getattr(args, "coworker_command", None) == "compose":
         out = getattr(args, "out", None) or "coworkers-out"
@@ -908,7 +937,34 @@ def _cli_coworker(args, **_kwargs) -> int:
         else:
             print(json.dumps({"ok": True, "rendered": rendered}, indent=2))
         return 0
-    print("usage: hermes coworker compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]")
+    if getattr(args, "coworker_command", None) == "install-openshell":
+        # The pure planner lives in openshell/installer.py; loading it by path lets the same
+        # code produce the dry-run transcript and drive the real apply, so they cannot diverge.
+        import importlib.util
+        installer_path = Path(__file__).resolve().parent / "openshell" / "installer.py"
+        ispec = importlib.util.spec_from_file_location("_osh_f64_installer", installer_path)
+        installer = importlib.util.module_from_spec(ispec)
+        ispec.loader.exec_module(installer)
+        if not installer.SHA40.match(args.ref or ""):
+            print(json.dumps({"ok": False, "error": "--ref must be a full 40-character commit SHA"}))
+            return 2
+        substrate = (installer.load_spec(args.spec) or {}).get("substrate")
+        if substrate != "openshell":
+            print(json.dumps({"ok": False, "error": f"install-openshell requires substrate: openshell (spec: {substrate!r})"}))
+            return 2
+        if getattr(args, "dry_run", False):
+            print(installer.plan_text(args.spec, args.ref), end="")
+        else:
+            gateway_url = getattr(args, "gateway_url", None)
+            if not gateway_url:
+                print(json.dumps({"ok": False, "error": "install-openshell (real run) requires --gateway-url "
+                                  "(a loopback ?token/?ticket gateway URL) to probe and create the fleet rooms "
+                                  "against the live gateway"}))
+                return 2
+            _apply_openshell(installer, args.spec, args.ref, gateway_url)
+        return 0
+    print("usage: hermes coworker {compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]"
+          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--dry-run]}")
     return 2
 
 
