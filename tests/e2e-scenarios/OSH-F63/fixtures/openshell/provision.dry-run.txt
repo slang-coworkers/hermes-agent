@@ -3,11 +3,6 @@ openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie --pol
 openshell sandbox create --name osh-f63-orchestrator --from osh-f63-base:trixie --policy policy-orchestrator.yaml
 openshell sandbox create --name osh-f63-reviewer --from osh-f63-base:trixie --policy policy-reviewer.yaml
 openshell sandbox create --name osh-f63-tester --from osh-f63-base:trixie --policy policy-tester.yaml
-openshell policy set policy-architect.yaml
-openshell policy set policy-builder.yaml
-openshell policy set policy-orchestrator.yaml
-openshell policy set policy-reviewer.yaml
-openshell policy set policy-tester.yaml
 openshell sandbox ssh-config osh-f63-architect
 openshell sandbox ssh-config osh-f63-builder
 openshell sandbox ssh-config osh-f63-orchestrator
@@ -18,8 +13,3 @@ openshell sandbox delete osh-f63-builder
 openshell sandbox delete osh-f63-orchestrator
 openshell sandbox delete osh-f63-reviewer
 openshell sandbox delete osh-f63-tester
-openshell policy delete policy-architect.yaml
-openshell policy delete policy-builder.yaml
-openshell policy delete policy-orchestrator.yaml
-openshell policy delete policy-reviewer.yaml
-openshell policy delete policy-tester.yaml

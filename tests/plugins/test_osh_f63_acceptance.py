@@ -655,18 +655,35 @@ def test_ac_osh_f63_3(tmp_path, monkeypatch):
 
 
 def test_ac_osh_f63_4(tmp_path):
-    """AC-OSH-F63-4: --provision-dry-run prints, deterministically, a plan where
-    each profile's create/policy/ssh-config/teardown commands are JOINED by the
-    same sandbox name + policy file and setup precedes teardown — so a plan that
-    creates one name, configures another, and points Hermes at a third cannot
-    pass. (substrate is the spec-file key; --provision-dry-run is the only flag.)"""
+    """AC-OSH-F63-4: --provision-dry-run prints, deterministically, exactly 15
+    lines — 5 `sandbox create` + 5 `sandbox ssh-config` + 5 `sandbox delete`,
+    with NO `openshell policy *` line (the broker op surface is
+    policy get|list|set|update — there is no `policy delete` verb, and `sandbox
+    create --policy` binds+enforces the policy inline so `policy set` is
+    redundant). Each profile's create/ssh-config/delete
+    are JOINED by the same sandbox name, and all creates precede all ssh-configs
+    precede all deletes — so a plan that creates one name, configures another,
+    points Hermes at a third, or emits a stray policy verb cannot pass.
+    (substrate is the spec-file key; --provision-dry-run is the only flag.)"""
     home = _bootstrap_home(tmp_path)
     r1 = _render(OPENSHELL_SPEC, tmp_path / "o1", home, "--provision-dry-run")
     r2 = _render(OPENSHELL_SPEC, tmp_path / "o2", home, "--provision-dry-run")
     assert r1.returncode == 0 and r2.returncode == 0, (r1.stderr, r2.stderr)
     assert r1.stdout == r2.stdout, "provision dry-run not deterministic across runs"
 
-    tokens = [shlex.split(ln) for ln in r1.stdout.splitlines() if ln.strip()]
+    plan_lines = r1.stdout.splitlines()
+    assert len(plan_lines) == 3 * len(COWORKER_PROFILES), (
+        f"expected exactly {3 * len(COWORKER_PROFILES)} plan lines "
+        f"(5 create + 5 ssh-config + 5 delete), got {len(plan_lines)}: {plan_lines}"
+    )
+    assert all(ln.strip() for ln in plan_lines), f"provision plan has a blank/whitespace-only line: {plan_lines!r}"
+    # each line must be a single clean `openshell` command — no shell chaining or
+    # redirection could smuggle a second (e.g. policy) command past the whitelist.
+    _shell_control = re.compile(r"(?:&&|\|\||[;&|<>`]|\$\()")
+    assert all(not _shell_control.search(ln) for ln in plan_lines), (
+        f"provision plan line contains shell chaining/redirection metacharacters: {plan_lines!r}"
+    )
+    tokens = [shlex.split(ln) for ln in plan_lines]
 
     def _arg(toks, flag):
         if flag in toks and toks.index(flag) + 1 < len(toks):
@@ -712,21 +729,32 @@ def test_ac_osh_f63_4(tmp_path):
         di, delete = _find(["openshell", "sandbox", "delete"], name)
         assert _positional(ssh_cfg, ["openshell", "sandbox", "ssh-config"]) == name, f"{profile}: ssh-config positional target {ssh_cfg!r} is not the created name {name!r}"
         assert _positional(delete, ["openshell", "sandbox", "delete"]) == name, f"{profile}: delete positional target {delete!r} is not the created name {name!r}"
-        psi, pset = _find(["openshell", "policy", "set"], policy)
-        pdi, pdel = _find(["openshell", "policy", "delete"], policy)
-        assert _positional(pset, ["openshell", "policy", "set"]) == policy, f"{profile}: policy-set positional {pset!r} is not {policy!r}"
-        assert _positional(pdel, ["openshell", "policy", "delete"]) == policy, f"{profile}: policy-delete positional {pdel!r} is not {policy!r}"
-        assert max(ci, si, psi) < min(di, pdi), (
-            f"{profile}: a teardown command precedes setup (create={ci} ssh-config={si} policy-set={psi}; sandbox-delete={di} policy-delete={pdi})"
+    # No policy verbs appear in the plan: the broker op surface is
+    # `policy get|list|set|update` (there is NO `policy delete` verb), and
+    # `openshell sandbox create --policy` binds+enforces the policy inline, so
+    # `policy set` is redundant here. Whitelist the
+    # three sandbox verbs and reject any `openshell policy *` line.
+    allowed = (
+        ["openshell", "sandbox", "create"],
+        ["openshell", "sandbox", "ssh-config"],
+        ["openshell", "sandbox", "delete"],
+    )
+    for ln, t in zip(plan_lines, tokens):
+        assert any(t[: len(v)] == v for v in allowed), (
+            "provision plan line is not one of the whitelisted sandbox verbs "
+            f"(no `openshell policy *` command may appear): {t}"
         )
-
-    for subcmd in (
-        ["openshell", "sandbox", "create"], ["openshell", "policy", "set"],
-        ["openshell", "sandbox", "ssh-config"], ["openshell", "sandbox", "delete"],
-        ["openshell", "policy", "delete"],
-    ):
-        cnt = sum(1 for t in tokens if t[: len(subcmd)] == subcmd)
-        assert cnt == len(COWORKER_PROFILES), f"{' '.join(subcmd)}: expected {len(COWORKER_PROFILES)} lines, got {cnt}"
+        assert not re.search(r"\bopenshell\s+policy(?:\s|$)", ln), f"provision plan emits a policy command: {ln!r}"
+    phases = {tuple(v): [i for i, t in enumerate(tokens) if t[: len(v)] == v] for v in allowed}
+    for v in allowed:
+        assert len(phases[tuple(v)]) == len(COWORKER_PROFILES), (
+            f"{' '.join(v)}: expected {len(COWORKER_PROFILES)} lines, got {len(phases[tuple(v)])}"
+        )
+    creates = phases[("openshell", "sandbox", "create")]
+    sshcfgs = phases[("openshell", "sandbox", "ssh-config")]
+    deletes = phases[("openshell", "sandbox", "delete")]
+    assert max(creates) < min(sshcfgs), f"a ssh-config precedes a create: creates={creates} ssh-configs={sshcfgs}"
+    assert max(sshcfgs) < min(deletes), f"a delete precedes a ssh-config: ssh-configs={sshcfgs} deletes={deletes}"
 
 
 def test_ac_osh_f63_6():
