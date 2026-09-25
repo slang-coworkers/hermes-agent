@@ -20,7 +20,7 @@ network_policies:
     - path: /usr/bin/curl
     endpoints:
     - host: 172.17.0.1
-      port: 10255
+      port: 18255
       protocol: rest
       enforcement: enforce
       rules:

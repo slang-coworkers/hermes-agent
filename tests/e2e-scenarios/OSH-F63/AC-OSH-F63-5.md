@@ -49,8 +49,10 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
 - A name-scoped OpenShell **broker** reachable from the tester container: a unix socket
   `/workspace/extra/osh-broker/osh.sock` (rw) fronted by the `openshell` **shim on PATH at
   `/workspace/extra/osh-broker-bin/openshell` (ro)** — the scoped way to run `openshell
-  sandbox create|exec|delete|ssh-config`, `openshell policy set|prove`, and `openshell
-  logs`. (An earlier probe of `/workspace/extra/osh-bin/openshell` was the stale path; use
+  sandbox create|exec|delete|ssh-config`, `openshell policy set`, and `openshell
+  logs`. (There is no `openshell policy prove` verb — policy acceptance is proven by
+  `sandbox create --policy` reaching Ready. An earlier probe of
+  `/workspace/extra/osh-bin/openshell` was the stale path; use
   `/workspace/extra/osh-broker-bin/openshell` only.)
 - **Broker scope (enforced by the broker, not just convention):** sandbox names must match
   `osh-f63-*`; `--policy` files must sit under the testbed root
@@ -83,34 +85,35 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
   (`-D` creates the parent `openshell/keys/` dir, which the installed fixtures do not carry).
   The ssh-config auth rides the mTLS proxy, so the key need only EXIST (no key material).
 - The rendered `openshell policy` files ship in each distribution's `distribution_owned`,
-  so after install they sit at the profile's installed home. Use these exact paths as the
-  `--policy` arguments: builder → `$HERMES_HOME/profiles/builder/policy-builder.yaml`,
-  tester → `$HERMES_HOME/profiles/tester/policy-tester.yaml` (the AC-OSH-F63-2 output).
+  so after install they sit at the profile's installed home
+  (`$HERMES_HOME/profiles/<profile>/policy-<profile>.yaml`, the AC-OSH-F63-2 output). **The
+  broker requires every `--policy` path to sit under the testbed root
+  `/workspace/extra/hermes-fleet-testbed/`** (a `$HERMES_HOME`-rooted path is refused), so
+  copy each rendered policy there before `create` and pass the testbed path — e.g.
+  `install -D "$HERMES_HOME/profiles/builder/policy-builder.yaml" /workspace/extra/hermes-fleet-testbed/policy-builder.yaml`,
+  then `--policy /workspace/extra/hermes-fleet-testbed/policy-builder.yaml` (same
+  for tester). Copy only — the rendered content is unchanged and is the AC-OSH-F63-2 output.
 - Confirm the broker lane answers `openshell sandbox list` for `osh-f63-*`.
 - Confirm the `openshell` shim is on PATH at `/workspace/extra/osh-broker-bin/openshell` and
   an `ssh` client is present; if either is absent the lane is not yet runnable (outcome c).
 
 ## Steps
 
-1. **Grammar-conformance + policy install/prove, then create the probe AND the sibling**
-   (so step 4's outcome is an authorization decision, never a not-found):
-   `openshell policy set policy-builder.yaml` then `openshell policy prove` against the
-   *rendered* builder policy → expect: the pinned OpenShell CLI **accepts** the emitted
-   file (proving the real binary parses the render's structure and enforces its
-   allows/denies — neither provable by AC-2's hermetic structural check), and `prove`
-   reports the **two** allows admitted (OneCLI hop `172.17.0.1:10255` + inference route
-   `inference-api.nvidia.com:443`) and `172.17.0.1:10256`, `host.openshell.internal:8080`
-   + an off-policy host all denied. Then create BOTH sandboxes:
-   `openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie --policy
-   policy-builder.yaml` — **the probe, whose bare `--name` the builder profile's rendered
-   `terminal.ssh_host` (`openshell-osh-f63-builder`) resolves to** — AND
-   `openshell policy set policy-tester.yaml` + `openshell sandbox create --name
-   osh-f63-tester --from osh-f63-base:trixie --policy policy-tester.yaml` — **the sibling**
-   → expect: both reach Ready under their proven policies. **First-pull timeout:** the
-   first `openshell sandbox create` can exceed the 2-min tool-call timeout while it pulls
-   `osh-f63-base:trixie` — run each `create` in the background (or with a ≥5-min bounded
-   wait) and poll `openshell sandbox list` for Ready, so a slow first pull is not scored as
-   a create failure.
+1. **Create the probe AND the sibling** (so step 4's outcome is an authorization decision,
+   never a not-found), from the rendered policies copied under the testbed root (see
+   §Setup): `openshell sandbox create --name osh-f63-builder --from osh-f63-base:trixie
+   --policy /workspace/extra/hermes-fleet-testbed/policy-builder.yaml` — **the probe, whose
+   bare `--name` the builder profile's rendered `terminal.ssh_host`
+   (`openshell-osh-f63-builder`) resolves to** — AND `openshell sandbox create --name
+   osh-f63-tester --from osh-f63-base:trixie --policy
+   /workspace/extra/hermes-fleet-testbed/policy-tester.yaml` — **the sibling** → expect:
+   both reach **Ready**. **Create-Ready IS the grammar-acceptance proof** — the real binary
+   parses the render's five-section structure and loads its allow/deny rules (`--policy` on
+   `create` loads the policy, so no separate `policy set` step is needed; the shim exposes no
+   `openshell policy prove` verb, and acceptance is not provable by AC-2's hermetic
+   structural check). The broker's `openshell sandbox create --no-tty -- true` returns when
+   the sandbox is Ready (~3s locally, no image pull), so a `create` that returns has reached
+   Ready; poll `openshell sandbox list` to confirm both.
 2. **Install the RENDERED ssh-config, then reach the probe through it:**
    `openshell sandbox ssh-config osh-f63-builder` → the builder profile's `~/.ssh/config`
    entry whose `Host` alias is the builder's rendered `terminal.ssh_host`
@@ -129,13 +132,18 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
    namespace-local and both may legitimately be `1000`; the discriminators are the hostname
    and the `sandbox` username.
 3. From inside `osh-f63-builder`, on the record via `openshell logs --source sandbox`:
-   **(a) an in-policy POST** to the OneCLI hop `172.17.0.1:10255` (the agent's real traffic
-   shape) → expect: allowed, logging `NET:OPEN ALLOWED` + `HTTP:POST ALLOWED`. This is the
-   on-box proof that the rendered policy admits the coworker's actual POST traffic, not just
-   GET — a GET-only rule would deny this and FAIL the step, which is why AC-2 does not
-   hard-code the verb and AC-5 proves it. **(b) a `curl` to a host NOT in the policy** →
-   expect: denied, logging an OCSF `NET:OPEN … DENIED … [reason:…]` line. Capturing both
-   puts the allow (incl. POST) and the deny on the record.
+   **(a) an in-policy POST** to the OneCLI **data-plane** hop `172.17.0.1:18255` (the agent's
+   real traffic shape) **sent THROUGH the sandbox proxy `HTTP_PROXY=http://10.200.0.1:3128`**
+   (in-sandbox clients reach declared hops ONLY via that proxy; a direct/`NO_PROXY`
+   connection to `172.17.0.1` is not routable and would not exercise the policy) → expect:
+   allowed, logging `NET:OPEN ALLOWED` + `HTTP:POST ALLOWED` with **no `[engine:ssrf]`
+   denial** (`18255` is the data-plane port; the substrate-blocked `10255` produced the
+   round-1 `port 10255 is a blocked control-plane port` SSRF denial). This is the on-box
+   proof that the rendered policy admits the coworker's actual POST traffic, not just GET —
+   a GET-only rule would deny this and FAIL the step, which is why AC-2 does not hard-code
+   the verb and AC-5 proves it. **(b) a `curl` to a host NOT in the policy** → expect:
+   denied, logging an OCSF `NET:OPEN … DENIED … [reason:…]` line. Capturing both puts the
+   allow (incl. POST) and the deny on the record.
 4. **Worker-side sibling-authz negative control (HARD isolation gate):** first, an
    operator-side `openshell sandbox list` records `osh-f63-tester` **Ready** immediately
    before the worker attempt (so a denial is unambiguously authz, NOT not-found). Then from
@@ -157,8 +165,8 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
 
 ## Pass
 
-The criterion holds ONLY when step 1 shows the rendered policy accepted + proven by the
-real OpenShell CLI and BOTH `osh-f63-builder` (probe) and `osh-f63-tester` (sibling) Ready,
+The criterion holds ONLY when step 1 shows the rendered policy accepted (create-Ready) by
+the real OpenShell CLI with BOTH `osh-f63-builder` (probe) and `osh-f63-tester` (sibling) Ready,
 step 2 shows the rendered ssh-config resolving the probe and in-sandbox execution through
 it (`hostname` off-gateway, `id -un` == `sandbox`), step 3 shows the **in-policy POST
 allowed** (`HTTP:POST ALLOWED` — the coworker's real traffic admitted) and the off-policy
