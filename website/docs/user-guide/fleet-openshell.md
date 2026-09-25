@@ -108,10 +108,21 @@ earlier flat `egress: {allow: […]}` shape is rejected with `unknown field egre
 
 ```yaml
 egress:
-  proxy_addr: "172.17.0.1:10255"                    # the OneCLI request hop (allowed)
+  proxy_addr: "172.17.0.1:18255"                    # the OneCLI DATA-PLANE hop (allowed; DNAT alias of onecli-lego:10255)
   inference_route: "inference-api.nvidia.com:443"   # the model inference route (allowed)
   sandbox_image: "osh-f63-base:trixie"              # the --from image (broker-pinned; Debian trixie, glibc 2.41)
 ```
+
+**In-sandbox egress goes through the substrate proxy.** Every OpenShell sandbox has
+`HTTP_PROXY=http://10.200.0.1:3128` set inside it, and in-sandbox clients reach the
+declared hops (the OneCLI data-plane hop `172.17.0.1:18255`, the inference route) **only**
+through that proxy — a direct connection to `172.17.0.1` is **not routable** from a
+sandbox. The policy's declared endpoints stay the target addresses
+(`172.17.0.1:18255` + the inference route) with `protocol: rest`; the proxy is the egress
+*path*, not a policy endpoint. `172.17.0.1:18255` is the OneCLI **data-plane** hop (a
+source-preserving DNAT alias of `onecli-lego:10255`): the OpenShell substrate (0.0.72)
+hard-blocks `10255` as a control-plane port, so the data plane is `18255` (the **podman**
+substrate is unchanged at `10255`).
 
 The ssh path is **not** an egress target — ssh arrives INBOUND through the OpenShell
 proxy socket, not outbound — so the ssh control endpoint is not in the allow-set. Per
@@ -128,7 +139,7 @@ network_policies:
     name: worker-egress
     binaries: [{path: /usr/bin/curl}]
     endpoints:
-      - {host: 172.17.0.1, port: 10255, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
+      - {host: 172.17.0.1, port: 18255, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
       - {host: inference-api.nvidia.com, port: 443, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
 ```
 
@@ -143,8 +154,8 @@ into the hermetic AC-2 check. The render writes this file as `policy-<profile>.y
 beside the profile's config (carried into the installed profile via `distribution_owned`)
 — the **canonical allow-set** the provisioning plan names on its bare
 `--policy policy-<profile>.yaml` argument. **AC-OSH-F63-5 validates this emitted file
-unchanged:** if the pinned OpenShell CLI rejects it (`openshell policy set` / `prove`) or
-fails to enforce it — admitting the in-policy POST while denying
+unchanged:** if the pinned OpenShell CLI rejects it (the sandbox never reaches Ready under
+`openshell sandbox create --policy`) or fails to enforce it — admitting the in-policy POST while denying
 `host.openshell.internal:8080` — the criterion FAILS and the renderer must be corrected;
 do not regenerate or hand-edit the policy during verification.
 
