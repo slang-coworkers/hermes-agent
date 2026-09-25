@@ -31,9 +31,9 @@ veto can reach. There are six:
 
 | tool | provided by | role |
 |---|---|---|
-| `onboard_coworker` | `nv-coworker-compose` (`plugins/nv-coworker-compose/__init__.py:929-940`) | coworker composition |
-| `onboard_project` | `nv-coworker-compose` (`:929-940`) | coworker composition |
-| `create_agent` | `nv-coworker-compose` (`:929-940`) | coworker composition |
+| `onboard_coworker` | `nv-coworker-compose` (`plugins/nv-coworker-compose/__init__.py:944-955`) | coworker composition |
+| `onboard_project` | `nv-coworker-compose` (`:944-955`) | coworker composition |
+| `create_agent` | `nv-coworker-compose` (`:944-955`) | coworker composition |
 | `record_decision` | `nv-approval-ledger` (`plugins/nv-approval-ledger/__init__.py:514-529`) | ledger write |
 | `record_human_verdict` | `nv-approval-ledger` (`:514-529`) | ledger write |
 | `cronjob_manage` | `nv-fleet-gates` vendored floor (`plugins/nv-fleet-gates/__init__.py:68`) | cron for another profile |
@@ -91,15 +91,15 @@ list is pinned — no dedicated accessor is needed.
 ## 4. How the veto consumes the inventory
 
 The plugin captures the inventory **once, at load time** — the block is headed "config is
-immutable mid-session" (`plugins/nv-fleet-gates/__init__.py:206`):
+immutable mid-session" (`plugins/nv-fleet-gates/__init__.py:226`):
 
 ```python
 admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN
 ```
 
-(`:214`) — the managed-merged config value (§3) unioned with the vendored floor. The FLEET-ADMIN
+(`:234`) — the managed-merged config value (§3) unioned with the vendored floor. The FLEET-ADMIN
 predicate `_fleet_admin_block` then denies the call when the caller is not the orchestrator and
-the tool's canonical name is in that set (`:312-320`). The incoming `tool_name` is
+the tool's canonical name is in that set (`:342-350`). The incoming `tool_name` is
 alias-canonicalised first (`plugins/nv-fleet-gates/aliases.py:17`, `cronjob → cronjob_manage`), so
 the legacy spelling `cronjob` is denied identically to `cronjob_manage`. Because the value is
 captured at load from the *managed-merged* config, a profile that later empties its own
@@ -144,7 +144,7 @@ profile home, which a bot cannot forge through config.
 
 Role authorization is a **separate prerequisite**, not something this row establishes. When
 managed `profile_roles` is pinned, `_managed_profile_roles()` wins and a self-added local role is
-ignored (`:147-169`, `:252-255`); when it is absent, `_role()` falls back to the profile-local
+ignored (`:147-169`, `:272-275`); when it is absent, `_role()` falls back to the profile-local
 `profile_roles` map, so a worker could self-promote by editing its own config. This row's
 guarantee is therefore precisely scoped: with `admin_tools` pinned managed, the **inventory** a
 worker faces is immutable — a worker cannot un-gate a tool by emptying its own `admin_tools`. It
@@ -190,9 +190,9 @@ The covering plugin is a fork addition present only in the baseline
 
 **Covering plugin (baseline `release/v2026.8.31-e2e-fixed`):**
 
-- `plugins/nv-fleet-gates/__init__.py:214` — `admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN` (captured once, "config is immutable mid-session" `:206`); `:68` `_VENDORED_ADMIN = {"cronjob_manage"}`; `:312-320` `_fleet_admin_block`; `:136-144` `_current_profile()`; `:147-169` `_managed_profile_roles()` (the dict-valued contrast) and `:252-255` `_role()` (managed-first, profile-local fallback); `:590` `register_hook("pre_tool_call", …)`.
+- `plugins/nv-fleet-gates/__init__.py:234` — `admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN` (captured once, "config is immutable mid-session" `:226`); `:68` `_VENDORED_ADMIN = {"cronjob_manage"}`; `:342-350` `_fleet_admin_block`; `:136-144` `_current_profile()`; `:147-169` `_managed_profile_roles()` (the dict-valued contrast) and `:272-275` `_role()` (managed-first, profile-local fallback); `:620` `register_hook("pre_tool_call", …)`.
 - `plugins/nv-fleet-gates/aliases.py:17` — `cronjob → cronjob_manage` canonicalisation.
-- Inventory registrations: `plugins/nv-coworker-compose/__init__.py:929-940` (`onboard_coworker`, `onboard_project`, `create_agent`); `plugins/nv-approval-ledger/__init__.py:514-529` (`record_decision`, `record_human_verdict`).
+- Inventory registrations: `plugins/nv-coworker-compose/__init__.py:944-955` (`onboard_coworker`, `onboard_project`, `create_agent`); `plugins/nv-approval-ledger/__init__.py:514-529` (`record_decision`, `record_human_verdict`).
 - Out-of-inventory gates: `tools/kanban_tools.py:122-135` (`_check_kanban_orchestrator_mode`, guarding `kanban_list` `:2365-2371` and `kanban_unblock` `:2464-2471`), `:103-119` (`_check_kanban_mode`, worker-available lifecycle tools), `:467-482` (`_require_orchestrator_tool` backstop); `plugins/nv-cost-cap/__init__.py:1063-1072` (`cost-cap` CLI command), `:892-905` (`_orchestrator_profile`).
 
 **Stock primitives (tag `v2026.8.31` / `main`):**
