@@ -320,7 +320,7 @@ def register(ctx) -> None:
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
-            return _block("sandbox: container task environment is not ready — refusing")
+            return _block("sandbox: task environment is not ready — refusing")
         if canon in ("terminal", "execute_code"):
             if predicates.is_dangerous_command(predicates.command_text(canon, args)):
                 return _block(

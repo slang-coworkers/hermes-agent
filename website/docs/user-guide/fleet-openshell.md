@@ -164,8 +164,8 @@ do not regenerate or hand-edit the policy during verification.
 Before a fleet can be provisioned, the operator must satisfy these prerequisites:
 
 1. A **name-prefixed OpenShell access path** reachable from the provisioning host — a
-   scoped way to run `openshell sandbox create|exec|delete|ssh-config`,
-   `openshell policy set|get`, and `openshell logs` against the gateway, restricted to
+   scoped way to run `openshell sandbox create|exec|delete|ssh-config` and
+   `openshell logs` against the gateway, restricted to
    `<prefix>-*` sandboxes. The gateway admin credentials are admin over ALL sandboxes
    and **must never** be mounted into the provisioning host, a worker sandbox,
    `<prefix>-gw`, or `brev-hermes`.

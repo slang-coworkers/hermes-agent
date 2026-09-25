@@ -21,7 +21,7 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
     compose_p.add_argument(
         "--provision-dry-run", action="store_true",
         help="After rendering, print the deterministic OpenShell provisioning plan "
-             "(sandbox create/policy set/ssh-config + teardown) for a substrate: openshell spec",
+             "(sandbox create/ssh-config/delete) for a substrate: openshell spec",
     )
 
 

@@ -552,12 +552,14 @@ def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
     ``terminal.backend`` is forced to ``descriptor.backend``: an omitted key is
     written (overriding the stock ``local`` default) and an explicit matching value
     is kept, but any other value — any other string or any non-string — raises
-    ``CompositionError``. The substrate's shared-container-key
+    ``CompositionError``. For a **container** substrate the shared-container-key
     (``terminal.<prefix>_shared_container_key``) is forced to the empty string: only
     an omitted key or the exact string ``""`` is accepted; every other value is
     refused the same way, including falsey non-strings (``False``/``0``/``[]``/
     ``{}``/``None``) that the config->env bridge would serialise to a NON-empty env
-    string and so collapse per-profile container identity to one shared container.
+    string and so collapse per-profile container identity to one shared container. A
+    **remote-ssh** substrate has no local container, so no shared-container-key is
+    written and any inherited ``terminal.docker_*`` key is refused outright.
     The content type-check runs before any comparison, so a non-string YAML value
     raises ``CompositionError`` rather than a raw ``TypeError``. FLEET-F62 also
     derives the veto's ``expected_backend`` from ``descriptor.backend`` here — the
@@ -3266,12 +3268,14 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
 
     # ISO-F15 session-driver seam, enforced as an all-or-nothing pre-pass: force
-    # terminal.backend: docker + terminal.docker_shared_container_key: "" on EVERY
-    # rendered profile (every coworker type AND the DEFAULT multiplexer) and reject
-    # any other backend or a non-empty shared key. Validated + normalised here,
-    # before the Phase-B write loop, so a violation on a later-resolved profile
-    # (DEFAULT is resolved and written last) raises before out_root holds any
-    # config.yaml — no partial fleet on disk.
+    # terminal.backend to the substrate's backend (descriptor.backend — `docker` for
+    # the container substrate, `ssh` for openshell) on EVERY rendered profile (every
+    # coworker type AND the DEFAULT multiplexer) and reject any other backend. For the
+    # container substrate the shared-container-key is also forced to ""; the remote-ssh
+    # substrate has no local container, so it writes no shared key and refuses any
+    # terminal.docker_* key. Validated + normalised here, before the Phase-B write loop,
+    # so a violation on a later-resolved profile (DEFAULT is resolved and written last)
+    # raises before out_root holds any config.yaml — no partial fleet on disk.
     for driver_tname, driver_resolved in resolved_by_type.items():
         _reject_malformed_terminal(driver_resolved["config"], driver_tname)
         _enforce_session_driver(driver_resolved["config"], driver_tname, descriptor)
