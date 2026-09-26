@@ -44,6 +44,13 @@ ALLOWLIST = {
     "hermes_cli/managed_scope.py",
     # Parse-health probe: intentionally answers "does the raw file parse?".
     "gateway/readiness.py",
+    # OSH-F64 fleet installer: raw read-diff-write-back of config.yaml at explicit sandbox
+    # paths (the sanctioned raw-read use — see read_user_config_raw's docstring, "ONLY legal
+    # for write-back round-trips"). It cannot route through hermes_cli.config's reader
+    # because importing that module runs ensure_hermes_home() at import time (config.py),
+    # scaffolding HERMES_HOME; the installer's --dry-run planner must NOT mutate the target
+    # home (AC-OSH-F64-1), so it stays import-light and reads raw here.
+    "plugins/nv-coworker-compose/openshell/installer.py",
 }
 
 # Directories that never count (tests may build fixture configs freely).
