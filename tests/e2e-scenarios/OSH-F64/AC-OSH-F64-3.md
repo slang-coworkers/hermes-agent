@@ -44,14 +44,20 @@ other scenario having left one standing). Confirm the broker lane answers `opens
 sandbox list` for `osh-f64-*`; render the OSH-F64 spec (AC-2 output) so `policy-<profile>.yaml`
 and the provision plan exist (the tester's lane stages the policies under
 `/workspace/extra/hermes-fleet-testbed/`); `openshell sandbox create --name osh-f64-gw --from
-nemoclaw-hermes-sandbox:local` (the GATEWAY image, §D1 — the worker sandboxes below create
+osh-f64-gateway:pinned --policy /workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml`
+(the pinned GATEWAY image, §D1 — built from base `nemoclaw-hermes-sandbox:local` + fork core
+@95de5f78, its lane APF bound inline; the worker sandboxes below create
 `--from localhost/hermes-openshell-sandbox:pinned`); a live OneCLI agent per served COWORKER
 profile exists — 5 (orchestrator/architect/builder/tester/reviewer); the gateway/`default`
 profile issues no live turn so it needs no dedicated OneCLI agent (operator prerequisite).
 Start the sandbox's Hermes gateway and capture its loopback credential URL as `$GW_URL`
 (`ws://127.0.0.1:<port>/api/ws?token=<cred>`); Phase B probes and creates the fleet rooms
 against it. No fixture is re-installed here — the tester has already installed the
-`fixtures:` list.
+`fixtures:` list. Finally, inside `osh-f64-gw` and BEFORE the installer runs, seed the managed
+dir with the §D6 scan guard: `export HERMES_MANAGED_DIR=/sandbox/.hermes/managed && mkdir -p
+$HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/` (LANE v2: the
+operator's pre-seeded managed config carries `plugins.scan_on_install: false`, the actual unblock
+for Phase A's first offline install; the installer also writes it by construction before Phase A).
 
 ## Steps
 1. Inside `osh-f64-gw`, with its Hermes gateway already running (Setup), run

@@ -22,10 +22,15 @@ attach with the lighter surface reachable through the forward.
 
 ## Setup
 This scenario provisions its OWN `osh-f64-gw` (it does not reuse AC-3's, which is torn
-down): `openshell sandbox create --name osh-f64-gw --from nemoclaw-hermes-sandbox:local` (the
-GATEWAY image, §D1; the served workers create `--from localhost/hermes-openshell-sandbox:pinned`),
-start its Hermes gateway and capture its loopback credential URL as `$GW_URL`, then
-`install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL"` (a real run requires
+down): `openshell sandbox create --name osh-f64-gw --from osh-f64-gateway:pinned --policy
+/workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml` (the pinned GATEWAY image, §D1
+— built from base `nemoclaw-hermes-sandbox:local` + fork core @95de5f78; the served workers create
+`--from localhost/hermes-openshell-sandbox:pinned`), start its Hermes gateway and capture its
+loopback credential URL as `$GW_URL`; then, inside `osh-f64-gw` and BEFORE the installer, seed the
+managed dir with the §D6 scan guard (`export HERMES_MANAGED_DIR=/sandbox/.hermes/managed && mkdir
+-p $HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/`, LANE v2 — the
+pre-seeded managed carries `plugins.scan_on_install: false`); then run `install-into-sandbox.sh
+<spec> --ref <sha> --gateway-url "$GW_URL"` (a real run requires
 `--gateway-url`), boot serving `default` + ≥2 coworkers under a stub model; `openshell forward
 start <29xxx-port> osh-f64-gw` (brokered, `-d`, bind `172.17.0.1`, port in 29000–29999 — the
 sandbox gateway listens on that same port) establishes the local forward; the dashboard is

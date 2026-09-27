@@ -289,6 +289,15 @@ WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`. 
 
 - **Phase A** installs the fleet plugins (`nv-coworker-compose`, `nv-fleet-gates`,
   `podman-onecli`) at the pinned commit so `hermes coworker` exists.
+- **Before Phase A's first `plugins install`**, the script writes `plugins.scan_on_install:
+  false` into the managed config (the §D6 install-scan guard). Without it the install-time
+  scanner returns a DANGEROUS verdict on these first-party plugins — false positives that
+  `--force` cannot override — and refuses the offline install. Turning the scan off is a
+  deliberate, sound trust decision **only** under this lane's boundary: the fleet plugins are
+  40-char-sha-pinned first-party artifacts installed offline from the operator-controlled
+  `/opt/hermes/fork` mirror with GitHub egress closed. It is an **openshell-only** managed
+  delta — the plain-host / container substrate keeps plugin scanning ON, since those installs
+  run from GitHub with egress open.
 - **Phase B** (`hermes coworker install-openshell`) composes the fleet under
   `substrate: openshell` and provisions **five worker sandboxes** — one per served
   coworker — each Ready under a per-bot `openshell policy` (that bot's APF: exactly the
