@@ -333,7 +333,12 @@ worker-image one; the orchestrator wiki-fold stays an operator opt-in under open
 To back the change out and leave the existing default exactly as before:
 
 - **Restore the default `config.yaml` backup** and the managed-config backup taken in
-  Phase A (this reverts the in-place default edit).
+  Phase A (this reverts the in-place default edit). If the managed config did NOT exist
+  before the install — a `config.yaml.osh-f64.absent` marker sits beside it, recording that the
+  §D6 scan-guard write created it — **delete both the managed `config.yaml` and that
+  `config.yaml.osh-f64.absent` marker** instead of restoring a backup, so the install-scan guard
+  does not linger with plugin scanning left disabled and no stale marker survives to make a
+  later operator-created managed config look originally-absent (which would skip its backup).
 - **Remove the five coworker profiles** (`hermes profile remove <role>` per role) — the
   profiles the install added, never the default profile.
 - **Uninstall the fleet plugins** that were newly installed (default + per-profile); a

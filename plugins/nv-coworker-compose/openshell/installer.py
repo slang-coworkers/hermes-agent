@@ -41,6 +41,12 @@ _OSH_PLUGINS = ("nv-coworker-compose", "nv-fleet-gates", "podman-onecli")
 # OSH-owned managed paths: the veto's role map + the openshell ssh-host anchor.
 _FLEET_GATES = "nv-fleet-gates"
 _BACKUP_SUFFIX = ".osh-f64.bak"
+# Marker recording that the managed config did NOT exist before the install. The §D6
+# scan-guard write (step 0.5) creates the managed config in Phase A, so without recording
+# the original absence a later phase would snapshot the installer's OWN scan-guard file and
+# rollback would "restore" plugins.scan_on_install: false instead of the original absence.
+# Rollback deletes the managed config when this marker is present rather than restoring a .bak.
+_ABSENT_SUFFIX = ".osh-f64.absent"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -366,9 +372,14 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str) -> List[Ste
     # snapshot yet, so a MANAGED-ONLY change (default diff empty) is still backed up.
     _, diff, backup_required = default_config_diff(default_config, spec_path, backup_present=backup_present)
     managed_cfg = Path(managed_dir, "config.yaml") if managed_dir else None
+    # Record the managed config's ORIGINAL state before the §D6 scan-guard write creates/mutates
+    # it: a .bak when it exists now, else an .absent marker. Recording absence matters as much as
+    # recording content — otherwise a later phase snapshots the installer's own scan-guard file
+    # and rollback restores plugins.scan_on_install: false instead of the original absence.
     managed_backup_needed = (
-        not managed_installed and managed_cfg is not None and managed_cfg.exists()
+        not managed_installed and managed_cfg is not None
         and not managed_cfg.with_suffix(managed_cfg.suffix + _BACKUP_SUFFIX).exists()
+        and not managed_cfg.with_suffix(managed_cfg.suffix + _ABSENT_SUFFIX).exists()
     )
     if backup_required or managed_backup_needed:
         backup_targets = [f"{home}/config.yaml"]
@@ -684,14 +695,27 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
     home = Path(ctx["home"])
     managed_dir = ctx.get("managed_dir") or ""
     if tag == "backup":
-        bases = [home / "config.yaml"]
+        import shutil
+        home_cfg = home / "config.yaml"
+        home_bak = home_cfg.with_suffix(home_cfg.suffix + _BACKUP_SUFFIX)
+        if home_cfg.exists() and not home_bak.exists():
+            shutil.copy2(home_cfg, home_bak)
         if managed_dir:
-            bases.append(Path(managed_dir, "config.yaml"))
-        for base in bases:
-            bak = base.with_suffix(base.suffix + _BACKUP_SUFFIX)
-            if base.exists() and not bak.exists():
-                import shutil
-                shutil.copy2(base, bak)
+            # Record the managed config's ORIGINAL state before scan_guard_write creates/mutates
+            # it: a .bak of its content, or an .absent marker when it did not exist — so rollback
+            # never restores the installer's own §D6 scan-guard file (which would leave scanning
+            # disabled) and instead deletes it to restore the original absence.
+            mcfg = Path(managed_dir, "config.yaml")
+            mbak = mcfg.with_suffix(mcfg.suffix + _BACKUP_SUFFIX)
+            mabsent = mcfg.with_suffix(mcfg.suffix + _ABSENT_SUFFIX)
+            if not mbak.exists() and not mabsent.exists():
+                if mcfg.exists():
+                    shutil.copy2(mcfg, mbak)
+                else:
+                    # Record absence even when the managed dir does not exist yet — scan_guard_write
+                    # creates it next, so without the marker Phase B would snapshot that new file.
+                    mabsent.parent.mkdir(parents=True, exist_ok=True)
+                    mabsent.write_text("", encoding="utf-8")
     elif tag == "plugin_snapshot":
         import shutil
         payload = step.data or {}

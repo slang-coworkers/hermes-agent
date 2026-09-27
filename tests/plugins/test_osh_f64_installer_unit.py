@@ -435,3 +435,59 @@ def test_atomic_write_preserves_symlink_target(tmp_path):
     assert link.is_symlink()                                   # symlink preserved, not replaced
     assert os.path.realpath(link) == str(real)                 # still points at the target
     assert yaml.safe_load(real.read_text(encoding="utf-8"))["gateway"]["multiplex_profiles"] is True
+
+
+def test_scan_guard_backup_records_original_absence_not_generated_file():
+    """§D6 rollback integrity (F64-R1): when the managed config is ABSENT before install, the
+    backup records an .absent marker (not a .bak), scan_guard_write then creates the file, and the
+    Phase-B backup re-evaluation does NOT snapshot the installer's OWN scan-guard file — so rollback
+    deletes it rather than restoring plugins.scan_on_install: false. An EXISTING managed config is
+    backed up verbatim before the guard mutates it."""
+    import os
+    import yaml
+    inst = _installer()
+    Path(os.environ["HERMES_HOME"], "plugins").mkdir(parents=True, exist_ok=True)
+    managed = Path(os.environ["HERMES_MANAGED_DIR"]); managed.mkdir(parents=True, exist_ok=True)
+    mcfg = managed / "config.yaml"
+    bak = managed / ("config.yaml" + inst._BACKUP_SUFFIX)
+    absent = managed / ("config.yaml" + inst._ABSENT_SUFFIX)
+    ctx = {"home": os.environ["HERMES_HOME"], "managed_dir": os.environ["HERMES_MANAGED_DIR"]}
+
+    # ABSENT before install -> backup records the .absent marker, never a .bak.
+    inst._execute_step(inst.Step("# backup", "backup"), ctx)
+    assert absent.exists() and not bak.exists(), \
+        "an absent managed config must be recorded by an .absent marker, not a .bak"
+    # scan_guard_write then CREATES the managed config carrying the guard.
+    inst._execute_step(inst.Step("# scan guard", "scan_guard_write"), ctx)
+    assert (yaml.safe_load(mcfg.read_text(encoding="utf-8")) or {}).get("plugins", {}).get("scan_on_install") is False
+    # Phase-B backup re-evaluation must NOT snapshot that installer-created file (the .absent marker
+    # already recorded the original state) — otherwise rollback would restore scan_on_install: false.
+    inst._execute_step(inst.Step("# backup", "backup"), ctx)
+    assert not bak.exists(), "Phase-B backup must not snapshot the installer-created scan-guard file"
+
+    # EXISTING before install -> backed up verbatim before the guard mutates it.
+    absent.unlink()
+    mcfg.write_text("plugins:\n  scan_on_install: true\nkeep: me\n", encoding="utf-8")
+    inst._execute_step(inst.Step("# backup", "backup"), ctx)
+    assert bak.exists(), "an existing managed config must be backed up before mutation"
+    original = yaml.safe_load(bak.read_text(encoding="utf-8")) or {}
+    assert original.get("keep") == "me" and original["plugins"]["scan_on_install"] is True, \
+        "the .bak must capture the ORIGINAL managed content, not a generated scan-guard file"
+
+
+def test_rollback_doc_deletes_absent_marker():
+    """§D6 rollback integrity (F64-R1 round 2): the rollback runbook must delete the
+    `.osh-f64.absent` marker alongside the managed config it created, so a stale marker cannot make
+    a later operator-created managed config look originally-absent (which would skip its backup and
+    leave it deletable on the next rollback)."""
+    import re
+    root = _repo_root()
+    doc = (root / "website" / "docs" / "user-guide" / "fleet-openshell.md").read_text(encoding="utf-8")
+    lower = doc.lower()
+    start = lower.find("### rollback")
+    assert start != -1, "runbook must carry a Rollback section"
+    nxt = lower.find("\n### ", start + 1)
+    section = lower[start:(nxt if nxt != -1 else len(lower))]
+    assert "osh-f64.absent" in section, "rollback runbook must name the .osh-f64.absent marker"
+    assert re.search(r"delete[\s\S]{0,160}osh-f64\.absent", section), \
+        "rollback runbook must delete the .osh-f64.absent marker so no stale marker misleads a later install"
