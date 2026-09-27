@@ -1815,7 +1815,8 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
 
 
 def _build_managed_fragment(profile_roles: Dict[str, str],
-                            expected_ssh_host: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                            expected_ssh_host: Optional[Dict[str, str]] = None,
+                            *, disable_install_scan: bool = False) -> Dict[str, Any]:
     """Build the machine-wide managed-scope fragment: the eight fleet-uniform
     approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
     this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
@@ -1831,13 +1832,23 @@ def _build_managed_fragment(profile_roles: Dict[str, str],
     ``expected_ssh_host`` ({profile: sandbox host}), for the remote-ssh substrate
     (OSH-F63), is pinned at the same managed scope so the veto's host-binding predicate
     anchors each profile to its OWN sandbox host from a map a worker cannot forge via
-    its per-profile config."""
+    its per-profile config.
+
+    ``disable_install_scan`` emits ``plugins.scan_on_install: false`` (OSH-F64 §D6).
+    Passed True on the openshell substrate only (symmetric to ``expected_ssh_host``):
+    the sha-pinned first-party fleet plugins are installed OFFLINE from the operator
+    mirror with GitHub egress closed, and the install-time scanner's DANGEROUS verdict
+    (which ``--force`` cannot override) would otherwise refuse them. On the
+    plain-host/container substrate the flag is left unset so scanning stays ON, since
+    those installs run from GitHub with egress open."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
     if expected_ssh_host:
         _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.expected_ssh_host", dict(expected_ssh_host))
+    if disable_install_scan:
+        _set_dotted(fragment, "plugins.scan_on_install", False)
     return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
@@ -3553,7 +3564,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         {tname: _openshell_ssh_alias(fleet_name, tname) for tname in roster}
         if is_remote else None
     )
-    managed_fragment = _build_managed_fragment(profile_roles_map, expected_ssh_host_map)
+    managed_fragment = _build_managed_fragment(
+        profile_roles_map, expected_ssh_host_map, disable_install_scan=is_remote)
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology

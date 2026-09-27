@@ -371,7 +371,24 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str) -> List[Ste
         and not managed_cfg.with_suffix(managed_cfg.suffix + _BACKUP_SUFFIX).exists()
     )
     if backup_required or managed_backup_needed:
-        steps.append(Step(f"# backup {home}/config.yaml (and the managed fragment) before any mutation", "backup"))
+        backup_targets = [f"{home}/config.yaml"]
+        if managed_backup_needed:
+            backup_targets.append(f"{managed_dir}/config.yaml")
+        steps.append(Step(f"# backup {' and '.join(backup_targets)} before any mutation", "backup"))
+        mutated = True
+
+    # §D6 scan-guard — write plugins.scan_on_install: false to the managed config BEFORE Phase
+    # A's first `plugins install`. The install-time scanner returns a DANGEROUS verdict on the
+    # first-party fleet plugins (false positives) that --force cannot override
+    # (plugin_guard.py:332-335); the durable step-4 managed write runs AFTER the installs, so the
+    # guard is established here first (managed_config_diff is a pure deep-merge, so any pre-seeded
+    # operator keys survive). Skipped once the managed fragment already carries it (managed_installed).
+    if not managed_installed:
+        steps.append(Step(
+            f"# write plugins.scan_on_install: false -> {managed_dir}/config.yaml "
+            "(§D6 install-scan guard, before any plugins install)",
+            "scan_guard_write",
+        ))
         mutated = True
 
     # Phase A — bootstrap: install the port's plugins into the default home.
@@ -582,9 +599,14 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     # require the machine-wide approval keys present — else schedule managed_write to backfill.
     approvals_present = bool((managed_config.get("approvals") or {}).get("mode")) and bool(
         ((managed_config.get("security") or {}).get("approval") or {}).get("transport"))
+    # §D6 (F64-P2): a fragment still lacking plugins.scan_on_install: false is NOT installed —
+    # a re-run would plan a scanned `plugins install`/`--force` the DANGEROUS verdict refuses
+    # (--force cannot override it), so the scan-guard write must be scheduled to backfill it.
+    scan_guarded = ((managed_config.get("plugins") or {}).get("scan_on_install") is False)
     managed_installed = (bool(fleet_settings.get("profile_roles"))
                          and bool(fleet_settings.get("expected_ssh_host"))
-                         and approvals_present)
+                         and approvals_present
+                         and scan_guarded)
     backup_present = (home / ("config.yaml" + _BACKUP_SUFFIX)).exists()
 
     return {
@@ -686,6 +708,18 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
         current = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {} if cfg_path.exists() else {}
         _, diff, _ = default_config_diff(current, ctx["spec_path"], backup_present=True)
         _atomic_write_yaml(cfg_path, apply_config_diff(current, diff))
+    elif tag == "scan_guard_write":
+        if not managed_dir:
+            raise ValueError(
+                "no managed-config dir resolved (HERMES_MANAGED_DIR unset and /etc/hermes "
+                "absent); refusing to write the §D6 scan guard to the cwd"
+            )
+        managed_path = Path(managed_dir, "config.yaml")
+        existing = yaml.safe_load(managed_path.read_text(encoding="utf-8")) or {} if managed_path.exists() else {}
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        # Deep-merge just the guard so any pre-seeded operator managed keys survive; the durable
+        # step-4 managed_write later folds in the full rendered fragment (which also carries it).
+        _atomic_write_yaml(managed_path, managed_config_diff(existing, {"plugins": {"scan_on_install": False}}))
     elif tag == "managed_write":
         if not managed_dir:
             raise ValueError(
@@ -748,9 +782,12 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None) -> N
 
 def phase_a(spec_path: Any, ref: str) -> None:
     """Bootstrap phase: back up the ORIGINAL config FIRST (a ``plugins install --enable``
-    rewrites config.yaml, so a later backup would capture a mutated file), then install
-    the port's plugins into the default home so ``hermes coworker`` exists for Phase B.
-    Idempotent — a re-run skips both."""
+    rewrites config.yaml, so a later backup would capture a mutated file), THEN write the
+    §D6 scan guard (``plugins.scan_on_install: false``) into the managed config so the
+    first-party fleet plugins install offline without the scanner's DANGEROUS verdict
+    (which ``--force`` cannot override), THEN install the port's plugins into the default
+    home so ``hermes coworker`` exists for Phase B. Idempotent — a re-run skips all three.
+    Order is fixed by ``build_plan`` (backup -> scan_guard_write -> plugin installs)."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
     state = collect_home_state(spec, spec_path)
@@ -770,7 +807,7 @@ def phase_a(spec_path: Any, ref: str) -> None:
             step.tag == "plugin_snapshot"
             and Path((step.data or {}).get("plugin_dir", "")).parent == default_plugins_dir
         )
-        if step.tag == "backup" or is_bootstrap_plugin or is_bootstrap_snapshot:
+        if step.tag in ("backup", "scan_guard_write") or is_bootstrap_plugin or is_bootstrap_snapshot:
             _execute_step(step, ctx)
 
 

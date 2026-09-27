@@ -72,7 +72,12 @@ if [ -z "$GATEWAY_URL" ]; then
   exit 2
 fi
 
-# Real run — Phase A: bootstrap the port's plugins so `hermes coworker` exists (idempotent).
+# Real run — Phase A: write the §D6 scan guard (plugins.scan_on_install: false into the managed
+# config) BEFORE the first `hermes plugins install`, then bootstrap the port's plugins so `hermes
+# coworker` exists. phase-a runs the build_plan steps in order (backup -> scan_guard_write ->
+# plugin installs), so the guard is in place before any scanned install — the install-time scanner
+# returns a DANGEROUS verdict on the first-party fleet plugins that --force cannot override, so an
+# install attempted before the guard would exit 1. Idempotent — a re-run skips all three.
 "$PY" "$DIR/installer.py" phase-a --spec "$SPEC" --ref "$REF"
 # Phase B: compose + per-profile installs + backed-up in-place default edit + managed
 # fragment + wires + rooms + restart, planned + applied by the install-openshell subaction.
