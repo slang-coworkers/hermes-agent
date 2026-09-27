@@ -203,9 +203,11 @@ def test_default_diff_seeds_fleet_gates_edges_db_path():
 
 def test_managed_installed_requires_ssh_host_and_approvals():
     """A managed fragment is 'installed' only with profile_roles AND expected_ssh_host AND
-    the machine-wide GOV-F23 approval floor. A FLEET-F62 fragment (profile_roles only), and an
-    openshell fragment still missing the approval keys, each leave managed_installed False so
-    the write backfills them — neither the ssh veto nor the approval floor is left fail-open."""
+    the machine-wide GOV-F23 approval floor AND the §D6 plugins.scan_on_install: false guard
+    (F64-P2). A FLEET-F62 fragment (profile_roles only), an openshell fragment still missing the
+    approval keys, and one still missing the scan guard each leave managed_installed False so the
+    write backfills them — neither the ssh veto, the approval floor, nor the install-scan guard is
+    left fail-open (a re-run without the guard hits the DANGEROUS verdict --force cannot override)."""
     import os, yaml
     inst = _installer()
     managed = Path(os.environ["HERMES_MANAGED_DIR"]); managed.mkdir(parents=True, exist_ok=True)
@@ -222,7 +224,9 @@ def test_managed_installed_requires_ssh_host_and_approvals():
     assert _installed(base) is False                               # roles+host but no approval floor
     base["approvals"] = {"mode": "smart"}
     base["security"] = {"approval": {"transport": "builtin"}}
-    assert _installed(base) is True                                # roles + host + approval floor
+    assert _installed(base) is False                               # roles+host+approvals but no §D6 scan guard (F64-P2)
+    base["plugins"]["scan_on_install"] = False
+    assert _installed(base) is True                                # roles + host + approval floor + scan guard
 
 
 def test_room_steps_carry_payload_and_execute_via_creator():

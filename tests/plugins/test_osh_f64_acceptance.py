@@ -34,7 +34,14 @@ PLUGIN_KEY = "nv-coworker-compose"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
 COWORKERS = ("orchestrator", "architect", "builder", "tester", "reviewer")
 INSTALL_SECTION = "install into an existing nemoclaw sandbox"
-# The substrate flip may change only terminal.*, the nv-fleet-gates expected_backend/expected_ssh_host deltas, and the container-only proxy belt (dropped on openshell).
+
+
+def _plugin_src(name: str) -> str:
+    # Canonical GitHub owner/repo/subdir shorthand (plugins_cmd.py:278-284). LANE v2 resolves it
+    # offline via a system git url.insteadOf rewrite to its mirror — a deployment git-config concern,
+    # not a lane path baked into the spec (port-fidelity: a real NemoClaw deployment has no mirror).
+    return f"slang-coworkers/hermes-agent/plugins/{name}"
+# The substrate flip may change only terminal.*, the nv-fleet-gates expected_backend/expected_ssh_host deltas, the container-only proxy belt (dropped on openshell), and the openshell-only plugins.scan_on_install:false scan-guard (§D6).
 FLEET_GATES_KEY = "nv-fleet-gates"
 
 
@@ -192,9 +199,9 @@ def _committed_fleet_f62_managed(root: Path) -> dict:
 
 
 def _drop_substrate_managed(managed: dict) -> dict:
-    """Managed fragment with the two documented substrate deltas removed.
+    """Managed fragment with the three documented substrate deltas removed.
 
-    Two managed keys differ by substrate and only by substrate:
+    Three managed keys differ by substrate and only by substrate:
     - nv-fleet-gates.expected_ssh_host is ADDED only on openshell (the docker->ssh
       backend host map; compose.py:3311-3314).
     - the TOP-LEVEL proxy belt (proxy.enabled: false) is written ONLY on the container
@@ -203,12 +210,21 @@ def _drop_substrate_managed(managed: dict) -> dict:
       relocates egress control to the per-profile policy-<role>.yaml allowlist (asserted
       above). Dropping proxy here is symmetric to expected_ssh_host, not a loss of the
       egress guarantee.
+    - plugins.scan_on_install: false is emitted ONLY on openshell (§D6): sound only
+      under the offline sha-pinned first-party install boundary with GitHub egress
+      closed. On the container/plain-host path the scan stays ON (installs run from
+      github with egress open), so this key is a genuine openshell-only substrate delta,
+      dropped here and asserted separately (test_installer_managed_fragment_… + the
+      positive check in test_ac_osh_f64_2).
     """
     out = copy.deepcopy(managed)
     entries = (((out.get("plugins") or {}).get("entries") or {}).get(FLEET_GATES_KEY) or {})
     settings = entries.get("settings")
     if isinstance(settings, dict):
         settings.pop("expected_ssh_host", None)
+    plugins = out.get("plugins")
+    if isinstance(plugins, dict):
+        plugins.pop("scan_on_install", None)  # openshell-only scan-guard delta (§D6)
     out.pop("proxy", None)  # top-level: sibling of approvals/security/plugins
     return out
 
@@ -304,6 +320,8 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     root = _repo_root()
     # Empty plugins/ home: a passing run proves the staged planner needs no pre-installed coworker.
     home, managed = _setup_home(tmp_path, monkeypatch, with_plugin=False)
+    # Pre-seed the managed config so the plan must snapshot the original before the §D6 scan-guard flip.
+    (managed / "config.yaml").write_text("plugins:\n  scan_on_install: true\n", encoding="utf-8")
     repo_openshell = _openshell_dir(root)
 
     lint = _import_file(repo_openshell / "dockerfile_lint.py", "osh_f64_lint")
@@ -352,8 +370,8 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     vecs = [shlex.split(ln) for ln in lines]
     boot = [v for v in vecs if v[1:3] == ["plugins", "install"] and "-p" not in v]
     assert len(boot) == len(enabled), f"expected {len(enabled)} bootstrap installs, got {len(boot)}"
-    for name in enabled:  # exact bootstrap vector per enabled plugin
-        assert ["hermes", "plugins", "install", f"slang-coworkers/hermes-agent/plugins/{name}",
+    for name in enabled:  # exact bootstrap vector per enabled plugin — canonical GitHub shorthand
+        assert ["hermes", "plugins", "install", _plugin_src(name),
                 "--ref", sha, "--enable"] in boot, f"missing exact bootstrap vector for {name}"
     compose_steps = [(i, v) for i, v in enumerate(vecs) if v[1:3] == ["coworker", "compose"]]
     assert len(compose_steps) == 1, "install plan must contain exactly one compose step"
@@ -409,10 +427,33 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
             f"missing exact `profile install {out_dir}/{role} --name {role} -y`"
         for name in enabled:  # every enabled plugin installed UNDER this served profile (distribution excludes plugins)
             assert ["hermes", "-p", role, "plugins", "install",
-                    f"slang-coworkers/hermes-agent/plugins/{name}", "--ref", sha, "--enable"] in vecs, \
+                    _plugin_src(name), "--ref", sha, "--enable"] in vecs, \
                 f"missing per-profile `-p {role} plugins install {name} --enable`"
 
     assert any("managed" in ln and str(managed) in ln for ln in lines), "no managed-dir write step"
+    # §D6: a DANGEROUS verdict ignores --force, so plugins.scan_on_install: false must reach the
+    # managed config before the first scanned `plugins install` (the installs precede the durable
+    # step-4 managed write, so the guard is written first); the ORIGINAL managed config is snapshotted
+    # before that mutation so rollback (AC-6) can restore it.
+    scan_guard_idx = next(
+        (i for i, ln in enumerate(lines)
+         if str(managed) in ln and "scan_on_install" in ln and "false" in ln.lower()),
+        None,
+    )
+    assert scan_guard_idx is not None, \
+        "install plan must write plugins.scan_on_install: false to the managed dir (§D6)"
+    managed_backup_idx = next(
+        (i for i, ln in enumerate(lines) if "backup" in ln.lower() and str(managed) in ln),
+        None,
+    )
+    assert managed_backup_idx is not None and managed_backup_idx < scan_guard_idx, \
+        "the ORIGINAL managed config must be backed up BEFORE the scan-guard write (§D3 step 0, rollback integrity)"
+    first_plugins_install = min(
+        i for i, v in enumerate(vecs)
+        if v[1:3] == ["plugins", "install"] or (v[1] == "-p" and v[3:5] == ["plugins", "install"])
+    )
+    assert scan_guard_idx < first_plugins_install, \
+        "the scan-guard managed write must precede the first `plugins install` (§D6 ordering)"
     # DIAG-1: the ORIGINAL default config must be backed up BEFORE any plugins install/enable rewrites it.
     backup_idx = next(i for i, ln in enumerate(lines) if "backup" in ln.lower() and str(home / "config.yaml") in ln)
     first_mutation = min(vecs.index(v) for v in vecs
@@ -500,7 +541,7 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
         return out
 
     name0, role0 = enabled[0], COWORKERS[0]
-    src0 = f"slang-coworkers/hermes-agent/plugins/{name0}"
+    src0 = _plugin_src(name0)
 
     # fully-installed home: NO mutating step at all (state-aware idempotence).
     mutating = re.compile(r"(plugins install|plugins enable|plugins disable|plugins uninstall|"
@@ -531,6 +572,59 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
                for v in svecs), "different-ref default plugin must plan `plugins install … --ref <sha> --force --enable`"
     assert any(v[1:3] == ["-p", role0] and "install" in v and src0 in v and "--force" in v and "--enable" in v and sha in v
                for v in svecs), "different-ref profile plugin must plan `-p <role> plugins install … --force --enable`"
+
+
+def test_installer_managed_fragment_disables_scan_on_install(tmp_path, monkeypatch):
+    """§D6 (supports AC-1, NO new AC id): the openshell render emits plugins.scan_on_install:
+    false into the managed fragment (ALONGSIDE the nested nv-fleet-gates veto settings, never in
+    place of them), and the installer's managed_config_diff(existing, rendered) — a PURE deep-merge,
+    rendered-wins — carries it durably over pre-seeded operator managed keys. Disabling the install
+    scan is what lets the sha-pinned first-party fleet plugins install offline (a DANGEROUS verdict
+    ignores --force, plugin_guard.py:332-335); the scan gate reads the flag from the managed-merged
+    load_config() (plugins_cmd.py:94-96, config.py:4049-4063), so the managed key is the in-surface
+    fix. FAILS on base: the stock render does not emit scan_on_install."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch)
+    assert yaml is not None
+
+    # Drive the REAL openshell render and read the ACTUAL rendered managed fragment — the fix lives
+    # in the render (_build_managed_fragment), so this asserts the product behaviour, not a stub dict.
+    manager = _load_manager()
+    out_osh = tmp_path / "out_scan"
+    _run_coworker(manager, ["compose", str(_osh_spec(root)), "--out", str(out_osh), "--provision-dry-run"])
+    rendered = _load_managed(out_osh)
+    assert rendered.get("plugins", {}).get("scan_on_install") is False, \
+        "openshell render must emit plugins.scan_on_install: false in the managed fragment (§D6)"
+    settings = (((rendered.get("plugins") or {}).get("entries") or {}).get(FLEET_GATES_KEY) or {}).get("settings")
+    assert isinstance(settings, dict) and settings.get("profile_roles"), \
+        "scan_on_install must ride the SAME fragment as the nested nv-fleet-gates veto settings, not replace them"
+
+    # The flag is an OPENSHELL-ONLY substrate delta (§D6): the plain-host/container render must
+    # LEAVE scanning ON, since those installs run from github with egress open. An UNCONDITIONAL
+    # emission in _build_managed_fragment would disable scanning outside the offline sha-pinned
+    # trust boundary — this negative render is what forbids that.
+    plain_out = tmp_path / "out_plain"
+    plain_spec = root / "tests" / "e2e-scenarios" / "FLEET-F62" / "spec" / "podman" / "coworker-types.yaml"
+    _run_coworker(manager, ["compose", str(plain_spec), "--out", str(plain_out)])
+    plain_managed = _load_managed(plain_out)
+    assert (plain_managed.get("plugins") or {}).get("scan_on_install", True) is True, \
+        "plain-host/container render must keep plugin scanning ENABLED (scan_on_install: false is openshell-only, §D6)"
+
+    # managed_config_diff is the committed (existing, rendered) PURE deep-merge (installer.py:286-295):
+    # rendered wins at the leaf so scan_on_install: false overrides a pre-seeded True, while unrelated
+    # operator managed keys survive (managed_scope exposes no write helper, so the installer merges).
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer")
+    preseed = {
+        "telemetry": {"operator_pinned": True},                    # unrelated operator managed policy
+        "plugins": {"scan_on_install": True, "keep_me": "yes"},
+    }
+    merged = planner.managed_config_diff(copy.deepcopy(preseed), rendered)
+    assert merged["plugins"]["scan_on_install"] is False, \
+        "rendered scan_on_install: false must win over a pre-seeded True (deep-merge, rendered-wins)"
+    assert merged["plugins"].get("keep_me") == "yes", \
+        "pre-seeded sibling plugins.* keys must survive the deep-merge"
+    assert merged.get("telemetry") == {"operator_pinned": True}, \
+        "unrelated pre-seeded operator managed keys must survive the deep-merge (merge, not overwrite)"
 
 
 def test_ac_osh_f64_2(tmp_path, monkeypatch):
@@ -648,7 +742,7 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         assert _non_substrate(osh_cfgs[prof]) == _non_substrate(baseline[prof]), (
             f"{prof}: non-substrate config drifted from the committed FLEET-F62 render"
         )
-    # managed fragment: identical except the two documented substrate deltas. Bound the
+    # managed fragment: identical except the three documented substrate deltas. Bound the
     # accepted proxy delta — the baseline container belt is exactly {enabled: false}, and
     # the openshell managed must carry NO proxy key (egress_params is None on openshell,
     # compose.py:3182, so proxy.enabled is never written; egress is the per-profile policy
@@ -659,6 +753,11 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
     osh_managed = _load_managed(out_osh)
     assert "proxy" not in osh_managed, \
         "openshell managed must NOT carry the container proxy belt — egress is the per-profile openshell policy"
+    # §D6: the openshell substrate carries plugins.scan_on_install: false (the offline sha-pinned
+    # install-trust delta), which the plain-host FLEET-F62 baseline does not — a genuine substrate
+    # delta, so it is dropped from the equality below and asserted positively here.
+    assert osh_managed.get("plugins", {}).get("scan_on_install") is False, \
+        "openshell managed must carry plugins.scan_on_install: false (§D6 substrate delta)"
     assert _drop_substrate_managed(osh_managed) == _drop_substrate_managed(baseline_managed), \
         "managed fragment drifted from the committed FLEET-F62 render (beyond the substrate deltas)"
 
@@ -734,6 +833,10 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "rollback restarts the gateway": r"restart[\s\S]{0,40}gateway",
         "rollback deletes sandboxes and policies": r"delete[\s\S]{0,60}sandbox[\s\S]{0,40}(polic|policy)",
         "per-sandbox NemoClaw dashboard/APF observation": r"(dashboard|apf)[\s\S]{0,60}(per[\s-]?sandbox|each\s+sandbox|shows)",
+        "scan_on_install disabled": r"scan_on_install[\s\S]{0,20}false",
+        "sha-pinned first-party trust rationale": r"(first[\s-]?party[\s\S]{0,120}(sha[\s-]?pinned|40[\s-]?char|pinned)|(sha[\s-]?pinned|40[\s-]?char|pinned)[\s\S]{0,120}first[\s-]?party)",
+        "offline fork mirror": r"/opt/hermes/fork",
+        "github egress closed": r"(github|egress)[\s\S]{0,40}(closed|disabled|off)",
     }
     for label, pat in obligations.items():
         assert re.search(pat, section), f"install/rollback section missing: {label}"
