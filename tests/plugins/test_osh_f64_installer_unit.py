@@ -491,3 +491,48 @@ def test_rollback_doc_deletes_absent_marker():
     assert "osh-f64.absent" in section, "rollback runbook must name the .osh-f64.absent marker"
     assert re.search(r"delete[\s\S]{0,160}osh-f64\.absent", section), \
         "rollback runbook must delete the .osh-f64.absent marker so no stale marker misleads a later install"
+
+
+@pytest.mark.linux_only
+def test_install_into_sandbox_dry_run_forwards_policy_root(tmp_path, monkeypatch):
+    """§D3: the shell entrypoint forwards --policy-root to `installer.py plan`, so a --dry-run
+    transcript rebases every `openshell sandbox create --policy` to <root>/render/<role>/
+    policy-<role>.yaml; without --policy-root the gateway-internal render path is kept."""
+    import os
+    import shlex
+    import subprocess
+    import sys
+    root = _repo_root()
+    home = tmp_path / "home"; (home / "plugins").mkdir(parents=True)  # _require_home refuses the platform default
+    (home / "config.yaml").write_text("plugins:\n  enabled: [nv-coworker-compose]\n", encoding="utf-8")
+    script = root / "plugins" / PLUGIN_KEY / "openshell" / "install-into-sandbox.sh"
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(home)
+    env["HERMES_PYTHON"] = sys.executable  # deterministic interpreter selection (has PyYAML under the runner)
+    host_root = "/tmp/osh-f64-policy-root"
+
+    def _create_policies(extra):
+        proc = subprocess.run(
+            ["bash", str(script), str(_spec_path()), "--ref", SHA, "--dry-run", *extra],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert proc.returncode == 0, f"dry-run failed: {proc.stderr}"
+        out = {}
+        for ln in proc.stdout.splitlines():
+            v = shlex.split(ln.strip()) if ln.strip() else []
+            if v[:3] == ["openshell", "sandbox", "create"]:
+                out[v[v.index("--name") + 1]] = v[v.index("--policy") + 1]
+        return out
+
+    rooted = _create_policies(["--policy-root", host_root])
+    assert rooted, "dry-run must plan `openshell sandbox create` steps"
+    for name, policy in rooted.items():
+        role = name[len("osh-f64-"):]
+        assert policy == f"{host_root}/render/{role}/policy-{role}.yaml", \
+            f"{name}: --policy-root must rebase --policy to the host mirror path (got {policy})"
+
+    default = _create_policies([])
+    for name, policy in default.items():
+        role = name[len("osh-f64-"):]
+        assert policy.endswith(f"/render/{role}/policy-{role}.yaml") and host_root not in policy, \
+            f"{name}: without --policy-root the gateway-internal render path is kept (got {policy})"

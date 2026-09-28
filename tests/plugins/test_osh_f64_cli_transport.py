@@ -78,15 +78,22 @@ def test_apply_openshell_routes_rooms_over_the_ws_requester(tmp_path, monkeypatc
     monkeypatch.setattr(mod, "_gateway_handle_request", _forbidden_inprocess)
 
     class _FakeInstaller:
-        def apply(self, spec, ref, *, room_creator, room_exists):
+        def __init__(self):
+            self.policy_root = "UNSET"
+
+        def apply(self, spec, ref, *, room_creator, room_exists, policy_root=None):
+            self.policy_root = policy_root
             assert room_exists("fleet-review") is False
             room_creator("fleet-review", "FLEET-F62 Review", ["orchestrator", "reviewer"])
 
-    mod._apply_openshell(_FakeInstaller(), "spec.yaml", "a" * 40,
-                         "ws://127.0.0.1:9/api/ws?token=x")
+    fake = _FakeInstaller()
+    mod._apply_openshell(fake, "spec.yaml", "a" * 40,
+                         "ws://127.0.0.1:9/api/ws?token=x", policy_root="/host/policy/root")
 
     assert "groups.state" in recorder.methods, "room existence must be probed over the requester"
     assert "groups.create" in recorder.methods, "room creation must be dispatched over the requester"
+    assert fake.policy_root == "/host/policy/root", \
+        "policy_root must forward through _apply_openshell to installer.apply"
 
 
 def test_apply_openshell_refuses_when_preflight_fails(tmp_path, monkeypatch):

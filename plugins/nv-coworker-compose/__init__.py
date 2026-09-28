@@ -895,7 +895,7 @@ async def _slash_onboard_project(args: str = "", **_kwargs) -> str:
     return json.dumps(result)
 
 
-def _apply_openshell(installer, spec: str, ref: str, gateway_url: str) -> None:
+def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_root=None) -> None:
     """Run the openshell install with the standalone gateway context bound (as
     ``onboard_coworker`` does), so the room ``groups.state``/``groups.create`` calls the
     plan makes reach the LIVE gateway over the authenticated WS requester — a standalone
@@ -919,7 +919,7 @@ def _apply_openshell(installer, spec: str, ref: str, gateway_url: str) -> None:
     _pending_ws_requester.set(None)
     token = _standalone_ctx.set({"url": gateway_url, "requester": requester})
     try:
-        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present)
+        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present, policy_root=policy_root)
     finally:
         _close_standalone(token)
 
@@ -953,7 +953,7 @@ def _cli_coworker(args, **_kwargs) -> int:
             print(json.dumps({"ok": False, "error": f"install-openshell requires substrate: openshell (spec: {substrate!r})"}))
             return 2
         if getattr(args, "dry_run", False):
-            print(installer.plan_text(args.spec, args.ref), end="")
+            print(installer.plan_text(args.spec, args.ref, policy_root=getattr(args, "policy_root", None)), end="")
         else:
             gateway_url = getattr(args, "gateway_url", None)
             if not gateway_url:
@@ -961,10 +961,10 @@ def _cli_coworker(args, **_kwargs) -> int:
                                   "(a loopback ?token/?ticket gateway URL) to probe and create the fleet rooms "
                                   "against the live gateway"}))
                 return 2
-            _apply_openshell(installer, args.spec, args.ref, gateway_url)
+            _apply_openshell(installer, args.spec, args.ref, gateway_url, policy_root=getattr(args, "policy_root", None))
         return 0
     print("usage: hermes coworker {compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]"
-          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--dry-run]}")
+          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--policy-root <dir>] [--dry-run]}")
     return 2
 
 

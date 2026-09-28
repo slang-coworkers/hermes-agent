@@ -337,7 +337,7 @@ def _profile_drifted(role: str, digests: Dict[str, Any]) -> bool:
     return cur is not None and want is not None and cur != want
 
 
-def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str) -> List[Step]:
+def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root: Optional[str] = None) -> List[Step]:
     """The full ordered, state-aware install plan. Backups come FIRST (before any
     ``plugins install/enable`` rewrites config.yaml). A fully-installed home plans no
     mutating step; ``hermes gateway restart`` is emitted only when something changed.
@@ -429,9 +429,13 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str) -> List[Ste
         if role in installed_profiles:
             continue
         sandbox = f"{project}-{role}"
-        # The rendered policy compose writes at <out>/<role>/policy-<role>.yaml — the full
-        # path, so openshell finds it (compose's own dry-run plan uses the bare name).
-        policy = f"{out}/{role}/policy-{role}.yaml"
+        # OpenShell validates --policy on the broker host, so an explicit root selects the
+        # host-mirrored render tree; unset keeps the gateway-internal render path.
+        policy = (
+            f"{policy_root}/render/{role}/policy-{role}.yaml"
+            if policy_root
+            else f"{out}/{role}/policy-{role}.yaml"
+        )
         steps.append(Step(["openshell", "sandbox", "create", "--name", sandbox, "--from", image, "--policy", policy], "provision_create"))
         steps.append(Step(["openshell", "sandbox", "ssh-config", sandbox], "provision_sshconfig"))
 
@@ -633,11 +637,11 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     }
 
 
-def plan_text(spec_path: Any, ref: str) -> str:
+def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None) -> str:
     spec = load_spec(spec_path)
     _require_openshell(spec)
     state = collect_home_state(spec, spec_path)
-    return render_transcript(build_plan(state, spec_path, ref))
+    return render_transcript(build_plan(state, spec_path, ref, policy_root=policy_root))
 
 
 # --------------------------------------------------------------------------------------
@@ -780,7 +784,7 @@ def _apply_ctx(spec: Dict[str, Any], spec_path: Any, room_creator=None) -> Dict[
     }
 
 
-def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None) -> None:
+def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, policy_root=None) -> None:
     """Execute the full plan. ``room_creator(room_id, name, members)`` performs the
     onboarding ``groups.create`` against the live gateway and ``room_exists(room_id)``
     reports whether a room is already present; the caller (the CLI subaction) injects both
@@ -800,7 +804,7 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None) -> N
         present = [rid for rid in spec_rooms if room_exists(rid)]
         state["rooms"] = "all" if spec_rooms and len(present) == len(spec_rooms) else present
     ctx = _apply_ctx(spec, spec_path, room_creator=room_creator)
-    for step in build_plan(state, spec_path, ref):
+    for step in build_plan(state, spec_path, ref, policy_root=policy_root):
         _execute_step(step, ctx)
 
 
@@ -842,13 +846,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         p = sub.add_parser(mode)
         p.add_argument("--spec", required=True)
         p.add_argument("--ref", required=True)
+        if mode in ("plan", "apply"):
+            p.add_argument(
+                "--policy-root", default=None,
+                help="Host dir the OpenShell broker validates worker --policy paths under; "
+                     "rebases each provision-create --policy to <root>/render/<role>/policy-<role>.yaml "
+                     "(default: the gateway-internal render path)",
+            )
     ns = parser.parse_args(argv)
     if not SHA40.match(ns.ref):
         parser.error("--ref must be a full 40-character commit SHA")
     if ns.mode == "plan":
-        sys.stdout.write(plan_text(ns.spec, ns.ref))
+        sys.stdout.write(plan_text(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None)))
     elif ns.mode == "apply":
-        apply(ns.spec, ns.ref)
+        apply(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None))
     elif ns.mode == "phase-a":
         phase_a(ns.spec, ns.ref)
     return 0

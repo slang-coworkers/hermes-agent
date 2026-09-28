@@ -46,6 +46,12 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
         help="Loopback gateway /api/ws URL with a ?token or ?ticket credential; required for "
              "a real run (rooms are probed/created against the live gateway), unused with --dry-run",
     )
+    install_osh_p.add_argument(
+        "--policy-root", default=None,
+        help="Host directory the OpenShell broker validates worker --policy paths under; when set, "
+             "each worker sandbox-create --policy is rebased to <root>/render/<role>/policy-<role>.yaml "
+             "(default: the gateway-internal render path)",
+    )
 
 
 def setup_onboard(parser: argparse.ArgumentParser) -> None:
