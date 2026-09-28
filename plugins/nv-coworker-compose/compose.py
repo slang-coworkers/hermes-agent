@@ -1163,6 +1163,10 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     # policy hop proxy_addr); kept verbatim (not normalized) so the child dials it exactly.
     chain_addr = _req_str("chain_addr") if "chain_addr" in egress else "127.0.0.1:18255"
     ca_bundle = _req_str("ca_bundle") if "ca_bundle" in egress else "/etc/osh-lane/ca-bundle.pem"
+    # OSH-F64 §D7.1: the OneCLI secret ids the openshell render writes into the DEFAULT/gateway
+    # config's profile_secret_sets grant map (absent → no populate; the spine [] passes through).
+    onecli_secret_ids = (_validate_openshell_secret_ids(egress["onecli_secret_ids"])
+                         if "onecli_secret_ids" in egress else None)
     return {
         "allow": allow,
         "sandbox_image": sandbox_image,
@@ -1171,6 +1175,7 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
         "raw_hops": raw_hops,
         "chain_addr": chain_addr,
         "ca_bundle": ca_bundle,
+        "onecli_secret_ids": onecli_secret_ids,
     }
 
 
@@ -1226,6 +1231,29 @@ def _validate_openshell_binaries(value: Any) -> List[str]:
             raise CompositionError(
                 f"egress.binaries entries must be absolute paths without '..', got {path!r}")
         out.append(path)
+    return out
+
+
+def _validate_openshell_secret_ids(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.onecli_secret_ids`` (OSH-F64 §D7.1) into the OneCLI
+    secret ids the openshell render writes into the DEFAULT/gateway config's
+    ``profile_secret_sets`` grant map. A NON-EMPTY list of non-empty strings, each free of
+    control characters; an empty list is REJECTED — it would recreate the grant-revocation
+    footgun (``onecli-onboard`` on an empty grant ``set_secrets([])`` revokes the identity's
+    secret → 401). Opaque ids, not paths, so no absolute-path/glob/``..`` check. Called only
+    when the key is present; an absent key means no populate (spine ``[]`` passes through)."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.onecli_secret_ids must be a non-empty list of OneCLI secret ids, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.onecli_secret_ids entries must be non-empty strings, got {entry!r}")
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.onecli_secret_ids entries must not contain control characters, got {entry!r}")
+        out.append(entry.strip())
     return out
 
 
@@ -1289,6 +1317,21 @@ def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
     _set_dotted(config, "secrets.onecli.override_existing", True)
     _set_dotted(config, "plugins.entries.podman-onecli.settings.proxy_rewrite", chain_addr)
     _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
+
+
+def _enforce_openshell_secret_sets(config: Dict[str, Any], served_profiles: List[str],
+                                   secret_ids: List[str]) -> None:
+    """Populate the DEFAULT/gateway onboard GRANT map (OSH-F64 §D7.1). Written into the
+    DEFAULT config's ``plugins.entries.podman-onecli.settings.profile_secret_sets``, where
+    the deploy's ``onecli-onboard`` reads it to grant each served identity the inference
+    secret OneCLI swaps in at request time. Replaces the committed spine ``[]`` (inert for
+    the mocked tests, a footgun for the live bake). Openshell-only, DEFAULT profile only —
+    never a served coworker's own config (its per-turn hydration does not read this map)."""
+    settings = (config.setdefault("plugins", {}).setdefault("entries", {})
+                .setdefault("podman-onecli", {}).setdefault("settings", {}))
+    grants = settings.setdefault("profile_secret_sets", {})
+    for profile in served_profiles:
+        grants[profile] = list(secret_ids)
 
 
 def _openshell_policy_document(allow: List[str],
@@ -3455,6 +3498,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # Phase-B loop below. An absent egress block leaves enforcement off, so dev/test
     # specs render unchanged.
     egress_block = data.get("egress")
+    # OSH-F64 §D7.1: validate a present egress.onecli_secret_ids on EITHER substrate — the
+    # container path never reaches _validate_openshell_egress, so without this a container
+    # spec could silently ship an empty grant list and revoke identities at onboard.
+    if isinstance(egress_block, dict) and "onecli_secret_ids" in egress_block:
+        _validate_openshell_secret_ids(egress_block["onecli_secret_ids"])
     if is_remote:
         # OSH-F63: the remote-ssh substrate's egress is a per-profile `openshell
         # policy` file (not the container docker_* env), so an openshell fleet must
@@ -3587,6 +3635,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_webhook_routes(default_config, served)
     if egress_params is not None:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
+    # OSH-F64 §D7.1: openshell populates the DEFAULT onboard grant map for each served
+    # coworker (roster excludes `default`); a served coworker's own config is untouched.
+    if is_remote and openshell_params.get("onecli_secret_ids") is not None:
+        _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
