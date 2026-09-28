@@ -217,3 +217,34 @@ def test_policy_document_raw_hops_default_off_keeps_rest():
     assert doc["network_policies"]["worker-egress"]["endpoints"] == [
         _endpoint("172.17.0.1", 18255), _endpoint("inference-api.nvidia.com", 443),
         _endpoint("172.17.0.1", 18777)]
+
+
+# --- OSH-F64 §D7 chain-dial: preserve_existing fail-closed guard ----------------------
+
+CHAIN_ADDR = "127.0.0.1:18255"
+CA_BUNDLE = "/etc/osh-lane/ca-bundle.pem"
+
+
+@pytest.mark.parametrize("preserved", ["https_proxy", "HTTPS_PROXY", "SSL_CERT_FILE", "CURL_CA_BUNDLE"])
+def test_openshell_chain_dial_rejects_preserved_proxy_ca(preserved):
+    """A secrets.preserve_existing entry naming a forced proxy/CA var is refused fail-closed:
+    it would win over secrets.onecli.override_existing and keep the inherited denied proxy,
+    defeating the chain-dial (OSH-F64 §D7)."""
+    c = _compose()
+    config = {"secrets": {"preserve_existing": [preserved]}}
+    with pytest.raises(c.CompositionError):
+        c._enforce_openshell_chain_dial(config, "builder", CHAIN_ADDR, CA_BUNDLE)
+
+
+def test_openshell_chain_dial_allows_benign_preserve_and_sets_fields():
+    """A preserve_existing carve-out that does NOT name a proxy/CA var is allowed, and the
+    render sets the four chain-dial fields (enabled + override_existing + the two settings)."""
+    c = _compose()
+    config = {"secrets": {"preserve_existing": ["ANTHROPIC_API_KEY"]}}
+    c._enforce_openshell_chain_dial(config, "builder", CHAIN_ADDR, CA_BUNDLE)
+    assert config["secrets"]["onecli"]["enabled"] is True
+    assert config["secrets"]["onecli"]["override_existing"] is True
+    settings = config["plugins"]["entries"]["podman-onecli"]["settings"]
+    assert settings["proxy_rewrite"] == CHAIN_ADDR
+    assert settings["ca_bundle"] == CA_BUNDLE
+    assert config["secrets"]["preserve_existing"] == ["ANTHROPIC_API_KEY"]

@@ -1156,12 +1156,21 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     # protocol:rest HTTP-API endpoint. A no-broker spec keeps OSH-F63's protocol:rest shape for
     # every endpoint (back-compat).
     raw_hops = [proxy_addr, broker_addr] if broker_addr is not None else []
+    # OSH-F64 §D7 chain-dial: two OPTIONAL/defaulted fields that feed the per-coworker
+    # secrets.onecli SETTINGS render (podman-onecli proxy_rewrite/ca_bundle), NOT the
+    # worker-egress policy endpoints — so they are validated but never appended to `allow`.
+    # chain_addr is the loopback onecli-chain the served child dials (DISTINCT from the
+    # policy hop proxy_addr); kept verbatim (not normalized) so the child dials it exactly.
+    chain_addr = _req_str("chain_addr") if "chain_addr" in egress else "127.0.0.1:18255"
+    ca_bundle = _req_str("ca_bundle") if "ca_bundle" in egress else "/etc/osh-lane/ca-bundle.pem"
     return {
         "allow": allow,
         "sandbox_image": sandbox_image,
         "filesystem_read_only": read_only,
         "binaries": binaries,
         "raw_hops": raw_hops,
+        "chain_addr": chain_addr,
+        "ca_bundle": ca_bundle,
     }
 
 
@@ -1245,6 +1254,38 @@ def _openshell_hostport(entry: str) -> Tuple[str, int]:
         raise CompositionError(
             f"openshell policy endpoint must be host:port with a port in 1..65535, got {entry!r}")
     return host, int(port)
+
+
+# OSH-F64 §D7: the eight env names the chain-dial secrets.onecli source FORCES over the
+# child's inherited ambient (4 proxy spellings + 4 CA names). A secrets.preserve_existing
+# carve-out listing any of them would keep the inherited denied proxy and defeat the fix.
+_CHAIN_DIAL_FORCED_VARS = frozenset({
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HERMES_CA_BUNDLE",
+})
+
+
+def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
+                                  chain_addr: str, ca_bundle: str) -> None:
+    """Repoint a served coworker's profile-scoped child model turn through the operator
+    onecli-chain (OSH-F64 §D7). Written into the RAW per-profile config, since secret
+    hydration reads raw config, not the managed overlay; openshell-only, per served
+    coworker (never the default profile)."""
+    secrets = config.get("secrets")
+    if isinstance(secrets, dict):
+        preserved = secrets.get("preserve_existing")
+        if isinstance(preserved, (list, tuple)):
+            clash = sorted(v for v in preserved if isinstance(v, str) and v in _CHAIN_DIAL_FORCED_VARS)
+            if clash:
+                raise CompositionError(
+                    f"coworker {profile_name!r}: secrets.preserve_existing must not carve out a "
+                    f"chain-dial proxy/CA var {clash} — a preserved value wins over "
+                    f"secrets.onecli.override_existing, keeping the inherited denied proxy and "
+                    f"defeating the OneCLI chain-dial (OSH-F64 §D7)")
+    _set_dotted(config, "secrets.onecli.enabled", True)
+    _set_dotted(config, "secrets.onecli.override_existing", True)
+    _set_dotted(config, "plugins.entries.podman-onecli.settings.proxy_rewrite", chain_addr)
+    _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
 
 
 def _openshell_policy_document(allow: List[str],
@@ -3515,6 +3556,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # AFTER (so _render_coworker does not need to know about it).
         if is_remote:
             _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
+            _enforce_openshell_chain_dial(resolved["config"], tname,
+                                          openshell_params["chain_addr"],
+                                          openshell_params["ca_bundle"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
