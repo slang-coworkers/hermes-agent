@@ -22,8 +22,6 @@ def register(ctx) -> None:
         api_key_env=api_key_env,
         insecure_no_auth_origins=ctx.get_config("insecure_no_auth_origins", []),
     )
-    # OSH-F64 §D7: optional openshell chain-dial settings (default-absent → unchanged
-    # source behaviour). ctx.get_config reads plugins.entries.podman-onecli.settings.*.
     ctx.register_secret_source(OneCLISecretSource(
         api_key_env=api_key_env,
         proxy_rewrite=ctx.get_config("proxy_rewrite"),

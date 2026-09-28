@@ -225,7 +225,7 @@ CHAIN_ADDR = "127.0.0.1:18255"
 CA_BUNDLE = "/etc/osh-lane/ca-bundle.pem"
 
 
-@pytest.mark.parametrize("preserved", ["https_proxy", "HTTPS_PROXY", "SSL_CERT_FILE", "CURL_CA_BUNDLE"])
+@pytest.mark.parametrize("preserved", ["https_proxy", "HTTPS_PROXY", " HTTPS_PROXY ", "SSL_CERT_FILE", "CURL_CA_BUNDLE"])
 def test_openshell_chain_dial_rejects_preserved_proxy_ca(preserved):
     """A secrets.preserve_existing entry naming a forced proxy/CA var is refused fail-closed:
     it would win over secrets.onecli.override_existing and keep the inherited denied proxy,

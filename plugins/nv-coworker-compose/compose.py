@@ -1275,7 +1275,10 @@ def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
     if isinstance(secrets, dict):
         preserved = secrets.get("preserve_existing")
         if isinstance(preserved, (list, tuple)):
-            clash = sorted(v for v in preserved if isinstance(v, str) and v in _CHAIN_DIAL_FORCED_VARS)
+            # Trim to match the registry, which strips preserve_existing entries before
+            # comparison — else a padded " HTTPS_PROXY " would bypass this guard yet still
+            # preserve the inherited denied proxy.
+            clash = sorted(v.strip() for v in preserved if isinstance(v, str) and v.strip() in _CHAIN_DIAL_FORCED_VARS)
             if clash:
                 raise CompositionError(
                     f"coworker {profile_name!r}: secrets.preserve_existing must not carve out a "

@@ -129,9 +129,8 @@ class OneCLISecretSource(SecretSource):
                 for name in _CA_ENV_NAMES:
                     result.secrets[name] = self._ca_bundle
             return result
-        # Default (unchanged): return the full env and mirror the token-bearing proxy onto
-        # all four spellings. C1 (FLEET-F62): OneCLI may return it under only a subset; any
-        # spelling left missing/tokenless would let curl prefer a tokenless placeholder.
+        # Mirror the token-bearing proxy onto all four spellings: curl gives the lowercase
+        # spelling precedence, so any left missing/tokenless would select a tokenless placeholder.
         result.secrets = dict(env)
         if proxy_value:
             for name in _PROXY_ALIASES:
