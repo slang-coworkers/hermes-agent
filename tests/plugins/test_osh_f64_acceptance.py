@@ -627,6 +627,45 @@ def test_installer_managed_fragment_disables_scan_on_install(tmp_path, monkeypat
         "unrelated pre-seeded operator managed keys must survive the deep-merge (merge, not overwrite)"
 
 
+def test_installer_policy_root_rebases_provision_create_policy(tmp_path, monkeypatch):
+    """§D3 --policy-root (supports AC-1, mints no AC id): build_plan rebases each provision-create --policy
+    to the host path <root>/render/<role>/policy-<role>.yaml; the default keeps the gateway-internal render
+    path."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch, with_plugin=False)
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer_policy_root")
+    spec = str(_osh_spec(root))
+    ref = "a" * 40
+    default_render = planner._render_out_dir()   # the exact gateway-internal prefix build_plan uses
+
+    def _creates(steps):
+        return [s for s in steps if getattr(s, "tag", None) == "provision_create"]
+
+    def _opt_of(cmd, flag):
+        return cmd[cmd.index(flag) + 1]
+
+    def _role(cmd):
+        name = _opt_of(cmd, "--name")
+        assert name.startswith("osh-f64-"), f"unexpected sandbox name {name!r}"
+        return name[len("osh-f64-"):]
+
+    default_creates = _creates(planner.build_plan({}, spec, ref))
+    assert default_creates, "build_plan must plan `openshell sandbox create` steps for the fresh fleet"
+    for s in default_creates:
+        role = _role(s.command)
+        assert _opt_of(s.command, "--policy") == f"{default_render}/{role}/policy-{role}.yaml", \
+            f"{role}: default --policy must be the gateway-internal render path"
+
+    host_root = "/workspace/extra/hermes-fleet-testbed/osh-f64"
+    rooted_creates = _creates(planner.build_plan({}, spec, ref, policy_root=host_root))
+    assert len(rooted_creates) == len(default_creates), \
+        "--policy-root must not change the number of provision-create steps"
+    for s in rooted_creates:
+        role = _role(s.command)
+        assert _opt_of(s.command, "--policy") == f"{host_root}/render/{role}/policy-{role}.yaml", \
+            f"{role}: --policy-root must rebase --policy to <root>/render/<role>/policy-<role>.yaml"
+
+
 def test_ac_osh_f64_2(tmp_path, monkeypatch):
     """AC-OSH-F64-2: the full FLEET-F62 spec composes under substrate: openshell; the flip touches only the substrate surface."""
     root = _repo_root()
