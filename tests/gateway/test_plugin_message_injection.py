@@ -619,7 +619,12 @@ def _peek_delivery(task_id, board=None):
         task = kb.get_task(conn, task_id)
     finally:
         conn.close()
-    return {"sub": sub, "events": events, "task": task, "board": board, "durable": True}
+    # old_cursor/cursor mirror production's delivery dict (kanban_watchers.py):
+    # the durable path's owner-fenced lease CAS reads d["old_cursor"] to fence
+    # the claim at the pre-delivery cursor snapshot.
+    return {"sub": sub, "old_cursor": int(sub.get("last_event_id") or 0),
+            "cursor": _cur, "events": events, "task": task, "board": board,
+            "durable": True}
 
 
 def _cursor(task_id):
@@ -811,11 +816,22 @@ def _mk_task_and_durable_push_sub():
             conn, title="push-durable", assignee="p", idempotency_key="push-durable-1",
         )
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
+        # add_notify_sub refuses retry_policy='durable' on a push transport, so
+        # create the row as 'default' and set 'durable' directly — exercising the
+        # runtime push-guard as defence-in-depth (a durable-push row that reached
+        # the delivery path) without tripping the source-side validation.
         kb.add_notify_sub(
             conn, task_id=task_id, platform="telegram", chat_id="tg-chat-1",
             notifier_profile="p", chat_type="group",
-            delivery_mode="wake", retry_policy="durable",
+            delivery_mode="wake", retry_policy="default",
         )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE kanban_notify_subs SET retry_policy = 'durable' "
+                "WHERE task_id = ? AND platform = 'telegram' "
+                "AND chat_id = 'tg-chat-1' AND thread_id = ''",
+                (task_id,),
+            )
     finally:
         conn.close()
     return task_id

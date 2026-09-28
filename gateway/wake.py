@@ -182,6 +182,13 @@ async def _self_post_chat_completion(
     }
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
+    if require_persist_ack:
+        # Opt-in signal to the api_server idempotency cache: keep an UNPERSISTED
+        # turn OUT of the cache so this durable caller's same-key retry re-runs
+        # until the turn commits. Absent this header the server keeps the
+        # upstream default (cache any completed result). Distinct INBOUND header;
+        # the response-only X-Hermes-Turn-Persisted ack is untouched.
+        headers["X-Hermes-Require-Persist"] = "1"
     payload = {
         "model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
         "messages": [{"role": "user", "content": text}],

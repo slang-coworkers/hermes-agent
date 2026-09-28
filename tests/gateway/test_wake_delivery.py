@@ -137,6 +137,7 @@ def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
         seen["path"] = request.path
         seen["idem"] = request.headers.get("Idempotency-Key")
         seen["session_id"] = request.headers.get("X-Hermes-Session-Id")
+        seen["require_persist"] = request.headers.get("X-Hermes-Require-Persist")
         return web.json_response(
             {"choices": [{"message": {"content": "ok"}}]},
             headers={"X-Hermes-Turn-Persisted": "true"},
@@ -166,6 +167,10 @@ def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
     assert seen["path"] == "/p/gov-f25-owner/v1/chat/completions"
     assert seen["idem"] == "o/r#7:D1"
     assert seen["session_id"] == "owner-sid"
+    # A durable caller (require_persist_ack=True) sends the opt-in header so the
+    # api_server idempotency cache keeps an unpersisted turn out of cache and
+    # re-runs the same-key retry until it commits.
+    assert seen["require_persist"] == "1"
 
 
 def test_deliver_wake_retries_429_then_succeeds(monkeypatch):

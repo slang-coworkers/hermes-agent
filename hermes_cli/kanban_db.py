@@ -1515,6 +1515,14 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     retry_policy  TEXT NOT NULL DEFAULT 'default',
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
+    -- Owner-fenced, short-lived delivery lease for the durable notifier path:
+    -- claimed_by is the delivering drainer's opaque token and lease_until its
+    -- epoch expiry, so a single active delivery is enforced under concurrency
+    -- WITHOUT advancing the cursor (peek-then-advance crash-safety is kept).
+    -- Nullable because SQLite forbids a non-constant default; inert (always
+    -- NULL) on the stock 'default' retry_policy path.
+    claimed_by    TEXT,
+    lease_until   INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
@@ -2789,6 +2797,18 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "retry_policy",
                 "retry_policy TEXT NOT NULL DEFAULT 'default'",
             )
+        if "claimed_by" not in notify_cols:
+            # Additive + nullable: a legacy board gains the durable-delivery
+            # lease columns unclaimed (NULL), so every pre-existing sub is free
+            # for the first durable drainer to lease and no behaviour changes on
+            # the stock retry_policy path.
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "claimed_by", "claimed_by TEXT"
+            )
+        if "lease_until" not in notify_cols:
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "lease_until", "lease_until INTEGER"
+            )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -2918,6 +2938,7 @@ _REBUILD_SPECS = {
         " retry_policy TEXT NOT NULL DEFAULT 'default',"
         " created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
+        " claimed_by TEXT, lease_until INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
@@ -11407,6 +11428,12 @@ def task_age(task: Task) -> dict:
 #   "wake"         -> wake the agent only; no passive message is sent
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 _NOTIFY_RETRY_POLICIES = ("default", "durable")
+# The sole transport whose delivery can confirm persistence (its wake self-post
+# carries the X-Hermes-Turn-Persisted ack), so the only one on which a 'durable'
+# retry_policy is deliverable. Mirrors gateway.config.Platform.API_SERVER as a
+# string — the adapter object is not in scope at add_notify_sub, and hermes_cli
+# must not import the gateway layer.
+_DURABLE_RETRY_PLATFORM = "api_server"
 
 
 def _encode_notify_delivery_metadata(
@@ -11468,7 +11495,12 @@ def add_notify_sub(
     event (capped backoff + operator alert instead). ``None`` leaves an
     existing row's policy untouched (and inserts ``'default'`` for a fresh
     row); an explicit value is last-write-wins. An unknown value falls back
-    to ``'default'``.
+    to ``'default'``. ``retry_policy='durable'`` is accepted ONLY on the
+    ``api_server`` platform — the sole transport whose delivery confirms
+    persistence (its wake self-post carries the ``X-Hermes-Turn-Persisted``
+    ack). A push-capable transport cannot confirm delivery, so a durable sub
+    on it would be retained forever and never delivered; requesting one raises
+    ``ValueError`` here rather than creating a silently-undeliverable row.
 
     ``user_id_alt`` records the originating source's platform-specific stable
     alt ID (Signal UUID, Feishu union_id, ...) alongside ``user_id``. Active-wake
@@ -11507,6 +11539,21 @@ def add_notify_sub(
     )
     insert_chat_type = chat_type or "dm"
     insert_retry = retry_policy if retry_policy in _NOTIFY_RETRY_POLICIES else "default"
+    # A 'durable' sub is only ever deliverable on a transport that can confirm
+    # persistence (api_server, via the wake self-post's X-Hermes-Turn-Persisted
+    # ack). On a push-capable transport the delivery path refuses it before any
+    # cursor advance, so it would be retained forever and never delivered —
+    # reject it at the source with an actionable error instead of accepting a
+    # silently-undeliverable sub. Validated on the platform string because the
+    # adapter object (whose supports_async_delivery is the real capability) is
+    # not in scope here.
+    if retry_policy == "durable" and platform != _DURABLE_RETRY_PLATFORM:
+        raise ValueError(
+            f"retry_policy='durable' requires a confirmable transport "
+            f"({_DURABLE_RETRY_PLATFORM}); platform {platform!r} is push-capable "
+            f"and cannot confirm persistence, so a durable sub on it would be "
+            f"retained forever and never delivered."
+        )
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
@@ -11871,13 +11918,32 @@ def claim_unseen_events_for_sub(
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT last_event_id FROM kanban_notify_subs "
+            "SELECT last_event_id, retry_policy, claimed_by, lease_until "
+            "FROM kanban_notify_subs "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (task_id, platform, chat_id, thread_id or ""),
         ).fetchone()
         if row is None:
             return 0, 0, []
         old_cursor = int(row["last_event_id"])
+        # The default claim path (advance-at-claim) must never touch a durable
+        # sub: durable delivery uses peek-then-advance via the owner-fenced
+        # lease, advancing only after a persist ack. Re-check the row's current
+        # policy/lease inside this txn so a policy switch after this watcher's
+        # poll snapshot cannot leak an event onto the wrong path:
+        #  - retry_policy == 'durable' (a default->durable switch) → leave it for
+        #    the durable path, do not pre-advance without an ack;
+        #  - an active lease (a durable->default switch mid-delivery) → leave it
+        #    for the lease holder.
+        if str(row["retry_policy"] or "default").lower() == "durable":
+            return old_cursor, old_cursor, []
+        lease_until = row["lease_until"]
+        if (
+            row["claimed_by"] is not None
+            and lease_until is not None
+            and int(lease_until) > int(time.time())
+        ):
+            return old_cursor, old_cursor, []
         new_cursor, events = unseen_events_for_sub(
             conn,
             task_id=task_id,
@@ -11911,6 +11977,96 @@ def advance_notify_cursor(
             "UPDATE kanban_notify_subs SET last_event_id = ? "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (int(new_cursor), task_id, platform, chat_id, thread_id or ""),
+        )
+
+
+def claim_notify_sub_lease(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    expected_cursor: int,
+    token: str,
+    lease_until: int,
+    now: int,
+) -> bool:
+    """Owner-fenced CAS claim of a durable sub's short-lived delivery lease.
+
+    Grants ONE drainer exclusive delivery of the event range that begins at
+    ``expected_cursor`` WITHOUT advancing the cursor, so the durable path keeps
+    its peek-then-advance crash-safety while gaining the single-active-delivery
+    guarantee the default (``claim_unseen_events_for_sub``) path gets from the
+    writer lock. Succeeds only when the row is still at ``expected_cursor`` and
+    is either unclaimed or its prior lease has expired (``lease_until <= now``,
+    reclaim after a dead drainer), AND the row is still ``retry_policy='durable'``
+    — so a sub switched to a non-durable policy after this drainer's snapshot
+    cannot be claimed here. Returns ``True`` iff this call took the lease.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET claimed_by = ?, lease_until = ? "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND last_event_id = ? "
+            "AND LOWER(retry_policy) = 'durable' "
+            "AND (claimed_by IS NULL OR lease_until <= ?)",
+            (token, int(lease_until), task_id, platform, chat_id, thread_id or "",
+             int(expected_cursor), int(now)),
+        )
+        return cur.rowcount > 0
+
+
+def advance_and_release_notify_sub(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    expected_cursor: int,
+    new_cursor: int,
+    token: str,
+) -> bool:
+    """Advance the cursor and release the lease in one CAS after a confirmed
+    durable delivery. Applies only when THIS drainer still holds the lease
+    (``claimed_by = token``) and the cursor has not moved (``last_event_id =
+    expected_cursor``); returns ``True`` iff it advanced."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET last_event_id = ?, claimed_by = NULL, lease_until = NULL "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND last_event_id = ? AND claimed_by = ?",
+            (int(new_cursor), task_id, platform, chat_id, thread_id or "",
+             int(expected_cursor), token),
+        )
+        return cur.rowcount > 0
+
+
+def release_notify_sub_lease(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    token: str,
+) -> None:
+    """Release a delivery lease held by ``token`` WITHOUT advancing the cursor.
+
+    Used after a handled delivery failure (process still alive) so the very
+    next notifier tick re-delivers, rather than waiting out ``lease_until``.
+    Scoped to ``claimed_by = token`` so it can never free a lease another
+    drainer has since taken."""
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET claimed_by = NULL, lease_until = NULL "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND claimed_by = ?",
+            (task_id, platform, chat_id, thread_id or "", token),
         )
 
 
