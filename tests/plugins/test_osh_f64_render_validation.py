@@ -17,10 +17,12 @@ binary path is resolved by the sandbox, not an egress boundary), and is APPENDED
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 PLUGIN_KEY = "nv-coworker-compose"
 # v1 base egress: NO ssh_control_path (the v1 render forbids outbound :22; ssh is inbound).
@@ -248,3 +250,45 @@ def test_openshell_chain_dial_allows_benign_preserve_and_sets_fields():
     assert settings["proxy_rewrite"] == CHAIN_ADDR
     assert settings["ca_bundle"] == CA_BUNDLE
     assert config["secrets"]["preserve_existing"] == ["ANTHROPIC_API_KEY"]
+
+
+# --- OSH-F64 §D7.1: onecli_secret_ids validation (reject the grant-revocation footgun) --
+
+@pytest.mark.parametrize("bad", [[], [""], "Anthropic-Dev", [123], [" "], ["a\n"], None])
+def test_openshell_onecli_secret_ids_rejects_malformed(bad):
+    """A PRESENT egress.onecli_secret_ids fail-closes unless it is a non-empty list of
+    non-empty strings — [] is rejected because onecli-onboard on an empty grant does
+    set_secrets([]), REVOKING the identity's secret → 401 (OSH-F64 §D7.1)."""
+    c = _compose()
+    with pytest.raises(c.CompositionError):
+        c._validate_openshell_egress({**BASE_EGRESS, "onecli_secret_ids": bad})
+
+
+def test_openshell_onecli_secret_ids_absent_is_none():
+    """An ABSENT onecli_secret_ids means no populate (the committed spine [] passes through)."""
+    c = _compose()
+    assert c._validate_openshell_egress(dict(BASE_EGRESS))["onecli_secret_ids"] is None
+
+
+def test_openshell_onecli_secret_ids_valid_returned():
+    """A valid list is returned (stripped) for the default profile_secret_sets populate."""
+    c = _compose()
+    params = c._validate_openshell_egress({**BASE_EGRESS, "onecli_secret_ids": ["Anthropic-Dev"]})
+    assert params["onecli_secret_ids"] == ["Anthropic-Dev"]
+
+
+def test_container_onecli_secret_ids_rejects_empty(tmp_path):
+    """The reject-[] guard holds on the CONTAINER substrate too (via compose(), not only the
+    openshell validator that a container spec never reaches) — a container spec cannot silently
+    ship an empty grant list. A VALID container value composes fine and is ignored (frozen
+    test_ac_osh_f64_11 part 2 covers that positive)."""
+    c = _compose()
+    source = _repo_root() / "tests" / "e2e-scenarios" / "FLEET-F62" / "spec" / "podman"
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(source, spec_dir)
+    spec_path = spec_dir / "coworker-types.yaml"
+    data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    data["egress"]["onecli_secret_ids"] = []
+    spec_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(c.CompositionError, match="onecli_secret_ids"):
+        c.compose(str(spec_path), str(tmp_path / "out"))
