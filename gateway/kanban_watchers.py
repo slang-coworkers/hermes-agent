@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import time
 from contextvars import Context
@@ -1238,7 +1239,12 @@ class GatewayKanbanWatchersMixin:
         (cursor contiguity), applies capped backoff, and NEVER deletes the sub;
         the next tick retries from here.
         """
-        from gateway.wake import adapter_supports_push, deliver_wake
+        from gateway.wake import (
+            _RETRY_DELAYS_SECONDS,
+            WAKE_TURN_TIMEOUT_SECONDS,
+            adapter_supports_push,
+            deliver_wake,
+        )
 
         sub = d["sub"]
         task = d.get("task")
@@ -1301,12 +1307,45 @@ class GatewayKanbanWatchersMixin:
             )
             return
 
+        # A single deliver_wake envelope can run up to WAKE_TURN_TIMEOUT_SECONDS
+        # per attempt across 1 + len(_RETRY_DELAYS_SECONDS) attempts; hold the
+        # owner-fenced lease comfortably beyond that whole envelope so it can
+        # never expire mid-delivery and let a second drainer double-deliver.
+        # (Chosen: a fixed generous lease, not a heartbeat.) Only true process
+        # death — where no handler runs to release the lease — waits out this
+        # expiry; recovery is then at-least-once (the persist ack + stable
+        # per-event Idempotency-Key dedup the redelivery), never a lost event.
+        lease_seconds = int(
+            WAKE_TURN_TIMEOUT_SECONDS * (1 + len(_RETRY_DELAYS_SECONDS))
+            + sum(_RETRY_DELAYS_SECONDS)
+        ) + 300
+
+        # Peek-then-advance: the cursor advances only after a persist-confirmed
+        # ack, so the expected pre-delivery cursor starts at the peeked snapshot
+        # and moves forward one event at a time as each delivery is confirmed.
+        expected_cursor = int(d.get("old_cursor") or 0)
         for ev in events:
             text = self._render_durable_event(ev, task, sub, board_slug)
+            token = secrets.token_hex(16)
+            now = int(time.time())
+            # Owner-fenced claim: take an exclusive, non-advancing lease on this
+            # sub row at the current cursor. rowcount 0 ⇒ another live drainer
+            # holds the range (or the cursor already moved) ⇒ stop without
+            # delivering, so concurrent drainers deliver each event exactly once.
+            claimed = await _to_thread_process_service(
+                self._kanban_claim, sub, expected_cursor, token,
+                now + lease_seconds, now, board_slug,
+            )
+            if not claimed:
+                return
             if text is None:
-                # Nothing to deliver for this kind — advance past it so the
-                # cursor stays contiguous.
-                await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+                # Nothing to deliver for this kind — advance past it (cursor
+                # contiguity) and release the lease in one CAS.
+                await _to_thread_process_service(
+                    self._kanban_advance_release, sub, expected_cursor, ev.id,
+                    token, board_slug,
+                )
+                expected_cursor = ev.id
                 continue
             key = None
             if isinstance(ev.payload, dict):
@@ -1322,12 +1361,21 @@ class GatewayKanbanWatchersMixin:
                     require_persist_ack=True,
                 )
             except Exception as exc:
-                # Delivery unconfirmed: leave the cursor unmoved (redelivered
-                # next tick), back off, and NEVER drop the durable sub.
+                # Delivery unconfirmed: release the lease immediately (do NOT
+                # wait for expiry) so the next tick re-delivers, leave the
+                # cursor unmoved, back off, and NEVER drop the durable sub.
+                await _to_thread_process_service(
+                    self._kanban_release, sub, token, board_slug,
+                )
                 self._note_durable_failure(sub_key, exc)
                 return
-            # Delivery confirmed (deliver_wake raised otherwise) → mark SEEN.
-            await _to_thread_process_service(self._kanban_advance, sub, ev.id, board_slug)
+            # Delivery confirmed (deliver_wake raised otherwise) → advance the
+            # cursor past this event and release the lease atomically (SEEN).
+            await _to_thread_process_service(
+                self._kanban_advance_release, sub, expected_cursor, ev.id,
+                token, board_slug,
+            )
+            expected_cursor = ev.id
             fail_counts.pop(sub_key, None)
             backoff.pop(sub_key, None)
             logger.info(
@@ -1353,6 +1401,70 @@ class GatewayKanbanWatchersMixin:
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
                 new_cursor=cursor,
+            )
+        finally:
+            conn.close()
+
+    def _kanban_claim(
+        self, sub: dict, expected_cursor: int, token: str,
+        lease_until: int, now: int, board: Optional[str] = None,
+    ) -> bool:
+        """Sync helper: take the durable-delivery lease on ``sub``. Runs in
+        to_thread. Returns True iff this drainer claimed the event range."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect(board=board)
+        try:
+            return _kb.claim_notify_sub_lease(
+                conn,
+                task_id=sub["task_id"],
+                platform=sub["platform"],
+                chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "",
+                expected_cursor=expected_cursor,
+                token=token,
+                lease_until=lease_until,
+                now=now,
+            )
+        finally:
+            conn.close()
+
+    def _kanban_advance_release(
+        self, sub: dict, expected_cursor: int, new_cursor: int, token: str,
+        board: Optional[str] = None,
+    ) -> bool:
+        """Sync helper: advance the cursor and release the lease in one CAS
+        after a confirmed delivery. Runs in to_thread."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect(board=board)
+        try:
+            return _kb.advance_and_release_notify_sub(
+                conn,
+                task_id=sub["task_id"],
+                platform=sub["platform"],
+                chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "",
+                expected_cursor=expected_cursor,
+                new_cursor=new_cursor,
+                token=token,
+            )
+        finally:
+            conn.close()
+
+    def _kanban_release(
+        self, sub: dict, token: str, board: Optional[str] = None,
+    ) -> None:
+        """Sync helper: release the durable-delivery lease held by ``token``
+        without advancing the cursor. Runs in to_thread."""
+        from hermes_cli import kanban_db as _kb
+        conn = _kb.connect(board=board)
+        try:
+            _kb.release_notify_sub_lease(
+                conn,
+                task_id=sub["task_id"],
+                platform=sub["platform"],
+                chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "",
+                token=token,
             )
         finally:
             conn.close()
