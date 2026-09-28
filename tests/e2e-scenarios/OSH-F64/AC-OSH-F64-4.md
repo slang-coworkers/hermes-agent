@@ -38,8 +38,9 @@ Provision `osh-f64-gw` (`openshell sandbox create --name osh-f64-gw --from
 osh-f64-gateway:pinned --policy /workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml`,
 the pinned GATEWAY image, §D1 — built from base `nemoclaw-hermes-sandbox:local` + fork core
 @95de5f78; the `orchestrator`/`builder` worker sandboxes create
-`--from localhost/hermes-openshell-sandbox:pinned`). Inside `osh-f64-gw` and BEFORE the installer,
-in this ORDER:
+`--from localhost/hermes-openshell-sandbox:pinned`). BEFORE the installer, in this ORDER — steps 1,
+2a, and 3 run INSIDE `osh-f64-gw`; the render + host-mirror in 2b–2c are HOST-lane commands
+(`openshell sandbox exec`, host `mkdir`, host redirection) that reach into the sandbox:
 1. Seed the managed dir with the §D6 scan guard: `export HERMES_MANAGED_DIR=/sandbox/.hermes/managed
    && mkdir -p $HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/` (the
    pre-seeded managed carries `plugins.scan_on_install: false`).
@@ -50,7 +51,8 @@ in this ORDER:
    (c) mirror each rendered policy to the host testbed root via a QUOTED remote shell (so `$HERMES_HOME`
    expands INSIDE the sandbox, not on the host) — `mkdir -p /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>`
    then `openshell sandbox exec osh-f64-gw -- sh -lc 'cat "$HERMES_HOME/.osh-f64/render/<role>/policy-<role>.yaml"' > /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>/policy-<role>.yaml`
-   for `orchestrator` and `builder`.
+   for each of the five roles (orchestrator, architect, builder, tester, reviewer) the installer
+   provisions from the full `types:` roster (the scenario then drives orchestrator + builder).
 3. Bring the gateway up for Phase B: `export HERMES_DASHBOARD_SESSION_TOKEN=<token>` BEFORE starting
    `hermes serve` (web_server.py:589 — a bare `hermes serve` surfaces no token and the WS `/api/ws`
    upgrade still validates `?token` despite `auth_required:false`), start the sandbox's `hermes serve`

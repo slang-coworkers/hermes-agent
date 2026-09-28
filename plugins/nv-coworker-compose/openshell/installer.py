@@ -6,7 +6,7 @@ idempotent. Both the ``--dry-run`` transcript and the real run are produced from
 ``build_plan`` and executed step-for-step, so they cannot diverge.
 
 Pure planner surface (no side effects):
-  - ``build_plan(home_state, spec_path, ref) -> list[Step]``
+  - ``build_plan(home_state, spec_path, ref, policy_root=None) -> list[Step]``
   - ``default_config_diff(existing_config, spec, *, backup_present=False)``
   - ``apply_config_diff(config, diff)`` — deep merge, preserves unrelated keys
   - ``managed_config_diff(existing_managed, rendered_managed)`` — deep merge of the FULL

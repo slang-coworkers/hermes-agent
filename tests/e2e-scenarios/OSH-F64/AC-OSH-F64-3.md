@@ -50,7 +50,9 @@ profile exists — 5 (orchestrator/architect/builder/tester/reviewer); the gatew
 profile issues no live turn so it needs no dedicated OneCLI agent (operator prerequisite). No
 fixture is re-installed here — the tester has already installed the `fixtures:` list.
 
-Then, inside `osh-f64-gw` and BEFORE the installer, in this ORDER:
+Then, BEFORE the installer, in this ORDER — steps 1, 2a, and 3 run INSIDE `osh-f64-gw`; the render +
+host-mirror in 2b–2c are HOST-lane commands (`openshell sandbox exec`, host `mkdir`, host redirection)
+that reach into the sandbox:
 1. Seed the managed dir with the §D6 scan guard: `export HERMES_MANAGED_DIR=/sandbox/.hermes/managed
    && mkdir -p $HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/` (the
    pre-seeded managed config carries `plugins.scan_on_install: false`, the actual unblock for Phase
@@ -62,7 +64,7 @@ Then, inside `osh-f64-gw` and BEFORE the installer, in this ORDER:
    (c) mirror each rendered policy to the host testbed root via a QUOTED remote shell (so `$HERMES_HOME`
    expands INSIDE the sandbox, not on the host) — `mkdir -p /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>`
    then `openshell sandbox exec osh-f64-gw -- sh -lc 'cat "$HERMES_HOME/.osh-f64/render/<role>/policy-<role>.yaml"' > /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>/policy-<role>.yaml`
-   for each served coworker role.
+   for each of the five roles (orchestrator, architect, builder, tester, reviewer) the installer provisions.
 3. Bring the gateway up for Phase B: `export HERMES_DASHBOARD_SESSION_TOKEN=<token>` BEFORE starting
    `hermes serve` (web_server.py:589 — a bare `hermes serve` surfaces no token and the WS `/api/ws`
    upgrade still validates `?token` despite `auth_required:false`), start the sandbox's `hermes serve`
@@ -71,8 +73,14 @@ Then, inside `osh-f64-gw` and BEFORE the installer, in this ORDER:
    creates the fleet rooms against it, so the gateway MUST be up before step 1's full install.
 
 ## Steps
-1. Inside `osh-f64-gw`, with its `hermes serve` gateway already running (Setup step 3), run
-   `install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL" --policy-root /workspace/extra/hermes-fleet-testbed/osh-f64`
+1. Inside `osh-f64-gw`, first capture the rooted plan for step 2's evidence (a real apply does not
+   echo its command vectors — only `--dry-run` prints them; running it in the sandbox's own fresh
+   `HERMES_HOME` is what makes `build_plan` emit all five `provision_create` rows — on the host, the
+   installed fixtures would suppress them): `install-into-sandbox.sh <spec> --ref <sha> --policy-root
+   /workspace/extra/hermes-fleet-testbed/osh-f64 --dry-run > provision-plan.txt` (records the rooted
+   `openshell sandbox create --policy <root>/render/<role>/policy-<role>.yaml` line for all five
+   roles). Then, in the same sandbox with its `hermes serve` gateway already running (Setup step 3),
+   run `install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL" --policy-root /workspace/extra/hermes-fleet-testbed/osh-f64`
    (Phase A idempotently re-skips the Setup's staged phase-a → Phase B `hermes coworker
    install-openshell`, which composes the fleet, provisions the five `osh-f64-<profile>` worker
    sandboxes via the OpenShell setup prefix — `sandbox create --policy <root>/render/<profile>/policy-<profile>.yaml`
@@ -86,9 +94,9 @@ Then, inside `osh-f64-gw` and BEFORE the installer, in this ORDER:
 2. Verify the worker sandboxes Phase B created in step 1 (no separate `sandbox create` — Phase B
    already created them with `--policy-root`): `openshell sandbox list` shows `osh-f64-<profile>`
    Ready for the ≥2 served coworkers, each bound to its mirrored HOST policy
-   `/workspace/extra/hermes-fleet-testbed/osh-f64/render/<profile>/policy-<profile>.yaml` (record the
-   `--policy` path from the step-1 provision transcript) → expect: each worker sandbox is Ready under
-   its rendered policy.
+   `/workspace/extra/hermes-fleet-testbed/osh-f64/render/<profile>/policy-<profile>.yaml` (the
+   `--policy` path is the one captured in step 1's `provision-plan.txt`) → expect: each worker sandbox
+   is Ready under its rendered policy.
 3. Drive a live turn as served coworker A (`architect`) **through architect's own
    profile-scoped chat child** that issues a `terminal` call writing+reading a nonce and
    running `hostname; id -u` → expect: executes inside `osh-f64-architect` (nonce

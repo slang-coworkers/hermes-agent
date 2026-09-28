@@ -285,7 +285,13 @@ Preview first — `install-into-sandbox.sh <spec> --ref <40-char-sha> --dry-run`
 full ordered plan and changes nothing. Then run it for real, adding the sandbox's loopback
 gateway credential URL: `install-into-sandbox.sh <spec> --ref <40-char-sha> --gateway-url <ws-url>`.
 Phase B probes and creates the fleet rooms against the live gateway over that authenticated
-WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`. The script:
+WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`.
+
+On a lane where the OpenShell broker validates `--policy` as a HOST path it reads itself, add
+`--policy-root <host dir>`: each worker `sandbox create --policy` is then rebased to
+`<host dir>/render/<role>/policy-<role>.yaml` (the operator mirrors the rendered per-worker
+policies under that root first); with it unset, the gateway-internal render path is used and the
+plan is byte-for-byte unchanged. The script:
 
 - **Phase A** installs the fleet plugins (`nv-coworker-compose`, `nv-fleet-gates`,
   `podman-onecli`) at the pinned commit so `hermes coworker` exists.
