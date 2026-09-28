@@ -1256,8 +1256,7 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
     """A durable sub switched to a non-durable policy while a durable drainer
     holds an unexpired lease must not let the default claim path re-deliver or
     advance past the leased event; only after the lease expires may the default
-    path claim it. Closes the durable/default double-delivery race under a
-    mid-delivery retry_policy switch."""
+    path claim it."""
     import time
 
     conn = kb.connect()
@@ -1281,8 +1280,6 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
             conn, task_id, "note", metadata={"idempotency_key": "k1"},
         )
 
-        # A durable drainer takes the non-advancing lease at the pre-delivery
-        # cursor.
         now = int(time.time())
         assert kb.claim_notify_sub_lease(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
@@ -1290,7 +1287,6 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
             now=now,
         )
 
-        # The sub is switched to a non-durable policy mid-delivery.
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE kanban_notify_subs SET retry_policy = 'default' "
@@ -1299,13 +1295,11 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
                 (task_id,),
             )
 
-        # The default claim path must NOT deliver the leased event.
         old, new, events = kb.claim_unseen_events_for_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
         )
         assert events == [] and new == old == base_cursor
 
-        # After the lease expires, the default path may claim the event.
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE kanban_notify_subs SET lease_until = ? "
@@ -1317,5 +1311,41 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
         )
         assert len(events2) == 1 and new2 > old2
+    finally:
+        conn.close()
+
+
+def test_default_snapshot_cannot_claim_after_durable_policy_switch(kanban_home):
+    """A watcher that routed a sub via the default path on a stale 'default'
+    snapshot must not advance-at-claim once the row has switched to 'durable':
+    claim_unseen_events_for_sub re-checks the policy inside its txn and leaves a
+    durable sub for the peek-then-advance lease path (no ack-less pre-advance)."""
+    conn = kb.connect()
+    try:
+        task = kb.create_task(
+            conn, title="policy-switch", assignee="p",
+            idempotency_key="policy-switch-1",
+        )
+        task_id = task if isinstance(task, str) else getattr(task, "id", task)
+        kb.add_notify_sub(
+            conn, task_id=task_id, platform="api_server", chat_id="sess-2",
+            notifier_profile="p", delivery_mode="wake", retry_policy="default",
+        )
+        base_cursor = int(
+            kb.list_notify_subs(conn, task_id=task_id)[0].get("last_event_id") or 0
+        )
+        kb.publish_task_notification(
+            conn, task_id, "note", metadata={"idempotency_key": "k1"},
+        )
+
+        kb.add_notify_sub(
+            conn, task_id=task_id, platform="api_server", chat_id="sess-2",
+            notifier_profile="p", delivery_mode="wake", retry_policy="durable",
+        )
+
+        old, new, events = kb.claim_unseen_events_for_sub(
+            conn, task_id=task_id, platform="api_server", chat_id="sess-2",
+        )
+        assert events == [] and new == old == base_cursor
     finally:
         conn.close()

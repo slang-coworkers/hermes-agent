@@ -1,8 +1,7 @@
 """GOV-F25.b — failing-on-base acceptance tests for the three GOV-F25 core hardening fixes.
 
-Ships as tests/gateway/test_gov_f25b_hardening.py (CORE-CHANGE tests live with the
-code they exercise). One test per pytest acceptance criterion; the AC-id -> node
-mapping is mechanical: AC-GOV-F25.b-<n> -> test_ac_gov_f25_b_<n>.
+One test per pytest acceptance criterion; the AC-id -> node mapping is mechanical:
+AC-GOV-F25.b-<n> -> test_ac_gov_f25_b_<n>.
 
 Behaviour contracts, not snapshots: no model lists / version literals / enum counts;
 no source files read; no network beyond loopback aiohttp test servers; HERMES_HOME is

@@ -1310,11 +1310,12 @@ class GatewayKanbanWatchersMixin:
         # Hold the owner-fenced lease comfortably beyond the whole deliver_wake
         # envelope (WAKE_TURN_TIMEOUT_SECONDS per attempt across 1 +
         # len(_RETRY_DELAYS_SECONDS) attempts) so it can never expire
-        # mid-delivery and let a second drainer double-deliver. Only true
-        # process death — no handler runs to release the lease — waits out this
-        # expiry, and recovery is then at-least-once: the persist ack blocks a
-        # cursor advance, but the finite idempotency cache cannot guarantee
-        # dedup once the lease has outlived the cache TTL.
+        # mid-delivery and let a second drainer double-deliver. A lost holder —
+        # process death, task cancellation, or an unhandled failure that skips
+        # the release — waits out this expiry, and recovery is then
+        # at-least-once: the persist ack blocks a cursor advance, but the finite
+        # idempotency cache cannot guarantee dedup once the lease has outlived
+        # the cache TTL.
         lease_seconds = int(
             WAKE_TURN_TIMEOUT_SECONDS * (1 + len(_RETRY_DELAYS_SECONDS))
             + sum(_RETRY_DELAYS_SECONDS)

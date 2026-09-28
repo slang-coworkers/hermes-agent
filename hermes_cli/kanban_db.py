@@ -11918,18 +11918,25 @@ def claim_unseen_events_for_sub(
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT last_event_id, claimed_by, lease_until FROM kanban_notify_subs "
+            "SELECT last_event_id, retry_policy, claimed_by, lease_until "
+            "FROM kanban_notify_subs "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (task_id, platform, chat_id, thread_id or ""),
         ).fetchone()
         if row is None:
             return 0, 0, []
         old_cursor = int(row["last_event_id"])
-        # An active durable lease (claimed_by set, not yet expired) owns this
-        # event range under peek-then-advance: the default claim path must not
-        # advance past or re-deliver an event a durable drainer is delivering.
-        # Reachable when a sub is switched durable->default while a durable
-        # delivery is in flight. Only an expired/absent lease is claimable here.
+        # The default claim path (advance-at-claim) must never touch a durable
+        # sub: durable delivery uses peek-then-advance via the owner-fenced
+        # lease, advancing only after a persist ack. Re-check the row's current
+        # policy/lease inside this txn so a policy switch after this watcher's
+        # poll snapshot cannot leak an event onto the wrong path:
+        #  - retry_policy == 'durable' (a default->durable switch) → leave it for
+        #    the durable path, do not pre-advance without an ack;
+        #  - an active lease (a durable->default switch mid-delivery) → leave it
+        #    for the lease holder.
+        if str(row["retry_policy"] or "default").lower() == "durable":
+            return old_cursor, old_cursor, []
         lease_until = row["lease_until"]
         if (
             row["claimed_by"] is not None
