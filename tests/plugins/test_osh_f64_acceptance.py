@@ -1,7 +1,7 @@
 """Acceptance test for OSH-F64 — Fleet under OpenShell (P7 demo).
 
-One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6); AC-3/4 (live) and AC-5
-(ui) are proven by their scenario files. Loads nv-coworker-compose from an
+One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10); AC-3/4
+(live) and AC-5 (ui) are proven by their scenario files. Loads nv-coworker-compose from an
 isolated HERMES_HOME via the real discovery path, asserts registration, then
 drives the behaviour. Behaviour contract, not a byte snapshot
 (AGENTS.md:122-125,804-823). No network (every hermes invocation is
@@ -229,7 +229,7 @@ def _drop_substrate_managed(managed: dict) -> dict:
     return out
 
 
-def _non_substrate(cfg: dict) -> dict:
+def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False) -> dict:
     """Config with the substrate surface removed: terminal.*, the veto's expected_backend
     delta, and the container-only top-level proxy belt the openshell substrate skips.
 
@@ -250,6 +250,16 @@ def _non_substrate(cfg: dict) -> dict:
     if isinstance(settings, dict):
         settings.pop("expected_backend", None)
     out.pop("proxy", None)  # container-only egress belt (compose.py:956); skipped on openshell
+    if strip_chain_dial:
+        # §D7 chain-dial fields the openshell render adds per served coworker and the container
+        # baseline lacks; secrets.onecli.enabled is rendered on BOTH paths, so it is NOT stripped.
+        onecli_sec = (out.get("secrets") or {}).get("onecli")
+        if isinstance(onecli_sec, dict):
+            onecli_sec.pop("override_existing", None)
+        onecli_set = (((out.get("plugins") or {}).get("entries") or {}).get("podman-onecli") or {}).get("settings")
+        if isinstance(onecli_set, dict):
+            onecli_set.pop("proxy_rewrite", None)
+            onecli_set.pop("ca_bundle", None)
     return out
 
 
@@ -778,7 +788,7 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         # skills.external_dirs is NOT dropped: it must survive the substrate flip (declared under
         # each coworker type's config.skills.external_dirs, not the spine/default), so the equality
         # below checks it on both sides — the coworkers carry it, the default carries none.
-        assert _non_substrate(osh_cfgs[prof]) == _non_substrate(baseline[prof]), (
+        assert _non_substrate(osh_cfgs[prof], strip_chain_dial=(prof != "default")) == _non_substrate(baseline[prof]), (
             f"{prof}: non-substrate config drifted from the committed FLEET-F62 render"
         )
     # managed fragment: identical except the three documented substrate deltas. Bound the
@@ -879,3 +889,183 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
     }
     for label, pat in obligations.items():
         assert re.search(pat, section), f"install/rollback section missing: {label}"
+
+
+# --- OneCLI chain-dial (§D7) -------------------------------------------------
+
+ONECLI_KEY = "podman-onecli"
+_CA_ENV_NAMES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HERMES_CA_BUNDLE")
+_PROXY_SPELLINGS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+
+
+def _onecli_settings(cfg: dict) -> dict:
+    return (((cfg.get("plugins") or {}).get("entries") or {}).get(ONECLI_KEY) or {}).get("settings") or {}
+
+
+def _load_onecli(tmp_path, monkeypatch, *, settings: dict | None = None):
+    """Load podman-onecli via the real discovery path (test_podman_onecli_secret_source.py shape).
+
+    Returns (OneCLISecretSource class, oneclient module, manager). When `settings` is given it is
+    written under plugins.entries.podman-onecli.settings BEFORE discovery, so register(ctx) reads
+    it via ctx.get_config and constructs the REGISTERED source from it — the wiring the ambient-
+    override test exercises. No secrets: block is written, so discovery does not hydrate anything.
+    """
+    assert yaml is not None
+    root = _repo_root()
+    src = root / "plugins" / ONECLI_KEY
+    if not (src / "plugin.yaml").exists():
+        pytest.fail(f"plugins/{ONECLI_KEY} not present")
+    home = tmp_path / "onecli_home"
+    (home / "plugins").mkdir(parents=True)
+    shutil.copytree(src, home / "plugins" / ONECLI_KEY)
+    bundled = tmp_path / "onecli_bundled"
+    bundled.mkdir()
+    cfg: dict = {"plugins": {"enabled": [ONECLI_KEY]}}
+    if settings:
+        cfg["plugins"]["entries"] = {ONECLI_KEY: {"settings": settings}}
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    from hermes_cli.plugins import PluginManager
+
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins[ONECLI_KEY]
+    assert loaded.enabled is True and loaded.error is None and loaded.module is not None
+    src_mod = loaded.module.secret_source
+    return src_mod.OneCLISecretSource, src_mod.oneclient, manager
+
+
+def test_ac_osh_f64_7(tmp_path, monkeypatch):
+    """AC-OSH-F64-7: compose renders the OneCLI chain-dial config into each served coworker's raw config, openshell-only."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch)
+    manager = _load_manager()
+    assert yaml is not None
+
+    # chain_addr is the child's loopback dial, not the worker-policy proxy hop (egress.proxy_addr).
+    osh_spec = _osh_spec(root)
+    spec_dir = tmp_path / "spec_osh"
+    shutil.copytree(osh_spec.parent, spec_dir)
+    spec_file = spec_dir / osh_spec.name
+    spec_doc = yaml.safe_load(spec_file.read_text(encoding="utf-8")) or {}
+    spec_doc.setdefault("egress", {})["chain_addr"] = "127.0.0.1:18256"
+    spec_doc["egress"]["ca_bundle"] = "/tmp/osh-f64-ca.pem"
+    spec_file.write_text(yaml.safe_dump(spec_doc), encoding="utf-8")
+
+    out_osh = tmp_path / "out_openshell"
+    _run_coworker(manager, ["compose", str(spec_file), "--out", str(out_osh)])
+    cfgs = _read_rendered_configs(out_osh)
+    for prof in COWORKERS:
+        onecli = ((cfgs[prof].get("secrets") or {}).get("onecli") or {})
+        assert onecli.get("enabled") is True, f"{prof}: secrets.onecli.enabled must be true"
+        assert onecli.get("override_existing") is True, f"{prof}: secrets.onecli.override_existing must be true"
+        settings = _onecli_settings(cfgs[prof])
+        assert settings.get("proxy_rewrite") == "127.0.0.1:18256", f"{prof}: proxy_rewrite must read egress.chain_addr"
+        assert settings.get("ca_bundle") == "/tmp/osh-f64-ca.pem", f"{prof}: ca_bundle must read egress.ca_bundle"
+    # chain_addr feeds the podman-onecli SETTINGS, not the worker-egress POLICY endpoints (v1 stores
+    # host/port as separate fields, so compare pairs — a string scan would be vacuous).
+    for policy in out_osh.rglob("policy-*.yaml"):
+        doc = yaml.safe_load(policy.read_text(encoding="utf-8")) or {}
+        eps = doc["network_policies"]["worker-egress"]["endpoints"]
+        pairs = {(str(ep["host"]), int(ep["port"])) for ep in eps}
+        assert pairs == {("172.17.0.1", 18255), ("inference-api.nvidia.com", 443), ("172.17.0.1", 18777)}, \
+            f"{policy.name}: worker-egress endpoints must stay the three policy hops (got {sorted(pairs)})"
+    # Hydration reads the RAW per-profile config, NOT the managed overlay (§D7): the keys must live in raw config.
+    managed = _load_managed(out_osh)
+    assert "onecli" not in (managed.get("secrets") or {}), "managed fragment must NOT carry secrets.onecli"
+    msettings = _onecli_settings(managed)
+    assert "proxy_rewrite" not in msettings and "ca_bundle" not in msettings, \
+        "managed fragment must NOT carry proxy_rewrite/ca_bundle"
+    # The container baseline already enables onecli; only the three chain-dial fields are excluded.
+    f62_specs = sorted(p for p in (root / "tests" / "e2e-scenarios" / "FLEET-F62").rglob("coworker-types.yaml"))
+    assert f62_specs, "FLEET-F62 spec (container substrate) not found (batch5_merged is the dispatch gate)"
+    out_f62 = tmp_path / "out_container"
+    _run_coworker(manager, ["compose", str(f62_specs[0]), "--out", str(out_f62)])
+    for prof, cfg in _read_rendered_configs(out_f62).items():
+        onecli = ((cfg.get("secrets") or {}).get("onecli") or {})
+        assert "override_existing" not in onecli, f"{prof}: container render must not carry chain-dial override_existing"
+        cset = _onecli_settings(cfg)
+        assert "proxy_rewrite" not in cset and "ca_bundle" not in cset, \
+            f"{prof}: container render must not carry chain-dial proxy_rewrite/ca_bundle (openshell-only)"
+
+
+def test_ac_osh_f64_8(tmp_path, monkeypatch):
+    """AC-OSH-F64-8: proxy_rewrite rewrites the OneCLI proxy host:port to the chain addr, preserving credential userinfo."""
+    OneCLISecretSource, oneclient, _ = _load_onecli(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        oneclient, "get_container_config",
+        lambda *, agent: {"env": {"HTTPS_PROXY": "http://user:aoc_tok@host.docker.internal:10255"}},
+    )
+    src = OneCLISecretSource(proxy_rewrite="127.0.0.1:18255")
+    result = src.fetch({}, str(tmp_path / "onecli_home"))
+    for name in _PROXY_SPELLINGS:
+        assert result.secrets.get(name) == "http://user:aoc_tok@127.0.0.1:18255", \
+            f"{name}: host:port rewritten to the chain, userinfo (user:aoc_tok) intact"
+
+
+def test_ac_osh_f64_9(tmp_path, monkeypatch):
+    """AC-OSH-F64-9: with proxy_rewrite explicitly unset the source copies the OneCLI proxy verbatim (opt-in optional)."""
+    OneCLISecretSource, oneclient, _ = _load_onecli(tmp_path, monkeypatch)
+    returned = "http://user:aoc_tok@host.docker.internal:10255"
+    monkeypatch.setattr(oneclient, "get_container_config", lambda *, agent: {"env": {"HTTPS_PROXY": returned}})
+    src = OneCLISecretSource(proxy_rewrite=None)
+    result = src.fetch({}, str(tmp_path / "onecli_home"))
+    for name in _PROXY_SPELLINGS:
+        assert result.secrets.get(name) == returned, f"{name}: proxy copied verbatim when proxy_rewrite unset"
+    assert not any(n in result.secrets for n in _CA_ENV_NAMES), "no CA names forced when ca_bundle unset"
+
+
+def test_ac_osh_f64_10(tmp_path, monkeypatch):
+    """AC-OSH-F64-10: ca_bundle forces the four CA env names; rewrite mode forces only proxy+CA keys, not bootstrap creds."""
+    OneCLISecretSource, oneclient, _ = _load_onecli(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        oneclient, "get_container_config",
+        lambda *, agent: {"env": {
+            "HTTPS_PROXY": "http://user:aoc_tok@host.docker.internal:10255",
+            "ANTHROPIC_API_KEY": "bootstrap-key", "NO_PROXY": "localhost", "ONECLI_API_KEY": "onecli-secret",
+        }},
+    )
+    src = OneCLISecretSource(proxy_rewrite="127.0.0.1:18255", ca_bundle="/etc/osh-lane/ca-bundle.pem")
+    result = src.fetch({}, str(tmp_path / "onecli_home"))
+    for name in _CA_ENV_NAMES:
+        assert result.secrets.get(name) == "/etc/osh-lane/ca-bundle.pem", f"{name}: forced to the ca_bundle path"
+    forced = set(result.secrets)
+    assert forced == set(_PROXY_SPELLINGS) | set(_CA_ENV_NAMES), \
+        f"rewrite mode forces EXACTLY the proxy + CA keys, got {sorted(forced)}"
+    assert "ANTHROPIC_API_KEY" not in forced and "NO_PROXY" not in forced, \
+        "bootstrap creds / NO_PROXY are not in the forced (overridable) set — override_existing cannot clobber them"
+
+
+def test_onecli_registered_source_overrides_ambient(tmp_path, monkeypatch):
+    """register(ctx) wires the rendered settings into the REGISTERED source; apply_all with override_existing replaces the inherited ambient proxy, preserving carve-outs."""
+    OneCLISecretSource, oneclient, _manager = _load_onecli(
+        tmp_path, monkeypatch,
+        settings={"proxy_rewrite": "127.0.0.1:18255", "ca_bundle": "/etc/osh-lane/ca-bundle.pem"},
+    )
+    monkeypatch.setattr(
+        oneclient, "get_container_config",
+        lambda *, agent: {"env": {
+            "HTTPS_PROXY": "http://user:aoc_tok@host.docker.internal:10255",
+            "ANTHROPIC_API_KEY": "bootstrap-key", "ONECLI_API_KEY": "onecli-secret",
+        }},
+    )
+    from agent.secret_sources import registry as sr
+
+    ambient = {name: "http://10.200.0.1:3128" for name in _PROXY_SPELLINGS}
+    ambient.update({"ANTHROPIC_API_KEY": "bootstrap-key", "NO_PROXY": "localhost", "ONECLI_API_KEY": "bootstrap-onecli"})
+    # preserve_existing is a TOP-LEVEL secrets key (registry reads secrets_cfg.get("preserve_existing")).
+    sr.apply_all(
+        {"preserve_existing": ["ANTHROPIC_API_KEY"], "onecli": {"enabled": True, "override_existing": True}},
+        str(tmp_path / "onecli_home"), environ=ambient,
+    )
+    for name in _PROXY_SPELLINGS:
+        assert ambient.get(name) == "http://user:aoc_tok@127.0.0.1:18255", \
+            f"{name}: override_existing replaces the inherited denied ambient proxy with the token-bearing chain URL"
+    for name in _CA_ENV_NAMES:
+        assert ambient.get(name) == "/etc/osh-lane/ca-bundle.pem", f"{name}: forced to the ca_bundle path"
+    assert ambient["ANTHROPIC_API_KEY"] == "bootstrap-key", "preserve_existing carve-out honoured"
+    assert ambient["NO_PROXY"] == "localhost", "NO_PROXY untouched (source forces only proxy+CA keys)"
+    assert ambient["ONECLI_API_KEY"] == "bootstrap-onecli", "protected ONECLI_API_KEY not overwritten by the returned onecli-secret"
