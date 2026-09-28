@@ -11918,13 +11918,25 @@ def claim_unseen_events_for_sub(
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT last_event_id FROM kanban_notify_subs "
+            "SELECT last_event_id, claimed_by, lease_until FROM kanban_notify_subs "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (task_id, platform, chat_id, thread_id or ""),
         ).fetchone()
         if row is None:
             return 0, 0, []
         old_cursor = int(row["last_event_id"])
+        # An active durable lease (claimed_by set, not yet expired) owns this
+        # event range under peek-then-advance: the default claim path must not
+        # advance past or re-deliver an event a durable drainer is delivering.
+        # Reachable when a sub is switched durable->default while a durable
+        # delivery is in flight. Only an expired/absent lease is claimable here.
+        lease_until = row["lease_until"]
+        if (
+            row["claimed_by"] is not None
+            and lease_until is not None
+            and int(lease_until) > int(time.time())
+        ):
+            return old_cursor, old_cursor, []
         new_cursor, events = unseen_events_for_sub(
             conn,
             task_id=task_id,
@@ -11981,7 +11993,9 @@ def claim_notify_sub_lease(
     guarantee the default (``claim_unseen_events_for_sub``) path gets from the
     writer lock. Succeeds only when the row is still at ``expected_cursor`` and
     is either unclaimed or its prior lease has expired (``lease_until <= now``,
-    reclaim after a dead drainer). Returns ``True`` iff this call took the lease.
+    reclaim after a dead drainer), AND the row is still ``retry_policy='durable'``
+    — so a sub switched to a non-durable policy after this drainer's snapshot
+    cannot be claimed here. Returns ``True`` iff this call took the lease.
     """
     with write_txn(conn):
         cur = conn.execute(
@@ -11989,6 +12003,7 @@ def claim_notify_sub_lease(
             "SET claimed_by = ?, lease_until = ? "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
             "AND last_event_id = ? "
+            "AND LOWER(retry_policy) = 'durable' "
             "AND (claimed_by IS NULL OR lease_until <= ?)",
             (token, int(lease_until), task_id, platform, chat_id, thread_id or "",
              int(expected_cursor), int(now)),
