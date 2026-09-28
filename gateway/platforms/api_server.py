@@ -5318,6 +5318,14 @@ class APIServerAdapter(BasePlatformAdapter):
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
+            # Persist-gating the idempotency cache is OPT-IN: only a caller that
+            # sends X-Hermes-Require-Persist:1 (the durable wake self-post, see
+            # gateway/wake.py) wants an UNPERSISTED turn kept OUT of the cache so
+            # its same-key retry re-runs until the turn commits. Every other
+            # Idempotency-Key client keeps the upstream default (cache any
+            # completed result), so an unpersisted 200 is served from cache on
+            # retry instead of re-running an expensive turn.
+            require_persist = request.headers.get("X-Hermes-Require-Persist") == "1"
             fp = _make_request_fingerprint(
                 body,
                 keys=[
@@ -5330,20 +5338,28 @@ class APIServerAdapter(BasePlatformAdapter):
                     "stream",
                 ],
             )
+            if require_persist:
+                # Keep the two cache modes disjoint: a same-key request that
+                # flips the mode must not be served a result cached under the
+                # other mode (a durable retry given a non-durable unpersisted
+                # answer, or vice versa).
+                fp = f"{fp}:require-persist"
+
+            def _cache_if_persisted(r):
+                # A real agent turn always reports turn_persisted (True/False);
+                # caching a missing/None/False result would serve a same-key
+                # durable retry a non-durable answer for the 300s TTL.
+                return (
+                    isinstance(r, tuple)
+                    and len(r) >= 1
+                    and isinstance(r[0], dict)
+                    and r[0].get("turn_persisted") is True
+                )
+
             try:
                 result, usage = await _idem_cache.get_or_set(
                     idempotency_key, fp, _compute_completion,
-                    # Cache ONLY a turn confirmed persisted: a real agent turn
-                    # always reports turn_persisted (True/False), so caching a
-                    # missing/None/False result would serve a same-key retry
-                    # (e.g. a durable wake) a non-durable answer for the 300s TTL
-                    # instead of re-running it.
-                    cache_if=lambda r: (
-                        isinstance(r, tuple)
-                        and len(r) >= 1
-                        and isinstance(r[0], dict)
-                        and r[0].get("turn_persisted") is True
-                    ),
+                    cache_if=_cache_if_persisted if require_persist else None,
                 )
             except Exception as e:
                 logger.error(
