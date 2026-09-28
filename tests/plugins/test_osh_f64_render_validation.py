@@ -280,8 +280,7 @@ def test_openshell_onecli_secret_ids_valid_returned():
 def test_container_onecli_secret_ids_rejects_empty(tmp_path):
     """The reject-[] guard holds on the CONTAINER substrate too (via compose(), not only the
     openshell validator that a container spec never reaches) — a container spec cannot silently
-    ship an empty grant list. A VALID container value composes fine and is ignored (frozen
-    test_ac_osh_f64_11 part 2 covers that positive)."""
+    ship an empty grant list."""
     c = _compose()
     source = _repo_root() / "tests" / "e2e-scenarios" / "FLEET-F62" / "spec" / "podman"
     spec_dir = tmp_path / "spec"

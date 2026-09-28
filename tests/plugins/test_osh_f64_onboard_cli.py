@@ -4,7 +4,7 @@
 hermes-main consumes the FIRST ``-p``/``--profile`` in argv as the GLOBAL profile
 selector and strips it before argparse (``hermes_cli/main.py`` ``_apply_profile_override``
 :586-590 breaks on the first match, :719-722 strips it). So the correct form sets the
-onboarding context to ``default`` (whose config carries the render-populated grant map)
+onboarding context to ``default`` (whose config carries the configured grant map)
 and leaves the onboard handler's own ``--profile <role>`` intact; a bare
 ``hermes onecli-onboard --profile <role>`` loses the handler's required flag AND sets the
 wrong (role) context. This drives the REGISTERED command (its setup_fn + handler_fn from
@@ -84,16 +84,14 @@ def test_onecli_onboard_cli_default_context(tmp_path, monkeypatch):
         entry["setup_fn"](p)
         return p
 
-    # --- Case A: the correct form -------------------------------------------------------
     monkeypatch.setattr(sys, "argv",
                         ["hermes", "-p", "default", "onecli-onboard", "--profile", "builder"])
     hmain._apply_profile_override()
-    assert os.environ["HERMES_HOME"] == str(home)                       # onboarding context = the gateway root
-    assert sys.argv == ["hermes", "onecli-onboard", "--profile", "builder"]  # only `-p default` was stripped
+    assert os.environ["HERMES_HOME"] == str(home)
+    assert sys.argv == ["hermes", "onecli-onboard", "--profile", "builder"]
     ns = _subparser().parse_args(sys.argv[2:])
-    assert ns.profile == "builder"                                      # the handler's own flag survives
+    assert ns.profile == "builder"
 
-    # the registered handler consumes the render-populated grant map and dispatches it
     calls: dict = {}
     monkeypatch.setattr(module.oneclient, "ensure_agent",
                         lambda identifier: calls.__setitem__("ensure", identifier))
@@ -104,10 +102,9 @@ def test_onecli_onboard_cli_default_context(tmp_path, monkeypatch):
     assert calls["ensure"] == "builder"
     assert calls["set"] == ("builder", ["Anthropic-Dev"])
 
-    # --- Case B: the bare form (wrong) --------------------------------------------------
     monkeypatch.setattr(sys, "argv", ["hermes", "onecli-onboard", "--profile", "builder"])
     hmain._apply_profile_override()
-    assert os.environ["HERMES_HOME"] == str(home / "profiles" / "builder")  # WRONG context: role, not default
-    assert sys.argv == ["hermes", "onecli-onboard"]                     # the required --profile was consumed as the selector
+    assert os.environ["HERMES_HOME"] == str(home / "profiles" / "builder")
+    assert sys.argv == ["hermes", "onecli-onboard"]
     with pytest.raises(SystemExit):
-        _subparser().parse_args(sys.argv[2:])                          # onboard handler's --profile is now missing
+        _subparser().parse_args(sys.argv[2:])
