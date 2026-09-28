@@ -1,6 +1,6 @@
 """Acceptance test for OSH-F64 — Fleet under OpenShell (P7 demo).
 
-One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10); AC-3/4
+One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10, 11); AC-3/4
 (live) and AC-5 (ui) are proven by their scenario files. Loads nv-coworker-compose from an
 isolated HERMES_HOME via the real discovery path, asserts registration, then
 drives the behaviour. Behaviour contract, not a byte snapshot
@@ -229,7 +229,7 @@ def _drop_substrate_managed(managed: dict) -> dict:
     return out
 
 
-def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False) -> dict:
+def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False, strip_secret_sets: bool = False) -> dict:
     """Config with the substrate surface removed: terminal.*, the veto's expected_backend
     delta, and the container-only top-level proxy belt the openshell substrate skips.
 
@@ -260,6 +260,13 @@ def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False) -> dict:
         if isinstance(onecli_set, dict):
             onecli_set.pop("proxy_rewrite", None)
             onecli_set.pop("ca_bundle", None)
+    if strip_secret_sets:
+        # §D7.1: the openshell render populates profile_secret_sets on the default/gateway config
+        # from egress.onecli_secret_ids; the FLEET-F62 baseline keeps []. Strip it from both sides
+        # of the default comparison so the rest of the config is still compared for equality.
+        onecli_set = (((out.get("plugins") or {}).get("entries") or {}).get("podman-onecli") or {}).get("settings")
+        if isinstance(onecli_set, dict):
+            onecli_set.pop("profile_secret_sets", None)
     return out
 
 
@@ -788,7 +795,7 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         # skills.external_dirs is NOT dropped: it must survive the substrate flip (declared under
         # each coworker type's config.skills.external_dirs, not the spine/default), so the equality
         # below checks it on both sides — the coworkers carry it, the default carries none.
-        assert _non_substrate(osh_cfgs[prof], strip_chain_dial=(prof != "default")) == _non_substrate(baseline[prof]), (
+        assert _non_substrate(osh_cfgs[prof], strip_chain_dial=(prof != "default"), strip_secret_sets=(prof == "default")) == _non_substrate(baseline[prof], strip_secret_sets=(prof == "default")), (
             f"{prof}: non-substrate config drifted from the committed FLEET-F62 render"
         )
     # managed fragment: identical except the three documented substrate deltas. Bound the
@@ -1037,6 +1044,45 @@ def test_ac_osh_f64_10(tmp_path, monkeypatch):
         f"rewrite mode forces EXACTLY the proxy + CA keys, got {sorted(forced)}"
     assert "ANTHROPIC_API_KEY" not in forced and "NO_PROXY" not in forced, \
         "bootstrap creds / NO_PROXY are not in the forced (overridable) set — override_existing cannot clobber them"
+
+
+def test_ac_osh_f64_11(tmp_path, monkeypatch):
+    """AC-OSH-F64-11: openshell render populates profile_secret_sets with the inference secret (not []), per served profile."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch)
+    manager = _load_manager()
+    assert yaml is not None
+
+    # 1. The SHIPPED OSH-F64 spec (unmodified) must render each served profile's grant to the inference
+    #    secret — catches a spec that ships egress.onecli_secret_ids missing/[] (which would 401 at re-verify).
+    osh_spec = _osh_spec(root)
+    out_osh = tmp_path / "out_openshell"
+    _run_coworker(manager, ["compose", str(osh_spec), "--out", str(out_osh)])
+    # The onboard grant map lives on the default/gateway config, where onecli-onboard reads it (§D7.1).
+    pss = _onecli_settings(_read_rendered_configs(out_osh)["default"]).get("profile_secret_sets") or {}
+    for prof in COWORKERS:
+        assert pss.get(prof) == ["Anthropic-Dev"], (
+            f"shipped OSH-F64 spec: default profile_secret_sets[{prof}] must grant the inference secret "
+            f"['Anthropic-Dev'] under openshell (not []), got {pss.get(prof)!r}"
+        )
+
+    # 2. The openshell gate holds: injecting egress.onecli_secret_ids into the non-openshell FLEET-F62 spec
+    #    must NOT populate the grant map — catches a renderer that populates regardless of substrate.
+    f62_specs = sorted(p for p in (root / "tests" / "e2e-scenarios" / "FLEET-F62").rglob("coworker-types.yaml"))
+    assert f62_specs, "FLEET-F62 spec (container substrate) not found"
+    f62_dir = tmp_path / "spec_f62"
+    shutil.copytree(f62_specs[0].parent, f62_dir)
+    f62_file = f62_dir / f62_specs[0].name
+    f62_doc = yaml.safe_load(f62_file.read_text(encoding="utf-8")) or {}
+    f62_doc.setdefault("egress", {})["onecli_secret_ids"] = ["osh-f64-test-secret"]
+    f62_file.write_text(yaml.safe_dump(f62_doc), encoding="utf-8")
+    out_f62 = tmp_path / "out_container"
+    _run_coworker(manager, ["compose", str(f62_file), "--out", str(out_f62)])
+    f62_pss = _onecli_settings(_read_rendered_configs(out_f62)["default"]).get("profile_secret_sets") or {}
+    assert {r: f62_pss.get(r) for r in COWORKERS} == {r: [] for r in COWORKERS}, (
+        f"container render must IGNORE egress.onecli_secret_ids (openshell gate): every served profile's grant "
+        f"must stay [], got {f62_pss!r}"
+    )
 
 
 def test_onecli_registered_source_overrides_ambient(tmp_path, monkeypatch):
