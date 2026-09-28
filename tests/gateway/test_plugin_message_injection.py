@@ -816,11 +816,10 @@ def _mk_task_and_durable_push_sub():
             conn, title="push-durable", assignee="p", idempotency_key="push-durable-1",
         )
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        # GOV-F25.b Fix 3 refuses retry_policy='durable' on a push transport at
-        # add_notify_sub, so create the row as 'default' and set 'durable'
-        # directly. This still exercises the runtime push-guard as defence-in-
-        # depth (a durable-push row that reached the delivery path some other
-        # way) without tripping the new source-side validation.
+        # add_notify_sub refuses retry_policy='durable' on a push transport, so
+        # create the row as 'default' and set 'durable' directly — exercising the
+        # runtime push-guard as defence-in-depth (a durable-push row that reached
+        # the delivery path) without tripping the source-side validation.
         kb.add_notify_sub(
             conn, task_id=task_id, platform="telegram", chat_id="tg-chat-1",
             notifier_profile="p", chat_type="group",

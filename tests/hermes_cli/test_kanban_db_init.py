@@ -279,10 +279,8 @@ def test_durable_lease_columns_added_nullable_on_legacy_db(tmp_path, monkeypatch
     with kb.connect(db_path) as conn:
         cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
         assert "claimed_by" in cols and "lease_until" in cols
-        # Nullable: PRAGMA notnull flag is 0 for both.
         assert cols["claimed_by"]["notnull"] == 0
         assert cols["lease_until"]["notnull"] == 0
-        # The pre-existing sub upgraded unclaimed.
         row = conn.execute(
             "SELECT claimed_by, lease_until FROM kanban_notify_subs "
             "WHERE task_id = 'task-1'"

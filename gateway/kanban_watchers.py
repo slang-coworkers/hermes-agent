@@ -1307,14 +1307,14 @@ class GatewayKanbanWatchersMixin:
             )
             return
 
-        # A single deliver_wake envelope can run up to WAKE_TURN_TIMEOUT_SECONDS
-        # per attempt across 1 + len(_RETRY_DELAYS_SECONDS) attempts; hold the
-        # owner-fenced lease comfortably beyond that whole envelope so it can
-        # never expire mid-delivery and let a second drainer double-deliver.
-        # (Chosen: a fixed generous lease, not a heartbeat.) Only true process
-        # death — where no handler runs to release the lease — waits out this
-        # expiry; recovery is then at-least-once (the persist ack + stable
-        # per-event Idempotency-Key dedup the redelivery), never a lost event.
+        # Hold the owner-fenced lease comfortably beyond the whole deliver_wake
+        # envelope (WAKE_TURN_TIMEOUT_SECONDS per attempt across 1 +
+        # len(_RETRY_DELAYS_SECONDS) attempts) so it can never expire
+        # mid-delivery and let a second drainer double-deliver. Only true
+        # process death — no handler runs to release the lease — waits out this
+        # expiry, and recovery is then at-least-once: the persist ack blocks a
+        # cursor advance, but the finite idempotency cache cannot guarantee
+        # dedup once the lease has outlived the cache TTL.
         lease_seconds = int(
             WAKE_TURN_TIMEOUT_SECONDS * (1 + len(_RETRY_DELAYS_SECONDS))
             + sum(_RETRY_DELAYS_SECONDS)

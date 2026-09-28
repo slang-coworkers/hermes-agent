@@ -167,9 +167,9 @@ def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
     assert seen["path"] == "/p/gov-f25-owner/v1/chat/completions"
     assert seen["idem"] == "o/r#7:D1"
     assert seen["session_id"] == "owner-sid"
-    # GOV-F25.b Fix 2: a durable caller (require_persist_ack=True) sends the
-    # opt-in header so the api_server idempotency cache keeps an unpersisted
-    # turn out of cache and re-runs the same-key retry until it commits.
+    # A durable caller (require_persist_ack=True) sends the opt-in header so the
+    # api_server idempotency cache keeps an unpersisted turn out of cache and
+    # re-runs the same-key retry until it commits.
     assert seen["require_persist"] == "1"
 
 
