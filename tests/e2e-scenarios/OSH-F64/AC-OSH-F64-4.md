@@ -38,15 +38,33 @@ Provision `osh-f64-gw` (`openshell sandbox create --name osh-f64-gw --from
 osh-f64-gateway:pinned --policy /workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml`,
 the pinned GATEWAY image, §D1 — built from base `nemoclaw-hermes-sandbox:local` + fork core
 @95de5f78; the `orchestrator`/`builder` worker sandboxes create
-`--from localhost/hermes-openshell-sandbox:pinned`), start its Hermes gateway and capture its
-loopback credential URL as `$GW_URL`; then, inside `osh-f64-gw` and BEFORE the installer, seed the
-managed dir with the §D6 scan guard (`export HERMES_MANAGED_DIR=/sandbox/.hermes/managed && mkdir
--p $HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/`, LANE v2 — the
-pre-seeded managed carries `plugins.scan_on_install: false`); then run `install-into-sandbox.sh
-<spec> --ref <sha> --gateway-url "$GW_URL"` (a real run requires `--gateway-url`) so `orchestrator` +
-`builder` are served with their worker sandboxes Ready; both have a live OneCLI agent; the
-fleet-admin veto (`nv-fleet-gates`, `enforce_sandbox: true`, orchestrator-only admin) is live
-from the composed spec. No fixture is re-installed here.
+`--from localhost/hermes-openshell-sandbox:pinned`). Inside `osh-f64-gw` and BEFORE the installer,
+in this ORDER:
+1. Seed the managed dir with the §D6 scan guard: `export HERMES_MANAGED_DIR=/sandbox/.hermes/managed
+   && mkdir -p $HERMES_MANAGED_DIR && cp /tmp/osh-lane/managed/config.yaml $HERMES_MANAGED_DIR/` (the
+   pre-seeded managed carries `plugins.scan_on_install: false`).
+2. Make the per-worker policies HOST-readable for the broker (LANE v4, §D3 `--policy-root`):
+   (a) run the staged `installer.py phase-a --spec <spec> --ref <sha>` so `hermes coworker` exists;
+   (b) render gateway-internally WITHOUT provisioning —
+   `openshell sandbox exec osh-f64-gw -- sh -lc 'hermes coworker compose <spec> --out "$HERMES_HOME/.osh-f64/render"'`;
+   (c) mirror each rendered policy to the host testbed root via a QUOTED remote shell (so `$HERMES_HOME`
+   expands INSIDE the sandbox, not on the host) — `mkdir -p /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>`
+   then `openshell sandbox exec osh-f64-gw -- sh -lc 'cat "$HERMES_HOME/.osh-f64/render/<role>/policy-<role>.yaml"' > /workspace/extra/hermes-fleet-testbed/osh-f64/render/<role>/policy-<role>.yaml`
+   for `orchestrator` and `builder`.
+3. Bring the gateway up for Phase B: `export HERMES_DASHBOARD_SESSION_TOKEN=<token>` BEFORE starting
+   `hermes serve` (web_server.py:589 — a bare `hermes serve` surfaces no token and the WS `/api/ws`
+   upgrade still validates `?token` despite `auth_required:false`), start the sandbox's `hermes serve`
+   messaging gateway, wait for readiness, and capture
+   `$GW_URL=ws://127.0.0.1:<port>/api/ws?token=$HERMES_DASHBOARD_SESSION_TOKEN` (Phase B's live-WS
+   preflight and room creation run against it, so the gateway MUST be up before the full install).
+
+Then run `install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL" --policy-root
+/workspace/extra/hermes-fleet-testbed/osh-f64` (Phase A idempotently re-skips the staged phase-a;
+Phase B composes + provisions `orchestrator` + `builder` via `openshell sandbox create --policy
+<root>/render/<role>/policy-<role>.yaml` + creates rooms against the live gateway + restarts) so both
+are served with their worker sandboxes Ready; both have a live OneCLI agent; the fleet-admin veto
+(`nv-fleet-gates`, `enforce_sandbox: true`, orchestrator-only admin) is live from the composed spec.
+No fixture is re-installed here.
 
 ## Steps
 1. Human → orchestrator Bot Chat: "run change P7-<nonce>" (`message_agent` in the one
