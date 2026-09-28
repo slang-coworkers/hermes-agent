@@ -68,6 +68,16 @@ are served with their worker sandboxes Ready; both have a live OneCLI agent; the
 (`nv-fleet-gates`, `enforce_sandbox: true`, orchestrator-only admin) is live from the composed spec.
 No fixture is re-installed here.
 
+**Grant preflight (§D7.1):** confirm the `orchestrator` and `builder` `HERMES_HOME` basenames each
+match a OneCLI identity GRANTED the inference secret. The openshell render populates the
+default/gateway `profile_secret_sets[<role>]` = `["Anthropic-Dev"]` (from `egress.onecli_secret_ids`),
+which the deploy's `onecli-onboard` reads to grant each identity. Do NOT run `onecli-onboard`
+against a `profile_secret_sets` entry left `[]` — `set_secrets([])` REVOKES that identity's grant →
+the served turn 401s. If (re)onboarding is needed, run `hermes -p default onecli-onboard --profile
+<role>` from the gateway root (a bare `hermes onecli-onboard --profile <role>` is stripped by
+hermes-main → wrong context + missing required flag). With the grant present the turns expect a
+200; a 401 is a fault to diagnose (grant / identity / token-bearing route / CA), not tolerated.
+
 ## Steps
 1. Human → orchestrator Bot Chat: "run change P7-<nonce>" (`message_agent` in the one
    gateway; NO a2a) → expect: orchestrator accepts (coordination turn; no terminal yet).

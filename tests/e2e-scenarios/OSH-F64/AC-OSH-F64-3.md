@@ -50,6 +50,17 @@ profile exists — 5 (orchestrator/architect/builder/tester/reviewer); the gatew
 profile issues no live turn so it needs no dedicated OneCLI agent (operator prerequisite). No
 fixture is re-installed here — the tester has already installed the `fixtures:` list.
 
+**Grant preflight (§D7.1):** confirm each served profile's `HERMES_HOME` basename matches a
+OneCLI identity GRANTED the inference secret. The openshell render populates the default/gateway
+`profile_secret_sets[<role>]` = `["Anthropic-Dev"]` (from `egress.onecli_secret_ids`), which the
+deploy's `onecli-onboard` reads to grant each identity. Do NOT run `onecli-onboard` against a
+`profile_secret_sets` entry left `[]` — `set_secrets([])` REVOKES that identity's grant → the
+served turn 401s. If (re)onboarding is needed, run `hermes -p default onecli-onboard --profile
+<role>` from the gateway root (a bare `hermes onecli-onboard --profile <role>` is stripped by
+hermes-main → wrong context + missing required flag). With the grant present the live turn
+expects a 200; a 401 is a fault to diagnose (grant / identity match / token-bearing route / CA),
+not a tolerated state.
+
 Then, BEFORE the installer, in this ORDER — steps 1, 2a, and 3 run INSIDE `osh-f64-gw`; the render +
 host-mirror in 2b–2c are HOST-lane commands (`openshell sandbox exec`, host `mkdir`, host redirection)
 that reach into the sandbox:
