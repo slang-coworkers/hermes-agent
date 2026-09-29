@@ -564,3 +564,28 @@ def test_sandbox_list_failure_does_not_create(tmp_path, monkeypatch):
     with pytest.raises(subprocess.CalledProcessError):
         inst._execute_step(create_steps[0], {"home": str(tmp_path)})
     assert not created, "no sandbox create may be issued when the existence check fails"
+
+
+def test_sandbox_exists_reads_list_name_column(monkeypatch):
+    """The real _sandbox_exists parser reads the NAME (first) column of `openshell sandbox
+    list`: a listed sandbox is present, an unlisted one absent."""
+    import subprocess
+    inst = _installer()
+    listing = (
+        "NAME              CREATED              PHASE\n"
+        "osh-f64-gw        2026-09-29 11:54:52  Ready\n"
+        "osh-f64-builder   2026-09-29 11:55:10  Ready\n"
+    )
+
+    def _fake_run(cmd, *args, **kwargs):
+        assert list(cmd) == ["openshell", "sandbox", "list"]
+
+        class _CP:
+            returncode = 0
+            stdout = listing
+
+        return _CP()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert inst._sandbox_exists("osh-f64-builder") is True
+    assert inst._sandbox_exists("osh-f64-tester") is False

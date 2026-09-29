@@ -432,10 +432,8 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
     # policy set` step; the provision plan is the 15-line no-policy shape (5 create + 5
     # ssh-config + 5 delete). The
     # teardown suffix (sandbox delete) is reserved for rollback and never appears in the
-    # install plan. Sandbox names mirror compose's <project>-<role> ssh_host. One sandbox
-    # create + one ssh-config per served coworker; apply-time idempotence (skip a sandbox that
-    # already exists) lives in _execute_step via _sandbox_exists, so profile-installed state is
-    # never conflated with sandbox existence.
+    # install plan. Sandbox names mirror compose's <project>-<role> ssh_host. A profile can
+    # exist without its sandbox, so _sandbox_exists is checked at apply time.
     project = spec.get("project") or "fleet"
     image = (spec.get("egress") or {}).get("sandbox_image") or "localhost/hermes-openshell-sandbox:pinned"
     for role in roles:
