@@ -291,3 +291,24 @@ def test_container_onecli_secret_ids_rejects_empty(tmp_path):
     spec_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(c.CompositionError, match="onecli_secret_ids"):
         c.compose(str(spec_path), str(tmp_path / "out"))
+
+
+# --- OSH-F64 §D8 route 1: disable the bundled firecrawl providers ----------------------
+
+def test_disable_firecrawl_providers_append_if_absent_idempotent():
+    """The §D8 helper appends web-firecrawl + browser-firecrawl to plugins.disabled, preserves
+    an operator-set disable, dedups, and is a no-op on re-call (order-stable, idempotent)."""
+    c = _compose()
+    cfg = {"plugins": {"disabled": ["operator-block", "web-firecrawl"]}}
+    c._disable_firecrawl_providers(cfg)
+    assert cfg["plugins"]["disabled"] == ["operator-block", "web-firecrawl", "browser-firecrawl"]
+    c._disable_firecrawl_providers(cfg)
+    assert cfg["plugins"]["disabled"] == ["operator-block", "web-firecrawl", "browser-firecrawl"]
+
+
+def test_disable_firecrawl_providers_creates_list():
+    """On a config with no plugins.disabled the helper creates it with exactly the two providers."""
+    c = _compose()
+    cfg: dict = {}
+    c._disable_firecrawl_providers(cfg)
+    assert cfg["plugins"]["disabled"] == ["web-firecrawl", "browser-firecrawl"]

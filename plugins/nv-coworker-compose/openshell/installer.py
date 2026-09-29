@@ -242,6 +242,17 @@ def _desired_default(
             # Deep-merge onto any existing settings so an unrelated operator key on the
             # same entry survives (never a wholesale replace).
             desired[f"plugins.entries.{name}.settings"] = _deep_merge(base, settings)
+    # §D8 route 1: the render disables the firecrawl providers on the five served configs
+    # (installed via `profile install`), but the gateway default is edited in place here, so
+    # union plugins.disabled onto it too — else the multiplex HOST still loads firecrawl.
+    # Order-stable + dedup'd so a re-run is a no-op (the idempotence AC-1 asserts), and an
+    # operator-set disable is preserved.
+    have_disabled, cur_disabled = _get_dotted(existing, "plugins.disabled")
+    merged_disabled = list(cur_disabled) if have_disabled and isinstance(cur_disabled, list) else []
+    for name in ("web-firecrawl", "browser-firecrawl"):
+        if name not in merged_disabled:
+            merged_disabled.append(name)
+    desired["plugins.disabled"] = merged_disabled
     return desired
 
 

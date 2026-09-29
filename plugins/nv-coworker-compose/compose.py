@@ -3102,6 +3102,20 @@ def _inject_self_plugin(config: Dict[str, Any], orchestrator_profile: str) -> No
     settings["orchestrator_profile"] = orchestrator_profile
 
 
+_FIRECRAWL_DISABLE = ("web-firecrawl", "browser-firecrawl")
+
+
+def _disable_firecrawl_providers(config: Dict[str, Any]) -> None:
+    # `plugins.disabled` matches a bundled backend by manifest name and wins ahead of the
+    # bundled-backend auto-load, so disabling the firecrawl providers stops the multiplex
+    # boot warm-up from reading their unscoped FIRECRAWL_API_KEY (§D8). Append-if-absent
+    # preserves any operator-set disable and keeps a re-render idempotent.
+    disabled = config.setdefault("plugins", {}).setdefault("disabled", [])
+    for name in _FIRECRAWL_DISABLE:
+        if name not in disabled:
+            disabled.append(name)
+
+
 def _merged_spine_config(spines: Dict[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for spine in spines.values():
@@ -3602,6 +3616,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
             _enforce_openshell_chain_dial(resolved["config"], tname,
                                           openshell_params["chain_addr"],
                                           openshell_params["ca_bundle"])
+            _disable_firecrawl_providers(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
@@ -3629,6 +3644,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
     if is_remote and openshell_params.get("onecli_secret_ids") is not None:
         _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
+    if is_remote:
+        _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
