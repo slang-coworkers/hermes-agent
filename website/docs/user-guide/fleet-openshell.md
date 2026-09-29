@@ -336,6 +336,17 @@ plan is byte-for-byte unchanged. The script:
   reinstalled.
 - It creates the fleet rooms and wires, then restarts the gateway via the shipped
   `hermes gateway restart`.
+- **Post-install Bot-Mode onboarding (required for `message_agent`).** After the gateway is
+  up, the operator runs the fleet onboard step from the default gateway context —
+  `hermes -p default onboard coworker <spec> --gateway-url "$GW_URL"` — which creates each
+  served coworker's **canonical Bot Chat** session and its `ui_meta['hermes-bots']` roster
+  entry. `message_agent`'s tool schema is injected ONLY into a coworker's canonical Bot Chat,
+  so without this step the served bots hold no Bot Chat and `message_agent` (bot-to-bot
+  delivery) is unreachable fleet-wide; the installer's rooms (`groups.create`) and wires do
+  NOT create it. Run it as `-p default`, never profile-scoped (a profile-scoped invocation
+  would re-render SSH-key paths relative to the wrong `HERMES_HOME`); it force-re-renders the
+  served distributions, so confirm the post-onboard per-role config is unchanged (SSH, OneCLI
+  chain-dial, the disabled firecrawl providers, the enabled plugins).
 - The dashboard or desktop app then attaches to the running gateway through the desktop
   forward (`openshell forward start <29xxx-port> osh-f64-gw` — brokered, `-d`, bind
   `172.17.0.1`, port in 29000–29999) — one gateway connection for the whole app, listing

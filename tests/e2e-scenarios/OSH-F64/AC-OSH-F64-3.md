@@ -109,12 +109,22 @@ that reach into the sandbox:
    `--policy` path is the one captured in step 1's `provision-plan.txt`) → expect: each worker sandbox
    is Ready under its rendered policy.
 3. Drive a live turn as served coworker A (`architect`) **through architect's own
-   profile-scoped chat child** that issues a `terminal` call writing+reading a nonce and
-   running `hostname; id -u` → expect: executes inside `osh-f64-architect` (nonce
-   round-trips; `hostname`/`id -u` differ from `osh-f64-gw`'s and from coworker B's sandbox).
-4. Repeat step 3 as served coworker B (`builder`) through B's own profile-scoped child →
-   expect: executes inside `osh-f64-builder` (distinct `hostname`/`id -u`), proving
-   per-profile sandbox routing in the one multiplexed gateway.
+   profile-scoped chat child** that FIRST issues a `write_file` tool call to
+   `.hermes/plans/architect.md` (the fork `nv-fleet-gates` plan-first `pre_tool_call` gate —
+   `plugins/nv-fleet-gates/__init__.py:409-416`, `plan_gate` default True — exempts AND
+   records `has_plan` ONLY for a `write_file`/`patch` whose path `is_plan_path`; a `terminal`
+   `>` to a plan path is NOT exempt and records no plan because `predicates.target_path`
+   returns None for `terminal` — `predicates.py:187-192` — so the plan MUST be a `write_file`
+   call), THEN a `terminal` call writes+reads a nonce and runs `hostname; id -u` (now passes —
+   `has_plan` recorded) → expect: executes inside `osh-f64-architect` (nonce round-trips;
+   `hostname`/`id -u` differ from `osh-f64-gw`'s and from coworker B's sandbox). The
+   plan-file-first ordering PRESERVES the file-write scope (it is not weakened); `plan_gate:
+   false` is NOT used (it would diverge the rendered `nv-fleet-gates.settings` from FLEET-F62
+   and FAIL AC-2's equality).
+4. Repeat step 3 as served coworker B (`builder`) through B's own profile-scoped child —
+   FIRST a `write_file` tool call to `.hermes/plans/builder.md`, THEN the `terminal` nonce
+   write+read — → expect: executes inside `osh-f64-builder` (distinct `hostname`/`id -u`),
+   proving per-profile sandbox routing in the one multiplexed gateway.
 5. From a worker sandbox, attempt `curl` to a host NOT in its policy → expect: denied, and
    the denial appears in `openshell logs` (the `--source` OSH-F63 recorded).
 6. Teardown: delete every `osh-f64-*` sandbox and policy → expect: `sandbox list` /
@@ -128,4 +138,8 @@ nonce round-trip), an off-policy egress is denied and logged, and teardown is cl
 ## Evidence
 `scenario-AC-OSH-F64-3/evidence.txt` (per-step transcripts incl. the two nonce round-trips
 with their differing `hostname`/`id -u`, the served-profile list, the port count) +
-`scenario-AC-OSH-F64-3/openshell.log` (the egress-denial line and its `--source`).
+`scenario-AC-OSH-F64-3/openshell.log` (the egress-denial line and its `--source`) +
+`scenario-AC-OSH-F64-3/gateway-restart.log` (the install's `hermes gateway restart` exit code
+and full traceback, RETAINED — §D8; the run confirms restart exit 0 and a served live 200, or
+names the true first-uncaught exit-1 frame for the route-(3) decision — firecrawl is disabled
+in the render + installer default, so its `UnscopedSecretError` traceback should be absent).

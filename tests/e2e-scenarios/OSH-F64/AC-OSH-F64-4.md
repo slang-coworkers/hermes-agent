@@ -78,6 +78,31 @@ the served turn 401s. If (re)onboarding is needed, run `hermes -p default onecli
 hermes-main → wrong context + missing required flag). With the grant present the turns expect a
 200; a 401 is a fault to diagnose (grant / identity / token-bearing route / CA), not tolerated.
 
+**Post-install onboarding (Option 2 — architect ruling 2026-09-29; the documented post-install
+operator step, NOT an installer change).** After the install brings up the gateway and BEFORE
+step 1, run the fleet's onboard step from the DEFAULT gateway context — `hermes -p default
+onboard coworker <spec> --gateway-url "$GW_URL"` from the gateway root after readiness (the
+`nv-coworker-compose` onboard subaction — `__init__.py:495` `_ensure_canonical_bot_chat` / `:695`
+`_configure_bot_meta` / `:734-799`). Run it as `-p default`, NOT profile-scoped (a profile-scoped
+invocation would re-render SSH-key paths relative to the wrong `HERMES_HOME`). This onboard
+force-re-renders all served distributions, so ASSERT exit 0 / `ok: true`, that `orchestrator`
+and `builder` each gain a canonical "Bot Chat" session AND a `ui_meta['hermes-bots']` roster
+entry, AND that the post-onboard per-role config is UNCHANGED (SSH host/key, OneCLI chain-dial,
+`plugins.disabled` firecrawl, enabled plugins) — the onboard must NOT silently re-render away the
+install's config. `message_agent`'s tool schema is injected ONLY into a canonical Bot Chat
+(`/workspace/extra/hermes-release/tools/bot_mode_dm.py:18-27`, gate `:150-159`); the installer's
+rooms (`groups.create`, titled "Group: …", EXCLUDED from the Bot-Chat gate `:23`) + wires do NOT
+create it. Onboarding adds no AC-1 installer step — it is scenario-Setup, not the installer;
+§D3/AC-1 stay UNCHANGED (the §D8 firecrawl default-diff is the separate AC-1 change).
+
+**Gateway-restart capture (§D8):** retain the install's `hermes gateway restart` exit code + full
+traceback as `scenario-AC-OSH-F64-4/gateway-restart.log` and confirm the gateway is usable —
+EXPECTED: restart exit 0 + a served live 200; if restart exits 1, the route-(3) fresh-start
+`hermes serve` workaround must be PROVED on the same image (restart exit 1 + `hermes serve` exit 0
++ served live 200) before the live criterion passes; firecrawl is disabled in the render +
+installer default (§D8 route 1), so the misleading firecrawl `UnscopedSecretError` traceback
+should be absent.
+
 ## Steps
 1. Human → orchestrator Bot Chat: "run change P7-<nonce>" (`message_agent` in the one
    gateway; NO a2a) → expect: orchestrator accepts (coordination turn; no terminal yet).
@@ -85,11 +110,13 @@ hermes-main → wrong context + missing required flag). With the grant present t
    the wiring gate (unwired send blocked).
 3. `hermes wire add orchestrator builder`, then orchestrator → builder again → expect:
    delivered; builder receives the task.
-4. The builder's delivery turn runs in the BUILDER's own profile-scoped child and issues
-   the change as a `terminal` call inside ITS worker sandbox (`osh-f64-builder`), then
-   replies `P7-BUILT:<nonce>` visible in the room → expect: the reply carries the exact
-   nonce and the change artifact was written in the builder's sandbox (`hostname`/`id -u`
-   differ from the gateway).
+4. The builder's delivery turn runs in the BUILDER's own profile-scoped child and FIRST
+   issues a `write_file` tool call to `.hermes/plans/builder.md` (satisfies + records the
+   `nv-fleet-gates` plan-first gate — a `terminal` `>` is NOT exempt, §Scenario AC-3), THEN
+   issues the change as a `terminal` call inside ITS worker sandbox (`osh-f64-builder`), then
+   replies `P7-BUILT:<nonce>` visible in the room → expect: the reply carries the exact nonce
+   and the change artifact was written in the builder's sandbox (`hostname`/`id -u` differ
+   from the gateway).
 5. A worker profile (e.g. builder) attempts `cronjob_manage` → expect: denied by the
    fleet-admin veto (`orchestrator-only`).
 6. Teardown: delete every `osh-f64-*` sandbox and policy.
@@ -103,6 +130,8 @@ $15 cap.
 
 ## Evidence
 `scenario-AC-OSH-F64-4/step-1..5.png` (room transcript screenshots) +
-`scenario-AC-OSH-F64-4/evidence.txt` (the `P7-BUILT:<nonce>` line, the unwired-refusal and
-post-wire-success lines, the `cronjob_manage` denial, the one-gateway/one-port check, the
-call/$ totals).
+`scenario-AC-OSH-F64-4/evidence.txt` (the onboard confirmation that `orchestrator` + `builder`
+each hold a canonical Bot Chat post-onboard, the `P7-BUILT:<nonce>` line, the unwired-refusal and
+post-wire-success lines, the `cronjob_manage` denial, the one-gateway/one-port check, the call/$
+totals) + `scenario-AC-OSH-F64-4/gateway-restart.log` (the retained `hermes gateway restart` exit
+code + traceback, §D8).

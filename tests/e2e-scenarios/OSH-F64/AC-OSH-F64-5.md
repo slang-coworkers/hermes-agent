@@ -49,20 +49,46 @@ down): `openshell sandbox create --name osh-f64-gw --from osh-f64-gateway:pinned
 Then run `install-into-sandbox.sh <spec> --ref <sha> --gateway-url "$GW_URL" --policy-root
 /workspace/extra/hermes-fleet-testbed/osh-f64`, boot serving `default` + ≥2 coworkers under a stub
 model; `openshell forward start <29xxx-port> osh-f64-gw` (brokered, `-d`, bind `172.17.0.1`, port
-in 29000–29999 — the sandbox gateway listens on that same port) establishes the local forward; the
-dashboard is reached at the forwarded address under agent-browser (hermes-ui-driver skill). No
-fixture is re-installed here. Teardown deletes `osh-f64-*` at the end.
+in 29000–29999 — the sandbox gateway listens on that same port) establishes the local forward. No
+fixture is re-installed here.
+
+**Dashboard Host-guard reconciliation (architect ruling 2026-09-29 — blessed).** The broker forces
+the forward to bind `172.17.0.1`, but the CORE dashboard Host-header guard admits a `172.17.0.1`
+Host only when non-loopback-bound + auth-configured (`hermes_cli/web_server.py:914-947`, decision
+`:943-944`; mismatch → HTTP 400, `:950-982`). So the Setup establishes a loopback TCP bridge on the
+tester host — `socat TCP-LISTEN:<port>,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:<port>` — and
+points agent-browser at `127.0.0.1:<port>`: the browser sends a LOOPBACK `Host` (accepted, no auth
+gate) while the `openshell forward` stays the transport and the dashboard WS still carries
+`HERMES_DASHBOARD_SESSION_TOKEN` (kept from step 3). The core guard is BYTE-UNTOUCHED, not weakened;
+§D5 (ui over desktop) stands. The `dashboard.public_url`+auth alternative is REJECTED (a
+non-loopback/public host engages the auth gate, `web_server.py:798-836`; RFC1918 treated as public).
+**Tester-runtime prereq (VERIFY — likely already present):** `socat` IS in the coworker image
+(dpkg-owned `/usr/bin/socat`) — it is simply not in Hermes' own `Dockerfile:73` apt set; confirm
+`command -v socat` on the tester runtime and `install_packages` ONLY if that group's image lacks it
+(NOT a default prereq).
+
+**Onboarding (Option 2, as AC-4):** before step 3's Bot Chat pane, run the same default-context
+onboard step AC-4 uses — `hermes -p default onboard coworker <spec> --gateway-url "$GW_URL"` from
+the gateway root, asserting exit 0 and unchanged per-role config — so each served profile's
+`ui_meta` (incl. the `hermes-bots` roster metadata) is populated (`tui_gateway/methods_profiles.py:300-306`).
+The `profiles.list` backend appends every served profile's row REGARDLESS of `ui_meta`
+(`methods_profiles.py:328,334`), so step 2's profile list does NOT depend on onboarding; onboarding
+is required HERE to prove the canonical Bot Chat (step 3) and the bot metadata.
+
+**Gateway-restart capture (§D8):** retain the install's `hermes gateway restart` exit code +
+traceback as `scenario-AC-OSH-F64-5/gateway-restart.log` and confirm the gateway is up (as
+AC-3/AC-4; firecrawl disabled in the render + installer default). Teardown deletes `osh-f64-*` (and
+stops the socat bridge) at the end.
 
 ## Steps
-1. Open the dashboard through the forwarded URL → expect: it loads and reports connected to
-   one gateway.
-2. In the profile combobox, select `orchestrator` → expect: the `orchestrator »` prompt (the
-   web SPA opens the DEFAULT profile's view regardless of connection, so a named-profile
-   view requires this explicit select).
-3. Read the profile rail / Bots roster → expect: it lists `default` + the served coworker
+1. Open the dashboard through the forwarded URL (agent-browser → the loopback bridge
+   `127.0.0.1:<port>`) → expect: it loads and reports connected to one gateway.
+2. Read the profile rail / Bots roster → expect: it lists `default` + the served coworker
    profiles (screenshot).
-4. Open the orchestrator's Bot Chat pane → expect: the chat view for the orchestrator
-   profile renders (screenshot).
+3. Select `orchestrator` in the profile combobox (the web SPA opens the DEFAULT profile's
+   view regardless of connection, so a named-profile view requires this explicit select —
+   expect the `orchestrator »` prompt), then open the orchestrator's Bot Chat pane → expect:
+   the chat view for the orchestrator profile renders (screenshot).
 
 ## Pass
 The app, connected through a single `openshell forward` to the gateway sandbox, lists the
@@ -70,7 +96,8 @@ served profiles and opens the orchestrator's Bot Chat — one gateway connection
 whole app.
 
 ## Evidence
-`scenario-AC-OSH-F64-5/step-1..4.png` plus, where a served-profile fact is a row rather
+`scenario-AC-OSH-F64-5/step-1..3.png` plus, where a served-profile fact is a row rather
 than a pixel, a `python3 -c` query over the gateway sandbox's `$HERMES_HOME` state captured
 to `evidence.txt` (the coworker image ships no `sqlite3` CLI; use the stdlib `sqlite3`
-module in `python3 -c`).
+module in `python3 -c`) + `scenario-AC-OSH-F64-5/gateway-restart.log` (the retained `hermes
+gateway restart` exit code + traceback, §D8, as AC-3/AC-4).
