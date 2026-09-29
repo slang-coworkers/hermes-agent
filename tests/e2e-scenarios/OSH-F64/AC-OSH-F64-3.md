@@ -115,31 +115,64 @@ that reach into the sandbox:
    records `has_plan` ONLY for a `write_file`/`patch` whose path `is_plan_path`; a `terminal`
    `>` to a plan path is NOT exempt and records no plan because `predicates.target_path`
    returns None for `terminal` — `predicates.py:187-192` — so the plan MUST be a `write_file`
-   call), THEN a `terminal` call writes+reads a nonce and runs `hostname; id -u` (now passes —
-   `has_plan` recorded) → expect: executes inside `osh-f64-architect` (nonce round-trips;
-   `hostname`/`id -u` differ from `osh-f64-gw`'s and from coworker B's sandbox). The
-   plan-file-first ordering PRESERVES the file-write scope (it is not weakened); `plan_gate:
-   false` is NOT used (it would diverge the rendered `nv-fleet-gates.settings` from FLEET-F62
-   and FAIL AC-2's equality).
+   call), THEN a `terminal` call writes a fresh `nonce_architect` to the per-profile marker
+   path `/tmp/osh-f64-architect.marker` (for the step-5 independent isolation read) and runs
+   `hostname; id -u` (now passes — `has_plan` recorded) → expect: executes inside
+   `osh-f64-architect` — architect's profile-child `hostname` EQUALS a broker-side
+   `openshell sandbox exec osh-f64-architect -- hostname` probe AND differs from `osh-f64-gw`'s
+   and from coworker B's (`osh-f64-builder`) sandbox (routing to the ASSIGNED sandbox — the
+   ROUTING half of the GATE); `id -u` captured as a non-gating logged diagnostic, expected
+   10001 per the single non-root worker image, §D1/§D2. The plan-file-first ordering PRESERVES
+   the file-write scope (it is not weakened); `plan_gate: false` is NOT used (it would diverge
+   the rendered `nv-fleet-gates.settings` from FLEET-F62 and FAIL AC-2's equality).
 4. Repeat step 3 as served coworker B (`builder`) through B's own profile-scoped child —
-   FIRST a `write_file` tool call to `.hermes/plans/builder.md`, THEN the `terminal` nonce
-   write+read — → expect: executes inside `osh-f64-builder` (distinct `hostname`/`id -u`),
-   proving per-profile sandbox routing in the one multiplexed gateway.
-5. From a worker sandbox, attempt `curl` to a host NOT in its policy → expect: denied, and
+   FIRST a `write_file` tool call to `.hermes/plans/builder.md`, THEN a `terminal` call that
+   writes a fresh `nonce_builder` to `/tmp/osh-f64-builder.marker` and runs `hostname; id -u`
+   — → expect: executes inside `osh-f64-builder` — builder's profile-child `hostname` EQUALS a
+   broker-side `openshell sandbox exec osh-f64-builder -- hostname` probe and is distinct from
+   coworker A's (`osh-f64-architect`) AND from the `openshell sandbox exec osh-f64-gw -- hostname`
+   probe (routing to the ASSIGNED sandbox — the ROUTING half of the GATE); `id -u` logged
+   non-gating, expected 10001 as coworker A.
+5. **Cross-sandbox ISOLATION (independent broker-side reads — the ISOLATION half of the GATE):**
+   read each marker DIRECTLY through the broker, out-of-band of the profile children —
+   `openshell sandbox exec osh-f64-architect -- cat /tmp/osh-f64-architect.marker` == `nonce_architect`
+   and `openshell sandbox exec osh-f64-builder -- cat /tmp/osh-f64-builder.marker` == `nonce_builder`
+   — then require each nonce present ONLY in its provisioned worker:
+   `openshell sandbox exec osh-f64-builder -- cat /tmp/osh-f64-architect.marker`,
+   `osh-f64-architect -- cat /tmp/osh-f64-builder.marker`, and
+   `osh-f64-gw -- cat /tmp/osh-f64-architect.marker` / `osh-f64-gw -- cat /tmp/osh-f64-builder.marker`
+   ALL fail with a NONZERO exit status AND ENOENT (`No such file or directory`) — an empty
+   EXISTING file (exit 0, no output) OR a permission-denied (EACCES) read FAILS the gate, since
+   only true absence proves the marker never landed there (neither the OPPOSITE worker nor the
+   gateway sees the other's marker at all) → expect: each `nonce_<profile>` readable ONLY in
+   `osh-f64-<profile>` and every cross read nonzero+ENOENT, proving cross-sandbox isolation on
+   top of the routing probe.
+6. From a worker sandbox, attempt `curl` to a host NOT in its policy → expect: denied, and
    the denial appears in `openshell logs` (the `--source` OSH-F63 recorded).
-6. Teardown: delete every `osh-f64-*` sandbox and policy → expect: `sandbox list` /
+7. Teardown: delete every `osh-f64-*` sandbox and policy → expect: `sandbox list` /
    `policy list` no longer show any `osh-f64-*`.
 
 ## Pass
 One gateway/one port serves `default` + ≥2 coworkers, each coworker's terminal call (driven
-through its own profile-scoped child) runs in ITS own worker sandbox (distinct host/uid,
-nonce round-trip), an off-policy egress is denied and logged, and teardown is clean.
+through its own profile-scoped child) runs in ITS own NAMED worker sandbox — the GATE is BOTH
+(routing) each profile-child's `hostname` matches a broker probe of its assigned
+`osh-f64-<profile>` and is distinct from the other worker and the broker-probed gateway
+hostname, AND (isolation) each profile's `nonce_<profile>` is readable via an INDEPENDENT
+broker-side `cat` ONLY in its provisioned worker, absent from the opposite worker and
+`osh-f64-gw`; `id -u` is a logged non-gating diagnostic, identical across the single-image
+workers by design, §D1/§D2 — an off-policy egress is denied and logged, and teardown is clean.
 
 ## Evidence
-`scenario-AC-OSH-F64-3/evidence.txt` (per-step transcripts incl. the two nonce round-trips
-with their differing `hostname`/`id -u`, the served-profile list, the port count) +
-`scenario-AC-OSH-F64-3/openshell.log` (the egress-denial line and its `--source`) +
-`scenario-AC-OSH-F64-3/gateway-restart.log` (the install's `hermes gateway restart` exit code
-and full traceback, RETAINED — §D8; the run confirms restart exit 0 and a served live 200, or
-names the true first-uncaught exit-1 frame for the route-(3) decision — firecrawl is disabled
-in the render + installer default, so its `UnscopedSecretError` traceback should be absent).
+`scenario-AC-OSH-F64-3/evidence.txt` (per-step transcripts incl. each profile's `nonce_<profile>`
+write to `/tmp/osh-f64-<profile>.marker`, the INDEPENDENT broker-side marker reads proving each
+nonce present ONLY in its provisioned worker (`osh-f64-architect` == nonce_architect,
+`osh-f64-builder` == nonce_builder, and the opposite-worker + `osh-f64-gw` cross reads EACH
+recording a NONZERO exit status + ENOENT `No such file or directory` — an empty or
+permission-denied read would FAIL — the ISOLATION gate), each profile-child's `hostname`
+alongside the matching broker-side `openshell sandbox exec osh-f64-<profile> -- hostname` probe
+AND the `openshell sandbox exec osh-f64-gw -- hostname` gateway probe (the ROUTING gate) and the
+logged `id -u` per sandbox (non-gating diagnostic, §D1/§D2), the served-profile list, the port
+count) + `scenario-AC-OSH-F64-3/openshell.log` (the egress-denial line and its `--source`) +
+`scenario-AC-OSH-F64-3/gateway-restart.log` (the install's `hermes gateway restart` exit code and
+full traceback, RETAINED — §D8; the run confirms restart exit 0 and a served live 200, or names
+the true exit-1 frame for the route-(3) decision).

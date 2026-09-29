@@ -113,10 +113,17 @@ should be absent.
 4. The builder's delivery turn runs in the BUILDER's own profile-scoped child and FIRST
    issues a `write_file` tool call to `.hermes/plans/builder.md` (satisfies + records the
    `nv-fleet-gates` plan-first gate — a `terminal` `>` is NOT exempt, §Scenario AC-3), THEN
-   issues the change as a `terminal` call inside ITS worker sandbox (`osh-f64-builder`), then
-   replies `P7-BUILT:<nonce>` visible in the room → expect: the reply carries the exact nonce
-   and the change artifact was written in the builder's sandbox (`hostname`/`id -u` differ
-   from the gateway).
+   issues the change as a `terminal` call inside ITS worker sandbox (`osh-f64-builder`) that
+   ALSO writes `nonce_builder` to `/tmp/osh-f64-builder.marker`, then replies `P7-BUILT:<nonce>`
+   visible in the room → expect: the reply carries the exact nonce and the change artifact was
+   written in the builder's sandbox — [routing] the builder-turn's `hostname; id -u` output
+   shows a `hostname` that EQUALS a broker-side `openshell sandbox exec osh-f64-builder -- hostname`
+   probe and differs from the gateway's (routing to the ASSIGNED sandbox), AND [isolation] an
+   INDEPENDENT broker-side read shows `nonce_builder` present ONLY in `osh-f64-builder`
+   (`openshell sandbox exec osh-f64-builder -- cat /tmp/osh-f64-builder.marker` == `nonce_builder`)
+   and ABSENT — the reads fail with a NONZERO exit status AND ENOENT (`No such file or directory`);
+   an empty existing file or a permission-denied read FAILS the gate — from `osh-f64-orchestrator`
+   and `osh-f64-gw` (cross-sandbox isolation); `id -u` is logged non-gating, §D1/§D2.
 5. A worker profile (e.g. builder) attempts `cronjob_manage` → expect: denied by the
    fleet-admin veto (`orchestrator-only`).
 6. Teardown: delete every `osh-f64-*` sandbox and policy.
@@ -131,7 +138,13 @@ $15 cap.
 ## Evidence
 `scenario-AC-OSH-F64-4/step-1..5.png` (room transcript screenshots) +
 `scenario-AC-OSH-F64-4/evidence.txt` (the onboard confirmation that `orchestrator` + `builder`
-each hold a canonical Bot Chat post-onboard, the `P7-BUILT:<nonce>` line, the unwired-refusal and
-post-wire-success lines, the `cronjob_manage` denial, the one-gateway/one-port check, the call/$
-totals) + `scenario-AC-OSH-F64-4/gateway-restart.log` (the retained `hermes gateway restart` exit
-code + traceback, §D8).
+each hold a canonical Bot Chat post-onboard, the `P7-BUILT:<nonce>` line, the builder-turn
+`hostname; id -u` output alongside the matching broker-side
+`openshell sandbox exec osh-f64-builder -- hostname` probe AND the
+`openshell sandbox exec osh-f64-gw -- hostname` gateway probe (routing proof; `id -u` non-gating),
+the independent `openshell sandbox exec osh-f64-builder -- cat /tmp/osh-f64-builder.marker` ==
+`nonce_builder` read plus the cross reads from `osh-f64-orchestrator` and `osh-f64-gw` EACH
+recording a NONZERO exit status + ENOENT (`No such file or directory`) (cross-sandbox isolation),
+the unwired-refusal and post-wire-success lines, the `cronjob_manage` denial, the
+one-gateway/one-port check, the call/$ totals) + `scenario-AC-OSH-F64-4/gateway-restart.log` (the
+retained `hermes gateway restart` exit code + traceback, §D8).
