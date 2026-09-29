@@ -229,7 +229,7 @@ def _drop_substrate_managed(managed: dict) -> dict:
     return out
 
 
-def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False, strip_secret_sets: bool = False) -> dict:
+def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False, strip_secret_sets: bool = False, strip_firecrawl_disabled: bool = False) -> dict:
     """Config with the substrate surface removed: terminal.*, the veto's expected_backend
     delta, and the container-only top-level proxy belt the openshell substrate skips.
 
@@ -267,6 +267,17 @@ def _non_substrate(cfg: dict, *, strip_chain_dial: bool = False, strip_secret_se
         onecli_set = (((out.get("plugins") or {}).get("entries") or {}).get("podman-onecli") or {}).get("settings")
         if isinstance(onecli_set, dict):
             onecli_set.pop("profile_secret_sets", None)
+    if strip_firecrawl_disabled:
+        # §D8: the openshell render disables the bundled firecrawl providers via plugins.disabled
+        # (web-firecrawl, browser-firecrawl) on default + every served role; the FLEET-F62 baseline
+        # disables neither. Strip those two openshell-only entries from both sides so the rest of the
+        # config is still compared for equality (their PRESENCE is asserted positively in test_ac_osh_f64_2).
+        plugins = out.get("plugins")
+        if isinstance(plugins, dict) and isinstance(plugins.get("disabled"), list):
+            plugins["disabled"] = [d for d in plugins["disabled"]
+                                   if d not in ("web-firecrawl", "browser-firecrawl")]
+            if not plugins["disabled"]:
+                plugins.pop("disabled", None)
     return out
 
 
@@ -544,6 +555,25 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     installed_state = planner.apply_config_diff(fresh, fresh_diff)
     _, inst_diff, inst_backup = planner.default_config_diff(installed_state, spec)
     assert not inst_diff and inst_backup is False
+    # §D8 route 1 (gateway propagation): the installer's in-place default edit must ALSO union
+    # plugins.disabled for the firecrawl providers, so the multiplex-HOST gateway default (edited
+    # in place, NOT `profile install`ed) does not load firecrawl and the boot warm-up never reads
+    # its key. A render-only change to the `default` distribution does not reach the installed
+    # default (which _desired_default diff-applies), so this proves the installer propagates it.
+    inst_disabled = (installed_state.get("plugins") or {}).get("disabled") or []
+    assert "web-firecrawl" in inst_disabled and "browser-firecrawl" in inst_disabled, \
+        "installer default edit must union plugins.disabled=[web-firecrawl,browser-firecrawl] on the gateway default (§D8 route 1)"
+    # A fresh config cannot detect clobbering a pre-existing operator disable.
+    existing = {
+        "gateway": {"multiplex_profiles": False},
+        "plugins": {"disabled": ["operator-block", "web-firecrawl"]},
+    }
+    _, union_diff, _ = planner.default_config_diff(existing, spec)
+    union_state = planner.apply_config_diff(existing, union_diff)
+    assert union_state["plugins"]["disabled"] == ["operator-block", "web-firecrawl", "browser-firecrawl"], \
+        "plugins.disabled union must preserve operator disables, dedup, append missing, order-stable (§D8 route 1)"
+    assert planner.default_config_diff(union_state, spec)[1] == {}, \
+        "a re-run over the union'd default must be a no-op (idempotent, §D8 route 1)"
     full_state = {
         "default_config": installed_state, "installed_ref": sha,
         "plugins": {n: {"ref": sha, "enabled": True} for n in enabled},
@@ -795,7 +825,17 @@ def test_ac_osh_f64_2(tmp_path, monkeypatch):
         # skills.external_dirs is NOT dropped: it must survive the substrate flip (declared under
         # each coworker type's config.skills.external_dirs, not the spine/default), so the equality
         # below checks it on both sides — the coworkers carry it, the default carries none.
-        assert _non_substrate(osh_cfgs[prof], strip_chain_dial=(prof != "default"), strip_secret_sets=(prof == "default")) == _non_substrate(baseline[prof], strip_secret_sets=(prof == "default")), (
+        # §D8 route 1: the openshell render disables the bundled firecrawl providers (web-firecrawl,
+        # browser-firecrawl) on default + every served role so the multiplex boot warm-up never reads
+        # their key; the FLEET-F62 baseline disables neither. Assert PRESENCE positively, then strip
+        # these openshell-only entries from both sides of the equality below.
+        osh_disabled = ((osh_cfgs[prof].get("plugins") or {}).get("disabled")) or []
+        assert "web-firecrawl" in osh_disabled and "browser-firecrawl" in osh_disabled, \
+            f"{prof}: openshell render must disable web-firecrawl + browser-firecrawl via plugins.disabled (§D8)"
+        baseline_disabled = (baseline[prof].get("plugins") or {}).get("disabled") or []
+        assert "web-firecrawl" not in baseline_disabled and "browser-firecrawl" not in baseline_disabled, \
+            f"{prof}: FLEET-F62 baseline must NOT disable web-firecrawl or browser-firecrawl (the disable is openshell-only, §D8)"
+        assert _non_substrate(osh_cfgs[prof], strip_chain_dial=(prof != "default"), strip_secret_sets=(prof == "default"), strip_firecrawl_disabled=True) == _non_substrate(baseline[prof], strip_secret_sets=(prof == "default"), strip_firecrawl_disabled=True), (
             f"{prof}: non-substrate config drifted from the committed FLEET-F62 render"
         )
     # managed fragment: identical except the three documented substrate deltas. Bound the
@@ -881,6 +921,10 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "plugin installation instruction": r"(?:\binstall(?:ed|ing|s)?\b[\s\S]{0,60}\bplugins?\b|\bplugins?\b[\s\S]{0,60}\binstall(?:ed|ing|s)?\b)",
         "per-bot policy/APF": r"(per[\s-]?bot|per[\s-]?profile|each)[\s\S]{0,40}(polic|apf)",
         "desktop forward": r"(desktop|dashboard)[\s\S]{0,60}forward",
+        "post-install onboard command (default context, --gateway-url)": r"hermes\s+-p\s+default\s+onboard\s+coworker[\s\S]{0,80}--gateway-url",
+        "onboard creates each bot's canonical Bot Chat": r"canonical\s+bot\s*chat",
+        "onboard populates the hermes-bots roster": r"hermes-bots|bots\s+roster",
+        "onboard required for message_agent delivery": r"message_agent",
         "in-place backed-up default edit": r"(in[\s-]?place|edit)[\s\S]{0,80}(backup|back up|backed up)",
         "never profile install default": r"(never|do not|not)\s+(run\s+)?`?profile install default`?",
         "rollback restores the default backup": r"(restore|revert)[\s\S]{0,60}(default[\s\S]{0,20})?(config\.yaml|backup)",
