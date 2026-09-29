@@ -432,13 +432,13 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
     # policy set` step; the provision plan is the 15-line no-policy shape (5 create + 5
     # ssh-config + 5 delete). The
     # teardown suffix (sandbox delete) is reserved for rollback and never appears in the
-    # install plan. Sandbox names mirror compose's <project>-<role> ssh_host. Skipped for a
-    # role whose profile is already present.
+    # install plan. Sandbox names mirror compose's <project>-<role> ssh_host. One sandbox
+    # create + one ssh-config per served coworker; apply-time idempotence (skip a sandbox that
+    # already exists) lives in _execute_step via _sandbox_exists, so profile-installed state is
+    # never conflated with sandbox existence.
     project = spec.get("project") or "fleet"
     image = (spec.get("egress") or {}).get("sandbox_image") or "localhost/hermes-openshell-sandbox:pinned"
     for role in roles:
-        if role in installed_profiles:
-            continue
         sandbox = f"{project}-{role}"
         # OpenShell validates --policy on the broker host, so an explicit root selects the
         # host-mirrored render tree; unset keeps the gateway-internal render path.
@@ -661,9 +661,43 @@ def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None) -> st
 # unrelated operator keys.
 # --------------------------------------------------------------------------------------
 
-def _run(cmd: List[str]) -> None:
+def _run(cmd: List[str], env: Optional[Dict[str, str]] = None) -> None:
     import subprocess
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
+
+
+_REFUSED_ENV_NAMES = ("HERMES_DASHBOARD_SESSION_TOKEN", "API_SERVER_KEY")
+
+
+def _is_refused_secret_env(name: str) -> bool:
+    # The NemoClaw `hermes` wrapper's [SECURITY] startup guard refuses a process whose env
+    # carries raw secret-shaped names; the `gateway restart` child needs none of them.
+    return name in _REFUSED_ENV_NAMES or name.endswith("_TOKEN_FILE")
+
+
+def _gateway_restart_env() -> Dict[str, str]:
+    # Env for the `hermes gateway restart` child: os.environ minus the refused secret-shaped
+    # names, so the wrapper guard does not refuse it. Scoping the child's inherited names does
+    # NOT waive the core api_server API_SERVER_KEY guard — a gateway that actually enables
+    # api_server still needs a strong key of its own.
+    return {k: v for k, v in os.environ.items() if not _is_refused_secret_env(k)}
+
+
+def _sandbox_exists(name: str) -> bool:
+    # Apply-time idempotence for provision_create, decoupled from profile-installed state:
+    # whether an OpenShell worker sandbox is already provisioned, from the broker's
+    # `openshell sandbox list` (first whitespace column is NAME; the NAME/CREATED/PHASE header's
+    # first token never matches a <project>-<role> name). A failed listing raises (check=True)
+    # so apply halts on an unknown broker state rather than creating over a live sandbox.
+    import subprocess
+    proc = subprocess.run(
+        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True
+    )
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0] == name:
+            return True
+    return False
 
 
 def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
@@ -705,7 +739,17 @@ def _compute_profile_digests(spec_path: Any, ref: str, state: Dict[str, Any]) ->
 def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
     tag = step.tag
     if isinstance(step.command, (list, tuple)):
-        _run(list(step.command))
+        cmd = list(step.command)
+        if tag == "provision_create":
+            name = cmd[cmd.index("--name") + 1]
+            if _sandbox_exists(name):
+                return
+            _run(cmd)
+            return
+        if tag == "restart":
+            _run(cmd, env=_gateway_restart_env())
+            return
+        _run(cmd)
         return
     home = Path(ctx["home"])
     managed_dir = ctx.get("managed_dir") or ""

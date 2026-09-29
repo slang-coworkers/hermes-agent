@@ -536,3 +536,31 @@ def test_install_into_sandbox_dry_run_forwards_policy_root(tmp_path, monkeypatch
         role = name[len("osh-f64-"):]
         assert policy.endswith(f"/render/{role}/policy-{role}.yaml") and host_root not in policy, \
             f"{name}: without --policy-root the gateway-internal render path is kept (got {policy})"
+
+
+def test_sandbox_list_failure_does_not_create(tmp_path, monkeypatch):
+    """A failed `openshell sandbox list` halts apply (raises) rather than guessing "absent"
+    and creating over a possibly-live worker sandbox — the safe direction for _sandbox_exists."""
+    import subprocess
+    inst = _installer()
+    create_steps = [s for s in inst.build_plan({"profiles": []}, str(_spec_path()), SHA)
+                    if s.tag == "provision_create"]
+    assert create_steps, "build_plan must plan provision_create steps"
+    created: list = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        cmd = list(cmd)
+        if cmd[:3] == ["openshell", "sandbox", "list"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        if cmd[:3] == ["openshell", "sandbox", "create"]:
+            created.append(cmd)
+
+        class _CP:
+            returncode = 0
+
+        return _CP()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        inst._execute_step(create_steps[0], {"home": str(tmp_path)})
+    assert not created, "no sandbox create may be issued when the existence check fails"
