@@ -1,6 +1,6 @@
 """Acceptance test for OSH-F64 — Fleet under OpenShell (P7 demo).
 
-One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10, 11); AC-3/4
+One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10, 11, 12, 13); AC-3/4
 (live) and AC-5 (ui) are proven by their scenario files. Loads nv-coworker-compose from an
 isolated HERMES_HOME via the real discovery path, asserts registration, then
 drives the behaviour. Behaviour contract, not a byte snapshot
@@ -937,9 +937,20 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "sha-pinned first-party trust rationale": r"(first[\s-]?party[\s\S]{0,120}(sha[\s-]?pinned|40[\s-]?char|pinned)|(sha[\s-]?pinned|40[\s-]?char|pinned)[\s\S]{0,120}first[\s-]?party)",
         "offline fork mirror": r"/opt/hermes/fork",
         "github egress closed": r"(github|egress)[\s\S]{0,40}(closed|disabled|off)",
+        "wrapper [SECURITY] env-secret guard documented": r"(\[security\]|secret-shaped|env-secret\s+guard)[\s\S]{0,240}(refus|scrub|placeholder)",
+        "restart env-scrub of the refused names": r"scrub[\s\S]{0,200}(hermes_dashboard_session_token|api_server_key|token_file)",
+        "supervised gateway still needs a strong API_SERVER_KEY when api_server enabled": r"api_server_key[\s\S]{0,300}(enabl|supervis|gateway|strong|required)",
     }
     for label, pat in obligations.items():
         assert re.search(pat, section), f"install/rollback section missing: {label}"
+    # The four lane preconditions — strict token sets so no required object can silently drop.
+    for tokens in (
+        ("openshell sandbox ssh-config", "~/.ssh/config", "worker"),
+        ("openshell shim", "onecli-chain", "gateway", "path", "proxycommand"),
+        ("socat", "listener", "proxy_rewrite", "127.0.0.1:18255"),
+        ("nv-fleet-gates", "expected_ssh_host", "hermes_managed_dir", "resolv"),
+    ):
+        assert all(token in section for token in tokens), f"missing lane prerequisite: {tokens}"
 
 
 # --- OneCLI chain-dial (§D7) -------------------------------------------------
@@ -1159,3 +1170,122 @@ def test_onecli_registered_source_overrides_ambient(tmp_path, monkeypatch):
     assert ambient["ANTHROPIC_API_KEY"] == "bootstrap-key", "preserve_existing carve-out honoured"
     assert ambient["NO_PROXY"] == "localhost", "NO_PROXY untouched (source forces only proxy+CA keys)"
     assert ambient["ONECLI_API_KEY"] == "bootstrap-onecli", "protected ONECLI_API_KEY not overwritten by the returned onecli-secret"
+
+
+def test_ac_osh_f64_12(tmp_path, monkeypatch):
+    """The installer's `hermes gateway restart` child carries none of the refused secret-shaped env
+    names, or invokes the venv `hermes`."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch, with_plugin=False)
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer_ac12")
+    spec_path = str(_osh_spec(root))
+    ref = "a" * 40
+    spec = planner.load_spec(spec_path)
+
+    # The synthetic *_TOKEN_FILE proves the whole *_TOKEN_FILE class is dropped, not just the two observed names.
+    refused = {
+        "HERMES_DASHBOARD_SESSION_TOKEN": "dash-tok",
+        "API_SERVER_KEY": "api-key",
+        "OSH_BROKER_TOKEN_FILE": "/run/osh/broker.token",
+        "FOO_TOKEN_FILE": "/run/foo.token",
+    }
+    for name, value in refused.items():
+        monkeypatch.setenv(name, value)
+
+    steps = planner.build_plan({}, spec_path, ref)
+    restart = next((s for s in steps if getattr(s, "tag", None) == "restart"), None)
+    assert restart is not None, "build_plan must emit a `restart` step for a fresh install"
+
+    calls: list[tuple[list, object]] = []
+
+    def _capture(cmd, *args, **kwargs):
+        calls.append((list(cmd), kwargs.get("env")))
+
+        class _CP:
+            returncode = 0
+
+        return _CP()
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    planner._execute_step(restart, planner._apply_ctx(spec, spec_path))
+
+    restart_calls = [(cmd, env) for cmd, env in calls if cmd and cmd[-2:] == ["gateway", "restart"]]
+    assert restart_calls, f"the restart step issued no `gateway restart` child (calls={calls})"
+    cmd, env = restart_calls[-1]
+    effective = dict(env) if env is not None else dict(os.environ)
+    uses_venv = cmd[0] == "/opt/hermes/.venv/bin/hermes"
+    leaked = sorted(name for name in refused if name in effective)
+    assert uses_venv or not leaked, (
+        "the `hermes gateway restart` child must not inherit refused secret-shaped names "
+        f"(leaked={leaked}) unless it invokes the exact venv entry /opt/hermes/.venv/bin/hermes (argv0={cmd[0]!r})"
+    )
+
+
+def test_ac_osh_f64_13(tmp_path, monkeypatch):
+    """The installer provisions a worker sandbox for every served role — create-set == plan-set —
+    regardless of profile-installed state."""
+    root = _repo_root()
+    _setup_home(tmp_path, monkeypatch, with_plugin=False)
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer_ac13")
+    spec_path = str(_osh_spec(root))
+    ref = "a" * 40
+    spec = planner.load_spec(spec_path)
+    roles = list(planner._coworker_roles(spec))
+    project = spec.get("project") or "fleet"
+    plan_set = {f"{project}-{role}" for role in roles}
+    assert plan_set, "spec must declare served coworker roles"
+
+    def _create_names(steps):
+        names = set()
+        for s in steps:
+            if getattr(s, "tag", None) == "provision_create":
+                cmd = list(s.command)
+                names.add(cmd[cmd.index("--name") + 1])
+        return names
+
+    # Profile presence does not imply sandbox presence: a SUBSET and the FULL set of already-installed
+    # profiles must both still provision a sandbox for every served role.
+    for installed in ({"orchestrator", "reviewer"}, set(roles)):
+        state = {"profiles": sorted(installed)}
+        create_set = _create_names(planner.build_plan(state, spec_path, ref))
+        assert create_set == plan_set, (
+            f"installed={sorted(installed)}: provision-create set {sorted(create_set)} != served-role plan-set "
+            f"{sorted(plan_set)} — every served role must get a sandbox regardless of profile-installed state"
+        )
+
+    # Apply-time idempotence: `_execute_step` skips a provision_create whose sandbox already exists (a
+    # mockable existence seam), so a re-run creates only the missing sandboxes — AC-1's no-op-on-rerun promise.
+    # Invariant: `_sandbox_exists` must be a real production attribute (monkeypatch below only REPLACES it,
+    # never invents it), so the skip works when no test is monkeypatching — not just under the mock.
+    assert callable(getattr(planner, "_sandbox_exists", None)), (
+        "_execute_step must consult a real `_sandbox_exists(name)` helper for apply-time idempotence"
+    )
+    create_steps = [s for s in planner.build_plan({"profiles": []}, spec_path, ref)
+                    if getattr(s, "tag", None) == "provision_create"]
+    ctx = planner._apply_ctx(spec, spec_path)
+    ran: list[list[str]] = []
+
+    def _capture(cmd, *args, **kwargs):
+        ran.append(list(cmd))
+
+        class _CP:
+            returncode = 0
+
+        return _CP()
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+
+    def _created():
+        return {c[c.index("--name") + 1] for c in ran if c[:3] == ["openshell", "sandbox", "create"]}
+
+    existing_one = {next(iter(plan_set))}
+    monkeypatch.setattr(planner, "_sandbox_exists", lambda name: name in existing_one)
+    for step in create_steps:
+        planner._execute_step(step, ctx)
+    assert _created() == plan_set - existing_one, "apply must create only the missing sandboxes (skip the one already provisioned)"
+
+    ran.clear()
+    monkeypatch.setattr(planner, "_sandbox_exists", lambda name: name in plan_set)
+    for step in create_steps:
+        planner._execute_step(step, ctx)
+    assert not _created(), "a fully-provisioned fleet re-run creates no sandbox"
