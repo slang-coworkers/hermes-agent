@@ -386,3 +386,39 @@ view shows one `openshell policy` per sandbox — the three allowed endpoints pe
 the `/opt/osh-lane` read-only lane and the appended interpreter binaries, with an
 off-policy egress attempt denied and logged. The whole fleet is one gateway on one bound
 port; the per-profile `hermes -p <profile> chat` helper processes bind no external port.
+
+### The `hermes gateway restart` child and the wrapper `[SECURITY]` guard
+
+The install ends by restarting the gateway so it re-reads the edited default. On a NemoClaw
+sandbox the `hermes` entrypoint is a wrapper whose `[SECURITY]` startup guard refuses to
+start a process whose environment carries raw secret-shaped values — the deploy exports
+`HERMES_DASHBOARD_SESSION_TOKEN` for the live-WS preflight, and a supervised host may also
+carry `API_SERVER_KEY` or a `*_TOKEN_FILE`. The restart child needs none of them, so the
+installer scrubs `HERMES_DASHBOARD_SESSION_TOKEN`, `API_SERVER_KEY`, and every `*_TOKEN_FILE`
+(for example `OSH_BROKER_TOKEN_FILE`) from that child's environment before spawning it; the
+gateway process itself keeps its own configured secrets.
+
+That env-scrub is scoped to the restart child only — it does **not** waive the core guard.
+The `API_SERVER_KEY` guard is separate: a gateway that enables `api_server` and is supervised
+still requires a strong key configured for the listener; scrubbing an inherited name off the
+short-lived restart child does not enable an unauthenticated API server. Configure a strong
+`API_SERVER_KEY` on the supervised gateway when `api_server` is enabled, or leave the
+platform disabled.
+
+### Live-lane preconditions for a served turn
+
+Before a served coworker can complete a live turn over the OpenShell lane, four
+preconditions must hold on `brev-hermes`:
+
+1. **Per-worker ssh config.** Run `openshell sandbox ssh-config <name>` for each **worker**
+   sandbox and write its `User sandbox` + `ProxyCommand` block into `~/.ssh/config`, so the
+   profile's `terminal.ssh_host` alias resolves to the assigned sandbox.
+2. **OpenShell shim on `PATH`.** The `openshell shim` (the `onecli-chain` dialer) must be on
+   the gateway's `PATH` so the ssh `ProxyCommand` can dial the broker for each worker.
+3. **Loopback proxy relay.** A `socat` `listener` bridges the dashboard's loopback origin to
+   the broker-forced `proxy_rewrite` target `127.0.0.1:18255`, so a data-plane request the
+   dashboard issues on loopback reaches the OneCLI hop.
+4. **Resolvable managed dir.** The `nv-fleet-gates` veto reads the worker-unforgeable
+   `expected_ssh_host` map only when `$HERMES_MANAGED_DIR` resolves to the installed managed
+   fragment; if it does not resolve, the veto cannot bind a worker to its sandbox and the
+   turn is refused.
