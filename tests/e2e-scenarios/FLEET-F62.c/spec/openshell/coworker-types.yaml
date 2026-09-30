@@ -1,0 +1,118 @@
+# Base-NanoClaw fleet spec (openshell substrate column). The NanoClaw base
+# coworker fleet ported to Hermes fleet-spec form. Renders six distributions:
+# the DEFAULT multiplexer plus orchestrator/triager/fixer/reviewer/approver.
+# substrate: openshell => each coworker gets a per-profile ssh sandbox + one
+# policy-<role>.yaml; the DEFAULT multiplexer is unsandboxed (no policy). The
+# five roles are authored from the nv-main base building blocks (base-common
+# skills/workflows), not the existing nv-hermes overlay. See the fleet port
+# notes for the NanoClaw-to-Hermes mapping and every dropped/changed behaviour.
+project: nanoclaw-base
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# OpenShell egress: exactly the two endpoints the per-profile policy allows —
+# the OneCLI data-plane hop (172.17.0.1:18255) and the inference route. This is
+# the merged OSH-F63 (F63) egress shape on the current baseline; sandbox_image is
+# the pinned `--from` the provisioning plan uses.
+# F64.b-target: on OSH-F64.b merge this egress block becomes broker-18777-only
+#   (NO 18255 data-plane hop), with an OpenShell provider placeholder base_url
+#   https://inference.local and key sk-OPENSHELL-PROXY-REWRITE; the renderer and
+#   the golden regenerate and the openshell policy count moves 5 -> 6 (a gateway
+#   policy is added). That needs the unmerged F64.b renderer, so this row ships
+#   the F63 shape and documents the F64.b target in the fleet port notes.
+egress:
+  proxy_addr: "172.17.0.1:18255"
+  inference_route: "inference-api.nvidia.com:443"
+  sandbox_image: "nanoclaw-base:PENDING-OPERATOR-PIN"
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "Base-NanoClaw orchestrator — the elevated fleet-admin coworker; dispatches to the triager and closes the loop on the reviewer's approval."
+    skills: [supervise-issues]
+    context:
+      - "You are the elevated fleet-admin; only you carry the coworker-composition, wiring, room-admin, cron-for-others, and approval tools."
+      - "Every other role runs a restricted per-platform toolset; the same veto denies admin tools to non-orchestrator profiles."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  triager:
+    extends: [base]
+    identity: "Base-NanoClaw triager — first-line engineering; triages issues and mention-gated comments and briefs the fixer."
+    workflows: [triage-issue]
+    ui_meta: {title: "Triager", description: "Fleet triager", shape: "square"}
+  fixer:
+    extends: [base]
+    identity: "Base-NanoClaw fixer — applies the change in its own OpenShell ssh sandbox and iterates the fix head."
+    workflows: [implement]
+    ui_meta: {title: "Fixer", description: "Fleet fixer", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "Base-NanoClaw reviewer — reads the diff in its own OpenShell ssh sandbox and returns a verdict."
+    workflows: [plan]
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+  approver:
+    extends: [base]
+    identity: "Base-NanoClaw approver — the off-chain review-harvest role that gates the final approval; no nv-main base counterpart."
+    ui_meta: {title: "Approver", description: "Fleet approver", shape: "square"}
+
+# Onboarding-only chat membership (NOT the a2a graph — that is wire-manifest.txt).
+rooms:
+  fleet-room:
+    name: "Base-NanoClaw Fleet"
+    members: [orchestrator, triager, fixer, reviewer, approver]
+  review-room:
+    name: "Base-NanoClaw Review"
+    members: [fixer, reviewer, approver]
+
+# DEFAULT-only config. The GitHub ingress is a repo-level webhook (no App id):
+# three profile-bound routes into the DEFAULT multiplexer, shipped DISABLED at
+# both the platform level and per route. WEBHOOK_ENABLED=1 can force the platform
+# listener on (gateway/config.py:2348), but a per-route enabled: false rejects
+# events with 403 (gateway/platforms/webhook.py:673) until the operator
+# provisions the real HMAC secrets. See the fleet port notes.
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false
+  platforms:
+    webhook:
+      enabled: false
+      extra:
+        routes:
+          github-triager:
+            enabled: false
+            secret: "${env:NANOCLAW_GH_TRIAGER_SECRET}"
+            profile: triager
+            events: [issues, issue_comment]
+            deliver: github_comment
+            deliver_extra:
+              repo: "{repository.full_name}"
+              pr_number: "{issue.number}"
+          github-fixer:
+            enabled: false
+            secret: "${env:NANOCLAW_GH_FIXER_SECRET}"
+            profile: fixer
+            events: [pull_request, push]
+            deliver: github_comment
+            deliver_extra:
+              repo: "{repository.full_name}"
+              pr_number: "{pull_request.number}"
+          github-reviewer:
+            enabled: false
+            secret: "${env:NANOCLAW_GH_REVIEWER_SECRET}"
+            profile: reviewer
+            events: [pull_request_review, pull_request_review_comment]
+            deliver: github_comment
+            deliver_extra:
+              repo: "{repository.full_name}"
+              pr_number: "{pull_request.number}"

@@ -1,0 +1,15 @@
+openshell sandbox create --name nanoclaw-base-approver --from nanoclaw-base:PENDING-OPERATOR-PIN --policy policy-approver.yaml
+openshell sandbox create --name nanoclaw-base-fixer --from nanoclaw-base:PENDING-OPERATOR-PIN --policy policy-fixer.yaml
+openshell sandbox create --name nanoclaw-base-orchestrator --from nanoclaw-base:PENDING-OPERATOR-PIN --policy policy-orchestrator.yaml
+openshell sandbox create --name nanoclaw-base-reviewer --from nanoclaw-base:PENDING-OPERATOR-PIN --policy policy-reviewer.yaml
+openshell sandbox create --name nanoclaw-base-triager --from nanoclaw-base:PENDING-OPERATOR-PIN --policy policy-triager.yaml
+openshell sandbox ssh-config nanoclaw-base-approver
+openshell sandbox ssh-config nanoclaw-base-fixer
+openshell sandbox ssh-config nanoclaw-base-orchestrator
+openshell sandbox ssh-config nanoclaw-base-reviewer
+openshell sandbox ssh-config nanoclaw-base-triager
+openshell sandbox delete nanoclaw-base-approver
+openshell sandbox delete nanoclaw-base-fixer
+openshell sandbox delete nanoclaw-base-orchestrator
+openshell sandbox delete nanoclaw-base-reviewer
+openshell sandbox delete nanoclaw-base-triager
