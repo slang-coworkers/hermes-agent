@@ -158,7 +158,11 @@ def _config(profile_dir):
 
 
 def _tree_files(root):
-    return sorted(p.relative_to(root) for p in root.rglob("*") if p.is_file())
+    # Exclude __pycache__: run_tests.sh pre-compiles every git-tracked .py, so the
+    # committed golden's default/scripts/*.py gain .pyc the fresh untracked render
+    # never has — a transient build artifact, not part of the rendered contract.
+    return sorted(p.relative_to(root) for p in root.rglob("*")
+                  if p.is_file() and "__pycache__" not in p.parts)
 
 
 def _parse_frontmatter(text):
