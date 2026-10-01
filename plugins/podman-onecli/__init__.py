@@ -22,7 +22,11 @@ def register(ctx) -> None:
         api_key_env=api_key_env,
         insecure_no_auth_origins=ctx.get_config("insecure_no_auth_origins", []),
     )
-    ctx.register_secret_source(OneCLISecretSource(api_key_env=api_key_env))
+    ctx.register_secret_source(OneCLISecretSource(
+        api_key_env=api_key_env,
+        proxy_rewrite=ctx.get_config("proxy_rewrite"),
+        ca_bundle=ctx.get_config("ca_bundle"),
+    ))
     ctx.register_hook("on_session_start", reconcile_identity)
     profile_secret_sets = ctx.get_config("profile_secret_sets", {}) or {}
     ctx.register_cli_command(

@@ -48,12 +48,15 @@ def _load(tmp_path, monkeypatch, profile_secret_sets_yaml: str):
     return manager, loaded, hermes_home
 
 
-def _args_for(manager, profile_path: Path):
+def _args_for(manager, profile_path: Path, *, allow_ungranted: bool = False):
     entry = manager._cli_commands["onecli-onboard"]
     parser = argparse.ArgumentParser()
     subs = parser.add_subparsers(dest="_cmd")
     entry["setup_fn"](subs.add_parser("onecli-onboard"))
-    return entry, parser.parse_args(["onecli-onboard", "--profile", str(profile_path)])
+    argv = ["onecli-onboard", "--profile", str(profile_path)]
+    if allow_ungranted:
+        argv.append("--allow-ungranted")
+    return entry, parser.parse_args(argv)
 
 
 class _RecordingTransport:
@@ -107,7 +110,8 @@ def test_onboard_raises_when_container_config_unresolved(tmp_path, monkeypatch):
 
     profile = tmp_path / "profiles" / "cred-f28-bot-a"
     profile.mkdir(parents=True)
-    entry, args = _args_for(manager, profile)
+    # The empty-grant opt-in lets this test reach container-config resolution.
+    entry, args = _args_for(manager, profile, allow_ungranted=True)
     with pytest.raises(loaded.module.oneclient.OneCLIError):
         entry["handler_fn"](args)
     assert [kind for kind, _ in transport.calls] == [

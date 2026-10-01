@@ -296,7 +296,7 @@ def test_ac_cred_f28_5(tmp_path, monkeypatch):
     parser = argparse.ArgumentParser()
     subs = parser.add_subparsers(dest="_cmd")
     entry["setup_fn"](subs.add_parser("onecli-onboard"))
-    args = parser.parse_args(["onecli-onboard", "--profile", str(profile)])
+    args = parser.parse_args(["onecli-onboard", "--profile", str(profile), "--allow-ungranted"])
 
     # Two onboard passes through the registered handler: the first POST /api/agents
     # returns 201 (create), the second returns 409 (already exists). Both complete

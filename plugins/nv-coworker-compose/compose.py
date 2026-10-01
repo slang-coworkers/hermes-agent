@@ -1091,13 +1091,18 @@ def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name
 def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
-    raises ``CompositionError`` rather than emitting a half-formed policy. The BASE
-    egress allow-set this returns is {the OneCLI request hop ``proxy_addr``, the inference
-    route ``inference_route``} — opted-in providers add their role-scoped endpoints in
-    ``_openshell_policy_document``, not here; the ssh control path is INBOUND via the proxy
-    socket, not an egress target. A wildcard, the OneCLI control plane (…:10256), the
-    OpenShell gateway control plane (host.openshell.internal:8080), and the ssh port are
-    refused."""
+    raises ``CompositionError`` rather than emitting a half-formed policy. The BASE ALLOW
+    set is {the OneCLI request hop ``proxy_addr``, the inference route ``inference_route``};
+    the ssh control path is INBOUND via the proxy socket, not an egress target. The optional
+    OpenShell-0.0.72 ``broker_addr`` is appended as a third allow entry when the spec
+    declares it (default-absent → the two-endpoint base). A wildcard, the OneCLI control
+    plane (…:10256), the OpenShell gateway control plane (host.openshell.internal:8080), and
+    the ssh port are refused on every allow entry, broker included. Opted-in providers
+    (FLEET-F62.c) add their role-scoped endpoints in ``_openshell_policy_document``, not
+    here. The optional ``filesystem_read_only`` (absolute paths, no wildcard / no ``..``) is
+    returned for ``filesystem_policy.read_only`` and the optional ``binaries`` (absolute
+    paths, a ``*`` glob permitted) for the worker-egress binary allow-list; each absent →
+    ``None`` (the base v1 policy)."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1117,22 +1122,144 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     inference_route = _req_str("inference_route")
     sandbox_image = _req_str("sandbox_image")
     allow = [proxy_addr, inference_route]
+    # Append the optional broker BEFORE the refusal loop, so it gets the same wildcard /
+    # control-plane (:10256) / inbound-ssh (:22) checks as every other allow entry.
+    broker_addr = _normalize_proxy_addr(_req_str("broker_addr")) if "broker_addr" in egress else None
+    if broker_addr is not None:
+        allow.append(broker_addr)
     for entry in allow:
         _assert_openshell_host_allowed(entry)
-    return {"allow": allow, "sandbox_image": sandbox_image}
+    # An ABSENT key means the base v1 policy (back-compat); a PRESENT key (incl. an
+    # explicit null) is validated and fail-closes if malformed.
+    read_only = (_validate_openshell_read_only(egress["filesystem_read_only"])
+                 if "filesystem_read_only" in egress else None)
+    binaries = (_validate_openshell_binaries(egress["binaries"])
+                if "binaries" in egress else None)
+    # tls:skip toggle (OpenShell 0.0.72): a spec declaring the broker hop dials OneCLI as an
+    # HTTPS proxy and CONNECT-tunnels through BOTH OneCLI proxy hops, which a protocol:rest L7
+    # parser rejects (invalid origin-form request-target) — so proxy_addr + broker_addr render
+    # as RAW {host, port, tls: skip} passthroughs, while inference_route stays a discrete
+    # protocol:rest HTTP-API endpoint. A no-broker spec keeps OSH-F63's protocol:rest shape for
+    # every endpoint (back-compat).
+    raw_hops = [proxy_addr, broker_addr] if broker_addr is not None else []
+    # OSH-F64 §D7 chain-dial: two OPTIONAL/defaulted fields that feed the per-coworker
+    # secrets.onecli SETTINGS render (podman-onecli proxy_rewrite/ca_bundle), NOT the
+    # worker-egress policy endpoints — so they are validated but never appended to `allow`.
+    # chain_addr is the loopback onecli-chain the served child dials (DISTINCT from the
+    # policy hop proxy_addr); kept verbatim (not normalized) so the child dials it exactly.
+    chain_addr = _req_str("chain_addr") if "chain_addr" in egress else "127.0.0.1:18255"
+    ca_bundle = _req_str("ca_bundle") if "ca_bundle" in egress else "/etc/osh-lane/ca-bundle.pem"
+    onecli_secret_ids = (_validate_openshell_secret_ids(egress["onecli_secret_ids"])
+                         if "onecli_secret_ids" in egress else None)
+    # The pinned offline lane (sha-pinned offline fork mirror, closed GitHub egress, a local
+    # onecli-chain) is what the chain-dial, the firecrawl disable and the install-scan guard
+    # exist for, so only a fleet that declares it gets them; any other openshell fleet keeps
+    # the base render. Absent means off; a present non-bool (incl. null) fail-closes.
+    pinned_offline_lane = egress.get("pinned_offline_lane", False)
+    if not isinstance(pinned_offline_lane, bool):
+        raise CompositionError(
+            f"egress.pinned_offline_lane must be true or false, got {pinned_offline_lane!r}")
+    return {
+        "allow": allow,
+        "sandbox_image": sandbox_image,
+        "filesystem_read_only": read_only,
+        "binaries": binaries,
+        "raw_hops": raw_hops,
+        "chain_addr": chain_addr,
+        "ca_bundle": ca_bundle,
+        "onecli_secret_ids": onecli_secret_ids,
+        "pinned_offline_lane": pinned_offline_lane,
+    }
 
 
-# Keep policy hardening fixed here so spec data drives only the base egress allow-list
-# and the opt-in provider endpoints/binaries/methods — never the filesystem, landlock or
-# process floor.
+def _validate_openshell_read_only(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.filesystem_read_only`` into the paths the policy's
+    ``filesystem_policy.read_only`` admits: a non-empty list of absolute paths, each free
+    of control characters, wildcards and ``..`` traversal (write-denied lanes). Called only
+    when the key is present — an absent key means the base v1 policy, so a present ``null`` /
+    non-list / empty list is malformed and fail-closes."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.filesystem_read_only must be a non-empty list of absolute paths, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must be non-empty strings, got {entry!r}")
+        # Reject any C0/C1 control char or DEL on the RAW entry (before strip): these paths
+        # are written into the policy file the operator materialises, so a control char is
+        # malformed input, not a valid lane.
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must not contain control characters, got {entry!r}")
+        path = entry.strip()
+        if not path.startswith("/") or "*" in path or ".." in path.split("/"):
+            raise CompositionError(
+                f"egress.filesystem_read_only entries must be absolute paths without a wildcard "
+                f"or '..', got {path!r}")
+        out.append(path)
+    return out
+
+
+def _validate_openshell_binaries(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.binaries`` into the paths appended to the worker-egress
+    ``binaries`` allow-list: a non-empty list of absolute paths, each free of control
+    characters and ``..`` traversal. A ``*`` glob IS permitted (``/usr/bin/python3*`` matches
+    an interpreter family) — a binary entry is a path glob the sandbox resolves, not an
+    egress boundary like a network host or a read-only lane. Called only when the key is
+    present; a present ``null`` / non-list / empty list is malformed and fail-closes."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.binaries must be a non-empty list of absolute paths, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.binaries entries must be non-empty strings, got {entry!r}")
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.binaries entries must not contain control characters, got {entry!r}")
+        path = entry.strip()
+        if not path.startswith("/") or ".." in path.split("/"):
+            raise CompositionError(
+                f"egress.binaries entries must be absolute paths without '..', got {path!r}")
+        out.append(path)
+    return out
+
+
+def _validate_openshell_secret_ids(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.onecli_secret_ids`` into a non-empty list of non-empty
+    OneCLI secret ids. An empty list is rejected: onboarding an empty grant does
+    ``set_secrets([])``, which REVOKES the identity's secret. Opaque ids, not filesystem
+    paths, so no absolute-path / glob / ``..`` check."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.onecli_secret_ids must be a non-empty list of OneCLI secret ids, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.onecli_secret_ids entries must be non-empty strings, got {entry!r}")
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.onecli_secret_ids entries must not contain control characters, got {entry!r}")
+        out.append(entry.strip())
+    return out
+
+
+# Keep policy hardening fixed here so spec data drives only the validated additive inputs —
+# the base egress allow-list, the OSH-F64 appended read-only lanes / binaries, and the
+# FLEET-F62.c opt-in provider endpoints/binaries/methods — never the filesystem, landlock
+# or process floor.
 _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
 _OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)
 _OPENSHELL_POLICY_LANDLOCK = "best_effort"
-# The two egress endpoints (OneCLI hop + inference route) are POST-driven REST APIs;
-# emit POST so the coworker's real traffic is admitted. AC-OSH-F63-5 proves the in-policy
-# POST on-box (a GET-only rule would deny it); AC-2 stays verb-agnostic by design.
+# The validated egress endpoints (OneCLI hop + inference route, plus the optional broker)
+# are POST-driven REST APIs; emit POST so the coworker's real traffic is admitted.
+# AC-OSH-F63-5 proves the in-policy POST on-box (a GET-only rule would deny it); AC-2 stays
+# verb-agnostic by design.
 _OPENSHELL_POLICY_ALLOW_METHOD = "POST"
 _OPENSHELL_POLICY_ALLOW_PATH = "/**"
 
@@ -1147,6 +1274,53 @@ def _openshell_hostport(entry: str) -> Tuple[str, int]:
         raise CompositionError(
             f"openshell policy endpoint must be host:port with a port in 1..65535, got {entry!r}")
     return host, int(port)
+
+
+# OSH-F64 §D7: the eight env names the chain-dial secrets.onecli source FORCES over the
+# child's inherited ambient (4 proxy spellings + 4 CA names). A secrets.preserve_existing
+# carve-out listing any of them would keep the inherited denied proxy and defeat the fix.
+_CHAIN_DIAL_FORCED_VARS = frozenset({
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HERMES_CA_BUNDLE",
+})
+
+
+def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
+                                  chain_addr: str, ca_bundle: str) -> None:
+    """Repoint a served coworker's profile-scoped child model turn through the operator
+    onecli-chain (OSH-F64 §D7). Written into the RAW per-profile config, since secret
+    hydration reads raw config, not the managed overlay; pinned-offline-lane only, per
+    served coworker (never the default profile)."""
+    secrets = config.get("secrets")
+    if isinstance(secrets, dict):
+        preserved = secrets.get("preserve_existing")
+        if isinstance(preserved, (list, tuple)):
+            # Trim to match the registry, which strips preserve_existing entries before
+            # comparison — else a padded " HTTPS_PROXY " would bypass this guard yet still
+            # preserve the inherited denied proxy.
+            clash = sorted(v.strip() for v in preserved if isinstance(v, str) and v.strip() in _CHAIN_DIAL_FORCED_VARS)
+            if clash:
+                raise CompositionError(
+                    f"coworker {profile_name!r}: secrets.preserve_existing must not carve out a "
+                    f"chain-dial proxy/CA var {clash} — a preserved value wins over "
+                    f"secrets.onecli.override_existing, keeping the inherited denied proxy and "
+                    f"defeating the OneCLI chain-dial (OSH-F64 §D7)")
+    _set_dotted(config, "secrets.onecli.enabled", True)
+    _set_dotted(config, "secrets.onecli.override_existing", True)
+    _set_dotted(config, "plugins.entries.podman-onecli.settings.proxy_rewrite", chain_addr)
+    _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
+
+
+def _enforce_openshell_secret_sets(config: Dict[str, Any], served_profiles: List[str],
+                                   secret_ids: List[str]) -> None:
+    """Populate the gateway config's ``profile_secret_sets`` onboard grant map, which
+    ``onecli-onboard`` reads to grant each served identity. DEFAULT profile only — a served
+    coworker's own config does not read this map."""
+    settings = (config.setdefault("plugins", {}).setdefault("entries", {})
+                .setdefault("podman-onecli", {}).setdefault("settings", {}))
+    grants = settings.setdefault("profile_secret_sets", {})
+    for profile in served_profiles:
+        grants[profile] = list(secret_ids)
 
 
 def _assert_openshell_host_allowed(entry: str) -> None:
@@ -1250,24 +1424,48 @@ def _type_providers(
 def _openshell_policy_document(
     allow: List[str],
     providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[List[str]] = None,
+    binaries: Optional[List[str]] = None,
+    raw_hops: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Build one profile's OpenShell policy document in the accepted five-section
-    grammar from the two validated egress targets (§D1.3), plus any opted-in provider
-    endpoints/binaries/methods. Absent ``providers`` the document is byte-identical to the
+    """Build one profile's OpenShell policy document in the accepted five-section grammar
+    from the validated egress targets (§D1.3), plus any opted-in provider
+    endpoints/binaries/methods (FLEET-F62.c). The base document carries one endpoint per
+    ``allow`` target (broker, when declared, is already a third entry), the inherited
+    ``/usr/bin/curl`` worker-egress binary and the base read-only lanes; the optional OSH-F64
+    ``filesystem_read_only`` lanes are APPENDED to ``filesystem_policy.read_only`` and the
+    optional ``binaries`` to ``network_policies.worker-egress.binaries``.
+
+    ``raw_hops`` (host:port) are the OneCLI proxy hops the worker CONNECT-tunnels through when
+    it dials OneCLI as an HTTPS proxy (OpenShell 0.0.72); each renders as a RAW passthrough
+    endpoint ``{host, port, tls: skip}`` with NO ``protocol``/``enforcement``/``rules`` — a
+    ``protocol: rest`` L7 parser would reject the nested CONNECT. Every other allow target
+    (e.g. the inference route) stays a ``protocol: rest``/``enforcement: enforce`` HTTP-API
+    endpoint. Empty ``raw_hops`` → every endpoint keeps the ``protocol: rest`` shape (the
+    OSH-F63 back-compat contract).
+
+    Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
     base two-endpoint POST-only policy."""
-    # Endpoint hosts are the egress boundary; emit the two validated targets first.
-    endpoints = [
-        {
-            "host": host,
-            "port": port,
-            "protocol": "rest",
-            "enforcement": "enforce",
-            "rules": [{"allow": {"method": _OPENSHELL_POLICY_ALLOW_METHOD,
-                                 "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
-        }
-        for host, port in (_openshell_hostport(entry) for entry in allow)
-    ]
-    binaries = [{"path": _OPENSHELL_POLICY_BINARY}]
+    raw = {_openshell_hostport(entry) for entry in (raw_hops or [])}
+    # Endpoint hosts are the egress boundary; emit one per validated allow target — raw
+    # tls:skip for a CONNECT-tunnelled proxy hop (OSH-F64), protocol:rest for an HTTP-API
+    # endpoint.
+    endpoints = []
+    for host, port in (_openshell_hostport(entry) for entry in allow):
+        if (host, port) in raw:
+            endpoints.append({"host": host, "port": port, "tls": "skip"})
+        else:
+            endpoints.append({
+                "host": host,
+                "port": port,
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "rules": [{"allow": {"method": _OPENSHELL_POLICY_ALLOW_METHOD,
+                                     "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
+            })
+    # Base worker-egress binary plus the optional OSH-F64 egress.binaries (a path glob the
+    # sandbox resolves, not an egress boundary).
+    binary_records = [{"path": p} for p in (_OPENSHELL_POLICY_BINARY, *(binaries or []))]
     # Opt-in provider egress joins the SAME worker-egress network policy: each provider
     # endpoint becomes another enforced record, and its binaries union onto the binary
     # allow-list. The grammar's rule method is scalar, so a provider's verb set renders as
@@ -1284,13 +1482,13 @@ def _openshell_policy_document(
             })
         for binary in provider["binaries"]:
             record = {"path": binary}
-            if record not in binaries:
-                binaries.append(record)
+            if record not in binary_records:
+                binary_records.append(record)
     return {
         "version": 1,
         "filesystem_policy": {
             "include_workdir": True,
-            "read_only": list(_OPENSHELL_POLICY_FS_READ_ONLY),
+            "read_only": [*_OPENSHELL_POLICY_FS_READ_ONLY, *(filesystem_read_only or [])],
             "read_write": list(_OPENSHELL_POLICY_FS_READ_WRITE),
         },
         "landlock": {"compatibility": _OPENSHELL_POLICY_LANDLOCK},
@@ -1298,7 +1496,7 @@ def _openshell_policy_document(
         "network_policies": {
             _OPENSHELL_POLICY_NETWORK_NAME: {
                 "name": _OPENSHELL_POLICY_NETWORK_NAME,
-                "binaries": binaries,
+                "binaries": binary_records,
                 "endpoints": endpoints,
             }
         },
@@ -1310,19 +1508,27 @@ def _enforce_openshell_policy(
     profile_name: str,
     allow: List[str],
     providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[List[str]] = None,
+    binaries: Optional[List[str]] = None,
+    raw_hops: Optional[List[str]] = None,
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
     OpenShell grammar whose ``network_policies`` carry the base egress allow-set plus
-    any opted-in provider endpoints/binaries/methods (the operator materialises the
-    on-box ``openshell policy`` from it at provisioning).
+    any opted-in provider endpoints/binaries/methods (FLEET-F62.c); the optional OSH-F64
+    ``filesystem_read_only`` lanes and ``binaries`` are appended to the base
+    ``filesystem_policy.read_only`` / worker-egress binary list, and the ``raw_hops`` proxy
+    endpoints render as raw ``tls: skip`` passthroughs (the operator materialises the on-box
+    ``openshell policy`` from it at provisioning).
 
     The policy file is also added to the distribution manifest's ``distribution_owned``
     so ``install_distribution`` carries it into the installed profile rather than
     dropping it. ``config.yaml`` (and thus ``distribution.yaml``) were already written
     by ``_render_coworker`` before this runs."""
     policy_name = f"policy-{profile_name}.yaml"
-    _write_yaml(pdir / policy_name, _openshell_policy_document(allow, providers))
+    _write_yaml(pdir / policy_name,
+                _openshell_policy_document(allow, providers, filesystem_read_only,
+                                           binaries, raw_hops))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
@@ -1826,7 +2032,8 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
 
 
 def _build_managed_fragment(profile_roles: Dict[str, str],
-                            expected_ssh_host: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                            expected_ssh_host: Optional[Dict[str, str]] = None,
+                            *, disable_install_scan: bool = False) -> Dict[str, Any]:
     """Build the machine-wide managed-scope fragment: the eight fleet-uniform
     approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
     this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
@@ -1842,13 +2049,23 @@ def _build_managed_fragment(profile_roles: Dict[str, str],
     ``expected_ssh_host`` ({profile: sandbox host}), for the remote-ssh substrate
     (OSH-F63), is pinned at the same managed scope so the veto's host-binding predicate
     anchors each profile to its OWN sandbox host from a map a worker cannot forge via
-    its per-profile config."""
+    its per-profile config.
+
+    ``disable_install_scan`` emits ``plugins.scan_on_install: false`` (OSH-F64 §D6).
+    Passed True only for an openshell fleet with ``egress.pinned_offline_lane: true``:
+    there the sha-pinned first-party fleet plugins are installed OFFLINE from the
+    operator mirror with GitHub egress closed, and the install-time scanner's DANGEROUS
+    verdict (which ``--force`` cannot override) would otherwise refuse them. Every other
+    fleet (plain-host/container, and an openshell fleet outside that lane) leaves the flag
+    unset so scanning stays ON."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
     if expected_ssh_host:
         _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.expected_ssh_host", dict(expected_ssh_host))
+    if disable_install_scan:
+        _set_dotted(fragment, "plugins.scan_on_install", False)
     return fragment
 def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
@@ -3023,6 +3240,20 @@ def _inject_self_plugin(config: Dict[str, Any], orchestrator_profile: str) -> No
     settings["orchestrator_profile"] = orchestrator_profile
 
 
+_FIRECRAWL_DISABLE = ("web-firecrawl", "browser-firecrawl")
+
+
+def _disable_firecrawl_providers(config: Dict[str, Any]) -> None:
+    # `plugins.disabled` matches a bundled backend by manifest name and wins ahead of the
+    # bundled-backend auto-load, so disabling the firecrawl providers stops the multiplex
+    # boot warm-up from reading their unscoped FIRECRAWL_API_KEY (§D8). Append-if-absent
+    # preserves any operator-set disable and keeps a re-render idempotent.
+    disabled = config.setdefault("plugins", {}).setdefault("disabled", [])
+    for name in _FIRECRAWL_DISABLE:
+        if name not in disabled:
+            disabled.append(name)
+
+
 def _merged_spine_config(spines: Dict[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for spine in spines.values():
@@ -3411,6 +3642,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # Phase-B loop below. An absent egress block leaves enforcement off, so dev/test
     # specs render unchanged.
     egress_block = data.get("egress")
+    # OSH-F64 §D7.1: validate a present egress.onecli_secret_ids on EITHER substrate — the
+    # container path never reaches _validate_openshell_egress, so without this a container
+    # spec could silently ship an empty grant list and revoke identities at onboard.
+    if isinstance(egress_block, dict) and "onecli_secret_ids" in egress_block:
+        _validate_openshell_secret_ids(egress_block["onecli_secret_ids"])
     if is_remote:
         # OSH-F63: the remote-ssh substrate's egress is a per-profile `openshell
         # policy` file (not the container docker_* env), so an openshell fleet must
@@ -3524,11 +3760,19 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # AFTER (so _render_coworker does not need to know about it).
         if is_remote:
             _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
+            if openshell_params["pinned_offline_lane"]:
+                _enforce_openshell_chain_dial(resolved["config"], tname,
+                                              openshell_params["chain_addr"],
+                                              openshell_params["ca_bundle"])
+                _disable_firecrawl_providers(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
             _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
-                                      providers_by_type.get(tname))
+                                      providers_by_type.get(tname),
+                                      openshell_params["filesystem_read_only"],
+                                      openshell_params["binaries"],
+                                      openshell_params["raw_hops"])
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
@@ -3547,6 +3791,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_webhook_routes(default_config, served)
     if egress_params is not None:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
+    if is_remote and openshell_params.get("onecli_secret_ids") is not None:
+        _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
+    if is_remote and openshell_params["pinned_offline_lane"]:
+        _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     rendered[default_profile] = str(ddir)
@@ -3571,7 +3819,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         {tname: _openshell_ssh_alias(fleet_name, tname) for tname in roster}
         if is_remote else None
     )
-    managed_fragment = _build_managed_fragment(profile_roles_map, expected_ssh_host_map)
+    managed_fragment = _build_managed_fragment(
+        profile_roles_map, expected_ssh_host_map,
+        disable_install_scan=bool(is_remote and openshell_params["pinned_offline_lane"]))
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology

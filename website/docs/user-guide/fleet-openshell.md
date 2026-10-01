@@ -83,8 +83,9 @@ the OpenShell gateway control plane (`host.openshell.internal:8080`) for the wor
 tool egress.** The mounted mTLS identity is gateway-admin over *all* siblings, so a
 worker that could reach `host.openshell.internal:8080` could list/create/connect to
 sibling sandboxes — breaking profile isolation (topology rule 3, a MUST). The
-per-profile policy therefore allows **exactly two endpoints** — the OneCLI request hop
-and the inference route — and **`host.openshell.internal:8080` is never an endpoint.**
+per-profile policy therefore allows a small fixed base of **two endpoints** — the OneCLI
+request hop and the inference route (the OSH-F64 extension below may add a validated third
+broker endpoint) — and **`host.openshell.internal:8080` is never an endpoint.**
 AC-OSH-F63-5 proves this at runtime with a worker-side negative control: from inside a
 policy-constrained sandbox, an attempt to `sandbox list` / connect to a sibling via
 `host.openshell.internal:8080` must be **denied** (nonzero exit, no sibling metadata).
@@ -103,8 +104,8 @@ The render emits one `policy-<profile>.yaml` per coworker profile, in the OpenSh
 policy grammar the `openshell sandbox create --policy` CLI accepts — top-level
 `version`, `filesystem_policy`, `landlock`, `process`, and `network_policies` (an
 earlier flat `egress: {allow: […]}` shape is rejected with `unknown field egress`). Its
-`network_policies` allow-set is **exactly two endpoints**, taken from the spec's
-`egress` block:
+base `network_policies` allow-set is **two endpoints** (the OSH-F64 extension below may
+append a validated third), taken from the spec's `egress` block:
 
 ```yaml
 egress:
@@ -158,6 +159,57 @@ unchanged:** if the pinned OpenShell CLI rejects it (the sandbox never reaches R
 `openshell sandbox create --policy`) or fails to enforce it — admitting the in-policy POST while denying
 `host.openshell.internal:8080` — the criterion FAILS and the renderer must be corrected;
 do not regenerate or hand-edit the policy during verification.
+
+**OSH-F64 / OpenShell 0.0.72 extension (additive, optional).** A spec MAY carry three
+optional `egress` fields that extend — never replace — the base document above: a
+`broker_addr` (`172.17.0.1:18777`) renders as a **third** `network_policies.worker-egress`
+endpoint (the OpenShell 0.0.72 broker hop; the OneCLI request hop moves to `172.17.0.1:18255`,
+podman keeps `10255`); a `filesystem_read_only` list of exact absolute paths (no wildcard,
+no `..`) is **appended** to `filesystem_policy.read_only` as write-denied lanes (the demo
+adds `/opt/osh-lane`); and a `binaries` list of absolute paths (a `*` glob permitted, e.g.
+`/usr/bin/python3*`) is **appended** to `network_policies.worker-egress.binaries`, which
+already carries `/usr/bin/curl` (the demo adds `/usr/bin/python3*` and
+`/opt/hermes/.venv/bin/python`).
+
+**Proxy hops render as raw `tls: skip`, the inference route stays `protocol: rest`.** When
+the OSH-F64 delta is present (`broker_addr` set), the two OneCLI proxy hops —
+`172.17.0.1:18255` (`proxy_addr`) and `172.17.0.1:18777` (`broker_addr`) — render as raw
+passthrough endpoints `{host, port, tls: skip}` with **no** `protocol`/`enforcement`/`rules`.
+Both are HTTPS-proxy `CONNECT`-tunnel hops (0.0.72 tunnels the sandbox's outbound TLS through
+them), so a `protocol: rest` shape with a `POST /**` rule would try to parse and enforce
+inside an opaque tunnel and break the hop — the raw `tls: skip` form lets the substrate pass
+the tunnel through unmodified (the operator-validated 0.0.72 shape). `inference-api.nvidia.com:443`
+is a real HTTP-API endpoint reached over that tunnel, so it **keeps** `protocol: rest`,
+`enforcement: enforce`, and its `POST /**` rule. Only `worker-egress.endpoints` changes from
+the base document above (the other four sections and the appended `binaries` are as shown
+earlier); with the delta present it becomes:
+
+```yaml
+# network_policies.worker-egress.endpoints when the OSH-F64 delta (broker_addr) is present:
+endpoints:
+  - {host: 172.17.0.1, port: 18255, tls: skip}            # proxy_addr  — raw CONNECT tunnel
+  - {host: inference-api.nvidia.com, port: 443, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
+  - {host: 172.17.0.1, port: 18777, tls: skip}            # broker_addr — raw CONNECT tunnel
+```
+
+The forbidden set is unchanged: **no wildcard host**, the OneCLI control plane
+`172.17.0.1:10256` is never an endpoint, and **outbound** ssh (port 22) is never an endpoint
+(ssh is inbound via the proxy socket) — the broker is checked the same as every other allow
+entry. A spec absent all three optional fields renders exactly the base two-endpoint document
+above with **both** endpoints `protocol: rest` (the `tls: skip` shape is keyed strictly on the
+delta being present, never inferred) — the behavioural back-compat contract.
+
+**`egress.pinned_offline_lane` (boolean, default off).** Set it to `true` when the fleet runs in
+the pinned offline lane: a sha-pinned offline fork mirror, closed GitHub egress, and a local
+onecli-chain (the shipped OSH-F64 spec sets it). Only then does the render emit the three
+lane-specific settings: each served coworker's OneCLI chain-dial (`secrets.onecli.override_existing`
+plus `podman-onecli` `proxy_rewrite`/`ca_bundle`), the disabled firecrawl providers on the
+default and every served coworker, and the managed `plugins.scan_on_install: false`. Absent or
+`false`, an `openshell` fleet renders none of them (FLEET-F62.c and OSH-F63 are unchanged), and
+the worker policies are identical either way. Any value other than `true`/`false` is refused at
+compose time. The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`)
+is lane-only: it refuses a spec without `pinned_offline_lane: true` before it touches any state,
+so render a non-lane `openshell` fleet with `coworker compose`.
 
 ## Operator prerequisites
 
@@ -230,3 +282,164 @@ The top-level `sandbox_scope` key selects how many OpenShell sandboxes back the 
   `create_environment` that mints one sandbox per session and reaps it on idle) with
   `terminal.backend: openshell` — a CORE-CHANGE-free plugin path that OSH-F63 does not
   build. Until that provider ships, use `sandbox_scope: profile`.
+
+## install into an existing NemoClaw sandbox
+
+The demo runs the FLEET-F62 five-profile fleet on the OpenShell substrate INSIDE an
+existing NemoClaw Hermes sandbox — the shape of the user's `brev-hermes` — without ever
+touching that user box by hand. The two-phase entrypoint is
+`plugins/nv-coworker-compose/openshell/install-into-sandbox.sh`, staged into the sandbox
+at create time (`openshell sandbox create --upload`) or via `openshell sandbox exec`.
+
+### What the operator runs (on `brev-hermes`)
+
+Preview first — `install-into-sandbox.sh <spec> --ref <40-char-sha> --dry-run` prints the
+full ordered plan and changes nothing. Then run it for real, adding the sandbox's loopback
+gateway credential URL: `install-into-sandbox.sh <spec> --ref <40-char-sha> --gateway-url <ws-url>`.
+Phase B probes and creates the fleet rooms against the live gateway over that authenticated
+WebSocket, so the real run — unlike `--dry-run` — requires `--gateway-url`.
+
+On a lane where the OpenShell broker validates `--policy` as a HOST path it reads itself, add
+`--policy-root <host dir>`: each worker `sandbox create --policy` is then rebased to
+`<host dir>/render/<role>/policy-<role>.yaml` (the operator mirrors the rendered per-worker
+policies under that root first); with it unset, the gateway-internal render path is used and the
+plan is byte-for-byte unchanged. The script:
+
+- **Phase A** installs the fleet plugins (`nv-coworker-compose`, `nv-fleet-gates`,
+  `podman-onecli`) at the pinned commit so `hermes coworker` exists.
+- **Before Phase A's first `plugins install`**, the script writes `plugins.scan_on_install:
+  false` into the managed config (the §D6 install-scan guard). Without it the install-time
+  scanner returns a DANGEROUS verdict on these first-party plugins — false positives that
+  `--force` cannot override — and refuses the offline install. Turning the scan off is a
+  deliberate, sound trust decision **only** under this lane's boundary: the fleet plugins are
+  40-char-sha-pinned first-party artifacts installed offline from the operator-controlled
+  `/opt/hermes/fork` mirror with GitHub egress closed. It is an **openshell-only** managed
+  delta — the plain-host / container substrate keeps plugin scanning ON, since those installs
+  run from GitHub with egress open.
+- **Phase B** (`hermes coworker install-openshell`) composes the fleet under
+  `substrate: openshell` and provisions **five worker sandboxes** — one per served
+  coworker — each Ready under a per-bot `openshell policy` (that bot's APF: exactly the
+  three endpoints the spec's `egress` names — the OneCLI request hop, the inference route,
+  and the OpenShell-0.0.72 broker hop — the interpreter binaries appended to
+  `worker-egress.binaries` (`/usr/bin/python3*`, `/opt/hermes/.venv/bin/python`) on top of
+  the inherited `/usr/bin/curl`, and the write-denied `/opt/osh-lane` read-only lane, and
+  nothing else; neither the control plane `:10256` nor outbound ssh `:22` is ever allowed).
+- It also installs the fleet plugins under **each** served profile (a profile
+  distribution excludes plugins, so the veto must be installed per profile or it is
+  absent there).
+- **OneCLI identity grants (§D7.1).** Under `substrate: openshell` the render computes each
+  served coworker's grant from `egress.onecli_secret_ids` (the shipped spec sets
+  `["Anthropic-Dev"]`), and the openshell installer APPLIES that grant into the installed
+  `$HERMES_HOME/config.yaml` default's
+  `plugins.entries.podman-onecli.settings.profile_secret_sets[<each served coworker>]`,
+  overriding the spine's inert `[]`. That installer-applied default — NOT the render output,
+  which does not reach the installed gateway default — is the non-empty map `onecli-onboard`
+  reads. To APPLY those grants the operator runs, from the gateway root and per served role,
+  `hermes -p default onecli-onboard --profile <role>`: the `-p default` selects the onboarding
+  context whose applied config carries that grant map, and the trailing `--profile <role>` is
+  the onboard handler's own argument. **Never invoke it bare** (`hermes onecli-onboard --profile
+  <role>`): hermes-main consumes the first `-p`/`--profile` as the global profile selector and
+  strips it, so the handler's required `--profile` goes missing and the context is set to `<role>`
+  instead of `default`.
+- **An empty `profile_secret_sets` entry (`[]`) is refused by default.** `onecli-onboard` on an
+  empty grant would call `set_secrets([])`, which REVOKES that identity's inference secret → the
+  served model turn 401s, so the handler now RAISES rather than silently revoking a working grant.
+  The deliberate revocation case — an unassigned sibling the mocked hermetic tests prove still
+  401s — is the explicit opt-in `--allow-ungranted`: `hermes -p default onecli-onboard --profile
+  <role> --allow-ungranted` then performs the `set_secrets([])`. Never pass `--allow-ungranted`
+  for a served coworker in a live bake; its grant must be the non-empty `["Anthropic-Dev"]` the
+  installer applied.
+- It **edits the existing default profile in place**, taking a deterministic **backup**
+  of the original `$HERMES_HOME/config.yaml` FIRST — before any `plugins install --enable`
+  rewrites it — and writing the managed fragment to the managed dir as a separate file.
+  It must **never run `profile install default`**: `get_profile_dir("default")` resolves
+  to `$HERMES_HOME` itself (the user's running Hermes), so the default is edited, never
+  reinstalled.
+- It creates the fleet rooms and wires, then restarts the gateway via the shipped
+  `hermes gateway restart`.
+- **Post-install Bot-Mode onboarding (required for `message_agent`).** After the gateway is
+  up, the operator runs the fleet onboard step from the default gateway context —
+  `hermes -p default onboard coworker <spec> --gateway-url "$GW_URL"` — which creates each
+  served coworker's **canonical Bot Chat** session and its `ui_meta['hermes-bots']` roster
+  entry. `message_agent`'s tool schema is injected ONLY into a coworker's canonical Bot Chat,
+  so without this step the served bots hold no Bot Chat and `message_agent` (bot-to-bot
+  delivery) is unreachable fleet-wide; the installer's rooms (`groups.create`) and wires do
+  NOT create it. Run it as `-p default`, never profile-scoped (a profile-scoped invocation
+  would re-render SSH-key paths relative to the wrong `HERMES_HOME`); it force-re-renders the
+  served distributions, so confirm the post-onboard per-role config is unchanged (SSH, OneCLI
+  chain-dial, the disabled firecrawl providers, the enabled plugins).
+- The dashboard or desktop app then attaches to the running gateway through the desktop
+  forward (`openshell forward start <29xxx-port> osh-f64-gw` — brokered, `-d`, bind
+  `172.17.0.1`, port in 29000–29999) — one gateway connection for the whole app, listing
+  the served profiles.
+
+**Gateway-sandbox preflight (shared learnings).** Each served profile's process runs in
+the gateway sandbox and reads `skills.external_dirs`, so `/opt/hermes-fleet/shared-learnings/skills`
+must exist IN the gateway sandbox before boot (stage or mount it there). The remote-ssh
+substrate binds no container mount, so this is a gateway-sandbox prerequisite, not a
+worker-image one; the orchestrator wiki-fold stays an operator opt-in under openshell.
+
+### Rollback
+
+To back the change out and leave the existing default exactly as before:
+
+- **Restore the default `config.yaml` backup** and the managed-config backup taken in
+  Phase A (this reverts the in-place default edit). If the managed config did NOT exist
+  before the install — a `config.yaml.osh-f64.absent` marker sits beside it, recording that the
+  §D6 scan-guard write created it — **delete both the managed `config.yaml` and that
+  `config.yaml.osh-f64.absent` marker** instead of restoring a backup, so the install-scan guard
+  does not linger with plugin scanning left disabled and no stale marker survives to make a
+  later operator-created managed config look originally-absent (which would skip its backup).
+- **Remove the five coworker profiles** (`hermes profile remove <role>` per role) — the
+  profiles the install added, never the default profile.
+- **Uninstall the fleet plugins** that were newly installed (default + per-profile); a
+  plugin that pre-existed at the pinned ref is left as the operator had it.
+- **Restart the gateway** so it re-reads the restored default.
+- **Delete** the `osh-f64-*` worker sandboxes (`openshell sandbox delete`) — each sandbox's
+  policy is bound inline by `sandbox create --policy` and is removed with the sandbox, so
+  there is no separate teardown command — and the `osh-f64-gw` gateway sandbox when it was
+  a throwaway.
+
+### What the NemoClaw dashboard / APF shows afterwards
+
+The NemoClaw dashboard shows one running worker sandbox per served coworker, and its APF
+view shows one `openshell policy` per sandbox — the three allowed endpoints per bot plus
+the `/opt/osh-lane` read-only lane and the appended interpreter binaries, with an
+off-policy egress attempt denied and logged. The whole fleet is one gateway on one bound
+port; the per-profile `hermes -p <profile> chat` helper processes bind no external port.
+
+### The `hermes gateway restart` child and the wrapper `[SECURITY]` guard
+
+The install ends by restarting the gateway so it re-reads the edited default. On a NemoClaw
+sandbox the `hermes` entrypoint is a wrapper whose `[SECURITY]` startup guard refuses to
+start a process whose environment carries raw secret-shaped values — the deploy exports
+`HERMES_DASHBOARD_SESSION_TOKEN` for the live-WS preflight, and a supervised host may also
+carry `API_SERVER_KEY` or a `*_TOKEN_FILE`. The restart child needs none of them, so the
+installer scrubs `HERMES_DASHBOARD_SESSION_TOKEN`, `API_SERVER_KEY`, and every `*_TOKEN_FILE`
+(for example `OSH_BROKER_TOKEN_FILE`) from that child's environment before spawning it; the
+gateway process itself keeps its own configured secrets.
+
+That env-scrub is scoped to the restart child only — it does **not** waive the core guard.
+The `API_SERVER_KEY` guard is separate: a gateway that enables `api_server` and is supervised
+still requires a strong key configured for the listener; scrubbing an inherited name off the
+short-lived restart child does not enable an unauthenticated API server. Configure a strong
+`API_SERVER_KEY` on the supervised gateway when `api_server` is enabled, or leave the
+platform disabled.
+
+### Live-lane preconditions for a served turn
+
+Before a served coworker can complete a live turn over the OpenShell lane, four
+preconditions must hold on `brev-hermes`:
+
+1. **Per-worker ssh config.** Run `openshell sandbox ssh-config <name>` for each **worker**
+   sandbox and write its `User sandbox` + `ProxyCommand` block into `~/.ssh/config`, so the
+   profile's `terminal.ssh_host` alias resolves to the assigned sandbox.
+2. **OpenShell shim on `PATH`.** The `openshell shim` (the `onecli-chain` dialer) must be on
+   the gateway's `PATH` so the ssh `ProxyCommand` can dial the broker for each worker.
+3. **Loopback proxy relay.** A `socat` `listener` bridges the dashboard's loopback origin to
+   the broker-forced `proxy_rewrite` target `127.0.0.1:18255`, so a data-plane request the
+   dashboard issues on loopback reaches the OneCLI hop.
+4. **Resolvable managed dir.** The `nv-fleet-gates` veto reads the worker-unforgeable
+   `expected_ssh_host` map only when `$HERMES_MANAGED_DIR` resolves to the installed managed
+   fragment; if it does not resolve, the veto cannot bind a worker to its sandbox and the
+   turn is refused.
