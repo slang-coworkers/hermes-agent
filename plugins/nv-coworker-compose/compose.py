@@ -1091,11 +1091,13 @@ def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name
 def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
-    raises ``CompositionError`` rather than emitting a half-formed policy. The policy
-    ALLOW set is EXACTLY {the OneCLI request hop ``proxy_addr``, the inference route
-    ``inference_route``}; the ssh control path is INBOUND via the proxy socket, not an
-    egress target. A wildcard, the OneCLI control plane (…:10256), the OpenShell gateway
-    control plane (host.openshell.internal:8080), and the ssh port are refused."""
+    raises ``CompositionError`` rather than emitting a half-formed policy. The BASE
+    egress allow-set this returns is {the OneCLI request hop ``proxy_addr``, the inference
+    route ``inference_route``} — opted-in providers add their role-scoped endpoints in
+    ``_openshell_policy_document``, not here; the ssh control path is INBOUND via the proxy
+    socket, not an egress target. A wildcard, the OneCLI control plane (…:10256), the
+    OpenShell gateway control plane (host.openshell.internal:8080), and the ssh port are
+    refused."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1120,8 +1122,9 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     return {"allow": allow, "sandbox_image": sandbox_image}
 
 
-# Keep policy hardening fixed here so spec data can change only the validated
-# endpoint allow-list.
+# Keep policy hardening fixed here so spec data drives only the base egress allow-list
+# and the opt-in provider endpoints/binaries/methods — never the filesystem, landlock or
+# process floor.
 _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
@@ -1310,9 +1313,9 @@ def _enforce_openshell_policy(
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
-    OpenShell grammar whose ``network_policies`` endpoints are exactly the declared
-    allow set (the operator materialises the on-box ``openshell policy`` from it at
-    provisioning).
+    OpenShell grammar whose ``network_policies`` carry the base egress allow-set plus
+    any opted-in provider endpoints/binaries/methods (the operator materialises the
+    on-box ``openshell policy`` from it at provisioning).
 
     The policy file is also added to the distribution manifest's ``distribution_owned``
     so ``install_distribution`` carries it into the installed profile rather than

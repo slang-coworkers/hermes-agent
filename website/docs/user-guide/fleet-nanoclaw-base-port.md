@@ -55,10 +55,11 @@ splice-parent stub even though it produces no rendered skill.
 
 ## Egress: F63 shape now, F64.b later
 
-This row ships the merged OSH-F63 egress: the two allowed endpoints are the
+This row ships the merged OSH-F63 egress: the two base egress endpoints are the
 OneCLI data-plane hop `172.17.0.1:18255` and the inference route
-`inference-api.nvidia.com:443`, and the render emits five per-coworker openshell
-policies (the DEFAULT multiplexer is unsandboxed). The intended F64.b target —
+`inference-api.nvidia.com:443` (the three github-using workers add the GitHub
+endpoints on top — see the provider-fold section below), and the render emits five
+per-coworker openshell policies (the DEFAULT multiplexer is unsandboxed). The intended F64.b target —
 recorded in a `# F64.b-target:` comment in `coworker-types.yaml` — is
 broker-18777-only with no `18255` data-plane hop, an OpenShell provider
 placeholder base URL `https://inference.local`, and the key rewrite marker
