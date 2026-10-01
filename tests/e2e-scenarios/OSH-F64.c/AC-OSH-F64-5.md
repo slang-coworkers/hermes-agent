@@ -29,24 +29,38 @@ the loopback bridge's port (the forward exposes the sandbox port of the same num
 
 The `fixtures:` list is installed before this section; nothing here re-installs it. The installed
 fixture's files are the ROOT config of the sandbox: `osh-f64c-gw` is a default/multiplexer seed,
-the same shape as the parent's `osh-f64-gateway`. Every `openshell sandbox exec` below wraps its
-remote command in single quotes, so `$HERMES_HOME` expands INSIDE the sandbox.
+the same shape as the parent's `osh-f64-gateway`.
+
+Every in-sandbox command goes through `sx`. The `osh-f64-gateway:pinned` login shell does not set
+`HERMES_HOME`, and Hermes then uses `$HOME/.hermes`, i.e. `/sandbox/.hermes` (release
+`hermes_constants.py:59`, `:71-74`). So `sx` exports exactly that, and sets `PY` to the Hermes venv's
+python, before the command runs. Commands passed to `sx` are single-quoted (or escape their `\$`), so
+`$HERMES_HOME` and `$PY` expand INSIDE the sandbox. Only the tester-side `FIX=` below uses the
+testbed's own `$HERMES_HOME`.
 
 ```bash
 SCN=$WT/tests/e2e-scenarios/OSH-F64.c; AC=AC-OSH-F64-5; mkdir -p $ART/scenario-$AC
 FIX=$HERMES_HOME/profiles/osh-f64c-gw        # the installed fixture (tester's testbed home)
 P=<free port in 29000-29999>
 SB=osh-f64c-gw
+HX='export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"; PY=/opt/hermes/.venv/bin/python; [ -x "$PY" ] || PY=$(sed -n "1s/^#!//p" "$(command -v hermes)" 2>/dev/null);'
+sx() {  # sx [-t <secs>] '<command>': run it in $SB after $HX; -t bounds it (timeout 0 = no bound)
+  local t=0; [ "$1" = -t ] && { t=$2; shift 2; }
+  timeout "$t" openshell sandbox exec "$SB" -- sh -lc "$HX $1"
+}
 # Copy a small local dir into the sandbox through exec argv; needs only `sandbox exec`.
 stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in the sandbox>
   b64=$(tar -C "$(dirname "$1")" --exclude=__pycache__ -czf - "$(basename "$1")" | base64 -w0)
-  openshell sandbox exec $SB -- sh -lc "mkdir -p $2 && echo $b64 | base64 -d | tar -C $2 -xzf -"
+  sx "mkdir -p $2 && echo $b64 | base64 -d | tar -C $2 -xzf -"
 }
 ```
 
 1. **Create the sandbox** from the lane's pinned gateway image, the parent AC-OSH-F64-5 `--from`:
    `openshell sandbox create --name osh-f64c-gw --from osh-f64-gateway:pinned --policy /workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml`
    (nothing in this scenario needs egress; the parent's gateway policy is reused as is).
+   Then confirm the home resolves:
+   `sx 'echo "home=$HERMES_HOME py=$PY"; ls -d "$HERMES_HOME" && "$PY" -c "print(1)"' | tee $ART/scenario-$AC/env.txt` →
+   expect `home=/sandbox/.hermes`, the directory listed, and `1`.
 2. **Stage the PR head's plugin and the fixture into the sandbox root.** The plugin goes in as a
    USER plugin (`$HERMES_HOME/plugins/nv-bot-chat`), so the dashboard serves it only because the
    fixture lists it in `plugins.enabled`. The image's own config is kept as `config.yaml.image`:
@@ -55,27 +69,27 @@ stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in th
    mkdir -p $ART/scenario-$AC/root-seed && cp $FIX/config.yaml $FIX/SOUL.md $ART/scenario-$AC/root-seed/
    stage $ART/scenario-$AC/root-seed '"$HERMES_HOME/.osh-f64c"'
    stage $SCN/helpers '"$HERMES_HOME/.osh-f64c"'     # seed + evidence scripts used below
-   openshell sandbox exec $SB -- sh -lc 'cd "$HERMES_HOME" && { [ ! -f config.yaml ] || mv config.yaml config.yaml.image; } && cp .osh-f64c/root-seed/config.yaml .osh-f64c/root-seed/SOUL.md . && ls plugins/nv-bot-chat/dashboard/manifest.json'
+   sx 'cd "$HERMES_HOME" && { [ ! -f config.yaml ] || mv config.yaml config.yaml.image; } && cp .osh-f64c/root-seed/config.yaml .osh-f64c/root-seed/SOUL.md . && ls plugins/nv-bot-chat/dashboard/manifest.json'
    ```
    Only the fixture's own `config.yaml` + `SOUL.md` are copied (not the whole installed profile
    dir, which can hold seeded skills too large for one exec argument).
 3. **Create the two served named profiles** (the fixture allowlists them):
-   `openshell sandbox exec $SB -- sh -lc 'hermes profile create orchestrator --no-alias --no-skills && hermes profile create builder --no-alias --no-skills'`.
+   `sx 'hermes profile create orchestrator --no-alias --no-skills && hermes profile create builder --no-alias --no-skills'`.
 4. **Seed each served profile's hidden canonical Bot Chat** with two lines (operator + assistant).
    The canonical row is the exact-title `Bot Chat` session, `hidden=1`. `default`'s store is
    `$HERMES_HOME/state.db` (always served); the named ones live at `$HERMES_HOME/profiles/<name>/state.db`:
    ```bash
-   openshell sandbox exec $SB -- sh -lc 'PY=/opt/hermes/.venv/bin/python; [ -x "$PY" ] || PY=$(head -1 "$(command -v hermes)" | sed "s/^#!//"); "$PY" "$HERMES_HOME/.osh-f64c/helpers/seed_bot_chats.py"' | tee $ART/scenario-$AC/seeded.txt
+   sx '"$PY" "$HERMES_HOME/.osh-f64c/helpers/seed_bot_chats.py"' | tee $ART/scenario-$AC/seeded.txt
    ```
-   The seed runs under the Hermes venv's python because it imports `hermes_state`
+   The seed runs under the Hermes venv's python (`$PY`) because it imports `hermes_state`
    (`create_session` → `set_session_title(…, "Bot Chat")` → `set_session_hidden(…, True)` →
    `append_message` ×2).
    `seeded.txt` must name all three profiles; the orchestrator's id is `<orch-sid>` below.
 5. **Boot the ONE multiplex gateway** (no messaging platform is configured; the gateway keeps
    running for cron, `gateway/run.py:14185-14186`), and wait until its runtime state says running:
    ```bash
-   openshell sandbox exec $SB -- sh -lc 'setsid nohup hermes gateway run > "$HERMES_HOME/osh-f64c-gateway.log" 2>&1 < /dev/null &'
-   timeout 300 openshell sandbox exec $SB -- sh -lc 'until grep -q "\"gateway_state\": *\"running\"" "$HERMES_HOME/gateway_state.json" 2>/dev/null; do sleep 2; done'
+   sx 'setsid nohup hermes gateway run > "$HERMES_HOME/osh-f64c-gateway.log" 2>&1 < /dev/null &'
+   sx -t 300 'until grep -q "\"gateway_state\": *\"running\"" "$HERMES_HOME/gateway_state.json" 2>/dev/null; do sleep 2; done'
    ```
    An exit at the api_server key guard (exit 78) comes from the image's own environment, not from
    this plugin, which enables no platform. Capture `osh-f64c-gateway.log` and report it as `FAIL(env)`.
@@ -83,9 +97,11 @@ stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in th
    `--skip-build` serves the image's prebuilt SPA (`hermes_cli/web_dist`) rather than attempting an npm
    build the sandbox has no egress for (`hermes_cli/main.py:12207-12225`):
    ```bash
-   openshell sandbox exec $SB -- sh -lc "setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"
-   timeout 300 openshell sandbox exec $SB -- sh -lc "until curl -fsS http://127.0.0.1:$P/api/health | grep -q '\"ok\": *true'; do sleep 2; done"
+   sx "setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"
+   sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" $P; do sleep 2; done"
    ```
+   `health_ok.py` reads `/api/health` with the venv's stdlib, bypassing any sandbox proxy, so the
+   wait needs no `curl` in the image.
 7. **Open exactly ONE forward**, and log the command as you run it:
    ```bash
    echo "openshell forward start $P $SB -d" | tee $ART/scenario-$AC/forwards.txt
@@ -141,18 +157,17 @@ All files are under `$ART/scenario-AC-OSH-F64-5/`:
   `evidence.txt`. It must print `<orch-sid> 1 Bot Chat`, with the id equal to `opened-session-id.txt`:
   ```bash
   SID=$(cat $ART/scenario-AC-OSH-F64-5/opened-session-id.txt)
-  openshell sandbox exec $SB -- sh -lc "python3 \"\$HERMES_HOME/.osh-f64c/helpers/bot_chat_row.py\" $SID" | tee -a $ART/scenario-AC-OSH-F64-5/evidence.txt
+  sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/bot_chat_row.py\" $SID" | tee -a $ART/scenario-AC-OSH-F64-5/evidence.txt
   ```
 - **One forward:** `forwards.txt` holds exactly one `openshell forward start $P osh-f64c-gw -d`
   line, onto the dashboard's `$P`.
 - **One gateway process.** Append this `/proc/*/cmdline` scan of the sandbox to `evidence.txt`
   (it works whether or not `procps` is installed). It must print `gateway_processes 1`:
   ```bash
-  openshell sandbox exec $SB -- sh -lc 'python3 "$HERMES_HOME/.osh-f64c/helpers/gateway_count.py"' | tee -a $ART/scenario-AC-OSH-F64-5/evidence.txt
+  sx '"$PY" "$HERMES_HOME/.osh-f64c/helpers/gateway_count.py"' | tee -a $ART/scenario-AC-OSH-F64-5/evidence.txt
   ```
 - `osh-f64c-gateway.log` and `osh-f64c-dashboard.log`, copied out with
-  `openshell sandbox exec $SB -- sh -lc 'cat "$HERMES_HOME/osh-f64c-gateway.log"'` (and likewise for
-  the dashboard log).
+  `sx 'cat "$HERMES_HOME/osh-f64c-gateway.log"'` (and likewise for the dashboard log).
 
 ## Teardown
 
