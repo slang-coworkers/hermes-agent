@@ -2,9 +2,10 @@
 
 ``GET /bot-chats`` lists every served profile's hidden canonical Bot Chat;
 ``GET /bot-chats/{profile}/{session_id}/messages`` opens one. The transcript
-route takes the session store from the served set only, so a profile the
-gateway does not serve, or a session that is not that profile's canonical Bot
-Chat, is a 404 before any session store is read.
+route takes the session store from the served set, never from the request
+path: a profile the gateway does not serve has no store to open, and an id that
+is not that served profile's canonical Bot Chat is a 404 that never reaches the
+transcript read.
 """
 from __future__ import annotations
 
