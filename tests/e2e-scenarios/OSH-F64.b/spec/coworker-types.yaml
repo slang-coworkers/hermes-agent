@@ -30,7 +30,7 @@ egress:
   onecli_secret_ids: ["Anthropic-Dev"]    # retained → the base renders profile_secret_sets; OSH-F64.b suppresses it
   # OSH-F64.b single-authority inference provider (the spec-gated trigger, ADR §D1/§D3):
   inference_provider:
-    provider: compatible-endpoint         # the OpenShell APF credential-rewrite provider (policy endpoint marker + Hermes config provider key)
+    provider: compatible-endpoint         # the Hermes config provider key (providers.compatible-endpoint); the APF endpoint carries no provider field
     base_url: "https://inference.local/v1"  # /v1 so the OpenAI SDK posts {base_url}/chat/completions → the policy-allowed /v1/chat/completions
     api_mode: chat_completions            # accepted literal (agent_init.py:723); POST /v1/chat/completions is the operator-verified path
     model_id: aws/anthropic/bedrock-claude-opus-5-5

@@ -172,6 +172,12 @@ def enabled_plugins(spec: Dict[str, Any], spec_path: Any) -> List[str]:
             f"top-level plugins.enabled {top} diverges from the spine-resolved set "
             f"{spine}; the installer would install a different plugin set than the render enables"
         )
+    # OSH-F64.b (ADR §D4): under the single-authority posture the render scrubs podman-onecli from
+    # every rendered config (it is inert here), so the installer must not bootstrap it either —
+    # else install would re-enable a plugin the render removed. The legacy path (no
+    # inference_provider) keeps the spine set unchanged.
+    if "inference_provider" in (spec.get("egress") or {}):
+        return [name for name in spine if name != "podman-onecli"]
     return spine
 
 
@@ -222,6 +228,37 @@ def _set_dotted(cfg: Dict[str, Any], dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+# OSH-F64.b: a diff value of this sentinel means "DELETE this dotted key from the existing default
+# config", not "set it to None". A null would leave the key present (and `secrets.onecli: null`
+# still reads as a configured block); the single-authority upgrade must REMOVE the inherited OneCLI
+# state, so the diff carries an explicit delete marker that apply_config_diff honours.
+_DELETE = object()
+
+
+def _del_dotted(cfg: Dict[str, Any], dotted: str) -> bool:
+    """Remove ``dotted`` from ``cfg`` if present. Returns True when something was removed.
+    Prunes a parent mapping only when it becomes empty AND it is one this edit created the leaf
+    under, so an operator's sibling key never drags an unrelated parent away."""
+    parts = dotted.split(".")
+    stack = []
+    cur: Any = cfg
+    for part in parts[:-1]:
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        stack.append((cur, part))
+        cur = cur[part]
+    if not isinstance(cur, dict) or parts[-1] not in cur:
+        return False
+    del cur[parts[-1]]
+    # Walk back up pruning now-empty mappings this delete emptied.
+    for parent, key in reversed(stack):
+        if isinstance(parent.get(key), dict) and not parent[key]:
+            del parent[key]
+        else:
+            break
+    return True
+
+
 def _desired_default(
     existing: Dict[str, Any], spec: Dict[str, Any], enabled: List[str], entries: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -232,16 +269,33 @@ def _desired_default(
     default home carries what the veto/OneCLI need (e.g. ``edges_db_path``) — sibling keys
     on those entries and unrelated entries are left untouched."""
     roles = _coworker_roles(spec)
+    egress = spec.get("egress") or {}
+    gated = "inference_provider" in egress
     have, cur_enabled = _get_dotted(existing, "plugins.enabled")
     merged = list(cur_enabled) if have and isinstance(cur_enabled, list) else []
     for name in enabled:
         if name not in merged:
             merged.append(name)
+    # Under single authority podman-onecli is inert and the render removes it (enabled_plugins
+    # already drops it from `enabled`), but the UNION above re-adds it from an upgraded home's
+    # existing plugins.enabled. Filter it from the union too — else an in-place default upgrade
+    # would re-enable the plugin the render scrubbed.
+    if gated:
+        merged = [name for name in merged if name != "podman-onecli"]
     desired: Dict[str, Any] = {
         "gateway.multiplex_profiles": True,
         "gateway.multiplex_profile_allowlist": roles,
         "plugins.enabled": merged,
     }
+    # The single-authority upgrade must also DELETE the inherited OneCLI state an earlier
+    # (legacy / non-gated) install left in the default home — the podman-onecli settings entry and
+    # the secrets.onecli block — matching the render's scrub (compose.py). Emit a delete only when
+    # the key is actually present, so a clean/gated home plans no edit (idempotence AC-1).
+    if gated:
+        for dotted in ("plugins.entries.podman-onecli", "secrets.onecli"):
+            present, _ = _get_dotted(existing, dotted)
+            if present:
+                desired[dotted] = _DELETE
     for name in enabled:
         settings = ((entries.get(name) or {}).get("settings")) if isinstance(entries.get(name), dict) else None
         if isinstance(settings, dict) and settings:
@@ -264,14 +318,12 @@ def _desired_default(
     # onecli-onboard reads profile_secret_sets from this gateway default, which is edited in
     # place here, not installed from the render. Carry the served-role grants under openshell,
     # retaining any operator-managed identity, stripped to match the render's validated value.
-    egress = spec.get("egress") or {}
     secret_ids = egress.get("onecli_secret_ids")
     # OSH-F64.b (ADR §D4): under the single-authority inference posture (egress.inference_provider
     # present) the OneCLI chain-dial is superseded — the gateway default must NOT carry the §D7.1
     # grant map, so profile_secret_sets stays empty (matching the render, compose.py). The legacy
     # §D7 path (no inference_provider) is byte-unchanged.
-    if (secret_ids and spec.get("substrate") == "openshell"
-            and "inference_provider" not in egress):
+    if secret_ids and spec.get("substrate") == "openshell" and not gated:
         key = "plugins.entries.podman-onecli.settings"
         if isinstance(desired.get(key), dict):
             settings = dict(desired[key])
@@ -313,10 +365,14 @@ def default_config_diff(
 
 def apply_config_diff(config: Dict[str, Any], diff: Dict[str, Any]) -> Dict[str, Any]:
     """Return a deep copy of ``config`` with the dotted-key ``diff`` applied. Unrelated
-    keys are preserved verbatim (never clobbered)."""
+    keys are preserved verbatim (never clobbered). A ``_DELETE`` value removes the key
+    (OSH-F64.b single-authority upgrade), rather than setting it to ``None``."""
     out = copy.deepcopy(config) if isinstance(config, dict) else {}
     for dotted, value in diff.items():
-        _set_dotted(out, dotted, copy.deepcopy(value))
+        if value is _DELETE:
+            _del_dotted(out, dotted)
+        else:
+            _set_dotted(out, dotted, copy.deepcopy(value))
     return out
 
 
@@ -505,10 +561,17 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
         mutated = True
 
     # Non-managed default edit (already snapshotted in step 0). Prints the diff KEYS
-    # (gateway.multiplex_*, plugins.enabled, plugins.entries.<name>.settings).
+    # (gateway.multiplex_*, plugins.enabled, plugins.entries.<name>.settings), separating the
+    # OSH-F64.b single-authority deletions (inherited OneCLI state) from the set keys.
     if diff:
-        keys = ", ".join(sorted(diff))
-        steps.append(Step(f"# edit default config {home}/config.yaml: set {keys}", "default_edit"))
+        set_keys = sorted(k for k, v in diff.items() if v is not _DELETE)
+        del_keys = sorted(k for k, v in diff.items() if v is _DELETE)
+        parts = []
+        if set_keys:
+            parts.append("set " + ", ".join(set_keys))
+        if del_keys:
+            parts.append("delete " + ", ".join(del_keys))
+        steps.append(Step(f"# edit default config {home}/config.yaml: {'; '.join(parts)}", "default_edit"))
         mutated = True
 
     # Fleet rooms — one groups.create per declared room (the onboarding groups.create path,

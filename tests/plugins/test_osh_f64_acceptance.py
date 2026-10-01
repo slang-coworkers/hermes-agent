@@ -949,9 +949,9 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "wrapper [SECURITY] env-secret guard documented": r"(\[security\]|secret-shaped|env-secret\s+guard)[\s\S]{0,240}(refus|scrub|placeholder)",
         "restart env-scrub of the refused names": r"scrub[\s\S]{0,200}(hermes_dashboard_session_token|api_server_key|token_file)",
         "supervised gateway still needs a strong API_SERVER_KEY when api_server enabled": r"api_server_key[\s\S]{0,300}(enabl|supervis|gateway|strong|required)",
-        # Single-authority install posture: the OpenShell provider is present and the real
-        # credential never is (the §D7 OneCLI grant/onboard directives are not required here).
-        "single-authority OpenShell inference provider": r"provider:\s*compatible-endpoint",
+        # Single-authority install posture: the provider is declared config-side in
+        # providers.compatible-endpoint (the APF endpoint carries no provider field).
+        "single-authority OpenShell inference provider declared config-side": r"config-side[\s\S]{0,40}providers\.compatible-endpoint",
         "placeholder-only api_key, never the real credential": r"never[\s\S]{0,40}compatible_api_key",
         "no OneCLI grants under single authority": r"single\s+authority,?\s+no\s+onecli\s+grant",
         "broker-only worker; inference not a worker endpoint": r"inference\s+is\s+not\s+a\s+worker\s+endpoint",
@@ -964,6 +964,16 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         ("broker", "18777"),
     ):
         assert all(token in section for token in tokens), f"missing single-authority prerequisite: {tokens}"
+    # Lane preconditions (a) and (d) are OSH-F63 worker-access facts the single-authority posture
+    # does NOT supersede — workers are still reached over brokered ssh, and the veto still reads
+    # expected_ssh_host from the managed fragment — so they remain required. Only the §D7 inference
+    # chain-dial preconditions (b) openshell-shim/onecli-chain and (c) socat/proxy_rewrite are
+    # dropped (ADR bb163aac §D4-ratified supersession).
+    for tokens in (
+        ("openshell sandbox ssh-config", "~/.ssh/config", "worker"),
+        ("nv-fleet-gates", "expected_ssh_host", "hermes_managed_dir", "resolv"),
+    ):
+        assert all(token in section for token in tokens), f"missing lane prerequisite: {tokens}"
 
 
 # --- OneCLI chain-dial (§D7) -------------------------------------------------

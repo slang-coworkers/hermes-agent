@@ -165,17 +165,23 @@ control-plane broker `172.17.0.1:18777`:
 
 - **Per served coworker — `policy-<profile>.yaml`.** A worker sandbox issues **no** model call
   (the served model turn runs in the shared gateway sandbox, never in a worker), so its policy
-  carries **no inference endpoint**. Its only `worker-egress` endpoint is the broker hop
-  `172.17.0.1:18777`, rendered as a raw passthrough `{host, port, tls: skip}` — the one permitted
-  raw hop (0.0.72 tunnels the sandbox's outbound TLS through it, so a `protocol: rest` shape would
-  try to parse and enforce inside an opaque tunnel and break the hop). No second raw hop, and
-  inference is **not** a worker endpoint.
+  carries **no inference endpoint**. For the shipped spec (no type-opted providers) its only
+  `worker-egress` endpoint is the broker hop `172.17.0.1:18777`, rendered as a raw passthrough
+  `{host, port, tls: skip}` — the one permitted raw hop (0.0.72 tunnels the sandbox's outbound TLS
+  through it, so a `protocol: rest` shape would try to parse and enforce inside an opaque tunnel
+  and break the hop). A FLEET-F62.c type-opted provider may add further `protocol: rest` endpoints
+  to a worker, but never the dropped `172.17.0.1:18255` hop and never the inference route (the
+  render rejects both); no second raw hop, and inference is **not** a worker endpoint.
 - **For the default / multiplexer profile — `policy-gateway.yaml`.** The default profile is the
   **model-call sandbox**: every served coworker's model turn is multiplexed through it, so this
   policy — and only this policy — carries the inference endpoint. Its `worker-egress` endpoints
   become the broker raw hop plus exactly one REST endpoint, `inference.local:443` with
-  `protocol: rest`, `enforcement: enforce`, a `provider: compatible-endpoint` credential-rewrite
-  reference (**no `tls: skip`**), and EXACTLY these four allow rules and nothing else:
+  `protocol: rest`, `enforcement: enforce` (**no `tls: skip`**), and EXACTLY these four allow rules
+  and nothing else. The endpoint carries **no** on-endpoint credential field: the pinned OpenShell
+  CLI rejects `provider` / `credential` / `credential_rewrite` as unknown endpoint fields, and the
+  OpenShell proxy fires the credential rewrite on the placeholder bearer with no on-endpoint marker
+  — the provider is declared config-side in `providers.compatible-endpoint` (below), not on the
+  policy endpoint:
 
 ```yaml
 # policy-gateway.yaml — worker-egress endpoints (OSH-F64.b single-authority posture)
@@ -184,7 +190,6 @@ endpoints:
     port: 443
     protocol: rest
     enforcement: enforce
-    provider: compatible-endpoint          # fires the OpenShell L7 credential rewrite
     rules:
       - {allow: {method: POST, path: /v1/chat/completions}}
       - {allow: {method: POST, path: /v1/messages}}
@@ -195,10 +200,14 @@ endpoints:
 
 The gateway policy's `binaries` allow-list adds the in-process Hermes model-call interpreter
 `/opt/hermes/.venv/bin/python` (the served model call is a Python HTTP request, not a `curl`
-shell-out) on top of the base `/usr/bin/curl`. Nothing is inferred: the `tls: skip` shape is
-used only for the broker hop, and only the inference endpoint is ever `protocol: rest`. The
-render writes each file as `policy-<profile>.yaml` / `policy-gateway.yaml` beside the profile's
-config (carried into the installed profile via `distribution_owned`); AC-OSH-F63-5's validation
+shell-out) on top of the base `/usr/bin/curl`. The gateway policy also grants the Hermes runtime
+paths its `filesystem_policy` needs to run the model-call process — read-only `/opt/hermes`,
+`/proc`, `/dev/urandom` and read-write `/sandbox`, `/dev/null`, `/dev/pts` — on top of the base
+read-only (`/usr /bin /lib /etc`) + read-write (`/tmp`) lanes; **these grants are gateway-only, and
+worker policies keep the minimal base set**. Nothing is inferred: the `tls: skip` shape is used only
+for the broker hop, and only the inference endpoint is ever `protocol: rest`. The render writes each
+file as `policy-<profile>.yaml` / `policy-gateway.yaml` beside the profile's config (carried into
+the installed profile via `distribution_owned`); AC-OSH-F63-5's validation
 applies to each emitted file unchanged.
 
 ## OpenShell provider: single-authority inference credential rewrite (OSH-F64.b)
@@ -369,8 +378,12 @@ On a lane where the OpenShell broker validates `--policy` as a HOST path it read
 policies under that root first); with it unset, the gateway-internal render path is used and the
 plan is byte-for-byte unchanged. The script:
 
-- **Phase A** installs the fleet plugins (`nv-coworker-compose`, `nv-fleet-gates`,
-  `podman-onecli`) at the pinned commit so `hermes coworker` exists.
+- **Phase A** installs the spine's `plugins.enabled` set at the pinned commit so `hermes coworker`
+  exists. The set is the spine's, not posture-derived: the shipped legacy §D7 spine lists
+  `nv-coworker-compose`, `nv-fleet-gates` **and** `podman-onecli` (the OneCLI chain-dial needs the
+  last); the shipped OSH-F64.b single-authority spine lists only `nv-coworker-compose` and
+  `nv-fleet-gates` (`podman-onecli` is inert under `egress.inference_provider` and the spine does
+  not enable it).
 - **Before Phase A's first `plugins install`**, the script writes `plugins.scan_on_install:
   false` into the managed config (the §D6 install-scan guard). Without it the install-time
   scanner returns a DANGEROUS verdict on these first-party plugins — false positives that
@@ -383,26 +396,32 @@ plan is byte-for-byte unchanged. The script:
 - **Phase B** (`hermes coworker install-openshell`) composes the fleet under
   `substrate: openshell` and provisions **five worker sandboxes** — one per served
   coworker — each Ready under a per-bot `openshell policy` (that bot's APF). Under OSH-F64.b a
-  worker issues no model call (workers ship no Hermes runtime), so its policy allows ONLY the
-  OpenShell-0.0.72 broker hop (`172.17.0.1:18777`, the single raw `tls: skip` endpoint) — the
-  18777 broker aside, no raw hop remains and inference is NOT a worker endpoint — plus the
+  worker issues no model call (workers ship no Hermes runtime), so for the shipped spec (no
+  type-opted providers) its policy allows the OpenShell-0.0.72 broker hop (`172.17.0.1:18777`, the
+  single raw `tls: skip` endpoint) as its only egress — the 18777 broker aside, no raw hop remains
+  and inference is NOT a worker endpoint (a FLEET-F62.c type-opted provider may add further
+  `protocol: rest` endpoints, but never the dropped 18255 hop or the inference route) — plus the
   interpreter binaries appended to `worker-egress.binaries` (`/usr/bin/python3*`,
   `/opt/hermes/.venv/bin/python`) on top of the inherited `/usr/bin/curl`, and the write-denied
   `/opt/osh-lane` read-only lane, and nothing else; neither the control plane `:10256` nor
   outbound ssh `:22` is ever allowed. The **gateway** policy is where inference lives — the
-  `inference.local:443` `protocol: rest` endpoint (its four allow rules + the
-  `provider: compatible-endpoint` reference) plus the same broker raw hop; the operator creates
-  the gateway sandbox `--policy` from the rendered `policy-gateway.yaml`.
+  `inference.local:443` `protocol: rest` endpoint (its four allow rules, no on-endpoint credential
+  field — the provider is declared config-side in `providers.compatible-endpoint`) plus the same
+  broker raw hop, and the gateway-only Hermes runtime `filesystem_policy` grants (`/opt/hermes`,
+  `/proc`, `/dev/urandom` ro; `/sandbox`, `/dev/null`, `/dev/pts` rw); the operator creates the
+  gateway sandbox `--policy` from the rendered `policy-gateway.yaml`.
 - It also installs the fleet plugins under **each** served profile (a profile
   distribution excludes plugins, so the veto must be installed per profile or it is
   absent there).
 - **Inference credential (OSH-F64.b — single authority, no OneCLI grants).** Model calls are
   governed by the OpenShell inference provider above, NOT by a per-profile OneCLI identity. Under
-  the single-authority posture (`egress.inference_provider` present) the render leaves
-  `plugins.entries.podman-onecli.settings.profile_secret_sets` the spine `[]`, and the openshell
-  installer no longer populates it from `egress.onecli_secret_ids` — so there is **no OneCLI
-  onboarding step for inference**. Each served profile's sandbox holds only the fixed
-  `sk-OPENSHELL-PROXY-REWRITE` placeholder in its provider `api_key`; the real
+  the single-authority posture (`egress.inference_provider` present) the `podman-onecli` tunnel
+  plugin is inert, so the render drops it from `plugins.enabled` and removes its
+  `plugins.entries.podman-onecli` settings (there is no `profile_secret_sets` grant map), and the
+  openshell installer makes the same scrub on an upgraded default home — it **deletes** an
+  inherited `secrets.onecli` block and `plugins.entries.podman-onecli` rather than leaving them in
+  place. So there is **no OneCLI onboarding step for inference**. Each served profile's sandbox
+  holds only the fixed `sk-OPENSHELL-PROXY-REWRITE` placeholder in its provider `api_key`; the real
   `COMPATIBLE_API_KEY` the rewrite reads lives OpenShell-side and appears in no rendered config.
   (A legacy OSH-F64 spec that carries no `egress.inference_provider` keeps the pre-OSH-F64.b
   grant path unchanged — the posture is spec-gated.)
@@ -460,9 +479,15 @@ To back the change out and leave the existing default exactly as before:
 ### What the NemoClaw dashboard / APF shows afterwards
 
 The NemoClaw dashboard shows one running worker sandbox per served coworker, and its APF
-view shows one `openshell policy` per sandbox — the three allowed endpoints per bot plus
-the `/opt/osh-lane` read-only lane and the appended interpreter binaries, with an
-off-policy egress attempt denied and logged. The whole fleet is one gateway on one bound
+view shows one `openshell policy` per sandbox. The allowed endpoints depend on the posture: a
+legacy §D7 spec shows the three per-bot endpoints (OneCLI request hop, inference route, broker);
+a single-authority spec (`egress.inference_provider`), for the shipped case (no type-opted
+providers), shows **broker-only** worker policies (`172.17.0.1:18777` raw — a type-opted provider
+may add further `protocol: rest` endpoints, but never inference or the dropped 18255 hop) with
+inference carried solely on the gateway policy (`inference.local:443`, `protocol: rest`, four
+allow rules). Either way the policy also carries
+the `/opt/osh-lane` read-only lane and the appended interpreter binaries, with an off-policy
+egress attempt denied and logged. The whole fleet is one gateway on one bound
 port; the per-profile `hermes -p <profile> chat` helper processes bind no external port.
 
 ### The `hermes gateway restart` child and the wrapper `[SECURITY]` guard
@@ -485,7 +510,7 @@ platform disabled.
 
 ### Live-lane preconditions for a served turn
 
-Before a served coworker can complete a live turn over the OpenShell lane, four
+Before a served coworker can complete a live turn over the OpenShell lane, six
 preconditions must hold on `brev-hermes`:
 
 1. **OpenShell Sandbox CA trusted.** The gateway CA bundle must carry the **OpenShell
@@ -499,3 +524,12 @@ preconditions must hold on `brev-hermes`:
 4. **Start from the in-sandbox watchdog.** `openshell sandbox exec` runs in a different
    network namespace than the gateway, so start the fleet processes from the in-sandbox
    watchdog, never via `sandbox exec`.
+5. **Per-worker ssh config.** Run `openshell sandbox ssh-config <name>` for each **worker**
+   sandbox and write its `User sandbox` + `ProxyCommand` block into `~/.ssh/config`, so the
+   profile's `terminal.ssh_host` alias resolves to the assigned sandbox. (Single-authority
+   inference drops the §D7 inference chain-dial, **not** the brokered-ssh worker-access path —
+   workers are still reached over ssh.)
+6. **Resolvable managed dir.** The `nv-fleet-gates` veto reads the worker-unforgeable
+   `expected_ssh_host` map only when `$HERMES_MANAGED_DIR` resolves (`hermes_managed_dir`) to
+   the installed managed fragment; if it does not resolve, the veto cannot bind a worker to its
+   sandbox and the turn is refused.
