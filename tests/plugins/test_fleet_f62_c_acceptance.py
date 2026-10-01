@@ -1,23 +1,17 @@
-"""Acceptance test for FLEET-F62.c — the Base-NanoClaw coworker fleet spec.
+"""Hermetic acceptance tests for the Base-NanoClaw coworker fleet spec
+(ships to ``tests/plugins/test_fleet_f62_c_acceptance.py``).
 
-Ships to ``tests/plugins/test_fleet_f62_c_acceptance.py``. One
-``test_ac_fleet_f62_c_<n>`` per pytest ``## Acceptance criteria`` row (8), the
-mechanical join key for the tester Results rows, the reviewer cross-walk and the
-merge gate.
+One ``test_ac_fleet_f62_c_<n>`` checks each pytest ``## Acceptance criteria`` row
+— the mechanical join key for the tester Results rows, the reviewer cross-walk and
+the merge gate. The file requires the fork-only fleet plugins
+(``nv-coworker-compose``, ``nv-fleet-gates``) and this row's committed spec,
+fixtures and PORT-NOTES; on the stock v2026.8.31 tree the ``coworker`` verb is
+absent and the render subprocess returns non-zero, so every criterion fails — the
+file passes only once both exist (the acceptance asymmetry).
 
-Fail-on-stock asymmetry: the ``coworker`` CLI verb (``nv-coworker-compose``),
-``hermes wire`` / ``nv_fleet_gates.edges`` and the committed ``nanoclaw-base``
-spec + fixtures + PORT-NOTES are all fork-only. On the stock v2026.8.31 tree the
-render subprocess returns non-zero (unknown ``coworker`` command) and the edges
-import raises, so every criterion fails; the file passes only once the merged
-plugins AND this row's committed content exist. The builder locks the golden
-BYTE values (after the orchestrator accepts the [Spec handoff]); the ASSERTIONS
-below — counts, structure, edge set, route contract, PORT-NOTES keys — are fixed
-by this ADR.
-
-Behavior contract, not a snapshot: no source is read by the test, no network is
-used (``github_comment`` is asserted at the CONFIG level, never invoked), nothing
-is written under ``~/.hermes`` (tmp_path home + conftest sandbox).
+Behavior contract, not a snapshot: no source is read, no network is used
+(``github_comment`` is inspected as configuration, never invoked), nothing is
+written under ``~/.hermes`` (tmp_path home + conftest sandbox).
 """
 
 import os
@@ -104,6 +98,26 @@ _DESC_MAX = 60  # SKILL_PROMPT_DESC_LIMIT (release skill_utils.py:1182)
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")  # release skills_hub.py:214
 _MARKETING = ("powerful", "seamless", "cutting-edge", "revolutionary", "amazing", "best-in-class")
 
+GITHUB_WORKERS = ("triager", "fixer", "reviewer")
+NON_GITHUB_COWORKERS = ("orchestrator", "approver")
+NON_GITHUB_PROFILES = ("orchestrator", "approver", "default")
+GITHUB_ENDPOINTS = {"api.github.com:443", "github.com:443"}
+GITHUB_BINARIES = {"gh", "git"}
+# PATCH can only come from the github provider — the inference floor is POST-only —
+# so it is the discriminator a stub render cannot satisfy by accident.
+GITHUB_WRITE_METHODS = {"POST", "PATCH"}
+_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+_LITERAL_TOKEN_RE = re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
+_GH_URL_RE = re.compile(r"https?://[^\s\"']*github", re.I)
+SANDBOX_IMAGE = "localhost/hermes-openshell-sandbox:pinned"
+# AC-10 default-off baseline: the committed, merged, pre-widening OSH-F63 openshell
+# fleet (declares no providers:). Rendering it through the widened renderer must
+# reproduce its committed golden byte-for-byte — an immutable baseline, so there is
+# no self-consistency circularity.
+OSH_F63 = REPO_ROOT / "tests" / "e2e-scenarios" / "OSH-F63"
+OSH_F63_SPEC = OSH_F63 / "spec" / "openshell" / "coworker-types.yaml"
+OSH_F63_GOLDEN = OSH_F63 / "fixtures" / "openshell"
+
 
 def _isolated_home(tmp_path):
     """A HERMES_HOME with the two fleet plugins copied in and an empty bundled
@@ -124,8 +138,8 @@ def _isolated_home(tmp_path):
     return home
 
 
-def _render(out, home, *extra):
-    """Run ``hermes coworker compose <SPEC> --out <out> [extra]`` isolated."""
+def _render_spec(spec, out, home, *extra):
+    """Run ``hermes coworker compose <spec> --out <out> [extra]`` isolated."""
     env = dict(os.environ)
     env.update(
         HOME=str(home.parent),
@@ -135,9 +149,14 @@ def _render(out, home, *extra):
     )
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose",
-         str(SPEC), "--out", str(out), *extra],
+         str(spec), "--out", str(out), *extra],
         capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
     )
+
+
+def _render(out, home, *extra):
+    """Render the FLEET-F62.c nanoclaw-base spec (the default under test)."""
+    return _render_spec(SPEC, out, home, *extra)
 
 
 def _profile_dirs(out):
@@ -174,6 +193,118 @@ def _parse_frontmatter(text):
     data = yaml.safe_load(m.group(1))
     assert isinstance(data, dict), "frontmatter must parse to a mapping"
     return data
+
+
+def _role_policy(out, role):
+    """The openshell ``policy-<role>.yaml`` inside the role's rendered profile dir."""
+    d = _profile_dir(out, role)
+    matches = sorted(d.glob("policy-*.yaml"))
+    assert matches, f"no policy-*.yaml for {role} under {d}"
+    return yaml.safe_load(matches[0].read_text(encoding="utf-8"))
+
+
+def _policy_hosts(policy):
+    """Every ``host:port`` the policy allows — robust to either shape the renderer
+    may pick: a ``"host:port"`` string, or a mapping carrying host+port fields."""
+    hosts = set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            h = o.get("host") or o.get("addr") or o.get("hostname")
+            p = o.get("port")
+            if isinstance(h, str) and p is not None:
+                hosts.add(f"{h}:{p}")
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+        elif isinstance(o, str) and re.fullmatch(r"[A-Za-z0-9.-]+:\d+", o):
+            hosts.add(o)
+
+    walk(policy)
+    return hosts
+
+
+def _policy_binaries(policy):
+    """Basenames of the binaries the policy lists (under any ``binaries`` key),
+    whether entries are ``{path: /usr/bin/gh}`` or bare ``gh`` strings."""
+    bins = set()
+
+    def collect(value):
+        for e in value if isinstance(value, (list, tuple)) else []:
+            if isinstance(e, dict):
+                p = e.get("path") or e.get("name") or ""
+            else:
+                p = e
+            if isinstance(p, str) and p:
+                bins.add(p.rsplit("/", 1)[-1])
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if "binar" in str(k).lower():
+                    collect(v)
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+
+    walk(policy)
+    return bins
+
+
+def _network_policies(policy):
+    """Each network-policy mapping (the values under a ``network_policies`` key)."""
+    out = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            nps = o.get("network_policies")
+            if isinstance(nps, dict):
+                out.extend(v for v in nps.values() if isinstance(v, dict))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+
+    walk(policy)
+    return out
+
+
+def _np_endpoint(np, hostport):
+    """The endpoint record under one network policy whose host:port matches, else None."""
+    host, _, port = hostport.rpartition(":")
+    for ep in np.get("endpoints") or []:
+        if isinstance(ep, dict) and str(ep.get("host")) == host and str(ep.get("port")) == port:
+            return ep
+    return None
+
+
+def _allow_methods(endpoint):
+    """HTTP methods one endpoint ALLOWS under a rooted path — deny rules are ignored,
+    so a denied PATCH cannot read as an allowed write."""
+    methods = set()
+    for rule in endpoint.get("rules") or []:
+        allow = rule.get("allow") if isinstance(rule, dict) else None
+        if not isinstance(allow, dict) or not str(allow.get("path", "")).startswith("/"):
+            continue
+        m = allow.get("method")
+        for v in (m if isinstance(m, (list, tuple)) else [m]):
+            if isinstance(v, str) and v.upper() in _HTTP_METHODS:
+                methods.add(v.upper())
+    return methods
+
+
+def _np_binaries(np):
+    """Basenames of the binaries declared on one network policy."""
+    bins = set()
+    for e in np.get("binaries") or []:
+        p = e.get("path") if isinstance(e, dict) else e
+        if isinstance(p, str) and p:
+            bins.add(p.rsplit("/", 1)[-1])
+    return bins
 
 
 def test_ac_fleet_f62_c_1(tmp_path):
@@ -358,6 +489,12 @@ def test_ac_fleet_f62_c_5(tmp_path):
     create_lines = [ln for ln in r1.stdout.splitlines() if "sandbox create" in ln]
     assert len(create_lines) == len(COWORKERS), \
         f"expected {len(COWORKERS)} create lines, got {create_lines}"
+    # The pinned image is locked independently of builder-generated goldens.
+    spec_data = yaml.safe_load(SPEC.read_text(encoding="utf-8"))
+    assert spec_data["egress"]["sandbox_image"] == SANDBOX_IMAGE, \
+        f"spec egress.sandbox_image {spec_data['egress'].get('sandbox_image')!r} != {SANDBOX_IMAGE!r}"
+    assert all(f"--from {SANDBOX_IMAGE} " in ln for ln in create_lines), \
+        f"every create line must provision --from {SANDBOX_IMAGE}"
     names = set()
     for ln in create_lines:
         m = re.search(r"--name\s+(\S+)", ln)
@@ -473,3 +610,104 @@ def test_ac_fleet_f62_c_8(tmp_path):
     for role in COWORKERS:
         wh = (_config(_profile_dir(out1, role)).get("platforms") or {}).get("webhook") or {}
         assert not (wh.get("extra") or {}).get("routes"), f"{role} must carry no webhook routes"
+
+
+def test_ac_fleet_f62_c_9(tmp_path):
+    """The github provider is folded ONLY into {triager, fixer, reviewer} —
+    provider-attach lines, per-endpoint policy allows + gh/git binaries, and a
+    ${env:GH_TOKEN} placeholder; orchestrator/approver/default carry none."""
+    home = _isolated_home(tmp_path)
+    out = tmp_path / "out"
+    assert _render(out, home).returncode == 0
+    prov = _render(tmp_path / "prov", home, "--provision-dry-run")
+    assert prov.returncode == 0, prov.stderr
+
+    # Exactly the 3 github workers get an attach line and no other sandbox does — a
+    # sorted list, not a set, so a duplicate or an extra attach elsewhere also fails.
+    attach_lines = sorted(ln.strip() for ln in prov.stdout.splitlines()
+                          if "sandbox provider attach" in ln)
+    expected = sorted(f"openshell sandbox provider attach nanoclaw-base-{r} github"
+                      for r in GITHUB_WORKERS)
+    assert attach_lines == expected, f"provider-attach lines {attach_lines} != {expected}"
+
+    for role in GITHUB_WORKERS:
+        policy = _role_policy(out, role)
+        nps = _network_policies(policy)
+        for hp in GITHUB_ENDPOINTS:
+            # Scope to the network policy that actually contains THIS endpoint, and read
+            # methods only from its allow rules — a policy denying the github hosts (or
+            # allowing writes only on inference) then fails rather than reading as a pass.
+            owning = [np for np in nps if _np_endpoint(np, hp) is not None]
+            assert owning, f"{role}: no network policy allows endpoint {hp}"
+            np = owning[0]
+            ep = _np_endpoint(np, hp)
+            assert ep.get("enforcement") == "enforce", f"{role}: {hp} endpoint not enforced"
+            methods = _allow_methods(ep)
+            assert GITHUB_WRITE_METHODS <= methods, f"{role}: {hp} allow-methods {methods} missing {GITHUB_WRITE_METHODS - methods}"
+            np_bins = _np_binaries(np)
+            assert GITHUB_BINARIES <= np_bins, f"{role}: {hp} network policy missing binaries {GITHUB_BINARIES - np_bins}"
+        cfg = _config(_profile_dir(out, role))
+        assert cfg.get("GH_TOKEN") == "${env:GH_TOKEN}", \
+            f"{role}: top-level GH_TOKEN {cfg.get('GH_TOKEN')!r} must be the ${{env:GH_TOKEN}} placeholder"
+        dump = yaml.safe_dump(cfg)
+        assert not _LITERAL_TOKEN_RE.search(dump), f"{role}: a literal GitHub token leaked into config"
+        assert not _GH_URL_RE.search(dump), f"{role}: a live github URL leaked into config"
+
+    for role in NON_GITHUB_COWORKERS:
+        policy = _role_policy(out, role)
+        assert not (GITHUB_ENDPOINTS & _policy_hosts(policy)), f"{role}: policy must not allow github endpoints"
+        assert not (GITHUB_BINARIES & _policy_binaries(policy)), f"{role}: policy must not carry gh/git binaries"
+    for role in NON_GITHUB_PROFILES:
+        assert "GH_TOKEN" not in yaml.safe_dump(_config(_profile_dir(out, role))), f"{role}: must carry no GH_TOKEN"
+
+
+def test_ac_fleet_f62_c_10(tmp_path):
+    """Default-off non-regression: the committed, merged, pre-widening OSH-F63
+    openshell fleet (declares no providers:) renders through the widened renderer
+    with its provision plan and every policy-<role>.yaml byte-identical to the
+    committed OSH-F63 golden, and no github fold anywhere."""
+    assert OSH_F63_SPEC.is_file(), f"OSH-F63 spec missing at {OSH_F63_SPEC}"
+    assert OSH_F63_GOLDEN.is_dir(), f"OSH-F63 golden missing at {OSH_F63_GOLDEN}"
+    assert not re.search(r"(?m)^\s*providers\s*:", OSH_F63_SPEC.read_text(encoding="utf-8")), \
+        "OSH-F63 baseline must declare no providers: key"
+
+    home = _isolated_home(tmp_path)
+    out = tmp_path / "out"
+    assert _render_spec(OSH_F63_SPEC, out, home).returncode == 0
+    prov = _render_spec(OSH_F63_SPEC, tmp_path / "prov", home, "--provision-dry-run")
+    assert prov.returncode == 0, prov.stderr
+
+    assert "provider attach" not in prov.stdout, "default-off: no provider-attach line expected"
+    policies = sorted(out.glob("*/policy-*.yaml"))
+    assert policies, "OSH-F63 render produced no policy files"
+    for pol in policies:
+        policy = yaml.safe_load(pol.read_text(encoding="utf-8"))
+        assert not (GITHUB_ENDPOINTS & _policy_hosts(policy)), f"{pol.name}: no github endpoint expected"
+        assert not (GITHUB_BINARIES & _policy_binaries(policy)), f"{pol.name}: no gh/git binary expected"
+
+    # The render emits bare type dirs; the OSH-F63 fixtures namespace each under
+    # osh-f63-<type>. Lock the full policy role set so a missing or extra policy fails.
+    rendered_roles = {pol.parent.name for pol in policies}
+    golden_roles = {p.parent.name[len("osh-f63-"):]
+                    for p in OSH_F63_GOLDEN.glob("osh-f63-*/policy-*.yaml")}
+    assert golden_roles, "no OSH-F63 golden policies found on disk"
+    assert rendered_roles == golden_roles, \
+        f"rendered policy roles {rendered_roles} != OSH-F63 golden roles {golden_roles}"
+
+    # The provision plan (no --out/home path) and the openshell policy grammar (constants
+    # + egress allow-set, no HERMES_HOME) are home-independent, so they byte-lock DIRECTLY
+    # to the immutable pre-widening OSH-F63 golden — proving the widening is a true no-op
+    # when providers: is absent, not merely self-consistent. config.yaml is not compared:
+    # the providers: widening touches only build_provision_plan + the openshell policy
+    # path (_enforce_openshell_policy/_openshell_policy_document, run AFTER _render_coworker
+    # writes config), so it cannot regress config; and OSH-F63's committed config carries
+    # home-derived/testbed paths that are not byte-reproducible in a tmp home.
+    prov_golden = OSH_F63_GOLDEN / "provision.dry-run.txt"
+    assert prov_golden.is_file(), f"OSH-F63 provision golden missing at {prov_golden}"
+    assert prov.stdout.encode("utf-8") == prov_golden.read_bytes(), \
+        "OSH-F63 provision plan changed under the widened renderer (default-off regression)"
+    for pol in policies:
+        golden_pol = OSH_F63_GOLDEN / f"osh-f63-{pol.parent.name}" / pol.name
+        assert golden_pol.is_file(), f"OSH-F63 golden policy missing: osh-f63-{pol.parent.name}/{pol.name}"
+        assert pol.read_bytes() == golden_pol.read_bytes(), \
+            f"OSH-F63 policy {pol.name} changed under the widened renderer (default-off regression)"
