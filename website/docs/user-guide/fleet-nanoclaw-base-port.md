@@ -40,6 +40,7 @@ fleet.
 | plan | The generic plan workflow is converted to Hermes SKILL.md form and bound by the reviewer; its NanoClaw host-tool references are reworded for the Hermes gateway. |
 | implement | The generic implement workflow is converted to Hermes SKILL.md form and bound by the fixer; its worktree and CI guidance is kept and its NanoClaw dispatch wording dropped. |
 | triage-issue | The generic triage-issue workflow is converted to Hermes SKILL.md form and bound by the triager; its inline gh-api comment shell block is replaced with prose. |
+| github-provider-egress | Only the triager, fixer and reviewer attach the OpenShell github provider; their policies gain the api.github.com and github.com endpoints plus the gh and git binaries, and their config declares GH_TOKEN as an unresolved placeholder. The orchestrator, approver and DEFAULT multiplexer attach nothing, and real gh authentication plus GitHub delivery are deferred to the live tier. |
 
 ## The `base` workflow is source-only
 
@@ -88,3 +89,31 @@ HMAC secret and a bind address. `github_comment` runs a PR comment and needs a P
 number, so it does nothing for the non-PR `issues` and `push` events until then —
 per-event delivery and the outbound posting identity are live-tier concerns, not
 proven by this hermetic row.
+
+## GitHub provider egress is folded into three workers only
+
+The webhook routes above are GitHub *events coming into* the DEFAULT; the provider
+fold is the *egress out of the worker sandboxes* that call GitHub. The fleet spec
+declares a generic, default-off `providers:` catalog, and only the three
+github-using workers opt in with `providers: [github]`: the triager (posts issue
+comments), the fixer (opens PRs and pushes with `gh`/`git`), and the reviewer
+(posts PR reviews). This is the same route-bound set as the webhook ingress; the
+orchestrator (admin), the approver (off-chain) and the DEFAULT multiplexer
+(non-sandboxed) opt into nothing.
+
+For each opted-in worker the renderer (1) emits an
+`openshell sandbox provider attach <sandbox> github` line in the provisioning plan
+and (2) folds the provider's endpoints (`api.github.com:443`, `github.com:443`),
+binaries (`/usr/bin/gh`, `/usr/bin/git`) and HTTP methods into that worker's
+`policy-<role>.yaml` — the methods render one allow-rule per verb, so the write
+verbs (`POST`, `PATCH`, …) are admitted alongside the base inference route. The
+worker's config declares `GH_TOKEN: "${env:GH_TOKEN}"` — an **unresolved
+managed-config placeholder, never a literal token** and never a
+`terminal.env_passthrough` entry (the sandbox child strips `GH_TOKEN` as a
+provider-credential variable, so passthrough would be both ineffective and a
+credential-scrubbing weakening). The real credential is injected by the attached
+OpenShell provider at the proxy boundary at the **live tier**; this hermetic row
+only proves the rendered attach lines, policy endpoints/binaries/methods and the
+placeholder are byte-stable. Real `gh` authentication and GitHub delivery are the
+later live-e2e row. The `providers:` widening is additive and default-off: a fleet
+that declares no provider renders exactly as before.
