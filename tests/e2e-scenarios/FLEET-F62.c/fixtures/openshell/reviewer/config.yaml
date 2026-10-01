@@ -35,6 +35,7 @@ plugins:
     nv-coworker-compose:
       settings:
         orchestrator_profile: orchestrator
+GH_TOKEN: ${env:GH_TOKEN}
 terminal:
   backend: ssh
   ssh_host: openshell-nanoclaw-base-reviewer

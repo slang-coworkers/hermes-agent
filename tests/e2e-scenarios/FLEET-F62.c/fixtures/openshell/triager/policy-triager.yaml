@@ -18,6 +18,8 @@ network_policies:
     name: worker-egress
     binaries:
     - path: /usr/bin/curl
+    - path: /usr/bin/gh
+    - path: /usr/bin/git
     endpoints:
     - host: 172.17.0.1
       port: 18255
@@ -34,4 +36,44 @@ network_policies:
       rules:
       - allow:
           method: POST
+          path: /**
+    - host: api.github.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: /**
+      - allow:
+          method: POST
+          path: /**
+      - allow:
+          method: PATCH
+          path: /**
+      - allow:
+          method: PUT
+          path: /**
+      - allow:
+          method: DELETE
+          path: /**
+    - host: github.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: /**
+      - allow:
+          method: POST
+          path: /**
+      - allow:
+          method: PATCH
+          path: /**
+      - allow:
+          method: PUT
+          path: /**
+      - allow:
+          method: DELETE
           path: /**
