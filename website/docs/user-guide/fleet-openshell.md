@@ -207,7 +207,9 @@ plus `podman-onecli` `proxy_rewrite`/`ca_bundle`), the disabled firecrawl provid
 default and every served coworker, and the managed `plugins.scan_on_install: false`. Absent or
 `false`, an `openshell` fleet renders none of them (FLEET-F62.c and OSH-F63 are unchanged), and
 the worker policies are identical either way. Any value other than `true`/`false` is refused at
-compose time.
+compose time. The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`)
+is lane-only: it refuses a spec without `pinned_offline_lane: true` before it touches any state,
+so render a non-lane `openshell` fleet with `coworker compose`.
 
 ## Operator prerequisites
 

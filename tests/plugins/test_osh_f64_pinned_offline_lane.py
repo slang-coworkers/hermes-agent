@@ -7,8 +7,11 @@ for a fleet that declares ``egress.pinned_offline_lane: true``; every other open
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -218,3 +221,112 @@ def test_broker_and_provider_both_pass_the_forbidden_host_guard(tmp_path, mutate
     spec_file = _copy_spec(tmp_path, "OSH-F64", mutate)
     with pytest.raises(c.CompositionError, match="forbidden"):
         c.compose(str(spec_file), str(tmp_path / "out"))
+
+
+def _installer():
+    path = _repo_root() / "plugins" / PLUGIN_KEY / "openshell" / "installer.py"
+    spec = importlib.util.spec_from_file_location("osh_f64_lane_gate_installer", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tree(*roots: Path) -> dict:
+    return {str(p): p.read_bytes() for r in roots for p in sorted(r.rglob("*")) if p.is_file()}
+
+
+_REF = "0" * 40
+
+
+@pytest.mark.parametrize("source,mutate", [
+    ("FLEET-F62.c", None),
+    ("OSH-F64", lambda d: d["egress"].pop("pinned_offline_lane")),
+    ("OSH-F64", lambda d: d["egress"].__setitem__("pinned_offline_lane", False)),
+    ("OSH-F64", lambda d: d["egress"].__setitem__("pinned_offline_lane", "yes")),
+    ("OSH-F64", lambda d: d["egress"].__setitem__("pinned_offline_lane", 1)),
+    ("OSH-F64", lambda d: d["egress"].__setitem__("pinned_offline_lane", None)),
+], ids=["fleet-f62c", "absent", "false", "string", "int", "null"])
+def test_installer_refuses_a_spec_outside_the_lane_before_any_mutation(tmp_path, monkeypatch, source, mutate):
+    """install-openshell's entry points refuse a spec that does not declare the pinned
+    offline lane before collecting state, running a command or writing any file."""
+    inst = _installer()
+    home, managed = tmp_path / "home", tmp_path / "managed"
+    home.mkdir()
+    managed.mkdir()
+    (home / "config.yaml").write_text("gateway: {multiplex_profiles: false}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+
+    def _no_mutation(*_a, **_k):
+        raise AssertionError("installer attempted a command or write for a refused spec")
+
+    monkeypatch.setattr(subprocess, "run", _no_mutation)
+    monkeypatch.setattr(inst, "_atomic_write_yaml", _no_mutation)
+    monkeypatch.setattr(inst, "collect_home_state", _no_mutation)
+    spec_file = _copy_spec(tmp_path, source, mutate)
+    before = _tree(home, managed)
+    for entry in (inst.plan_text, inst.phase_a, inst.apply):
+        with pytest.raises(ValueError, match="pinned_offline_lane"):
+            entry(str(spec_file), _REF)
+    assert _tree(home, managed) == before, "a refused spec must leave HERMES_HOME and the managed dir untouched"
+
+
+def test_installer_accepts_the_shipped_lane_spec():
+    inst = _installer()
+    spec_file = _spec_dir("OSH-F64") / "coworker-types.yaml"
+    inst._require_openshell(inst.load_spec(spec_file))
+
+
+def _plugin_module(tmp_path, monkeypatch):
+    home, bundled = tmp_path / "hermes_home", tmp_path / "empty_bundled"
+    (home / "plugins").mkdir(parents=True)
+    bundled.mkdir()
+    shutil.copytree(_repo_root() / "plugins" / PLUGIN_KEY, home / "plugins" / PLUGIN_KEY)
+    (home / "config.yaml").write_text("plugins:\n  enabled: [nv-coworker-compose]\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    from hermes_cli.plugins import PluginManager
+
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins[PLUGIN_KEY]
+    assert loaded.enabled is True and loaded.error is None
+    return loaded.module
+
+
+def _install_args(spec_file: Path, dry_run: bool):
+    return argparse.Namespace(coworker_command="install-openshell", spec=str(spec_file), ref=_REF,
+                              dry_run=dry_run, gateway_url="ws://127.0.0.1:9/?ticket=t", policy_root=None)
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real-run", "dry-run"])
+def test_install_openshell_cli_refuses_a_non_lane_spec_before_the_gateway_preflight(
+        tmp_path, monkeypatch, capsys, dry_run):
+    """`hermes coworker install-openshell` refuses FLEET-F62.c's spec with exit 2 before it
+    probes the gateway, so a refused spec never spends the single-use ticket."""
+    mod = _plugin_module(tmp_path, monkeypatch)
+
+    def _no_preflight(_url):
+        raise AssertionError("gateway preflight reached for a refused spec")
+
+    monkeypatch.setattr(mod, "_gateway_preflight", _no_preflight)
+    rc = mod._cli_coworker(_install_args(_spec_dir("FLEET-F62.c") / "coworker-types.yaml", dry_run))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2 and out["ok"] is False and "pinned_offline_lane" in out["error"]
+
+
+def test_install_openshell_cli_lets_the_lane_spec_reach_the_gateway_preflight(tmp_path, monkeypatch):
+    mod = _plugin_module(tmp_path, monkeypatch)
+    probed = []
+
+    def _refusing_preflight(url):
+        probed.append(url)
+        return False, "test stop"
+
+    monkeypatch.setattr(mod, "_gateway_preflight", _refusing_preflight)
+    with pytest.raises(RuntimeError, match="gateway preflight failed: test stop"):
+        mod._cli_coworker(_install_args(_spec_dir("OSH-F64") / "coworker-types.yaml", False))
+    assert probed == ["ws://127.0.0.1:9/?ticket=t"]

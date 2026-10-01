@@ -948,9 +948,11 @@ def _cli_coworker(args, **_kwargs) -> int:
         if not installer.SHA40.match(args.ref or ""):
             print(json.dumps({"ok": False, "error": "--ref must be a full 40-character commit SHA"}))
             return 2
-        substrate = (installer.load_spec(args.spec) or {}).get("substrate")
-        if substrate != "openshell":
-            print(json.dumps({"ok": False, "error": f"install-openshell requires substrate: openshell (spec: {substrate!r})"}))
+        try:
+            installer._require_openshell(installer.load_spec(args.spec) or {})
+        except ValueError as exc:
+            # Refuse before the real run's gateway preflight, which spends a single-use ticket.
+            print(json.dumps({"ok": False, "error": str(exc)}))
             return 2
         if getattr(args, "dry_run", False):
             print(installer.plan_text(args.spec, args.ref, policy_root=getattr(args, "policy_root", None)), end="")

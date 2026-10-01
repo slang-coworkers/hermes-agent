@@ -124,11 +124,19 @@ def _coworker_roles(spec: Dict[str, Any]) -> List[str]:
 
 
 def _require_openshell(spec: Dict[str, Any]) -> None:
-    """Refuse a non-openshell spec before any state collection or install, so a wrong spec
-    cannot install/enable plugins and only then fail (the entry points call this first)."""
+    """Refuse a spec this installer must not act on, before any state collection or install,
+    so a wrong spec cannot install/enable plugins and only then fail (the entry points call
+    this first). It must be an openshell fleet AND declare the pinned offline lane: the
+    Phase-A scan guard and the default-config firecrawl union exist only for that lane, the
+    same opt-in the render's lane enforcements key on."""
     substrate = spec.get("substrate")
     if substrate != "openshell":
         raise ValueError(f"install-openshell requires substrate: openshell (spec has {substrate!r})")
+    egress = spec.get("egress")
+    lane = egress.get("pinned_offline_lane") if isinstance(egress, dict) else None
+    if lane is not True:
+        raise ValueError(
+            f"install-openshell requires egress.pinned_offline_lane: true (spec has {lane!r})")
 
 
 def _spine_enabled(spec: Dict[str, Any], spec_path: Any) -> List[str]:
