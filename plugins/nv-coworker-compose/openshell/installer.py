@@ -253,6 +253,22 @@ def _desired_default(
         if name not in merged_disabled:
             merged_disabled.append(name)
     desired["plugins.disabled"] = merged_disabled
+    # onecli-onboard reads profile_secret_sets from this gateway default, which is edited in
+    # place here, not installed from the render. Carry the served-role grants under openshell,
+    # retaining any operator-managed identity, stripped to match the render's validated value.
+    secret_ids = (spec.get("egress") or {}).get("onecli_secret_ids")
+    if secret_ids and spec.get("substrate") == "openshell":
+        key = "plugins.entries.podman-onecli.settings"
+        if isinstance(desired.get(key), dict):
+            settings = dict(desired[key])
+        else:
+            _, cur = _get_dotted(existing, key)
+            settings = dict(cur) if isinstance(cur, dict) else {}
+        grants = dict(settings.get("profile_secret_sets") or {})
+        for role in roles:
+            grants[role] = [s.strip() for s in secret_ids]
+        settings["profile_secret_sets"] = grants
+        desired[key] = settings
     return desired
 
 

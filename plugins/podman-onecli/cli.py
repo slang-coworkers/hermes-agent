@@ -28,6 +28,13 @@ def onboard_setup(parser) -> None:
         required=True,
         help="Profile name or path; the OneCLI identifier is its basename.",
     )
+    parser.add_argument(
+        "--allow-ungranted",
+        action="store_true",
+        help="Opt in to onboarding a profile whose grant is empty ([]); this REVOKES "
+             "that identity's secrets via set_secrets([]). Off by default so an empty "
+             "grant refuses rather than silently revoking a working grant.",
+    )
 
 
 def _identifier_from(profile: str) -> str:
@@ -64,6 +71,12 @@ def make_onboard_handler(profile_secret_sets):
                 f"OneCLI secret ids ([] to leave ungranted; got {raw!r})"
             )
         secrets = list(raw)
+        if not secrets and not getattr(args, "allow_ungranted", False):
+            raise ValueError(
+                f"profile_secret_sets[{identifier!r}] is empty ([]); onecli-onboard refuses an "
+                f"empty grant by default (set_secrets([]) would revoke the identity). Pass "
+                f"--allow-ungranted to opt into the revocation."
+            )
         oneclient.ensure_agent(identifier=identifier)
         oneclient.set_secrets(identifier=identifier, secrets=secrets)
         config = oneclient.get_container_config(agent=identifier)
