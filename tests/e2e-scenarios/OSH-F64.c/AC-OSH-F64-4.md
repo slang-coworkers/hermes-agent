@@ -64,6 +64,8 @@ stage() {  # as in AC-OSH-F64-5: copy a small local dir into the sandbox through
 1. **Lane-local gateway policy root.** Create it and seed the gateway policy from the parent lane's copy
    (a read; nothing is written under `osh-f64/`):
    `mkdir -p $ROOT && cp /workspace/extra/hermes-fleet-testbed/osh-f64/policy-gateway.yaml $ROOT/policy-gateway.yaml`.
+   That source file is a lane-host prerequisite: the parent AC-OSH-F64-4 Setup creates its gateway from the same
+   file. If it is missing, this scenario cannot provision; record it as `FAIL(env)`.
 2. **Provision and onboard the fleet exactly as the parent's `## Setup` does**, with the prefix and root
    substitutions and nothing else:
    - `openshell sandbox create --name osh-f64c-gw --from osh-f64-gateway:pinned --policy $ROOT/policy-gateway.yaml`
@@ -91,7 +93,7 @@ stage() {  # as in AC-OSH-F64-5: copy a small local dir into the sandbox through
      `--skip-build` is needed because the sandbox has no npm egress.
    - Wait until `/api/health` reports `"ok": true`.
    - Log the forward command, then run it: `echo "openshell forward start $P $SB -d" | tee $ART/scenario-$AC/forwards.txt` followed by `openshell forward start $P $SB -d`.
-   - Bridge the Host guard from loopback: `socat TCP-LISTEN:$P,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:$P &`, with its pid in `socat.pid`.
+   - Bridge the Host guard from loopback: `socat TCP-LISTEN:$P,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:$P & echo $! > $ART/scenario-$AC/socat.pid`.
    - `URL=http://127.0.0.1:$P/`.
    - The session token for API reads is `T=$(curl -s $URL | grep -o '__HERMES_SESSION_TOKEN__="[^"]*"' | cut -d'"' -f2)`.
 
@@ -106,18 +108,22 @@ step). Before each evidence query, re-read the listing (step 0's `curl`) and use
 NONCE=$(python3 -c 'import secrets; print(secrets.token_hex(4))'); echo "nonce $NONCE" >> $ART/scenario-$AC/evidence.txt
 listing() { curl -s -H "Authorization: Bearer $T" ${URL}api/plugins/nv-bot-chat/bot-chats > $ART/scenario-$AC/bot-chats.json; }
 field() { python3 -c "import json,sys; d={r['profile']: r for r in json.load(open(sys.argv[1]))['bot_chats']}; print(d[sys.argv[2]][sys.argv[3]])" $ART/scenario-$AC/bot-chats.json "$1" "$2"; }
-row() {  # row <profile> <session> <role> [tool_name] [needle] -> evidence.txt
-  openshell sandbox exec $SB -- sh -lc "python3 \"\$HERMES_HOME/.osh-f64c/helpers/evidence_row.py\" $*" | tee -a $ART/scenario-$AC/evidence.txt
+row() {  # row <profile> <session> <role> [tool_name] [needle] -> evidence.txt; %q keeps an empty tool_name as ''
+  printf -v quoted_args ' %q' "$@"
+  openshell sandbox exec "$SB" -- sh -lc "python3 \"\$HERMES_HOME/.osh-f64c/helpers/evidence_row.py\"$quoted_args" | tee -a "$ART/scenario-$AC/evidence.txt"
 }
 ```
 
 0. **The canonical ids.** Run `listing`; `ORCH_SID=$(field orchestrator session_id)`; `BUILD_SID=$(field builder session_id)`.
    Then `echo step-0 >> evidence.txt; row orchestrator $ORCH_SID assistant` → expect: the first line reads
-   `session <ORCH_SID> hidden=1 title=Bot Chat` (the hidden canonical row, not a fresh session). Run
+   `session <ORCH_SID> hidden=1 title=Bot Chat` (the hidden canonical row, not a fresh session). Every later
+   `row` call gets the tip; the helper walks `parent_session_id` up from it and prints the canonical ancestor on
+   that line. Run
    `row builder $BUILD_SID assistant` → expect the same `hidden=1 title=Bot Chat` shape for the builder.
 1. **Human → the orchestrator's canonical Bot Chat.** In agent-browser, select `orchestrator` in the
-   dashboard profile combobox → expect the `orchestrator »` prompt. The SPA takes the PTY's profile from that
-   selection (`web/src/contexts/useProfileScope.ts:4-5`), not from the URL. Then open `${URL}chat?resume=$ORCH_SID`.
+   dashboard profile combobox → expect the `orchestrator »` prompt. Then open `${URL}chat?profile=orchestrator&resume=$ORCH_SID`,
+   keeping `?profile=` in the URL because the SPA's profile scope is initialised from it
+   (`web/src/contexts/ProfileProvider.tsx:37-45`). Use the same URL whenever you return to the chat in steps 2–3.
    The SPA forwards both to `/api/pty?profile=orchestrator&resume=$ORCH_SID` (`web/src/pages/ChatPage.tsx:1165,1174`).
    A bare `?profile=` without `resume` can open the active-session file or a fresh session instead
    (`hermes_cli/web_server.py:17475-17494`), and `message_agent` exists only in the canonical Bot Chat. Send the parent's step-1 message, `run change P7-$NONCE`, and wait (bounded) for the orchestrator's

@@ -2,9 +2,11 @@
 
 Usage: python3 evidence_row.py <profile> <session-id> <role> [tool_name] [needle]
 
-Prints the session line "session <id> hidden=<0|1> title=<title>" and then the newest message
-in that session with the given role (and tool_name, and content containing needle, when given)
-as "row <msg-id> <role> <tool_name> <content prefix>", or "row none" when no row matches.
+<session-id> may be the canonical Bot Chat or its compression tip. The session line
+"session <id> hidden=<0|1> title=<title>" names the canonical row: the nearest session up the
+parent_session_id chain that is hidden and titled "Bot Chat" (the supplied id itself when it is).
+Then the newest message in <session-id> with the given role (and tool_name, and content containing
+needle, when given) prints as "row <msg-id> <role> <tool_name> <content prefix>", or "row none".
 """
 import os
 import sqlite3
@@ -18,9 +20,22 @@ home = os.environ["HERMES_HOME"]
 db_path = os.path.join(home, "state.db") if profile == "default" else os.path.join(home, "profiles", profile, "state.db")
 db = sqlite3.connect(db_path)
 
-session = db.execute("select id, hidden, title from sessions where id = ?", (session_id,)).fetchone()
-if session:
-    print("session %s hidden=%s title=%s" % session)
+canonical = None
+current = session_id
+for _ in range(32):
+    found = db.execute(
+        "select id, hidden, title, parent_session_id from sessions where id = ?", (current,)
+    ).fetchone()
+    if found is None:
+        break
+    if found[1] and found[2] == "Bot Chat":
+        canonical = found[:3]
+        break
+    if not found[3]:
+        break
+    current = found[3]
+if canonical:
+    print("session %s hidden=%s title=%s" % canonical)
 else:
     print("session none", session_id)
 

@@ -12,7 +12,6 @@ providers:
     api_mode: anthropic_messages
     api_key: dummy-osh-f64-not-a-real-key
     default_model: aws/anthropic/bedrock-claude-opus-4-8
-# OSH-F64.c delta: the gateway/default context also serves the nv-bot-chat dashboard tab.
 # The installer UNIONs plugins.enabled with the spine set, so this survives the install.
 plugins:
   enabled:
