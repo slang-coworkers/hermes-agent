@@ -315,19 +315,28 @@ plan is byte-for-byte unchanged. The script:
 - It also installs the fleet plugins under **each** served profile (a profile
   distribution excludes plugins, so the veto must be installed per profile or it is
   absent there).
-- **OneCLI identity grants (§D7.1).** Under `substrate: openshell` the render populates the
-  default/gateway config's `plugins.entries.podman-onecli.settings.profile_secret_sets[<each
-  served coworker>]` from `egress.onecli_secret_ids` (the shipped spec sets `["Anthropic-Dev"]`),
-  not the inert `[]`. To APPLY those grants the operator runs, from the gateway root and per
-  served role, `hermes -p default onecli-onboard --profile <role>`: the `-p default` selects the
-  onboarding context whose config carries that grant map, and the trailing `--profile <role>` is
+- **OneCLI identity grants (§D7.1).** Under `substrate: openshell` the render computes each
+  served coworker's grant from `egress.onecli_secret_ids` (the shipped spec sets
+  `["Anthropic-Dev"]`), and the openshell installer APPLIES that grant into the installed
+  `$HERMES_HOME/config.yaml` default's
+  `plugins.entries.podman-onecli.settings.profile_secret_sets[<each served coworker>]`,
+  overriding the spine's inert `[]`. That installer-applied default — NOT the render output,
+  which does not reach the installed gateway default — is the non-empty map `onecli-onboard`
+  reads. To APPLY those grants the operator runs, from the gateway root and per served role,
+  `hermes -p default onecli-onboard --profile <role>`: the `-p default` selects the onboarding
+  context whose applied config carries that grant map, and the trailing `--profile <role>` is
   the onboard handler's own argument. **Never invoke it bare** (`hermes onecli-onboard --profile
   <role>`): hermes-main consumes the first `-p`/`--profile` as the global profile selector and
   strips it, so the handler's required `--profile` goes missing and the context is set to `<role>`
-  instead of `default`. **Never onboard against a `profile_secret_sets` entry left `[]`:**
-  `onecli-onboard` on an empty grant does `set_secrets([])`, which REVOKES that identity's
-  inference secret grant → the served model turn 401s. `[]` is correct only for the mocked
-  hermetic tests (it proves an unassigned sibling still 401s), never for a live bake.
+  instead of `default`.
+- **An empty `profile_secret_sets` entry (`[]`) is refused by default.** `onecli-onboard` on an
+  empty grant would call `set_secrets([])`, which REVOKES that identity's inference secret → the
+  served model turn 401s, so the handler now RAISES rather than silently revoking a working grant.
+  The deliberate revocation case — an unassigned sibling the mocked hermetic tests prove still
+  401s — is the explicit opt-in `--allow-ungranted`: `hermes -p default onecli-onboard --profile
+  <role> --allow-ungranted` then performs the `set_secrets([])`. Never pass `--allow-ungranted`
+  for a served coworker in a live bake; its grant must be the non-empty `["Anthropic-Dev"]` the
+  installer applied.
 - It **edits the existing default profile in place**, taking a deterministic **backup**
   of the original `$HERMES_HOME/config.yaml` FIRST — before any `plugins install --enable`
   rewrites it — and writing the managed fragment to the managed dir as a separate file.
