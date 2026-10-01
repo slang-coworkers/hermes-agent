@@ -1091,17 +1091,18 @@ def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name
 def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
-    raises ``CompositionError`` rather than emitting a half-formed policy. The base ALLOW
+    raises ``CompositionError`` rather than emitting a half-formed policy. The BASE ALLOW
     set is {the OneCLI request hop ``proxy_addr``, the inference route ``inference_route``};
     the ssh control path is INBOUND via the proxy socket, not an egress target. The optional
     OpenShell-0.0.72 ``broker_addr`` is appended as a third allow entry when the spec
     declares it (default-absent → the two-endpoint base). A wildcard, the OneCLI control
     plane (…:10256), the OpenShell gateway control plane (host.openshell.internal:8080), and
-    the ssh port are refused on every allow entry, broker included. The optional
-    ``filesystem_read_only`` (absolute paths, no wildcard / no ``..``) is returned for
-    ``filesystem_policy.read_only`` and the optional ``binaries`` (absolute paths, a ``*``
-    glob permitted) for the worker-egress binary allow-list; each absent → ``None`` (the
-    base v1 policy)."""
+    the ssh port are refused on every allow entry, broker included. Opted-in providers
+    (FLEET-F62.c) add their role-scoped endpoints in ``_openshell_policy_document``, not
+    here. The optional ``filesystem_read_only`` (absolute paths, no wildcard / no ``..``) is
+    returned for ``filesystem_policy.read_only`` and the optional ``binaries`` (absolute
+    paths, a ``*`` glob permitted) for the worker-egress binary allow-list; each absent →
+    ``None`` (the base v1 policy)."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1127,22 +1128,7 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     if broker_addr is not None:
         allow.append(broker_addr)
     for entry in allow:
-        host, port = _openshell_hostport(entry)
-        # Canonicalise the host before the forbidden check so a case / trailing-dot /
-        # IPv6-bracket / wildcard variant of a control-plane or gateway host cannot slip
-        # past: DNS names are case-insensitive, a trailing root dot is equivalent, IPv6
-        # literals arrive bracketed, and any '*' is a wildcard the allow-set never permits.
-        canon = host.strip().casefold()
-        if len(canon) > 1 and canon.endswith("."):
-            canon = canon[:-1]
-        if canon.startswith("[") and canon.endswith("]"):
-            canon = canon[1:-1]
-        if ("*" in canon or canon in _OPENSHELL_FORBIDDEN_HOSTS
-                or (canon, port) in _OPENSHELL_FORBIDDEN_HOSTPORTS):
-            raise CompositionError(
-                f"openshell policy egress target {entry!r} is forbidden (control-plane / "
-                f"gateway / wildcard / inbound-ssh host); egress is proxy_addr + "
-                f"inference_route [+ broker_addr]")
+        _assert_openshell_host_allowed(entry)
     # An ABSENT key means the base v1 policy (back-compat); a PRESENT key (incl. an
     # explicit null) is validated and fail-closes if malformed.
     read_only = (_validate_openshell_read_only(egress["filesystem_read_only"])
@@ -1252,8 +1238,10 @@ def _validate_openshell_secret_ids(value: Any) -> List[str]:
     return out
 
 
-# Keep policy hardening fixed here so spec data can change only the validated additive
-# inputs — the endpoint allow-list, and (OSH-F64) the appended read-only lanes / binaries.
+# Keep policy hardening fixed here so spec data drives only the validated additive inputs —
+# the base egress allow-list, the OSH-F64 appended read-only lanes / binaries, and the
+# FLEET-F62.c opt-in provider endpoints/binaries/methods — never the filesystem, landlock
+# or process floor.
 _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
@@ -1326,12 +1314,114 @@ def _enforce_openshell_secret_sets(config: Dict[str, Any], served_profiles: List
         grants[profile] = list(secret_ids)
 
 
-def _openshell_policy_document(allow: List[str],
-                               filesystem_read_only: Optional[List[str]] = None,
-                               binaries: Optional[List[str]] = None,
-                               raw_hops: Optional[List[str]] = None) -> Dict[str, Any]:
+def _assert_openshell_host_allowed(entry: str) -> None:
+    """Reject an openshell egress target that is a control-plane / gateway / wildcard /
+    inbound-ssh host (``CompositionError``). Shared by the base egress allow-set and the
+    optional provider endpoints so neither path can smuggle a forbidden host past the
+    allow-set. Canonicalise the host first so a case / trailing-dot / IPv6-bracket /
+    wildcard variant of a control-plane or gateway host cannot slip past: DNS names are
+    case-insensitive, a trailing root dot is equivalent, IPv6 literals arrive bracketed,
+    and any '*' is a wildcard the allow-set never permits."""
+    host, port = _openshell_hostport(entry)
+    canon = host.strip().casefold()
+    if len(canon) > 1 and canon.endswith("."):
+        canon = canon[:-1]
+    if canon.startswith("[") and canon.endswith("]"):
+        canon = canon[1:-1]
+    if ("*" in canon or canon in _OPENSHELL_FORBIDDEN_HOSTS
+            or (canon, port) in _OPENSHELL_FORBIDDEN_HOSTPORTS):
+        raise CompositionError(
+            f"openshell policy egress target {entry!r} is forbidden (control-plane / "
+            f"gateway / wildcard / inbound-ssh host)")
+
+
+def _provider_str_list(entry: Dict[str, Any], pname: str, key: str) -> List[str]:
+    """One required provider-catalog field: a non-empty list of non-empty strings."""
+    val = entry.get(key)
+    if (not isinstance(val, list) or not val
+            or not all(isinstance(v, str) and v.strip() for v in val)):
+        raise CompositionError(
+            f"provider {pname!r}.{key} must be a non-empty list of non-empty strings, "
+            f"got {val!r}")
+    return [v.strip() for v in val]
+
+
+def _validate_provider_catalog(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Validate the OPTIONAL top-level ``providers:`` catalog into a name->spec map
+    (``{name: {"endpoints", "binaries", "methods"}}``). A provider is extra OpenShell
+    egress a worker opts into via its own ``providers: [<name>]`` list: ``endpoints`` are
+    host:port allow targets, ``binaries`` the tools the sandbox may run, ``methods`` the
+    HTTP verbs those endpoints allow (the write-capable set rendered one rule per verb).
+
+    Absent (or null) ``providers:`` -> ``{}`` — the default-off floor that leaves the
+    render byte-identical to a providers-free fleet. Fail-closed on a malformed entry;
+    endpoints are held to the same host grammar and forbidden-host guard as the base
+    egress allow-set, so a provider cannot reach a control-plane / gateway / wildcard
+    target."""
+    catalog = data.get("providers")
+    if catalog is None:
+        return {}
+    if not isinstance(catalog, dict):
+        raise CompositionError(
+            f"providers must be a mapping of name -> spec, got {type(catalog).__name__}")
+    resolved: Dict[str, Dict[str, Any]] = {}
+    for name, entry in catalog.items():
+        pname = _safe_name("provider", name)
+        if not isinstance(entry, dict):
+            raise CompositionError(
+                f"provider {pname!r} must be a mapping, got {type(entry).__name__}")
+        endpoints = _provider_str_list(entry, pname, "endpoints")
+        binaries = _provider_str_list(entry, pname, "binaries")
+        methods = _provider_str_list(entry, pname, "methods")
+        for ep in endpoints:
+            _assert_openshell_host_allowed(ep)
+        for method in methods:
+            if not re.fullmatch(r"[A-Z]+", method):
+                raise CompositionError(
+                    f"provider {pname!r} method {method!r} must be an uppercase HTTP verb")
+        resolved[pname] = {"endpoints": endpoints, "binaries": binaries, "methods": methods}
+    return resolved
+
+
+def _type_providers(
+    data: Dict[str, Any], tname: str, catalog: Dict[str, Dict[str, Any]]
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Resolve one type's opt-in ``providers: [<name>]`` list against the validated
+    catalog, in declared order (deduped) — ``[(name, spec)]``, or ``[]`` when the type
+    declares none. ``_resolve_type`` does not carry the per-type ``providers`` key, so it
+    is read from the raw spec here. Fail-closed on a non-list value or an unknown name."""
+    tinfo = (data.get("types") or {}).get(tname) or {}
+    names = tinfo.get("providers")
+    if names is None:
+        return []
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise CompositionError(
+            f"{tname}: providers must be a list of provider names, got {names!r}")
+    resolved: List[Tuple[str, Dict[str, Any]]] = []
+    seen: Set[str] = set()
+    for n in names:
+        pname = _safe_name("provider", n)
+        if pname not in catalog:
+            raise CompositionError(
+                f"{tname}: unknown provider {pname!r} (not declared in the top-level "
+                f"providers: catalog)")
+        if pname in seen:
+            continue
+        seen.add(pname)
+        resolved.append((pname, catalog[pname]))
+    return resolved
+
+
+def _openshell_policy_document(
+    allow: List[str],
+    providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[List[str]] = None,
+    binaries: Optional[List[str]] = None,
+    raw_hops: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section grammar
-    from the validated egress targets (§D1.3). The base document carries one endpoint per
+    from the validated egress targets (§D1.3), plus any opted-in provider
+    endpoints/binaries/methods (FLEET-F62.c). The base document carries one endpoint per
     ``allow`` target (broker, when declared, is already a third entry), the inherited
     ``/usr/bin/curl`` worker-egress binary and the base read-only lanes; the optional OSH-F64
     ``filesystem_read_only`` lanes are APPENDED to ``filesystem_policy.read_only`` and the
@@ -1343,10 +1433,14 @@ def _openshell_policy_document(allow: List[str],
     ``protocol: rest`` L7 parser would reject the nested CONNECT. Every other allow target
     (e.g. the inference route) stays a ``protocol: rest``/``enforcement: enforce`` HTTP-API
     endpoint. Empty ``raw_hops`` → every endpoint keeps the ``protocol: rest`` shape (the
-    OSH-F63 back-compat contract)."""
+    OSH-F63 back-compat contract).
+
+    Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
+    base two-endpoint POST-only policy."""
     raw = {_openshell_hostport(entry) for entry in (raw_hops or [])}
     # Endpoint hosts are the egress boundary; emit one per validated allow target — raw
-    # tls:skip for a CONNECT-tunnelled proxy hop, protocol:rest for an HTTP-API endpoint.
+    # tls:skip for a CONNECT-tunnelled proxy hop (OSH-F64), protocol:rest for an HTTP-API
+    # endpoint.
     endpoints = []
     for host, port in (_openshell_hostport(entry) for entry in allow):
         if (host, port) in raw:
@@ -1360,7 +1454,27 @@ def _openshell_policy_document(allow: List[str],
                 "rules": [{"allow": {"method": _OPENSHELL_POLICY_ALLOW_METHOD,
                                      "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
             })
-    binary_paths = [_OPENSHELL_POLICY_BINARY, *(binaries or [])]
+    # Base worker-egress binary plus the optional OSH-F64 egress.binaries (a path glob the
+    # sandbox resolves, not an egress boundary).
+    binary_records = [{"path": p} for p in (_OPENSHELL_POLICY_BINARY, *(binaries or []))]
+    # Opt-in provider egress joins the SAME worker-egress network policy: each provider
+    # endpoint becomes another enforced record, and its binaries union onto the binary
+    # allow-list. The grammar's rule method is scalar, so a provider's verb set renders as
+    # one allow-rule per method (not a method list).
+    for _name, provider in (providers or []):
+        for host, port in (_openshell_hostport(ep) for ep in provider["endpoints"]):
+            endpoints.append({
+                "host": host,
+                "port": port,
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "rules": [{"allow": {"method": method, "path": _OPENSHELL_POLICY_ALLOW_PATH}}
+                          for method in provider["methods"]],
+            })
+        for binary in provider["binaries"]:
+            record = {"path": binary}
+            if record not in binary_records:
+                binary_records.append(record)
     return {
         "version": 1,
         "filesystem_policy": {
@@ -1373,24 +1487,30 @@ def _openshell_policy_document(allow: List[str],
         "network_policies": {
             _OPENSHELL_POLICY_NETWORK_NAME: {
                 "name": _OPENSHELL_POLICY_NETWORK_NAME,
-                "binaries": [{"path": p} for p in binary_paths],
+                "binaries": binary_records,
                 "endpoints": endpoints,
             }
         },
     }
 
 
-def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str],
-                              filesystem_read_only: Optional[List[str]] = None,
-                              binaries: Optional[List[str]] = None,
-                              raw_hops: Optional[List[str]] = None) -> None:
+def _enforce_openshell_policy(
+    pdir: Path,
+    profile_name: str,
+    allow: List[str],
+    providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[List[str]] = None,
+    binaries: Optional[List[str]] = None,
+    raw_hops: Optional[List[str]] = None,
+) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
-    OpenShell grammar whose ``network_policies`` endpoints are exactly the declared
-    allow set (the operator materialises the on-box ``openshell policy`` from it at
-    provisioning). The optional OSH-F64 ``filesystem_read_only`` lanes and ``binaries``
-    are appended to the base ``filesystem_policy.read_only`` / worker-egress binary list,
-    and the ``raw_hops`` proxy endpoints render as raw ``tls: skip`` passthroughs.
+    OpenShell grammar whose ``network_policies`` carry the base egress allow-set plus
+    any opted-in provider endpoints/binaries/methods (FLEET-F62.c); the optional OSH-F64
+    ``filesystem_read_only`` lanes and ``binaries`` are appended to the base
+    ``filesystem_policy.read_only`` / worker-egress binary list, and the ``raw_hops`` proxy
+    endpoints render as raw ``tls: skip`` passthroughs (the operator materialises the on-box
+    ``openshell policy`` from it at provisioning).
 
     The policy file is also added to the distribution manifest's ``distribution_owned``
     so ``install_distribution`` carries it into the installed profile rather than
@@ -1398,7 +1518,8 @@ def _enforce_openshell_policy(pdir: Path, profile_name: str, allow: List[str],
     by ``_render_coworker`` before this runs."""
     policy_name = f"policy-{profile_name}.yaml"
     _write_yaml(pdir / policy_name,
-                _openshell_policy_document(allow, filesystem_read_only, binaries, raw_hops))
+                _openshell_policy_document(allow, providers, filesystem_read_only,
+                                           binaries, raw_hops))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
@@ -1422,6 +1543,7 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     # _safe_name-validated, so they carry no shell metachars.
     image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
     roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
+    catalog = _validate_provider_catalog(data)
     lines: List[str] = []
     # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
     # that file; the operator materialises it at that name before running the plan). The
@@ -1436,6 +1558,13 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
         lines.append(
             f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
             f"--from {image} --policy policy-{role}.yaml")
+    # Attach each worker's opted-in OpenShell providers after the sandboxes exist. A
+    # providers-free fleet emits no attach line, so its plan stays byte-identical.
+    for role in roster:
+        for name, _provider in _type_providers(data, role, catalog):
+            lines.append(
+                f"openshell sandbox provider attach "
+                f"{_openshell_sandbox_name(fleet_name, role)} {name}")
     for role in roster:
         lines.append(f"openshell sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
     for role in roster:
@@ -3519,12 +3648,21 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 "substrate 'openshell' requires an egress block (the per-profile "
                 "openshell policy allow-set: proxy_addr, inference_route)")
         openshell_params = _validate_openshell_egress(egress_block)
+        provider_catalog = _validate_provider_catalog(data)
+        # Resolve every type's provider opt-ins up front, so an unknown provider named by
+        # any type fails closed HERE — before the Phase-B loop writes a distribution (the
+        # same all-or-nothing discipline as the egress/ssh-key pre-passes).
+        providers_by_type = {
+            name: _type_providers(data, name, provider_catalog)
+            for name in resolved_by_type
+        }
         egress_params = None
         fleet_name = _safe_name("project", data.get("project", "fleet"))
         keys_dir = _openshell_keys_dir()
     else:
         egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
         openshell_params = None
+        providers_by_type = {}
         fleet_name = None
         keys_dir = None
 
@@ -3621,6 +3759,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
             _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
+                                      providers_by_type.get(tname),
                                       openshell_params["filesystem_read_only"],
                                       openshell_params["binaries"],
                                       openshell_params["raw_hops"])
