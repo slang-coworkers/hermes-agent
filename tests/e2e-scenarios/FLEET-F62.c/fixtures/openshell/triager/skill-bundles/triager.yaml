@@ -1,0 +1,3 @@
+skills:
+- triage-issue
+instruction: Run the triage-issue workflow anchored for the triager coworker.
