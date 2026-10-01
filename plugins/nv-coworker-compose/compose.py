@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -1088,6 +1089,122 @@ def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name
     _set_dotted(config, "terminal.ssh_key", str(keys_dir / profile_name))
 
 
+# OSH-F64.b: the four exact method+path rules the inference REST provider endpoint allows,
+# tightening the generic {POST, /**} to the single-authority allow-set.
+_OSH_F64B_INFERENCE_RULES = [
+    {"allow": {"method": "POST", "path": "/v1/chat/completions"}},
+    {"allow": {"method": "POST", "path": "/v1/messages"}},
+    {"allow": {"method": "POST", "path": "/v1/responses"}},
+    {"allow": {"method": "GET", "path": "/v1/models"}},
+]
+# OSH-F64.b: the OpenShell-side real inference credential key, held by the APF
+# credential-rewrite provider — it must NEVER appear in any rendered sandbox config (the
+# sandbox holds only the fixed rewrite-trigger placeholder). AC-OSH-F64.b-4 asserts it absent.
+_OSH_F64B_REAL_CRED_KEY = "COMPATIBLE_API_KEY"
+# OSH-F64.b: the SINGLE fixed routing-trigger placeholder (ADR §D3(A)). The OpenShell L7
+# credential rewrite fires on this exact literal and no other, so a differing value would send
+# the request unrewritten (upstream 401); the render requires the spec declare exactly this.
+_OSH_F64B_ROUTING_PLACEHOLDER = "sk-OPENSHELL-PROXY-REWRITE"
+# OSH-F64.b: the in-process Hermes model-call interpreter (ADR §D2). The gateway sandbox issues
+# the inference POST as a Python HTTP request, not a curl shell-out, so the gateway policy's
+# executable allow-list must permit this binary or the policy-allowed REST endpoint is
+# unreachable by the actual process.
+_OSH_F64B_MODEL_CALL_BINARY = "/opt/hermes/.venv/bin/python"
+# OSH-F64.b: the per-request attribution carrier. Under chat_completions custom-provider
+# extra_headers reach the request (run_agent.py:6437 skips them only for anthropic_messages/
+# bedrock_converse); both profile children share the one gateway sandbox, so a per-request
+# header — not per-sandbox identity — distinguishes them in the OpenShell/inference logs.
+_OSH_F64B_PROFILE_HEADER = "X-Hermes-Profile"
+# OSH-F64.b: the api_modes that STRIP custom-provider extra_headers (run_agent.py:6437). The
+# attribution header rides extra_headers, so an inference provider in one of these modes would
+# silently drop per-profile attribution — the validator fail-closes rather than render it.
+_OSH_F64B_HEADER_STRIPPING_API_MODES = frozenset({"anthropic_messages", "bedrock_converse"})
+# OSH-F64.b (§D1): the superseded OneCLI data-plane hop. The base egress host-guard
+# (_assert_openshell_host_allowed) rejects only control-plane / gateway / wildcard / inbound-ssh
+# hosts, so it does NOT by itself keep 18255 off a GATED fleet — the single-authority invariant
+# (AC-OSH-F64.b-1: no 172.17.0.1:18255 endpoint anywhere) is enforced separately on the gated
+# path for the broker, the inference route and every type-opted provider endpoint, so an omitted
+# proxy_addr or a provider opt-in cannot reintroduce the dropped tunnel hop.
+_OSH_F64B_ONECLI_HOP = ("172.17.0.1", 18255)
+# OSH-F64.b (§D1 / AC-OSH-F64.b-1): the lane control-plane broker is the ONE host:port permitted
+# to render as a raw tls:skip passthrough under the single-authority posture. Any other broker
+# value would render a raw hop AC-1 forbids, so the gated path pins the broker to exactly this.
+_OSH_F64B_BROKER_HOP = ("172.17.0.1", 18777)
+
+
+def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
+    """Validate the OSH-F64.b ``egress.inference_provider`` block — the spec-gated trigger
+    for the single-authority inference posture (ADR §D1/§D3/§D4). Fail-closed on a
+    missing/malformed field. Returns the normalized dict the render reads: ``provider`` (the
+    APF credential-rewrite + Hermes config provider name), ``base_url`` (an https URL whose
+    path is ``/v1`` — the OpenAI SDK posts ``{base_url}/chat/completions``, so ``/v1`` reaches
+    the policy-allowed ``/v1/chat/completions``), ``api_mode``, ``model_id``,
+    ``rewrite_placeholder`` (the FIXED routing api_key literal, identical across profiles —
+    not an identity), and ``attribution_tag_prefix`` (the per-profile tag is
+    ``<prefix>-<role>``)."""
+    if not isinstance(block, dict):
+        raise CompositionError(
+            f"egress.inference_provider must be a mapping, got {type(block).__name__}")
+
+    def _req(key: str) -> str:
+        val = block.get(key)
+        if not isinstance(val, str) or not val.strip():
+            raise CompositionError(
+                f"egress.inference_provider.{key} must be a non-empty string, got {val!r}")
+        if any(c in val for c in "\n\r\x00"):
+            raise CompositionError(
+                f"egress.inference_provider.{key} must not contain control characters, got {val!r}")
+        return val.strip()
+
+    provider = _req("provider")
+    base_url = _req("base_url")
+    parts = urlsplit(base_url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must be an https URL with a host, got {base_url!r}")
+    # No userinfo/query/fragment: a credential embedded in the URL (user:pass@) would be a real
+    # secret in a rendered config; a query/fragment on a provider base is malformed.
+    if parts.username or parts.password:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must not embed credentials (userinfo), got {base_url!r}")
+    if parts.query or parts.fragment:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must not carry a query or fragment, got {base_url!r}")
+    # The /v1 path is required so the OpenAI SDK's {base_url}/chat/completions lands on the
+    # policy-allowed /v1/chat/completions rather than /chat/completions.
+    if parts.path.rstrip("/") != "/v1":
+        raise CompositionError(
+            f"egress.inference_provider.base_url must carry a /v1 path, got path {parts.path!r}")
+    # api_mode must preserve custom-provider extra_headers, else the X-Hermes-Profile attribution
+    # header (§D3(B)) is silently dropped — fail-closed on a header-stripping mode.
+    api_mode = _req("api_mode")
+    if api_mode in _OSH_F64B_HEADER_STRIPPING_API_MODES:
+        raise CompositionError(
+            f"egress.inference_provider.api_mode {api_mode!r} strips custom-provider extra_headers "
+            f"(run_agent.py:6437), dropping the X-Hermes-Profile per-profile attribution header; "
+            f"use a header-preserving api_mode such as 'chat_completions'")
+    rewrite_placeholder = _req("rewrite_placeholder")
+    if _OSH_F64B_REAL_CRED_KEY in rewrite_placeholder:
+        raise CompositionError(
+            f"egress.inference_provider.rewrite_placeholder must be a non-secret placeholder, "
+            f"not the real credential {_OSH_F64B_REAL_CRED_KEY}")
+    # Routing fires only on the exact fixed literal; a differing placeholder loses credential
+    # rewrite at the boundary (upstream 401), so the render requires exactly it.
+    if rewrite_placeholder != _OSH_F64B_ROUTING_PLACEHOLDER:
+        raise CompositionError(
+            f"egress.inference_provider.rewrite_placeholder must be the fixed routing trigger "
+            f"{_OSH_F64B_ROUTING_PLACEHOLDER!r} (the literal the OpenShell L7 credential rewrite "
+            f"fires on, identical across profiles), got {rewrite_placeholder!r}")
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "api_mode": api_mode,
+        "model_id": _req("model_id"),
+        "rewrite_placeholder": rewrite_placeholder,
+        "attribution_tag_prefix": _req("attribution_tag_prefix"),
+    }
+
+
 def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
@@ -1118,17 +1235,80 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
                 f"egress.{key} must not contain control characters, got {val!r}")
         return val.strip()
 
-    proxy_addr = _normalize_proxy_addr(_req_str("proxy_addr"))
     inference_route = _req_str("inference_route")
     sandbox_image = _req_str("sandbox_image")
-    allow = [proxy_addr, inference_route]
+    # OSH-F64.b: egress.inference_provider is the spec-gated trigger for the single-authority
+    # posture (§D4). Parse it FIRST — its presence decides whether proxy_addr is required. When
+    # present, broker_addr is REQUIRED (the only raw hop that remains) and proxy_addr is
+    # accepted-but-dropped from the policy allow-set (§D1 — the 18255 OneCLI tunnel is
+    # superseded, so a gated spec need not carry it). Absent it, the legacy OSH-F64 §D7 render
+    # is byte-unchanged (back-compat) and proxy_addr stays REQUIRED.
+    inference_provider = (_validate_openshell_inference_provider(egress["inference_provider"])
+                          if "inference_provider" in egress else None)
+    if inference_provider is None:
+        proxy_addr = _normalize_proxy_addr(_req_str("proxy_addr"))
+    else:
+        proxy_addr = (_normalize_proxy_addr(_req_str("proxy_addr"))
+                      if "proxy_addr" in egress else None)
     # Append the optional broker BEFORE the refusal loop, so it gets the same wildcard /
-    # control-plane (:10256) / inbound-ssh (:22) checks as every other allow entry.
+    # control-plane (:10256) / inbound-ssh (:22) checks as every other allow entry. proxy_addr
+    # is dropped on the gated path (None), so filter it out of the allow set.
     broker_addr = _normalize_proxy_addr(_req_str("broker_addr")) if "broker_addr" in egress else None
+    if inference_provider is not None and broker_addr is None:
+        raise CompositionError(
+            "egress.inference_provider requires egress.broker_addr (the broker 18777 hop is the "
+            "only raw tls:skip endpoint under the OSH-F64.b single-authority posture)")
+    allow = [a for a in (proxy_addr, inference_route) if a is not None]
     if broker_addr is not None:
         allow.append(broker_addr)
     for entry in allow:
         _assert_openshell_host_allowed(entry)
+    # OSH-F64.b single-authority invariants (§D1): the broker is the ONLY raw tls:skip hop and
+    # inference is a DISTINCT protocol:rest endpoint. Reject a gated spec that would collapse
+    # those — inference_route == broker_addr renders inference as a raw passthrough (the raw
+    # branch wins in _openshell_policy_document, losing the four-path enforcement), and
+    # broker_addr == the dropped proxy_addr reintroduces the superseded 18255 raw tunnel. The
+    # config provider base_url must also be the SAME endpoint the policy allows (reachability).
+    if inference_provider is not None:
+        def _canon_hp(addr: str) -> Tuple[str, int]:
+            h, p = _openshell_hostport(addr)
+            return h.strip().casefold(), p
+        route_hp = _canon_hp(inference_route)
+        broker_hp = _canon_hp(broker_addr)
+        # AC-OSH-F64.b-1: the broker is the ONLY host:port permitted to render as a raw tls:skip
+        # passthrough, so pin it to exactly 172.17.0.1:18777 — any other value (the dropped 18255
+        # OneCLI hop, or any other port like 18256) would render a raw hop AC-1 forbids. The base
+        # host-guard does not catch this (it forbids only control-plane/gateway/wildcard/ssh), and
+        # proxy_addr may be omitted (so the proxy==broker check below does not cover it).
+        if broker_hp != _OSH_F64B_BROKER_HOP:
+            raise CompositionError(
+                f"egress.broker_addr {broker_addr!r} must be the lane control-plane broker "
+                f"172.17.0.1:18777 under the OSH-F64.b single-authority posture: it is the only "
+                f"endpoint that may render as a raw tls:skip passthrough (172.17.0.1:18255 is "
+                f"dropped, and no other raw hop is permitted)")
+        if route_hp == _OSH_F64B_ONECLI_HOP:
+            raise CompositionError(
+                f"egress.inference_route {inference_route!r} cannot be the superseded OneCLI 18255 "
+                f"hop: inference is a distinct OpenShell protocol:rest endpoint, not the dropped "
+                f"OneCLI tunnel")
+        if route_hp == broker_hp:
+            raise CompositionError(
+                f"egress.inference_route {inference_route!r} must differ from egress.broker_addr "
+                f"{broker_addr!r}: the broker is the only raw tls:skip hop, so a shared host:port "
+                f"would render inference as a raw passthrough, defeating the protocol:rest path "
+                f"enforcement")
+        if proxy_addr is not None and _canon_hp(proxy_addr) == broker_hp:
+            raise CompositionError(
+                f"egress.broker_addr {broker_addr!r} must differ from the dropped egress.proxy_addr "
+                f"{proxy_addr!r}: reusing the OneCLI 18255 hop as the broker reintroduces the "
+                f"superseded raw tunnel")
+        bparts = urlsplit(inference_provider["base_url"])
+        base_hp = ((bparts.hostname or "").casefold(), bparts.port or 443)
+        if base_hp != route_hp:
+            raise CompositionError(
+                f"egress.inference_provider.base_url host:port {base_hp[0]}:{base_hp[1]} must equal "
+                f"egress.inference_route {route_hp[0]}:{route_hp[1]} — the policy endpoint and the "
+                f"model-provider base_url are the same OpenShell inference endpoint")
     # An ABSENT key means the base v1 policy (back-compat); a PRESENT key (incl. an
     # explicit null) is validated and fail-closes if malformed.
     read_only = (_validate_openshell_read_only(egress["filesystem_read_only"])
@@ -1141,7 +1321,8 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     # as RAW {host, port, tls: skip} passthroughs, while inference_route stays a discrete
     # protocol:rest HTTP-API endpoint. A no-broker spec keeps OSH-F63's protocol:rest shape for
     # every endpoint (back-compat).
-    raw_hops = [proxy_addr, broker_addr] if broker_addr is not None else []
+    raw_hops = ([h for h in (proxy_addr, broker_addr) if h is not None]
+                if broker_addr is not None else [])
     # OSH-F64 §D7 chain-dial: two OPTIONAL/defaulted fields that feed the per-coworker
     # secrets.onecli SETTINGS render (podman-onecli proxy_rewrite/ca_bundle), NOT the
     # worker-egress policy endpoints — so they are validated but never appended to `allow`.
@@ -1169,6 +1350,10 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
         "ca_bundle": ca_bundle,
         "onecli_secret_ids": onecli_secret_ids,
         "pinned_offline_lane": pinned_offline_lane,
+        # OSH-F64.b (None under a legacy OSH-F64 spec): the single-authority inference posture.
+        "inference_provider": inference_provider,
+        "inference_route": inference_route,
+        "broker_addr": broker_addr,
     }
 
 
@@ -1421,12 +1606,50 @@ def _type_providers(
     return resolved
 
 
+def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: str,
+                                          inference_provider: Dict[str, Any]) -> None:
+    """Render a served coworker's single-authority inference model-provider config
+    (OSH-F64.b §D3), REPLACING the OSH-F64 §D7 OneCLI chain-dial for the openshell path.
+    The provider carries the OpenShell endpoint ``base_url`` (with the ``/v1`` path so the
+    OpenAI SDK's ``{base_url}/chat/completions`` reaches the policy-allowed path), the FIXED
+    routing-trigger ``api_key`` placeholder (identical across profiles — it fires the
+    OpenShell L7 credential rewrite, which reads the real key OpenShell-side, never in the
+    sandbox), and a per-request ``X-Hermes-Profile`` attribution header. A distinct
+    per-profile ``attribution_tag`` is written at config top level as the hermetic artifact
+    (AC-OSH-F64.b-4) — a dedicated field, never the credential slot."""
+    provider = inference_provider["provider"]
+    tag = f"{inference_provider['attribution_tag_prefix']}-{profile_name}"
+    providers = config.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        raise CompositionError(
+            f"coworker {profile_name!r}: providers must be a mapping to render the OpenShell "
+            f"inference provider, got {type(providers).__name__}")
+    # The render fully OWNS the single-authority inference provider block (§D3(A)): a FRESH
+    # placeholder-only mapping, never a reuse of an inherited entry whose extra_headers or other
+    # fields could carry a real credential (COMPATIBLE_API_KEY / any raw key must appear in NO
+    # rendered config). The per-request X-Hermes-Profile header is the per-profile attribution
+    # carrier — both profile children share the one gateway sandbox, so a per-request header, not
+    # per-sandbox identity, distinguishes them; it reaches the request because the validated
+    # api_mode preserves custom-provider extra_headers (run_agent.py:6437).
+    providers[provider] = {
+        "base_url": inference_provider["base_url"],
+        "api_mode": inference_provider["api_mode"],
+        "api_key": inference_provider["rewrite_placeholder"],
+        "default_model": inference_provider["model_id"],
+        "extra_headers": {_OSH_F64B_PROFILE_HEADER: tag},
+    }
+    _set_dotted(config, "model.provider", provider)
+    _set_dotted(config, "model.default", inference_provider["model_id"])
+    config["attribution_tag"] = tag
+
+
 def _openshell_policy_document(
     allow: List[str],
     providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
     filesystem_read_only: Optional[List[str]] = None,
     binaries: Optional[List[str]] = None,
     raw_hops: Optional[List[str]] = None,
+    rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section grammar
     from the validated egress targets (§D1.3), plus any opted-in provider
@@ -1447,6 +1670,10 @@ def _openshell_policy_document(
     Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
     base two-endpoint POST-only policy."""
     raw = {_openshell_hostport(entry) for entry in (raw_hops or [])}
+    # OSH-F64.b: per-endpoint REST overrides (keyed host:port) tighten the generic
+    # {POST, /**} rule to a specific method+path allow-set and attach the OpenShell
+    # credential-rewrite ``provider`` reference — the inference endpoint of the gateway policy.
+    overrides = {_openshell_hostport(hp): spec for hp, spec in (rest_overrides or {}).items()}
     # Endpoint hosts are the egress boundary; emit one per validated allow target — raw
     # tls:skip for a CONNECT-tunnelled proxy hop (OSH-F64), protocol:rest for an HTTP-API
     # endpoint.
@@ -1454,6 +1681,18 @@ def _openshell_policy_document(
     for host, port in (_openshell_hostport(entry) for entry in allow):
         if (host, port) in raw:
             endpoints.append({"host": host, "port": port, "tls": "skip"})
+        elif (host, port) in overrides:
+            spec = overrides[(host, port)]
+            endpoint = {
+                "host": host,
+                "port": port,
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "rules": [dict(rule) for rule in spec["rules"]],
+            }
+            if spec.get("provider"):
+                endpoint["provider"] = spec["provider"]
+            endpoints.append(endpoint)
         else:
             endpoints.append({
                 "host": host,
@@ -1511,6 +1750,7 @@ def _enforce_openshell_policy(
     filesystem_read_only: Optional[List[str]] = None,
     binaries: Optional[List[str]] = None,
     raw_hops: Optional[List[str]] = None,
+    rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
@@ -1528,7 +1768,7 @@ def _enforce_openshell_policy(
     policy_name = f"policy-{profile_name}.yaml"
     _write_yaml(pdir / policy_name,
                 _openshell_policy_document(allow, providers, filesystem_read_only,
-                                           binaries, raw_hops))
+                                           binaries, raw_hops, rest_overrides))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
@@ -3665,6 +3905,29 @@ def compose(spec: str, out: str) -> Dict[str, str]:
             name: _type_providers(data, name, provider_catalog)
             for name in resolved_by_type
         }
+        # AC-OSH-F64.b-1 / §D1: under the single-authority posture a FLEET-F62.c type-opted
+        # provider must not re-add the dropped OneCLI 18255 hop or the inference route to a worker
+        # policy (inference is gateway-only; the base host-guard forbids neither). Fail closed here
+        # — before any distribution is written — if any opted-in provider endpoint resolves to one.
+        if openshell_params.get("inference_provider") is not None:
+            def _canon_hp(addr: str) -> Tuple[str, int]:
+                h, p = _openshell_hostport(addr)
+                return h.strip().casefold(), p
+            inf_hp = _canon_hp(openshell_params["inference_route"])
+            onecli_hp = (_OSH_F64B_ONECLI_HOP[0].casefold(), _OSH_F64B_ONECLI_HOP[1])
+            for tname, provs in providers_by_type.items():
+                for pname, pspec in provs:
+                    for ep in pspec.get("endpoints") or []:
+                        ep_hp = _canon_hp(ep)
+                        if ep_hp == onecli_hp:
+                            raise CompositionError(
+                                f"{tname}: provider {pname!r} endpoint {ep!r} is the superseded "
+                                f"OneCLI 18255 hop, dropped under the OSH-F64.b single-authority "
+                                f"posture")
+                        if ep_hp == inf_hp:
+                            raise CompositionError(
+                                f"{tname}: provider {pname!r} endpoint {ep!r} is the inference "
+                                f"route — inference is a gateway-only endpoint, never a worker one")
         egress_params = None
         fleet_name = _safe_name("project", data.get("project", "fleet"))
         keys_dir = _openshell_keys_dir()
@@ -3674,6 +3937,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         providers_by_type = {}
         fleet_name = None
         keys_dir = None
+    # OSH-F64.b single-authority posture is spec-gated on egress.inference_provider (ADR §D4):
+    # non-None only on openshell + when the spec declares it. Absent → the legacy §D7 render.
+    osh_f64b_provider = openshell_params.get("inference_provider") if openshell_params else None
 
     # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never on
     # the DEFAULT/multiplexer gateway root. Mount composition (ISO-F13) owns each
@@ -3760,19 +4026,32 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # AFTER (so _render_coworker does not need to know about it).
         if is_remote:
             _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
-            if openshell_params["pinned_offline_lane"]:
+            if osh_f64b_provider is not None:
+                _enforce_openshell_inference_provider(resolved["config"], tname, osh_f64b_provider)
+            elif openshell_params["pinned_offline_lane"]:
                 _enforce_openshell_chain_dial(resolved["config"], tname,
                                               openshell_params["chain_addr"],
                                               openshell_params["ca_bundle"])
+            if openshell_params["pinned_offline_lane"]:
                 _disable_firecrawl_providers(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
-            _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
-                                      providers_by_type.get(tname),
-                                      openshell_params["filesystem_read_only"],
-                                      openshell_params["binaries"],
-                                      openshell_params["raw_hops"])
+            if osh_f64b_provider is not None:
+                # OSH-F64.b worker policy = D1 minus inference (workers issue no model call):
+                # the broker 18777 raw hop ONLY; the 18255 proxy hop is dropped from the allow-set.
+                # Opted-in FLEET-F62.c provider endpoints still apply to the worker.
+                _enforce_openshell_policy(pdir, tname, [openshell_params["broker_addr"]],
+                                          providers_by_type.get(tname),
+                                          openshell_params["filesystem_read_only"],
+                                          openshell_params["binaries"],
+                                          [openshell_params["broker_addr"]])
+            else:
+                _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
+                                          providers_by_type.get(tname),
+                                          openshell_params["filesystem_read_only"],
+                                          openshell_params["binaries"],
+                                          openshell_params["raw_hops"])
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
@@ -3791,12 +4070,44 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_webhook_routes(default_config, served)
     if egress_params is not None:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
-    if is_remote and openshell_params.get("onecli_secret_ids") is not None:
+    # §D7.1 grants are spec-gated (§D4): only the legacy path populates profile_secret_sets; the
+    # single-authority path (inference_provider present) leaves it the spine [].
+    if (is_remote and osh_f64b_provider is None
+            and openshell_params.get("onecli_secret_ids") is not None):
         _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
+    if is_remote and osh_f64b_provider is not None:
+        # OSH-F64.b: the gateway/default profile runs the served model turns in its profile-scoped
+        # children, so under single-authority inference it ALSO reaches inference — render its
+        # provider config so the placeholder + per-profile headers are present on the gateway too.
+        _enforce_openshell_inference_provider(default_config, default_profile, osh_f64b_provider)
     if is_remote and openshell_params["pinned_offline_lane"]:
         _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
+    # OSH-F64.b (D2): render the gateway APF policy for the model-call sandbox (the default
+    # profile) — the inference REST provider endpoint (exactly 4 method+paths + the
+    # credential-rewrite provider marker) + the broker 18777 raw hop; the 18255 proxy hop is
+    # dropped. The legacy §D7 render leaves the default profile unsandboxed (back-compat).
+    if is_remote and osh_f64b_provider is not None:
+        # The gateway sandbox issues the model-call Python HTTP request, so its executable
+        # allow-list MUST permit the venv interpreter (§D2) whether or not egress.binaries listed
+        # it — else the policy-allowed REST endpoint is unreachable by the actual process.
+        gateway_binaries = list(openshell_params["binaries"] or [])
+        if _OSH_F64B_MODEL_CALL_BINARY not in gateway_binaries:
+            gateway_binaries.append(_OSH_F64B_MODEL_CALL_BINARY)
+        _enforce_openshell_policy(
+            ddir, "gateway",
+            [openshell_params["inference_route"], openshell_params["broker_addr"]],
+            filesystem_read_only=openshell_params["filesystem_read_only"],
+            binaries=gateway_binaries,
+            raw_hops=[openshell_params["broker_addr"]],
+            rest_overrides={
+                openshell_params["inference_route"]: {
+                    "rules": _OSH_F64B_INFERENCE_RULES,
+                    "provider": osh_f64b_provider["provider"],
+                }
+            },
+        )
     rendered[default_profile] = str(ddir)
 
     # Emit the machine-wide managed-scope fragment after every profile validated

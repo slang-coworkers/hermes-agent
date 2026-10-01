@@ -264,8 +264,14 @@ def _desired_default(
     # onecli-onboard reads profile_secret_sets from this gateway default, which is edited in
     # place here, not installed from the render. Carry the served-role grants under openshell,
     # retaining any operator-managed identity, stripped to match the render's validated value.
-    secret_ids = (spec.get("egress") or {}).get("onecli_secret_ids")
-    if secret_ids and spec.get("substrate") == "openshell":
+    egress = spec.get("egress") or {}
+    secret_ids = egress.get("onecli_secret_ids")
+    # OSH-F64.b (ADR §D4): under the single-authority inference posture (egress.inference_provider
+    # present) the OneCLI chain-dial is superseded — the gateway default must NOT carry the §D7.1
+    # grant map, so profile_secret_sets stays empty (matching the render, compose.py). The legacy
+    # §D7 path (no inference_provider) is byte-unchanged.
+    if (secret_ids and spec.get("substrate") == "openshell"
+            and "inference_provider" not in egress):
         key = "plugins.entries.podman-onecli.settings"
         if isinstance(desired.get(key), dict):
             settings = dict(desired[key])

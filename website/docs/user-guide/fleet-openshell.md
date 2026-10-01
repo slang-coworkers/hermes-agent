@@ -100,12 +100,19 @@ rests on the policy denying the gateway endpoint, not on the identity being scop
 
 ## Egress policy: one `openshell policy` per profile
 
-The render emits one `policy-<profile>.yaml` per coworker profile, in the OpenShell
-policy grammar the `openshell sandbox create --policy` CLI accepts — top-level
-`version`, `filesystem_policy`, `landlock`, `process`, and `network_policies` (an
-earlier flat `egress: {allow: […]}` shape is rejected with `unknown field egress`). Its
-base `network_policies` allow-set is **two endpoints** (the OSH-F64 extension below may
-append a validated third), taken from the spec's `egress` block:
+The render emits one `policy-<profile>.yaml` per coworker profile, in the OpenShell policy
+grammar the `openshell sandbox create --policy` CLI accepts — top-level `version`,
+`filesystem_policy`, `landlock`, `process`, and `network_policies` (an earlier flat
+`egress: {allow: […]}` shape is rejected with `unknown field egress`). Its base
+`network_policies` allow-set is **two endpoints**, taken from the spec's `egress` block.
+
+### Plain (pre-OSH-F64.b) base posture — the pinned-lane egress
+
+This block is the **plain / pre-OSH-F64.b (pinned-lane) base posture** a bare openshell spec
+renders — the base the single-authority overlay below extends, never the OSH-F64.b inference
+path. Read the `172.17.0.1:18255` hop **here** as the plain OneCLI **data-plane** base egress,
+**not** an OSH-F64.b inference route (OSH-F64.b drops it from the inference path — see the
+overlay). The spec `egress` block carries the data-plane hop and the inference route directly:
 
 ```yaml
 egress:
@@ -115,19 +122,14 @@ egress:
 ```
 
 **In-sandbox egress goes through the substrate proxy.** Every OpenShell sandbox has
-`HTTP_PROXY=http://10.200.0.1:3128` set inside it, and in-sandbox clients reach the
-declared hops (the OneCLI data-plane hop `172.17.0.1:18255`, the inference route) **only**
-through that proxy — a direct connection to `172.17.0.1` is **not routable** from a
-sandbox. The policy's declared endpoints stay the target addresses
-(`172.17.0.1:18255` + the inference route) with `protocol: rest`; the proxy is the egress
-*path*, not a policy endpoint. `172.17.0.1:18255` is the OneCLI **data-plane** hop (a
-source-preserving DNAT alias of `onecli-lego:10255`): the OpenShell substrate (0.0.72)
-hard-blocks `10255` as a control-plane port, so the data plane is `18255` (the **podman**
-substrate is unchanged at `10255`).
-
-The ssh path is **not** an egress target — ssh arrives INBOUND through the OpenShell
-proxy socket, not outbound — so the ssh control endpoint is not in the allow-set. Per
-profile the render emits:
+`HTTP_PROXY=http://10.200.0.1:3128` set inside it, and in-sandbox clients reach the declared
+hops (the OneCLI data-plane hop `172.17.0.1:18255`, the inference route) **only** through that
+proxy — a direct connection to `172.17.0.1` is **not routable** from a sandbox. The policy's
+declared endpoints stay the target addresses (`172.17.0.1:18255` + the inference route) with
+`protocol: rest`; the proxy is the egress *path*, not a policy endpoint. `172.17.0.1:18255` is
+the OneCLI **data-plane** hop (a source-preserving DNAT alias of `onecli-lego:10255`): the
+OpenShell substrate (0.0.72) hard-blocks `10255` as a control-plane port, so the data plane is
+`18255`. Per profile the plain base policy renders both endpoints as `protocol: rest`:
 
 ```yaml
 # policy-builder.yaml
@@ -144,72 +146,134 @@ network_policies:
       - {host: inference-api.nvidia.com, port: 443, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
 ```
 
-Nothing else is allowed: **no wildcard host**, the OneCLI control plane
-(`172.17.0.1:10256`) is never an endpoint, and the OpenShell gateway control plane
-**`host.openshell.internal:8080`** is never an endpoint — denying that gateway endpoint
-to the policy-constrained worker is exactly what makes route (a) admissible (a worker
-must not reach the gateway to list or connect to sibling sandboxes; AC-OSH-F63-5 step 4
-proves that denial on-box). The `POST` method is the coworker's real traffic to both
-REST endpoints; the exact per-endpoint verb/path is proven on-box by AC-5, not frozen
-into the hermetic AC-2 check. The render writes this file as `policy-<profile>.yaml`
-beside the profile's config (carried into the installed profile via `distribution_owned`)
-— the **canonical allow-set** the provisioning plan names on its bare
-`--policy policy-<profile>.yaml` argument. **AC-OSH-F63-5 validates this emitted file
-unchanged:** if the pinned OpenShell CLI rejects it (the sandbox never reaches Ready under
-`openshell sandbox create --policy`) or fails to enforce it — admitting the in-policy POST while denying
-`host.openshell.internal:8080` — the criterion FAILS and the renderer must be corrected;
-do not regenerate or hand-edit the policy during verification.
+Nothing else is allowed in the base posture: **no wildcard host**, the OneCLI control plane
+(`172.17.0.1:10256`) is never an endpoint, and **outbound** ssh (port 22) is never an endpoint
+(ssh arrives INBOUND through the OpenShell proxy socket, not outbound). **AC-OSH-F63-5 validates
+the emitted file unchanged:** if the pinned OpenShell CLI rejects it (the sandbox never reaches
+Ready under `openshell sandbox create --policy`) or fails to enforce it, the criterion FAILS and
+the renderer must be corrected; do not regenerate or hand-edit the policy during verification.
 
-**OSH-F64 / OpenShell 0.0.72 extension (additive, optional).** A spec MAY carry three
-optional `egress` fields that extend — never replace — the base document above: a
-`broker_addr` (`172.17.0.1:18777`) renders as a **third** `network_policies.worker-egress`
-endpoint (the OpenShell 0.0.72 broker hop; the OneCLI request hop moves to `172.17.0.1:18255`,
-podman keeps `10255`); a `filesystem_read_only` list of exact absolute paths (no wildcard,
-no `..`) is **appended** to `filesystem_policy.read_only` as write-denied lanes (the demo
-adds `/opt/osh-lane`); and a `binaries` list of absolute paths (a `*` glob permitted, e.g.
-`/usr/bin/python3*`) is **appended** to `network_policies.worker-egress.binaries`, which
-already carries `/usr/bin/curl` (the demo adds `/usr/bin/python3*` and
-`/opt/hermes/.venv/bin/python`).
+### OSH-F64.b single-authority overlay (gated on `egress.inference_provider`)
 
-**Proxy hops render as raw `tls: skip`, the inference route stays `protocol: rest`.** When
-the OSH-F64 delta is present (`broker_addr` set), the two OneCLI proxy hops —
-`172.17.0.1:18255` (`proxy_addr`) and `172.17.0.1:18777` (`broker_addr`) — render as raw
-passthrough endpoints `{host, port, tls: skip}` with **no** `protocol`/`enforcement`/`rules`.
-Both are HTTPS-proxy `CONNECT`-tunnel hops (0.0.72 tunnels the sandbox's outbound TLS through
-them), so a `protocol: rest` shape with a `POST /**` rule would try to parse and enforce
-inside an opaque tunnel and break the hop — the raw `tls: skip` form lets the substrate pass
-the tunnel through unmodified (the operator-validated 0.0.72 shape). `inference-api.nvidia.com:443`
-is a real HTTP-API endpoint reached over that tunnel, so it **keeps** `protocol: rest`,
-`enforcement: enforce`, and its `POST /**` rule. Only `worker-egress.endpoints` changes from
-the base document above (the other four sections and the appended `binaries` are as shown
-earlier); with the delta present it becomes:
+When the spec carries an `egress.inference_provider` block (ADR §D4, spec-gated — a spec
+**without** it renders its own legacy posture byte-unchanged: the plain F63 base pictured above
+when it declares no `broker_addr`, or the §D7 broker posture when it does), the render switches
+the fleet to the **single-authority** inference posture and the worker/gateway split below. The
+`172.17.0.1:18255` OneCLI hop is **dropped from the inference path** — it is no longer a
+model-call route — and the only raw `tls: skip` hop that remains anywhere is the lane
+control-plane broker `172.17.0.1:18777`:
+
+- **Per served coworker — `policy-<profile>.yaml`.** A worker sandbox issues **no** model call
+  (the served model turn runs in the shared gateway sandbox, never in a worker), so its policy
+  carries **no inference endpoint**. Its only `worker-egress` endpoint is the broker hop
+  `172.17.0.1:18777`, rendered as a raw passthrough `{host, port, tls: skip}` — the one permitted
+  raw hop (0.0.72 tunnels the sandbox's outbound TLS through it, so a `protocol: rest` shape would
+  try to parse and enforce inside an opaque tunnel and break the hop). No second raw hop, and
+  inference is **not** a worker endpoint.
+- **For the default / multiplexer profile — `policy-gateway.yaml`.** The default profile is the
+  **model-call sandbox**: every served coworker's model turn is multiplexed through it, so this
+  policy — and only this policy — carries the inference endpoint. Its `worker-egress` endpoints
+  become the broker raw hop plus exactly one REST endpoint, `inference.local:443` with
+  `protocol: rest`, `enforcement: enforce`, a `provider: compatible-endpoint` credential-rewrite
+  reference (**no `tls: skip`**), and EXACTLY these four allow rules and nothing else:
 
 ```yaml
-# network_policies.worker-egress.endpoints when the OSH-F64 delta (broker_addr) is present:
+# policy-gateway.yaml — worker-egress endpoints (OSH-F64.b single-authority posture)
 endpoints:
-  - {host: 172.17.0.1, port: 18255, tls: skip}            # proxy_addr  — raw CONNECT tunnel
-  - {host: inference-api.nvidia.com, port: 443, protocol: rest, enforcement: enforce, rules: [{allow: {method: POST, path: /**}}]}
-  - {host: 172.17.0.1, port: 18777, tls: skip}            # broker_addr — raw CONNECT tunnel
+  - host: inference.local
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    provider: compatible-endpoint          # fires the OpenShell L7 credential rewrite
+    rules:
+      - {allow: {method: POST, path: /v1/chat/completions}}
+      - {allow: {method: POST, path: /v1/messages}}
+      - {allow: {method: POST, path: /v1/responses}}
+      - {allow: {method: GET,  path: /v1/models}}
+  - {host: 172.17.0.1, port: 18777, tls: skip}   # broker hop — the one permitted raw passthrough
 ```
 
-The forbidden set is unchanged: **no wildcard host**, the OneCLI control plane
-`172.17.0.1:10256` is never an endpoint, and **outbound** ssh (port 22) is never an endpoint
-(ssh is inbound via the proxy socket) — the broker is checked the same as every other allow
-entry. A spec absent all three optional fields renders exactly the base two-endpoint document
-above with **both** endpoints `protocol: rest` (the `tls: skip` shape is keyed strictly on the
-delta being present, never inferred) — the behavioural back-compat contract.
+The gateway policy's `binaries` allow-list adds the in-process Hermes model-call interpreter
+`/opt/hermes/.venv/bin/python` (the served model call is a Python HTTP request, not a `curl`
+shell-out) on top of the base `/usr/bin/curl`. Nothing is inferred: the `tls: skip` shape is
+used only for the broker hop, and only the inference endpoint is ever `protocol: rest`. The
+render writes each file as `policy-<profile>.yaml` / `policy-gateway.yaml` beside the profile's
+config (carried into the installed profile via `distribution_owned`); AC-OSH-F63-5's validation
+applies to each emitted file unchanged.
+
+## OpenShell provider: single-authority inference credential rewrite (OSH-F64.b)
+
+Under `substrate: openshell` the fleet's model calls do not transit a OneCLI tunnel; they
+go to a single **OpenShell inference provider** that OpenShell + APF alone governs.
+
+**How the operator configures it.** The provider sits behind `https://inference.local` —
+its `base_url` carries the `/v1` suffix and its `api_mode` is `chat_completions`. The render
+writes each served profile's model-provider config as a `providers.<name>` block (the `<name>`
+is the spec's `egress.inference_provider.provider`, e.g. `compatible-endpoint`) that `model`
+selects, holding ONLY a fixed, non-secret rewrite-trigger placeholder in `api_key`:
+
+```yaml
+model:
+  provider: compatible-endpoint        # the render selects the OpenShell provider
+providers:
+  compatible-endpoint:
+    base_url: "https://inference.local/v1"
+    api_mode: chat_completions
+    api_key: sk-OPENSHELL-PROXY-REWRITE   # non-secret trigger, identical across all profiles
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    extra_headers:
+      X-Hermes-Profile: osh-f64b-architect  # distinct per profile — the attribution carrier
+```
+
+`sk-OPENSHELL-PROXY-REWRITE` is **identical across every profile** — it is the token that
+fires the OpenShell L7 **credential rewrite**, NOT an identity. The real credential lives
+OpenShell-side as `COMPATIBLE_API_KEY` and **never appears in any sandbox config**. So
+OpenShell + APF is the sole authority for destination, method, path, and credential: a
+per-profile badge can never supersede APF.
+
+**Per-profile attribution.** Both profile children share the one gateway (model-call)
+sandbox, so a per-request header — not a per-sandbox identity — distinguishes them in the
+OpenShell / inference logs: the render sets a distinct non-secret
+`X-Hermes-Profile: osh-f64b-<role>` request header per served profile. It is applied under
+`chat_completions`, the mode in which a custom provider's `extra_headers` reach the request.
+
+**COST-F30 metering (replacement path).** With the OneCLI tunnel dropped, the model call
+goes direct to the OpenShell provider, whose response carries token usage that Hermes
+accrues natively; the plugin-observable meter is the `llm_execution` middleware. Two known
+coverage gaps remain: `codex_app_server` early-returns and bypasses all hooks and
+middleware, and the auxiliary / aux-model path issues its own client call that bypasses
+plugin middleware — neither is metered by the `llm_execution` hook.
+
+**Supersession (openshell substrate only).** OSH-F64.b **supersedes OSH-F64 §D7**
+(`podman-onecli` is inert under `substrate: openshell`). For the openshell
+substrate only — the **podman** substrate keeps OneCLI unchanged — the OneCLI-identity ADRs
+are superseded: **FLEET-F62**, **ISO-F14**, and **CRED-F28**. Under OSH-F64.b the
+per-profile OneCLI identity / badge is replaced by the OpenShell provider credential rewrite
+governed by APF. The podman substrate path is unchanged.
 
 **`egress.pinned_offline_lane` (boolean, default off).** Set it to `true` when the fleet runs in
-the pinned offline lane: a sha-pinned offline fork mirror, closed GitHub egress, and a local
-onecli-chain (the shipped OSH-F64 spec sets it). Only then does the render emit the three
-lane-specific settings: each served coworker's OneCLI chain-dial (`secrets.onecli.override_existing`
-plus `podman-onecli` `proxy_rewrite`/`ca_bundle`), the disabled firecrawl providers on the
-default and every served coworker, and the managed `plugins.scan_on_install: false`. Absent or
-`false`, an `openshell` fleet renders none of them (FLEET-F62.c and OSH-F63 are unchanged), and
-the worker policies are identical either way. Any value other than `true`/`false` is refused at
-compose time. The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`)
-is lane-only: it refuses a spec without `pinned_offline_lane: true` before it touches any state,
-so render a non-lane `openshell` fleet with `coworker compose`.
+the pinned offline lane: a sha-pinned offline fork mirror and closed GitHub egress. Only then does
+the render emit its lane-specific settings — the disabled firecrawl providers on the default and
+every served coworker, and the managed `plugins.scan_on_install: false`. Absent or `false`, an
+`openshell` fleet renders none of them (FLEET-F62.c and OSH-F63 are unchanged), and the worker
+policies are identical either way. Any value other than `true`/`false` is refused at compose time.
+
+Whether the lane flag ALSO emits the per-coworker OneCLI chain-dial
+(`secrets.onecli.override_existing` plus `podman-onecli` `proxy_rewrite`/`ca_bundle`) depends on
+the single-authority gate:
+
+- **With `egress.inference_provider` (OSH-F64.b single-authority posture):** NO chain-dial. The
+  per-coworker OneCLI dial is superseded (§D7 inert) — the render takes the OpenShell
+  inference-provider path for each profile instead, so the lane flag emits ONLY the firecrawl
+  disable and `scan_on_install: false`, never `secrets.onecli.override_existing` or a
+  `proxy_rewrite`/`ca_bundle`.
+- **Without it (legacy §D7, ungated):** the lane flag additionally emits each served coworker's
+  OneCLI chain-dial loopback — the sha-pinned offline fork mirror with closed GitHub egress is the
+  lane that legacy posture exists for.
+
+The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`) is lane-only: it
+refuses a spec without `pinned_offline_lane: true` before it touches any state, so render a
+non-lane `openshell` fleet with `coworker compose`.
 
 ## Operator prerequisites
 
@@ -318,37 +382,30 @@ plan is byte-for-byte unchanged. The script:
   run from GitHub with egress open.
 - **Phase B** (`hermes coworker install-openshell`) composes the fleet under
   `substrate: openshell` and provisions **five worker sandboxes** — one per served
-  coworker — each Ready under a per-bot `openshell policy` (that bot's APF: exactly the
-  three endpoints the spec's `egress` names — the OneCLI request hop, the inference route,
-  and the OpenShell-0.0.72 broker hop — the interpreter binaries appended to
-  `worker-egress.binaries` (`/usr/bin/python3*`, `/opt/hermes/.venv/bin/python`) on top of
-  the inherited `/usr/bin/curl`, and the write-denied `/opt/osh-lane` read-only lane, and
-  nothing else; neither the control plane `:10256` nor outbound ssh `:22` is ever allowed).
+  coworker — each Ready under a per-bot `openshell policy` (that bot's APF). Under OSH-F64.b a
+  worker issues no model call (workers ship no Hermes runtime), so its policy allows ONLY the
+  OpenShell-0.0.72 broker hop (`172.17.0.1:18777`, the single raw `tls: skip` endpoint) — the
+  18777 broker aside, no raw hop remains and inference is NOT a worker endpoint — plus the
+  interpreter binaries appended to `worker-egress.binaries` (`/usr/bin/python3*`,
+  `/opt/hermes/.venv/bin/python`) on top of the inherited `/usr/bin/curl`, and the write-denied
+  `/opt/osh-lane` read-only lane, and nothing else; neither the control plane `:10256` nor
+  outbound ssh `:22` is ever allowed. The **gateway** policy is where inference lives — the
+  `inference.local:443` `protocol: rest` endpoint (its four allow rules + the
+  `provider: compatible-endpoint` reference) plus the same broker raw hop; the operator creates
+  the gateway sandbox `--policy` from the rendered `policy-gateway.yaml`.
 - It also installs the fleet plugins under **each** served profile (a profile
   distribution excludes plugins, so the veto must be installed per profile or it is
   absent there).
-- **OneCLI identity grants (§D7.1).** Under `substrate: openshell` the render computes each
-  served coworker's grant from `egress.onecli_secret_ids` (the shipped spec sets
-  `["Anthropic-Dev"]`), and the openshell installer APPLIES that grant into the installed
-  `$HERMES_HOME/config.yaml` default's
-  `plugins.entries.podman-onecli.settings.profile_secret_sets[<each served coworker>]`,
-  overriding the spine's inert `[]`. That installer-applied default — NOT the render output,
-  which does not reach the installed gateway default — is the non-empty map `onecli-onboard`
-  reads. To APPLY those grants the operator runs, from the gateway root and per served role,
-  `hermes -p default onecli-onboard --profile <role>`: the `-p default` selects the onboarding
-  context whose applied config carries that grant map, and the trailing `--profile <role>` is
-  the onboard handler's own argument. **Never invoke it bare** (`hermes onecli-onboard --profile
-  <role>`): hermes-main consumes the first `-p`/`--profile` as the global profile selector and
-  strips it, so the handler's required `--profile` goes missing and the context is set to `<role>`
-  instead of `default`.
-- **An empty `profile_secret_sets` entry (`[]`) is refused by default.** `onecli-onboard` on an
-  empty grant would call `set_secrets([])`, which REVOKES that identity's inference secret → the
-  served model turn 401s, so the handler now RAISES rather than silently revoking a working grant.
-  The deliberate revocation case — an unassigned sibling the mocked hermetic tests prove still
-  401s — is the explicit opt-in `--allow-ungranted`: `hermes -p default onecli-onboard --profile
-  <role> --allow-ungranted` then performs the `set_secrets([])`. Never pass `--allow-ungranted`
-  for a served coworker in a live bake; its grant must be the non-empty `["Anthropic-Dev"]` the
-  installer applied.
+- **Inference credential (OSH-F64.b — single authority, no OneCLI grants).** Model calls are
+  governed by the OpenShell inference provider above, NOT by a per-profile OneCLI identity. Under
+  the single-authority posture (`egress.inference_provider` present) the render leaves
+  `plugins.entries.podman-onecli.settings.profile_secret_sets` the spine `[]`, and the openshell
+  installer no longer populates it from `egress.onecli_secret_ids` — so there is **no OneCLI
+  onboarding step for inference**. Each served profile's sandbox holds only the fixed
+  `sk-OPENSHELL-PROXY-REWRITE` placeholder in its provider `api_key`; the real
+  `COMPATIBLE_API_KEY` the rewrite reads lives OpenShell-side and appears in no rendered config.
+  (A legacy OSH-F64 spec that carries no `egress.inference_provider` keeps the pre-OSH-F64.b
+  grant path unchanged — the posture is spec-gated.)
 - It **edits the existing default profile in place**, taking a deterministic **backup**
   of the original `$HERMES_HOME/config.yaml` FIRST — before any `plugins install --enable`
   rewrites it — and writing the managed fragment to the managed dir as a separate file.
@@ -366,8 +423,8 @@ plan is byte-for-byte unchanged. The script:
   delivery) is unreachable fleet-wide; the installer's rooms (`groups.create`) and wires do
   NOT create it. Run it as `-p default`, never profile-scoped (a profile-scoped invocation
   would re-render SSH-key paths relative to the wrong `HERMES_HOME`); it force-re-renders the
-  served distributions, so confirm the post-onboard per-role config is unchanged (SSH, OneCLI
-  chain-dial, the disabled firecrawl providers, the enabled plugins).
+  served distributions, so confirm the post-onboard per-role config is unchanged (SSH, the
+  OpenShell inference provider config, the disabled firecrawl providers, the enabled plugins).
 - The dashboard or desktop app then attaches to the running gateway through the desktop
   forward (`openshell forward start <29xxx-port> osh-f64-gw` — brokered, `-d`, bind
   `172.17.0.1`, port in 29000–29999) — one gateway connection for the whole app, listing
@@ -431,15 +488,14 @@ platform disabled.
 Before a served coworker can complete a live turn over the OpenShell lane, four
 preconditions must hold on `brev-hermes`:
 
-1. **Per-worker ssh config.** Run `openshell sandbox ssh-config <name>` for each **worker**
-   sandbox and write its `User sandbox` + `ProxyCommand` block into `~/.ssh/config`, so the
-   profile's `terminal.ssh_host` alias resolves to the assigned sandbox.
-2. **OpenShell shim on `PATH`.** The `openshell shim` (the `onecli-chain` dialer) must be on
-   the gateway's `PATH` so the ssh `ProxyCommand` can dial the broker for each worker.
-3. **Loopback proxy relay.** A `socat` `listener` bridges the dashboard's loopback origin to
-   the broker-forced `proxy_rewrite` target `127.0.0.1:18255`, so a data-plane request the
-   dashboard issues on loopback reaches the OneCLI hop.
-4. **Resolvable managed dir.** The `nv-fleet-gates` veto reads the worker-unforgeable
-   `expected_ssh_host` map only when `$HERMES_MANAGED_DIR` resolves to the installed managed
-   fragment; if it does not resolve, the veto cannot bind a worker to its sandbox and the
-   turn is refused.
+1. **OpenShell Sandbox CA trusted.** The gateway CA bundle must carry the **OpenShell
+   Sandbox CA** (`/etc/openshell-tls/ca-bundle.pem`), or TLS to `inference.local` fails
+   (curl exit 60) and no served turn can complete.
+2. **Rewrite-trigger placeholder only.** Each served profile's model-provider config holds
+   only the `sk-OPENSHELL-PROXY-REWRITE` placeholder — **never** `COMPATIBLE_API_KEY`,
+   which lives OpenShell-side and must not reach any sandbox config.
+3. **No `API_SERVER_*` in a profile `.env`.** Do not seed a served profile's `.env` with any
+   `API_SERVER_*` value — the multiplexed gateway skips a profile whose `.env` carries one.
+4. **Start from the in-sandbox watchdog.** `openshell sandbox exec` runs in a different
+   network namespace than the gateway, so start the fleet processes from the in-sandbox
+   watchdog, never via `sandbox exec`.
