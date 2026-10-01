@@ -275,6 +275,22 @@ def test_default_diff_preserves_unrelated_plugin_settings():
     assert settings.get("edges_db_path")        # spine setting merged in
 
 
+def test_default_diff_preserves_operator_grant_in_secret_sets():
+    """The openshell grant apply OVERRIDES the served roles' profile_secret_sets but PRESERVES an
+    operator-managed identity already in that map (render-parallel merge, not a wholesale replace);
+    a re-run over the applied default is idempotent (§D7.1 ruling 2726 (a))."""
+    inst = _installer()
+    existing = {"gateway": {"multiplex_profiles": False},
+                "plugins": {"entries": {"podman-onecli": {"settings": {
+                    "profile_secret_sets": {"operator-sidecar": ["Ops-Only"]}}}}}}
+    _, diff, _ = inst.default_config_diff(existing, str(_spec_path()))
+    merged = inst.apply_config_diff(existing, diff)
+    pss = merged["plugins"]["entries"]["podman-onecli"]["settings"]["profile_secret_sets"]
+    assert pss["operator-sidecar"] == ["Ops-Only"]
+    assert pss["orchestrator"] == ["Anthropic-Dev"]
+    assert inst.default_config_diff(merged, str(_spec_path()))[1] == {}
+
+
 def test_force_install_snapshots_plugin_before_reinstall():
     """A different-ref plugin is snapshotted immediately before its --force reinstall."""
     inst = _installer()
