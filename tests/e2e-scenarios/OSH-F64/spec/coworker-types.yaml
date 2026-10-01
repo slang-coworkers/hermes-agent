@@ -26,6 +26,7 @@ egress:
   binaries: ["/usr/bin/python3*", "/opt/hermes/.venv/bin/python"]  # additive → appended to worker-egress.binaries
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
   onecli_secret_ids: ["Anthropic-Dev"]    # §D7.1: inference-secret grant the openshell render writes into default profile_secret_sets
+  pinned_offline_lane: true               # §D6/§D7/§D8: sha-pinned offline mirror + closed GitHub egress + local onecli-chain
   # No ssh_control_path: the v1 render forbids outbound 172.17.0.1:22; ssh is INBOUND via the proxy socket.
 
 spines:

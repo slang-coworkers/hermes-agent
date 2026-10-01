@@ -1151,6 +1151,14 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     ca_bundle = _req_str("ca_bundle") if "ca_bundle" in egress else "/etc/osh-lane/ca-bundle.pem"
     onecli_secret_ids = (_validate_openshell_secret_ids(egress["onecli_secret_ids"])
                          if "onecli_secret_ids" in egress else None)
+    # The pinned offline lane (sha-pinned offline fork mirror, closed GitHub egress, a local
+    # onecli-chain) is what the chain-dial, the firecrawl disable and the install-scan guard
+    # exist for, so only a fleet that declares it gets them; any other openshell fleet keeps
+    # the base render. Absent means off; a present non-bool (incl. null) fail-closes.
+    pinned_offline_lane = egress.get("pinned_offline_lane", False)
+    if not isinstance(pinned_offline_lane, bool):
+        raise CompositionError(
+            f"egress.pinned_offline_lane must be true or false, got {pinned_offline_lane!r}")
     return {
         "allow": allow,
         "sandbox_image": sandbox_image,
@@ -1160,6 +1168,7 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
         "chain_addr": chain_addr,
         "ca_bundle": ca_bundle,
         "onecli_secret_ids": onecli_secret_ids,
+        "pinned_offline_lane": pinned_offline_lane,
     }
 
 
@@ -1280,8 +1289,8 @@ def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
                                   chain_addr: str, ca_bundle: str) -> None:
     """Repoint a served coworker's profile-scoped child model turn through the operator
     onecli-chain (OSH-F64 §D7). Written into the RAW per-profile config, since secret
-    hydration reads raw config, not the managed overlay; openshell-only, per served
-    coworker (never the default profile)."""
+    hydration reads raw config, not the managed overlay; pinned-offline-lane only, per
+    served coworker (never the default profile)."""
     secrets = config.get("secrets")
     if isinstance(secrets, dict):
         preserved = secrets.get("preserve_existing")
@@ -2043,12 +2052,12 @@ def _build_managed_fragment(profile_roles: Dict[str, str],
     its per-profile config.
 
     ``disable_install_scan`` emits ``plugins.scan_on_install: false`` (OSH-F64 §D6).
-    Passed True on the openshell substrate only (symmetric to ``expected_ssh_host``):
-    the sha-pinned first-party fleet plugins are installed OFFLINE from the operator
-    mirror with GitHub egress closed, and the install-time scanner's DANGEROUS verdict
-    (which ``--force`` cannot override) would otherwise refuse them. On the
-    plain-host/container substrate the flag is left unset so scanning stays ON, since
-    those installs run from GitHub with egress open."""
+    Passed True only for an openshell fleet with ``egress.pinned_offline_lane: true``:
+    there the sha-pinned first-party fleet plugins are installed OFFLINE from the
+    operator mirror with GitHub egress closed, and the install-time scanner's DANGEROUS
+    verdict (which ``--force`` cannot override) would otherwise refuse them. Every other
+    fleet (plain-host/container, and an openshell fleet outside that lane) leaves the flag
+    unset so scanning stays ON."""
     fragment: Dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
@@ -3751,10 +3760,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # AFTER (so _render_coworker does not need to know about it).
         if is_remote:
             _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
-            _enforce_openshell_chain_dial(resolved["config"], tname,
-                                          openshell_params["chain_addr"],
-                                          openshell_params["ca_bundle"])
-            _disable_firecrawl_providers(resolved["config"])
+            if openshell_params["pinned_offline_lane"]:
+                _enforce_openshell_chain_dial(resolved["config"], tname,
+                                              openshell_params["chain_addr"],
+                                              openshell_params["ca_bundle"])
+                _disable_firecrawl_providers(resolved["config"])
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
@@ -3783,7 +3793,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
     if is_remote and openshell_params.get("onecli_secret_ids") is not None:
         _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
-    if is_remote:
+    if is_remote and openshell_params["pinned_offline_lane"]:
         _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
@@ -3810,7 +3820,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         if is_remote else None
     )
     managed_fragment = _build_managed_fragment(
-        profile_roles_map, expected_ssh_host_map, disable_install_scan=is_remote)
+        profile_roles_map, expected_ssh_host_map,
+        disable_install_scan=bool(is_remote and openshell_params["pinned_offline_lane"]))
     if egress_params is not None:
         # ISO-F14: the managed-scope layer deep-merges managed-wins onto every
         # profile at load, so proxy.enabled:false here forces the egress topology

@@ -199,6 +199,16 @@ entry. A spec absent all three optional fields renders exactly the base two-endp
 above with **both** endpoints `protocol: rest` (the `tls: skip` shape is keyed strictly on the
 delta being present, never inferred) — the behavioural back-compat contract.
 
+**`egress.pinned_offline_lane` (boolean, default off).** Set it to `true` when the fleet runs in
+the pinned offline lane: a sha-pinned offline fork mirror, closed GitHub egress, and a local
+onecli-chain (the shipped OSH-F64 spec sets it). Only then does the render emit the three
+lane-specific settings: each served coworker's OneCLI chain-dial (`secrets.onecli.override_existing`
+plus `podman-onecli` `proxy_rewrite`/`ca_bundle`), the disabled firecrawl providers on the
+default and every served coworker, and the managed `plugins.scan_on_install: false`. Absent or
+`false`, an `openshell` fleet renders none of them (FLEET-F62.c and OSH-F63 are unchanged), and
+the worker policies are identical either way. Any value other than `true`/`false` is refused at
+compose time.
+
 ## Operator prerequisites
 
 Before a fleet can be provisioned, the operator must satisfy these prerequisites:
