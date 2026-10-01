@@ -1,7 +1,7 @@
 """Acceptance test for OSH-F64 — Fleet under OpenShell (P7 demo).
 
 One test_ac_osh_f64_<n> per pytest: criterion (1, 2, 6, 7, 8, 9, 10, 11, 12, 13); AC-3/4
-(live) and AC-5 (ui) are proven by their scenario files. Loads nv-coworker-compose from an
+(live) are proven by their scenario files; AC-5 (ui) is WITHDRAWN (carried to OSH-F64.c, ruling 2582). Loads nv-coworker-compose from an
 isolated HERMES_HOME via the real discovery path, asserts registration, then
 drives the behaviour. Behaviour contract, not a byte snapshot
 (AGENTS.md:122-125,804-823). No network (every hermes invocation is
@@ -563,6 +563,13 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     inst_disabled = (installed_state.get("plugins") or {}).get("disabled") or []
     assert "web-firecrawl" in inst_disabled and "browser-firecrawl" in inst_disabled, \
         "installer default edit must union plugins.disabled=[web-firecrawl,browser-firecrawl] on the gateway default (§D8 route 1)"
+    # The installed default must carry the render's grant per role, never an empty one.
+    inst_pss = _onecli_settings(installed_state).get("profile_secret_sets") or {}
+    for _role in COWORKERS:
+        assert inst_pss.get(_role) == ["Anthropic-Dev"], (
+            f"installer applied default must grant {_role} the inference secret from the render "
+            f"(['Anthropic-Dev'], not the spine []); got {inst_pss.get(_role)!r} (§D7.1 ruling 2726 (a))"
+        )
     # A fresh config cannot detect clobbering a pre-existing operator disable.
     existing = {
         "gateway": {"multiplex_profiles": False},
@@ -940,6 +947,9 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "wrapper [SECURITY] env-secret guard documented": r"(\[security\]|secret-shaped|env-secret\s+guard)[\s\S]{0,240}(refus|scrub|placeholder)",
         "restart env-scrub of the refused names": r"scrub[\s\S]{0,200}(hermes_dashboard_session_token|api_server_key|token_file)",
         "supervised gateway still needs a strong API_SERVER_KEY when api_server enabled": r"api_server_key[\s\S]{0,300}(enabl|supervis|gateway|strong|required)",
+        "onecli-onboard grant directive (default context, --profile)": r"hermes\s+-p\s+default\s+onecli-onboard\s+--profile",
+        "--allow-ungranted documented as the explicit revoke opt-in": r"--allow-ungranted",
+        "onboard refuses an empty grant by default": r"(?:empty|\[\])[\s\S]{0,180}\brefus",
     }
     for label, pat in obligations.items():
         assert re.search(pat, section), f"install/rollback section missing: {label}"
@@ -1102,7 +1112,7 @@ def test_ac_osh_f64_10(tmp_path, monkeypatch):
 
 
 def test_ac_osh_f64_11(tmp_path, monkeypatch):
-    """AC-OSH-F64-11: openshell render populates profile_secret_sets with the inference secret (not []), per served profile."""
+    """AC-OSH-F64-11: openshell grant pipeline — render populates profile_secret_sets (not []), the installer APPLIES it to the default config, and onecli-onboard refuses an empty grant without --allow-ungranted (ruling 2726)."""
     root = _repo_root()
     _setup_home(tmp_path, monkeypatch)
     manager = _load_manager()
@@ -1137,6 +1147,55 @@ def test_ac_osh_f64_11(tmp_path, monkeypatch):
     assert {r: f62_pss.get(r) for r in COWORKERS} == {r: [] for r in COWORKERS}, (
         f"container render must IGNORE egress.onecli_secret_ids (openshell gate): every served profile's grant "
         f"must stay [], got {f62_pss!r}"
+    )
+
+    # The installer must apply the render's grant to the default config, never an empty one.
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer_ac11")
+    fresh = {"gateway": {"multiplex_profiles": False}}
+    _, diff, _ = planner.default_config_diff(fresh, str(osh_spec))
+    applied = planner.apply_config_diff(fresh, diff)
+    applied_pss = _onecli_settings(applied).get("profile_secret_sets") or {}
+    for prof in COWORKERS:
+        assert applied_pss.get(prof) == ["Anthropic-Dev"], (
+            f"installer APPLIED default config must carry the render's grant for {prof} "
+            f"(['Anthropic-Dev'], not the spine []); got {applied_pss.get(prof)!r} (ruling 2726 (a))"
+        )
+
+    # A stale empty grant must not silently revoke an existing one (set_secrets([]) IS revocation).
+    import argparse
+
+    _src, oneclient, onboard_manager = _load_onecli(
+        tmp_path, monkeypatch, settings={"profile_secret_sets": {"osh-f64-bot": []}},
+    )
+    entry = onboard_manager._cli_commands.get("onecli-onboard")
+    assert entry is not None, "podman-onecli must register the onecli-onboard CLI command"
+    calls: dict = {}
+    monkeypatch.setattr(oneclient, "ensure_agent", lambda identifier: calls.__setitem__("ensure", identifier))
+    monkeypatch.setattr(
+        oneclient, "set_secrets",
+        lambda identifier, secrets: calls.__setitem__("set", (identifier, list(secrets))),
+    )
+    monkeypatch.setattr(oneclient, "get_container_config", lambda *, agent: {"agent": agent})
+
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="cmd")
+    sub = subs.add_parser("onecli-onboard")
+    entry["setup_fn"](sub)
+
+    ns_noflag = parser.parse_args(["onecli-onboard", "--profile", "osh-f64-bot"])
+    with pytest.raises(ValueError):
+        entry["handler_fn"](ns_noflag)
+    assert "set" not in calls, (
+        "onecli-onboard must NOT call set_secrets for an empty grant without --allow-ungranted "
+        "(no silent revocation, ruling 2726 (b))"
+    )
+
+    calls.clear()
+    ns_flag = parser.parse_args(["onecli-onboard", "--profile", "osh-f64-bot", "--allow-ungranted"])
+    entry["handler_fn"](ns_flag)
+    assert calls.get("set") == ("osh-f64-bot", []), (
+        "--allow-ungranted is the explicit opt-in: only then is set_secrets(identifier, []) called "
+        "(ruling 2726 (b))"
     )
 
 
