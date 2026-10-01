@@ -83,8 +83,9 @@ def list_canonical_bot_chats() -> List[Dict[str, Any]]:
 def find_canonical(profile: str, session_id: str) -> Optional[Tuple[Dict[str, Any], Path]]:
     """The served canonical Bot Chat named by ``(profile, session_id)``, or None.
 
-    The session store path comes from the served set, never from the caller, so
-    an unserved profile or a non-canonical session id is refused before any read.
+    The session store path comes from the served set, never from the caller: an
+    unserved profile opens no store, and only the served profile's canonical row
+    is read to check the id, so an unmatched id never reaches the transcript read.
     """
     for entry, db_path in _canonical_entries(profile):
         if session_id in (entry["session_id"], entry["resolved_id"]):
