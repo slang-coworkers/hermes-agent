@@ -1672,9 +1672,25 @@ def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: 
             "extra_headers": {_OSH_F64B_PROFILE_HEADER: tag},
         }
     }
-    for field in ("api_key", "api", "base_url", "api_mode", "default_headers", "extra_headers"):
+    for field in ("api_key", "api", "api_base", "base_url", "api_mode",
+                  "key_env", "api_key_env", "default_headers", "extra_headers"):
         _pop_dotted(config, f"model.{field}")
     config.pop("custom_providers", None)
+    # Root-level route keys are promoted into the model at load: _normalize_root_model_keys
+    # (config.py:3152, applied :4042) copies a root `base_url`/`api_base` into `model.base_url` as a
+    # fallback. Pop them (and a stray root `provider`) so no non-single-authority route survives
+    # beside the fresh provider block; the authoritative `model.provider` is set below.
+    for field in ("provider", "base_url", "api_base"):
+        config.pop(field, None)
+    # A `delegation` block is a SECOND provider route: delegate_task is a core tool (toolsets.py:70) and
+    # the release `_resolve_delegation_credentials` (delegate_tool.py:4712-4716) returns an inherited
+    # delegation.api_key as the subagent key, while request_overrides can add per-request headers
+    # (delegate_tool.py:4725). Drop the route/auth sub-keys so the child inherits the parent
+    # single-authority route (delegate_tool.py:4705-4707); keep delegation.model and the limits.
+    delegation = config.get("delegation")
+    if isinstance(delegation, dict):
+        for field in ("provider", "base_url", "api_key", "api_mode", "request_overrides"):
+            delegation.pop(field, None)
     # A fallback chain activates on a primary failure (run_agent.py:7126) and each entry may name
     # its OWN provider and carry an inline credential — a second provider off the single-authority
     # endpoint, and a key the placeholder-only invariant forbids. Drop both; the single-authority

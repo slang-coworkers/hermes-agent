@@ -555,10 +555,27 @@ def test_osh_f64_b_inherited_model_and_custom_providers_dropped(loaded, tmp_path
         "api_key": "sk-INHERITED-MODEL-KEY",
         "api": "https://inference.local/v1",
         "base_url": "https://inference.local/v1",
+        "api_base": "https://inherited-model-apibase.example/v1",
         "api_mode": "chat_completions",
+        "key_env": "INHERITED_MODEL_KEY_ENV",
+        "api_key_env": "INHERITED_MODEL_API_KEY_ENV",
         "default_headers": {"Authorization": "Bearer INHERITED_MODEL_HEADER"},
         "extra_headers": {"Authorization": "Bearer INHERITED_MODEL_EXTRA"},
     })
+    # Root-level route keys the release promotes into the model at load (_normalize_root_model_keys).
+    cfg_block["provider"] = "inherited-root-provider"
+    cfg_block["base_url"] = "https://inherited-root-baseurl.example/v1"
+    cfg_block["api_base"] = "https://inherited-root-apibase.example/v1"
+    # A delegation block is a second provider route: _resolve_delegation_credentials returns an
+    # inherited delegation.api_key as the subagent key, and request_overrides can add per-request headers.
+    cfg_block["delegation"] = {
+        "provider": "custom",
+        "base_url": "https://inherited-delegation.example/v1",
+        "api_key": "sk-INHERITED-DELEGATION-KEY",
+        "api_mode": "chat_completions",
+        "request_overrides": {"extra_headers": {"Authorization": "Bearer INHERITED_DELEGATION_HEADER"}},
+        "model": "anthropic/claude-sonnet-4",
+    }
     cfg_block["providers"]["rogue-same-url"] = {
         "base_url": "https://inference.local/v1",
         "api_mode": "chat_completions",
@@ -609,7 +626,12 @@ def test_osh_f64_b_inherited_model_and_custom_providers_dropped(loaded, tmp_path
     inherited = ("sk-INHERITED-MODEL-KEY", "INHERITED_MODEL_HEADER", "INHERITED_MODEL_EXTRA",
                  "sk-INHERITED-PROV2-KEY", "sk-INHERITED-CP-KEY", "INHERITED_LEGACY_HEADER",
                  "sk-INHERITED-FALLBACK-KEY", "sk-INHERITED-FBPROV-KEY", "sk-INHERITED-AUX-KEY",
-                 "SOME_AUX_KEY_ENV")
+                 "SOME_AUX_KEY_ENV",
+                 "INHERITED_MODEL_KEY_ENV", "INHERITED_MODEL_API_KEY_ENV",
+                 "inherited-model-apibase.example", "inherited-root-provider",
+                 "inherited-root-baseurl.example", "inherited-root-apibase.example",
+                 "sk-INHERITED-DELEGATION-KEY", "INHERITED_DELEGATION_HEADER",
+                 "inherited-delegation.example")
     for role in (*SERVED_ROLES, "default"):  # the default/gateway profile also renders inference
         cfg = configs.get(role) or {}
         dumped = yaml.safe_dump(cfg)
@@ -620,8 +642,14 @@ def test_osh_f64_b_inherited_model_and_custom_providers_dropped(loaded, tmp_path
             f"{role}: a competing same-URL providers entry survived the gated render"
         )
         model = cfg.get("model") or {}
-        for field in ("api_key", "api", "base_url", "api_mode", "default_headers", "extra_headers"):
+        for field in ("api_key", "api", "api_base", "base_url", "api_mode",
+                      "key_env", "api_key_env", "default_headers", "extra_headers"):
             assert field not in model, f"{role}: inherited model.{field} survived the gated render"
+        for field in ("provider", "base_url", "api_base"):
+            assert field not in cfg, f"{role}: inherited root {field} survived the gated render"
+        delegation = cfg.get("delegation") or {}
+        for field in ("provider", "base_url", "api_key", "api_mode", "request_overrides"):
+            assert field not in delegation, f"{role}: inherited delegation.{field} survived the gated render"
         # the fallback chain (a second provider route) is dropped entirely
         assert "fallback_model" not in cfg, f"{role}: inherited fallback_model survived the gated render"
         assert "fallback_providers" not in cfg, f"{role}: inherited fallback_providers survived"
@@ -651,6 +679,22 @@ def test_osh_f64_b_inherited_model_and_custom_providers_dropped(loaded, tmp_path
             assert set(eh) == {"X-Hermes-Profile"}, (
                 f"{role}: resolver extra_headers for inference base_url must be only X-Hermes-Profile, got {eh}"
             )
+        # The release delegation resolver must not surface an inherited subagent key. With neither
+        # provider nor base_url on the scrubbed block, _resolve_delegation_credentials takes the
+        # parent-inherit branch and returns api_key None — the child inherits the single-authority
+        # route rather than the seeded delegation.api_key.
+        from tools.delegate_tool import _resolve_delegation_credentials
+
+        class _StubParent:  # the parent-inherit branch only reads getattr(parent, "request_overrides", None)
+            pass
+
+        resolved = _resolve_delegation_credentials(cfg.get("delegation") or {}, _StubParent())
+        assert resolved.get("api_key") in (None, ""), (
+            f"{role}: delegation resolver surfaced an inherited key {resolved.get('api_key')!r}"
+        )
+        assert resolved.get("api_key") != "sk-INHERITED-DELEGATION-KEY", (
+            f"{role}: delegation resolver returned the seeded inherited delegation key"
+        )
 
 
 def test_osh_f64_b_minimal_gated_spec(loaded, tmp_path):
