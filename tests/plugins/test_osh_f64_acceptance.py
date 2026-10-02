@@ -905,7 +905,9 @@ def test_openshell_render_backcompat_without_extension_fields(tmp_path, monkeypa
 
 
 def test_ac_osh_f64_6(tmp_path, monkeypatch):
-    """AC-OSH-F64-6: fleet-openshell.md gains the "install into an existing NemoClaw sandbox" section."""
+    """AC-OSH-F64-6: the "install into an existing NemoClaw sandbox" section documents the
+    single-authority OpenShell inference posture, and the §D7 OneCLI tunnel/relay/grant/onboard
+    directives (socat / 172.17.0.1:18255 / onecli-chain / onecli-onboard) are absent from it."""
     root = _repo_root()
     doc = root / "website" / "docs" / "user-guide" / "fleet-openshell.md"
     assert doc.exists(), "website/docs/user-guide/fleet-openshell.md must exist"
@@ -947,17 +949,28 @@ def test_ac_osh_f64_6(tmp_path, monkeypatch):
         "wrapper [SECURITY] env-secret guard documented": r"(\[security\]|secret-shaped|env-secret\s+guard)[\s\S]{0,240}(refus|scrub|placeholder)",
         "restart env-scrub of the refused names": r"scrub[\s\S]{0,200}(hermes_dashboard_session_token|api_server_key|token_file)",
         "supervised gateway still needs a strong API_SERVER_KEY when api_server enabled": r"api_server_key[\s\S]{0,300}(enabl|supervis|gateway|strong|required)",
-        "onecli-onboard grant directive (default context, --profile)": r"hermes\s+-p\s+default\s+onecli-onboard\s+--profile",
-        "--allow-ungranted documented as the explicit revoke opt-in": r"--allow-ungranted",
-        "onboard refuses an empty grant by default": r"(?:empty|\[\])[\s\S]{0,180}\brefus",
+        # Single-authority install posture: the provider is declared config-side in
+        # providers.compatible-endpoint (the APF endpoint carries no provider field).
+        "single-authority OpenShell inference provider declared config-side": r"config-side[\s\S]{0,40}providers\.compatible-endpoint",
+        "placeholder-only api_key, never the real credential": r"never[\s\S]{0,40}compatible_api_key",
+        "no OneCLI grants under single authority": r"single\s+authority,?\s+no\s+onecli\s+grant",
+        "broker-only worker; inference not a worker endpoint": r"inference\s+is\s+not\s+a\s+worker\s+endpoint",
     }
     for label, pat in obligations.items():
         assert re.search(pat, section), f"install/rollback section missing: {label}"
-    # The four lane preconditions — strict token sets so no required object can silently drop.
+    # The single-authority install prerequisites, as strict token sets so none can silently drop.
+    for tokens in (
+        ("inference.local", "sk-openshell-proxy-rewrite"),
+        ("broker", "18777"),
+    ):
+        assert all(token in section for token in tokens), f"missing single-authority prerequisite: {tokens}"
+    # Lane preconditions (a) and (d) are OSH-F63 worker-access facts the single-authority posture
+    # does NOT supersede — workers are still reached over brokered ssh, and the veto still reads
+    # expected_ssh_host from the managed fragment — so they remain required. Only the §D7 inference
+    # chain-dial preconditions (b) openshell-shim/onecli-chain and (c) socat/proxy_rewrite are
+    # dropped (ADR bb163aac §D4-ratified supersession).
     for tokens in (
         ("openshell sandbox ssh-config", "~/.ssh/config", "worker"),
-        ("openshell shim", "onecli-chain", "gateway", "path", "proxycommand"),
-        ("socat", "listener", "proxy_rewrite", "127.0.0.1:18255"),
         ("nv-fleet-gates", "expected_ssh_host", "hermes_managed_dir", "resolv"),
     ):
         assert all(token in section for token in tokens), f"missing lane prerequisite: {tokens}"
