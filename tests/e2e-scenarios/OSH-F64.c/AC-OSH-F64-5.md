@@ -114,12 +114,14 @@ stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in th
    echo "openshell forward start $P $SB -d" | tee $ART/scenario-$AC/forwards.txt
    openshell forward start $P $SB -d > $ART/scenario-$AC/forward-start.log 2>&1 &   # brokered; binds 172.17.0.1:$P
    echo $! > $ART/scenario-$AC/forward-client.pid
-   if ! timeout 300 sh -c "until openshell forward list 2>&1 | grep -E '(^|[[:space:]])$SB[[:space:]].*[[:space:]]$P[[:space:]]+running' ; do sleep 3; done" > $ART/scenario-$AC/forward-list.txt; then
+   if ! timeout 300 sh -c "until openshell forward list 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '(^|[[:space:]])$SB[[:space:]]+[^[:space:]]+[[:space:]]+$P[[:space:]]+[0-9]+[[:space:]]+running([[:space:]]|\$)' ; do sleep 3; done" > $ART/scenario-$AC/forward-list.txt; then
      echo "forward not running after 300 s" >&2; exit 1
    fi
    cat $ART/scenario-$AC/forward-list.txt
    ```
-   The wait must print the `osh-f64c-gw … $P running` line; a timeout is a Setup failure. No other
+   `forward list` prints `SANDBOX BIND PORT PID STATUS`, with STATUS wrapped in ANSI colour codes, so the wait
+   strips the colour codes and then matches the row's columns in order. It must print the
+   `osh-f64c-gw 172.17.0.1 $P <pid> running` line; a timeout is a Setup failure. No other
    `openshell forward start` runs in this scenario, and none is retried.
 8. **Loopback bridge for the dashboard Host guard.** The broker binds the forward to `172.17.0.1`,
    and the dashboard's Host guard rejects that Host with HTTP 400. Bridge it from loopback so the

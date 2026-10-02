@@ -143,7 +143,8 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      `sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" $P; do sleep 2; done"`.
    - Open the ONE forward exactly as AC-OSH-F64-5 Setup 7 does: log the command to `forwards.txt`, start it in the
      background (`> $ART/scenario-$AC/forward-start.log 2>&1 &`, pid to `forward-client.pid`), then wait up to 300 s
-     until `openshell forward list` shows `osh-f64c-gw … $P running` (saved to `forward-list.txt`). A timeout is a
+     until the colour-stripped `openshell forward list` shows the `osh-f64c-gw 172.17.0.1 $P <pid> running` row,
+     with the same `sed` + `grep -E` (saved to `forward-list.txt`). A timeout is a
      Setup failure; the start is never retried.
    - Bridge the Host guard from loopback: `socat TCP-LISTEN:$P,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:$P & echo $! > $ART/scenario-$AC/socat.pid`.
    - `URL=http://127.0.0.1:$P/`.
