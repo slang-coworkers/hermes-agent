@@ -1,6 +1,6 @@
 name: osh-f64c-worker-orchestrator
 version: 0.1.0
-description: 'OSH-F64.c served coworker seed: orchestrator'
+description: 'OSH-F64.c served coworker seed: orchestrator (single-authority inference)'
 distribution_owned:
 - SOUL.md
 - config.yaml

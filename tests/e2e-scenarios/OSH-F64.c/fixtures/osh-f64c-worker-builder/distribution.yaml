@@ -1,6 +1,6 @@
 name: osh-f64c-worker-builder
 version: 0.1.0
-description: 'OSH-F64.c served coworker seed: builder'
+description: 'OSH-F64.c served coworker seed: builder (single-authority inference)'
 distribution_owned:
 - SOUL.md
 - config.yaml
