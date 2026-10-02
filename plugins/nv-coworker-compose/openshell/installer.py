@@ -754,7 +754,9 @@ def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None) -> st
 
 def _run(cmd: List[str], env: Optional[Dict[str, str]] = None) -> None:
     import subprocess
-    subprocess.run(cmd, check=True, env=env)
+    # stdin is closed: these are non-interactive hermes/openshell invocations, and a child left
+    # attached to the parent's stdin can consume the apply driver's input (subprocess-stdin guard).
+    subprocess.run(cmd, check=True, env=env, stdin=subprocess.DEVNULL)
 
 
 _REFUSED_ENV_NAMES = ("HERMES_DASHBOARD_SESSION_TOKEN", "API_SERVER_KEY")
