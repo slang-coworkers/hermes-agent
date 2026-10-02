@@ -127,27 +127,39 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      and the install never returns, while the broker cuts any one exec at about 300 s. The wrapper records the
      install's exit code in `osh-f64c-install.rc` if it ever exits:
      ```bash
-     sx 'touch "$HERMES_HOME/osh-f64c-install.start"; sleep 1'
+     W='w() { f="$HERMES_HOME/gateway_state.json"; [ -e "$f" ] || { echo absent; return; }; "$PY" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[\"pid\"], d[\"start_time\"], d[\"gateway_state\"])" "$f" 2>/dev/null || echo ambiguous; };'
+     BASE=$(sx "$W"' touch "$HERMES_HOME/osh-f64c-install.start"; sleep 1; for k in 1 2 3 4 5; do b=$(w); [ "$b" != ambiguous ] && break; sleep 1; done; echo "$b"') || BASE=ambiguous
+     echo "baseline: $BASE" | tee $ART/scenario-$AC/install-poll.txt
+     [ "$BASE" != ambiguous ] || { echo "baseline gateway_state.json unreadable: FAIL" >&2; exit 1; }
+     B0=$(echo "$BASE" | cut -d' ' -f1,2)
      sx "setsid nohup sh -c '\"\$0\" \"\$@\"; echo \$? > \"\$HERMES_HOME/osh-f64c-install.rc\"' \"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT > \"\$HERMES_HOME/osh-f64c-install.log\" 2>&1 < /dev/null &"
+     RC='if [ -s "$HERMES_HOME/osh-f64c-install.rc" ]; then echo "exited rc=$(cat "$HERMES_HOME/osh-f64c-install.rc")"; exit 0; fi;'
+     POLL="i=0; while [ \$i -lt 70 ]; do $RC"
+     POLL+=' if [ "$HERMES_HOME/gateway_state.json" -nt "$HERMES_HOME/osh-f64c-install.start" ]; then s=$(w); [ -e "$HERMES_HOME/osh-f64c-install.first-state.json" ] || cp "$HERMES_HOME/gateway_state.json" "$HERMES_HOME/osh-f64c-install.first-state.json";'
+     POLL+=" case \"\$s\" in ambiguous|absent) ;; *' running') if [ \"\${s% *}\" != \"\$B0\" ]; then $RC echo \"ready \$s\"; exit 0; fi;; esac; fi;"
+     POLL+=' sleep 3; i=$((i+1)); done; echo waiting'
      INSTALL=waiting
      for slice in 1 2 3 4 5 6 7 8 9 10; do
-       INSTALL=$(sx -t 240 'i=0; while [ $i -lt 70 ]; do
-           if [ -s "$HERMES_HOME/osh-f64c-install.rc" ]; then echo "exited rc=$(cat "$HERMES_HOME/osh-f64c-install.rc")"; exit 0; fi
-           if [ "$HERMES_HOME/gateway_state.json" -nt "$HERMES_HOME/osh-f64c-install.start" ] && grep -q "\"gateway_state\": *\"running\"" "$HERMES_HOME/gateway_state.json"; then echo ready; exit 0; fi
-           sleep 3; i=$((i+1)); done; echo waiting') || INSTALL=waiting
+       INSTALL=$(sx -t 240 "$W B0='$B0'; $POLL") || INSTALL=waiting
        echo "slice $slice: $INSTALL" | tee -a $ART/scenario-$AC/install-poll.txt
-       [ "$INSTALL" = waiting ] || break
+       [ "${INSTALL%% *}" = waiting ] || break
      done
+     sx -t 60 'cat "$HERMES_HOME/osh-f64c-install.first-state.json" 2>/dev/null || echo none' | sed 's/^/first post-start gateway_state.json: /' >> $ART/scenario-$AC/install-poll.txt
      sx -t 60 'cat "$HERMES_HOME/osh-f64c-install.log"' > $ART/scenario-$AC/install.log
-     { if [ "$INSTALL" = ready ]; then echo 'restart_exit=pending (foreground gateway running)'; else echo "restart_exit=none (install $INSTALL)"; fi
+     { if [ "${INSTALL%% *}" = ready ]; then echo 'restart_exit=pending (foreground gateway running)'; else echo "restart_exit=none (install $INSTALL)"; fi
        cat $ART/scenario-$AC/install.log; } > $ART/scenario-$AC/gateway-restart.log
-     [ "$INSTALL" = ready ] || { echo "install not ready ($INSTALL): FAIL" >&2; tail -40 $ART/scenario-$AC/install.log >&2; exit 1; }
+     [ "${INSTALL%% *}" = ready ] || { echo "install not ready ($INSTALL): FAIL" >&2; tail -40 $ART/scenario-$AC/install.log >&2; exit 1; }
      ```
-     Ready means the gateway has written `gateway_state.json` since the install started (the one-second gap keeps `-nt`
-     exact on a filesystem with whole-second timestamps), with `"gateway_state":"running"`. The exit marker is checked
-     first: once the install has exited, its in-process gateway has exited with it, so that fails Setup whatever the exit
-     code. So does the overall bound expiring: ten slices of at most 240 s, about 40 min, well above the parent lane's
-     install, which was still running 13 min after launch. The launch
+     The broker rejects any exec argument that contains a newline, so the poll body is assembled into `POLL` as ONE line.
+     Before the launch, `BASE` records the writer `(pid, start_time)` of any existing `gateway_state.json`, or `absent`;
+     every write stamps its writer's own pair (release `gateway/status.py:1206-1209`, `:666-669`). Ready means the file is
+     newer than the start marker (the one-second gap keeps `-nt` exact on whole-second timestamps), reports
+     `"gateway_state":"running"`, and names a writer other than `BASE`. A snapshot that does not parse is inconclusive,
+     never ready. The exit marker is checked before the status is read and again after it: once the install has exited,
+     its in-process gateway has exited with it, so `exited rc=<n>` fails Setup whatever the code. So does the overall
+     bound expiring: ten slices of at most 240 s, about 40 min, well above the parent lane's install, which was still
+     running 13 min after launch. `install-poll.txt` records the baseline, each slice and the first post-start snapshot.
+     The launch
      argument is double-quoted on purpose: `$SPEC`, `$REF`, `$GW_URL` and `$ROOT` are tester-side values, and the single
      quotes keep the URL's `?token=` intact in the sandbox shell.
    - The grant preflight.
