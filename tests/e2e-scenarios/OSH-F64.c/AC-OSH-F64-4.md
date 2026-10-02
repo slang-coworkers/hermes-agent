@@ -121,17 +121,42 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" 9119; do sleep 2; done"
      GW_URL="ws://127.0.0.1:9119/api/ws?token=$TOK"
      ```
-   - The install, from the same image copy of the fleet plugin, with the `REF` resolved above:
+   - The install, from the same image copy of the fleet plugin, with the `REF` resolved above. It runs in the
+     BACKGROUND and is polled, as the parent lane ran it. The image has no service manager, so the installer's final
+     `hermes gateway restart` runs the gateway in the foreground (release `hermes_cli/gateway.py:8888-8896`, `:6426`)
+     and the install never returns, while the broker cuts any one exec at about 300 s. The wrapper records the
+     install's exit code in `osh-f64c-install.rc` if it ever exits:
      ```bash
-     sx "\"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT"
+     sx 'touch "$HERMES_HOME/osh-f64c-install.start"; sleep 1'
+     sx "setsid nohup sh -c '\"\$0\" \"\$@\"; echo \$? > \"\$HERMES_HOME/osh-f64c-install.rc\"' \"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT > \"\$HERMES_HOME/osh-f64c-install.log\" 2>&1 < /dev/null &"
+     INSTALL=waiting
+     for slice in 1 2 3 4 5 6 7 8 9 10; do
+       INSTALL=$(sx -t 240 'i=0; while [ $i -lt 70 ]; do
+           if [ -s "$HERMES_HOME/osh-f64c-install.rc" ]; then echo "exited rc=$(cat "$HERMES_HOME/osh-f64c-install.rc")"; exit 0; fi
+           if [ "$HERMES_HOME/gateway_state.json" -nt "$HERMES_HOME/osh-f64c-install.start" ] && grep -q "\"gateway_state\": *\"running\"" "$HERMES_HOME/gateway_state.json"; then echo ready; exit 0; fi
+           sleep 3; i=$((i+1)); done; echo waiting') || INSTALL=waiting
+       echo "slice $slice: $INSTALL" | tee -a $ART/scenario-$AC/install-poll.txt
+       [ "$INSTALL" = waiting ] || break
+     done
+     sx -t 60 'cat "$HERMES_HOME/osh-f64c-install.log"' > $ART/scenario-$AC/install.log
+     { if [ "$INSTALL" = ready ]; then echo 'restart_exit=pending (foreground gateway running)'; else echo "restart_exit=none (install $INSTALL)"; fi
+       cat $ART/scenario-$AC/install.log; } > $ART/scenario-$AC/gateway-restart.log
+     [ "$INSTALL" = ready ] || { echo "install not ready ($INSTALL): FAIL" >&2; tail -40 $ART/scenario-$AC/install.log >&2; exit 1; }
      ```
-     The argument is double-quoted on purpose: `$SPEC`, `$REF`, `$GW_URL` and `$ROOT` are tester-side values, and the
-     single quotes keep the URL's `?token=` intact in the sandbox shell.
+     Ready means the gateway has written `gateway_state.json` since the install started (the one-second gap keeps `-nt`
+     exact on a filesystem with whole-second timestamps), with `"gateway_state":"running"`. The exit marker is checked
+     first: once the install has exited, its in-process gateway has exited with it, so that fails Setup whatever the exit
+     code. So does the overall bound expiring: ten slices of at most 240 s, about 40 min, well above the parent lane's
+     install, which was still running 13 min after launch. The launch
+     argument is double-quoted on purpose: `$SPEC`, `$REF`, `$GW_URL` and `$ROOT` are tester-side values, and the single
+     quotes keep the URL's `?token=` intact in the sandbox shell.
    - The grant preflight.
    - The post-install onboard, `sx "hermes -p default onboard coworker $SPEC --gateway-url '$GW_URL'"`, asserting
      that `orchestrator` and `builder` each hold a canonical hidden `Bot Chat` plus a `ui_meta['hermes-bots']`
      entry.
-   - Keep the parent's `gateway-restart.log` capture.
+   - The parent's `gateway-restart.log` capture is written by the block above: while the gateway runs, the restart has
+     no exit code yet, so the file records `restart_exit=pending` followed by the install's output (on a failed install,
+     `restart_exit=none` and the install's state).
 3. **Stage and confirm the PR head's nv-bot-chat** in the gateway's user plugins (the installer installs only
    the fleet plugins): `stage $WT/plugins/nv-bot-chat '"$HERMES_HOME/plugins"'` (the helpers were staged in step 2);
    then `sx 'grep -A6 "^plugins:" "$HERMES_HOME/config.yaml" | grep -q nv-bot-chat || hermes -p default plugins enable nv-bot-chat'`.

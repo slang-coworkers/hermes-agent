@@ -1,4 +1,4 @@
-"""Count `hermes gateway run` and `hermes serve` processes from /proc (works without procps).
+"""Count the Hermes gateway and `hermes serve` processes from /proc (works without procps).
 
 Prints "gateway_processes <n>" (the gated count) and "serve_processes <n>" (recorded only).
 """
@@ -44,7 +44,9 @@ def classify(argv):
     rest = hermes_subcommand(argv)
     if rest is None:
         return None
-    if rest[:2] == ["gateway", "run"]:
+    # With no service manager, `hermes gateway restart` runs run_gateway() in its own process, so
+    # the live gateway keeps the `gateway restart` argv (release gateway/status.py:547-553).
+    if rest[:2] in (["gateway", "run"], ["gateway", "restart"]):
         return "gateway"
     if rest[:1] == ["serve"]:
         return "serve"
