@@ -55,10 +55,12 @@ mkdir -p $ART/scenario-$AC/spec && cp -r $WT/tests/e2e-scenarios/OSH-F64/spec/. 
 sed -i 's/^project: osh-f64$/project: osh-f64c/' $ART/scenario-$AC/spec/coworker-types.yaml
 grep -n '^project:' $ART/scenario-$AC/spec/coworker-types.yaml      # must print: project: osh-f64c
 SPEC='"$HERMES_HOME/.osh-f64c/spec/coworker-types.yaml"'   # in-sandbox path; staged in step 2, expands inside the sandbox
-# As in AC-OSH-F64-5: the image's login shell leaves HERMES_HOME unset and Hermes then uses
-# $HOME/.hermes (= /sandbox/.hermes, hermes_constants.py:59, :71-74), so every in-sandbox command
-# exports that first and gets PY = the Hermes venv's python.
-HX='export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"; PY=/opt/hermes/.venv/bin/python; [ -x "$PY" ] || PY=$(sed -n "1s/^#!//p" "$(command -v hermes)" 2>/dev/null);'
+# Each sx call is a fresh login shell, so every variable a later in-sandbox command reads is exported here,
+# not in the step that first sets it. HERMES_HOME: the image leaves it unset and Hermes uses $HOME/.hermes
+# (= /sandbox/.hermes, hermes_constants.py:59, :71-74). HERMES_MANAGED_DIR: read by phase-a, compose, serve,
+# install and onboard; Hermes resolves it only from the env var or /etc/hermes (managed_scope.py:65-71), and the
+# image has no /etc/hermes. PY: the Hermes venv's python.
+HX='export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"; export HERMES_MANAGED_DIR="$HERMES_HOME/managed"; PY=/opt/hermes/.venv/bin/python; [ -x "$PY" ] || PY=$(sed -n "1s/^#!//p" "$(command -v hermes)" 2>/dev/null);'
 sx() {  # sx [-t <secs>] '<command>': run it in $SB after $HX; -t bounds it (timeout 0 = no bound)
   local t=0; [ "$1" = -t ] && { t=$2; shift 2; }
   timeout "$t" openshell sandbox exec "$SB" -- sh -lc "$HX $1"
@@ -87,22 +89,43 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      Then confirm the home resolves:
      `sx 'echo "home=$HERMES_HOME py=$PY"; ls -d "$HERMES_HOME" && "$PY" -c "print(1)"' | tee $ART/scenario-$AC/env.txt` →
      expect `home=/sandbox/.hermes`, the directory listed, and `1`.
-     Then stage the lane-local spec: `stage $ART/scenario-$AC/spec '"$HERMES_HOME/.osh-f64c"'`. Every `<SPEC>`
+     Then stage the lane-local spec and the helpers, which serve's readiness wait below already reads:
+     `stage $ART/scenario-$AC/spec '"$HERMES_HOME/.osh-f64c"'`; `stage $SCN/helpers '"$HERMES_HOME/.osh-f64c"'`. Every `<SPEC>`
      below is `$SPEC` in a DOUBLE-quoted `sx` command: `$SPEC` expands on the tester side to the literal text
      `"$HERMES_HOME/.osh-f64c/spec/coworker-types.yaml"`, whose `$HERMES_HOME` then expands in the sandbox. Inside
      those double quotes, write every other in-sandbox `$` as `\$`.
-   - Parent step 1: the managed-dir scan guard, inside `osh-f64c-gw` (through `sx`).
-   - Parent step 2: the broker host-policy mirror. Phase-a with the lane-local spec (through `sx`), then
-     `sx "hermes coworker compose $SPEC --out \"\$HERMES_HOME/.osh-f64c/render\""`.
+   - `REF` is the PR head under test, resolved at run time. Phase-a and the install both install the fleet plugins
+     from the fork at `--ref $REF`, so the image's fork mirror (`/opt/hermes/fork.git`, observed on the lane image) must
+     carry it; if it does not, the lane image predates this head and the run stops as `FAIL(env)`:
+     ```bash
+     REF=$(git -C "$WT" rev-parse HEAD)
+     sx "git -C /opt/hermes/fork.git cat-file -e $REF^{commit}" || { echo "image mirror lacks $REF: FAIL(env)" >&2; exit 1; }
+     ```
+   - Parent step 1, the managed-dir scan guard. `HX` already exports `HERMES_MANAGED_DIR`:
+     `sx 'mkdir -p "$HERMES_MANAGED_DIR" && cp /tmp/osh-lane/managed/config.yaml "$HERMES_MANAGED_DIR/"'`.
+   - Parent step 2: the broker host-policy mirror. Phase-a with the lane-local spec, from the image's own copy of the
+     fleet plugin (observed on the lane image), then compose:
+     ```bash
+     sx "cd \"\$HERMES_HOME/plugins/nv-coworker-compose/openshell\" && \"\$PY\" installer.py phase-a --spec $SPEC --ref $REF"
+     sx "hermes coworker compose $SPEC --out \"\$HERMES_HOME/.osh-f64c/render\""
+     ```
      Mirror each role's policy with `mkdir -p $ROOT/render/<role>` and
      `sx 'cat "$HERMES_HOME/.osh-f64c/render/<role>/policy-<role>.yaml"' > $ROOT/render/<role>/policy-<role>.yaml`,
      for every role the installer provisions.
-   - Parent step 3, with the token exported in the SAME `sx` call that starts `hermes serve` (a separate remote shell
-     would not keep it): `TOK=<token>; sx "export HERMES_DASHBOARD_SESSION_TOKEN=$TOK; setsid nohup hermes serve <the parent's serve args> > \"\$HERMES_HOME/osh-f64c-serve.log\" 2>&1 < /dev/null &"`,
-     then the parent's readiness wait through `sx -t 300`, and `GW_URL=ws://127.0.0.1:<port>/api/ws?token=$TOK`.
-   - The install, run inside the sandbox from wherever the parent's lane stages the installer:
-     `sx "<staged>/install-into-sandbox.sh $SPEC --ref <sha> --gateway-url '$GW_URL' --policy-root $ROOT"`.
-     The argument is double-quoted on purpose: `$SPEC`, `$GW_URL` and `$ROOT` are tester-side values, and the
+   - Parent step 3. The token is generated at run time and exported in the SAME `sx` call that starts `hermes serve`
+     (a separate remote shell would not keep it). `serve` listens on its release defaults, `127.0.0.1:9119`
+     (`hermes_cli/subcommands/dashboard.py:26-31`), which the dashboard's `$P` does not collide with:
+     ```bash
+     TOK=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+     sx "export HERMES_DASHBOARD_SESSION_TOKEN=$TOK; setsid nohup hermes serve --host 127.0.0.1 --port 9119 > \"\$HERMES_HOME/osh-f64c-serve.log\" 2>&1 < /dev/null &"
+     sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" 9119; do sleep 2; done"
+     GW_URL="ws://127.0.0.1:9119/api/ws?token=$TOK"
+     ```
+   - The install, from the same image copy of the fleet plugin, with the `REF` resolved above:
+     ```bash
+     sx "\"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT"
+     ```
+     The argument is double-quoted on purpose: `$SPEC`, `$REF`, `$GW_URL` and `$ROOT` are tester-side values, and the
      single quotes keep the URL's `?token=` intact in the sandbox shell.
    - The grant preflight.
    - The post-install onboard, `sx "hermes -p default onboard coworker $SPEC --gateway-url '$GW_URL'"`, asserting
@@ -110,14 +133,18 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      entry.
    - Keep the parent's `gateway-restart.log` capture.
 3. **Stage and confirm the PR head's nv-bot-chat** in the gateway's user plugins (the installer installs only
-   the fleet plugins): `stage $WT/plugins/nv-bot-chat '"$HERMES_HOME/plugins"'`; `stage $SCN/helpers '"$HERMES_HOME/.osh-f64c"'`;
+   the fleet plugins): `stage $WT/plugins/nv-bot-chat '"$HERMES_HOME/plugins"'` (the helpers were staged in step 2);
    then `sx 'grep -A6 "^plugins:" "$HERMES_HOME/config.yaml" | grep -q nv-bot-chat || hermes -p default plugins enable nv-bot-chat'`.
 4. **Dashboard and the ONE forward**, as AC-OSH-F64-5 Setup steps 6–8:
-   - Start the dashboard: `sx "setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"`.
-     `--skip-build` is needed because the sandbox has no npm egress.
+   - Start the dashboard: `sx "export HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist; setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"`.
+     `--skip-build` is needed because the sandbox has no npm egress, and `HERMES_WEB_DIST` because the image's
+     prebuilt SPA is not at the default `PROJECT_ROOT/hermes_cli/web_dist` (see AC-OSH-F64-5 Setup 6).
    - Wait until `/api/health` reports `"ok": true`:
      `sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" $P; do sleep 2; done"`.
-   - Log the forward command, then run it: `echo "openshell forward start $P $SB -d" | tee $ART/scenario-$AC/forwards.txt` followed by `openshell forward start $P $SB -d`.
+   - Open the ONE forward exactly as AC-OSH-F64-5 Setup 7 does: log the command to `forwards.txt`, start it in the
+     background (`> $ART/scenario-$AC/forward-start.log 2>&1 &`, pid to `forward-client.pid`), then wait up to 300 s
+     until `openshell forward list` shows `osh-f64c-gw … $P running` (saved to `forward-list.txt`). A timeout is a
+     Setup failure; the start is never retried.
    - Bridge the Host guard from loopback: `socat TCP-LISTEN:$P,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:$P & echo $! > $ART/scenario-$AC/socat.pid`.
    - `URL=http://127.0.0.1:$P/`.
    - The session token for API reads is `T=$(curl -s $URL | grep -o '__HERMES_SESSION_TOKEN__="[^"]*"' | cut -d'"' -f2)`.
@@ -161,7 +188,9 @@ row() {  # row <profile> <session> <role> [tool_name] [needle] -> evidence.txt; 
 3. **Wire, then deliver.** Run `sx 'hermes wire add orchestrator builder'`,
    then ask the orchestrator in the same chat to send to the builder again → refresh `orchestrator` in the tab →
    expect: a newer `tool` row carrying the delivery confirmation → `step-3.png`. Evidence: `echo step-3 >> evidence.txt;
-   row orchestrator <tip> tool message_agent`. Its `row <msg-id>` must be newer than step 2's.
+   row orchestrator <tip> tool message_agent '"status": "sent"'`. The needle selects the delivery RESULT by its content: a
+   successful send returns `{"status": "sent", "to": …}` (release `tools/bot_mode_dm.py:705-714`), while step 2's refusal
+   is an `{"error": …}` payload (`:233-238`). Its `row <msg-id>` must also be newer than step 2's.
 4. **The builder's delivery turn.** This is parent step 4 with the prefix substitution: a `write_file` plan to
    `.hermes/plans/builder.md`, then the `terminal` change inside `osh-f64c-builder`, writing
    `/tmp/osh-f64c-builder.marker`. The delivery child runs `-c "Bot Chat"` (`tools/bot_mode_dm.py:361-378`).
@@ -174,7 +203,7 @@ row() {  # row <profile> <session> <role> [tool_name] [needle] -> evidence.txt; 
    `sx 'printf "%s\n" "Use the cronjob_manage tool to create an hourly cron job named osh-f64c-probe that says hello." > /tmp/osh-f64c-q5.txt && hermes -p builder chat --in ~ -c "Bot Chat" -Q --query-file /tmp/osh-f64c-q5.txt'`.
    Then refresh `builder` in the tab → expect: a `tool` row carrying the `cronjob_manage` denial that names
    `orchestrator-only` → `step-5.png`. Evidence: `echo step-5 >> evidence.txt; row builder <tip> tool cronjob_manage orchestrator-only`.
-6. **Teardown.** `kill $(cat $ART/scenario-$AC/socat.pid)`, then delete every `osh-f64c-*` sandbox and policy
+6. **Teardown.** `kill $(cat $ART/scenario-$AC/socat.pid)`; `kill $(cat $ART/scenario-$AC/forward-client.pid) 2>/dev/null`; then delete every `osh-f64c-*` sandbox and policy
    (`openshell sandbox delete osh-f64c-gw`, `osh-f64c-orchestrator`, `osh-f64c-builder`, plus their policies
    as the parent's teardown does). Nothing outside `osh-f64c-*` and `$ROOT` is touched.
 
@@ -194,7 +223,7 @@ All files are under `$ART/scenario-AC-OSH-F64-4/`:
   has no `sqlite3` CLI; columns `role` / `content` / `tool_name`, `hermes_state_common.py:459-463`). Each step's
   output is a `session … hidden=1 title=Bot Chat` line plus the matching row:
   - step 1: an `assistant` row;
-  - steps 2 and 3: `tool` rows with `tool_name` `message_agent`, step 3's newer;
+  - steps 2 and 3: `tool` rows with `tool_name` `message_agent`, step 3's newer and containing `"status": "sent"`;
   - step 4: an `assistant` row containing `P7-BUILT:<nonce>`;
   - step 5: a `tool` row with `tool_name` `cronjob_manage` whose content names `orchestrator-only`.
   A `row none` on any step is a FAIL for that step.

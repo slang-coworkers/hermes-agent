@@ -94,21 +94,33 @@ stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in th
    An exit at the api_server key guard (exit 78) comes from the image's own environment, not from
    this plugin, which enables no platform. Capture `osh-f64c-gateway.log` and report it as `FAIL(env)`.
 6. **Start the dashboard inside the sandbox.** It is a separate process from the gateway.
-   `--skip-build` serves the image's prebuilt SPA (`hermes_cli/web_dist`) rather than attempting an npm
-   build the sandbox has no egress for (`hermes_cli/main.py:12207-12225`):
+   With `--skip-build` the dashboard serves a prebuilt SPA instead of attempting an npm build the sandbox has
+   no egress for. It looks for that SPA at `PROJECT_ROOT/hermes_cli/web_dist` unless `HERMES_WEB_DIST` is set
+   (`hermes_cli/main.py:12210-12218`). In this image `PROJECT_ROOT` is `/opt/hermes/fork`, which ships no
+   dist; the prebuilt SPA is at `/opt/hermes/hermes_cli/web_dist`. So the launch exports `HERMES_WEB_DIST`
+   in the same `sx` call, after checking that the SPA is there:
    ```bash
-   sx "setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"
+   sx 'ls /opt/hermes/hermes_cli/web_dist/index.html'
+   sx "export HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist; setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"
    sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" $P; do sleep 2; done"
    ```
    `health_ok.py` reads `/api/health` with the venv's stdlib, bypassing any sandbox proxy, so the
    wait needs no `curl` in the image.
-7. **Open exactly ONE forward**, and log the command as you run it:
+7. **Open exactly ONE forward**, and log the command as you run it. In this lane the
+   `forward start … -d` client often does not return even though the broker already shows the forward
+   `running`. So start it in the background, wait (bounded) until `openshell forward list` shows it
+   running, and only then continue:
    ```bash
    echo "openshell forward start $P $SB -d" | tee $ART/scenario-$AC/forwards.txt
-   openshell forward start $P $SB -d          # brokered; binds 172.17.0.1:$P
+   openshell forward start $P $SB -d > $ART/scenario-$AC/forward-start.log 2>&1 &   # brokered; binds 172.17.0.1:$P
+   echo $! > $ART/scenario-$AC/forward-client.pid
+   if ! timeout 300 sh -c "until openshell forward list 2>&1 | grep -E '(^|[[:space:]])$SB[[:space:]].*[[:space:]]$P[[:space:]]+running' ; do sleep 3; done" > $ART/scenario-$AC/forward-list.txt; then
+     echo "forward not running after 300 s" >&2; exit 1
+   fi
+   cat $ART/scenario-$AC/forward-list.txt
    ```
-   No other `openshell forward start` runs in this scenario. If `openshell forward --help` lists a
-   listing verb, append its output to `forwards.txt`.
+   The wait must print the `osh-f64c-gw … $P running` line; a timeout is a Setup failure. No other
+   `openshell forward start` runs in this scenario, and none is retried.
 8. **Loopback bridge for the dashboard Host guard.** The broker binds the forward to `172.17.0.1`,
    and the dashboard's Host guard rejects that Host with HTTP 400. Bridge it from loopback so the
    browser sends a loopback `Host`, while the forward stays the only transport (`socat` is in the
@@ -171,5 +183,6 @@ All files are under `$ART/scenario-AC-OSH-F64-5/`:
 
 ## Teardown
 
-`kill $(cat $ART/scenario-AC-OSH-F64-5/socat.pid)`, then `openshell sandbox delete osh-f64c-gw`, which
-also drops its forward. Nothing outside `osh-f64c-*` is touched.
+`kill $(cat $ART/scenario-AC-OSH-F64-5/socat.pid)`; `kill $(cat $ART/scenario-AC-OSH-F64-5/forward-client.pid) 2>/dev/null`
+(the backgrounded forward client, if it is still waiting); then `openshell sandbox delete osh-f64c-gw`,
+which also drops its forward. Nothing outside `osh-f64c-*` is touched.
