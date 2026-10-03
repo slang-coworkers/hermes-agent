@@ -25,6 +25,7 @@ with open(path, encoding="utf-8") as fh:
 for name in ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
     print("ca_env", name, os.environ.get(name) or "unset")
 print("proxy_env", "HTTPS_PROXY", "set" if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") else "unset")
+print("netns", os.readlink("/proc/self/ns/net"))
 
 headers = dict(provider.get("extra_headers") or {})
 headers["Authorization"] = "Bearer " + str(provider.get("api_key") or "")

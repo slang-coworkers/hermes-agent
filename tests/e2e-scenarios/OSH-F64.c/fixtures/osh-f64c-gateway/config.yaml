@@ -11,6 +11,11 @@ providers:
     api_mode: chat_completions
     api_key: sk-OPENSHELL-PROXY-REWRITE
     default_model: aws/anthropic/bedrock-claude-opus-5-5
+    # The installer edits the default config in place and never writes this provider block, so the
+    # seed carries the default render's attribution header itself (G1 checks it).
+    extra_headers:
+      X-Hermes-Profile: osh-f64c-default
+attribution_tag: osh-f64c-default
 secrets:
   onecli:
     enabled: false
