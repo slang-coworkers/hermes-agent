@@ -55,7 +55,8 @@ throwaway `osh-f64c-gw`, the same lane-local roots apply.
 ## Setup
 
 The `fixtures:` list is installed before this section (`osh-f64c-gateway` is the gateway/default seed,
-the two workers the served coworkers); nothing here re-installs one. The gateway seed keeps
+the two workers the served coworkers); nothing here re-installs one. That install does not reach the sandbox:
+Setup 2 places the gateway seed as `osh-f64c-gw`'s root config. The gateway seed keeps
 `nv-bot-chat` in `plugins.enabled`, which the installer UNIONs with the spine set.
 
 **Lane preconditions, verified and never repaired here** (`website/docs/user-guide/fleet-openshell.md:511-535`;
@@ -142,6 +143,16 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      below is `$SPEC` in a DOUBLE-quoted `sx` command: `$SPEC` expands on the tester side to the literal text
      `"$HERMES_HOME/.osh-f64c/spec/coworker-types.yaml"`, whose `$HERMES_HOME` then expands in the sandbox. Inside
      those double quotes, write every other in-sandbox `$` as `\$`.
+   - **Place the gateway/default seed in the sandbox root** (as AC-OSH-F64-5 Setup 2 does), before phase-a. The
+     `fixtures:` install lands in the tester's testbed, not in `osh-f64c-gw`, and the installer edits the default
+     config in place without writing its provider block (`plugins/nv-coworker-compose/openshell/installer.py:262-340`),
+     so G1's `default` store carries the managed route only if this seed is the sandbox's root config. The image's
+     own config is kept as `config.yaml.image`:
+     ```bash
+     FIXG=$SCN/fixtures/osh-f64c-gateway; mkdir -p $ART/scenario-$AC/root-seed && cp $FIXG/config.yaml $FIXG/SOUL.md $ART/scenario-$AC/root-seed/
+     stage $ART/scenario-$AC/root-seed '"$HERMES_HOME/.osh-f64c"'
+     sx 'cd "$HERMES_HOME" && { [ ! -f config.yaml ] || mv config.yaml config.yaml.image; } && cp .osh-f64c/root-seed/config.yaml .osh-f64c/root-seed/SOUL.md .'
+     ```
    - `REF` is the PR head under test, resolved at run time. Phase-a and the install both install the fleet plugins
      from the fork at `--ref $REF`, so the image's fork mirror (`/opt/hermes/fork.git`, observed on the lane image) must
      carry it; if it does not, the lane image predates this head and the run stops as `FAIL(env)`:
@@ -230,20 +241,28 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      The launch
      argument is double-quoted on purpose: `$SPEC`, `$REF`, `$GW_URL` and `$ROOT` are tester-side values, and the single
      quotes keep the URL's `?token=` intact in the sandbox shell.
-   - **P2 — no `API_SERVER_*` in a profile `.env`** (`fleet-openshell.md:521-522`: the multiplexed gateway skips a
-     profile whose `.env` carries one). Names only:
-     `sx 'grep -l "^API_SERVER_" "$HERMES_HOME/.env" "$HERMES_HOME"/profiles/*/.env 2>/dev/null; true' | tee $ART/scenario-$AC/p2-env.txt`
-     → expect no output; a listed file is `FAIL(env)`.
+   - **P2 — no `API_SERVER_*` in a served profile's `.env`** (`fleet-openshell.md:521-522`). The multiplexer skips a
+     SECONDARY profile that enables a port-binding platform; the default profile owns the single shared listener
+     (release `gateway/run.py:2424-2430`). So only `profiles/*/.env` is gated; the default `.env`'s `API_SERVER_*`
+     names are recorded, not gated. Names only, never values:
+     ```bash
+     sx '[ ! -f "$HERMES_HOME/.env" ] || grep -o "^API_SERVER_[A-Z0-9_]*" "$HERMES_HOME/.env" | sed "s/^/default-env-name /"' > $ART/scenario-$AC/p2-default-env-names.txt || true
+     sx 'set -- "$HERMES_HOME"/profiles/*/.env; [ -e "$1" ] || exit 0; grep -l "^API_SERVER_" "$@"; rc=$?; [ "$rc" = 1 ] && exit 0; [ "$rc" = 0 ] && exit 3; exit "$rc"' | tee $ART/scenario-$AC/p2-env.txt \
+       || { echo "P2: API_SERVER_* in a served profile .env, or the check errored: FAIL(env)" >&2; exit 1; }
+     ```
+     The gate is the exit status (`set -o pipefail` keeps it through `tee`): a listed profile `.env` exits 3, a `grep`
+     or exec error exits non-zero, and only "no profile `.env`" or "no match" exits 0. The default-store names file is
+     written first, as a record, and is never gated.
    - **No grant preflight.** Under the gated render the §D7.1 `profile_secret_sets` grants are not written
      (`compose.py:4164-4167`), there is no OneCLI identity to grant, and `onecli-onboard` is not run.
    - The post-install onboard, `sx "hermes -p default onboard coworker $SPEC --gateway-url '$GW_URL'"`, asserting
      that `orchestrator` and `builder` each hold a canonical hidden `Bot Chat` plus a `ui_meta['hermes-bots']`
      entry. Then confirm the served configs still carry the gated route and no OneCLI hop (names and booleans only):
      ```bash
-     for r in orchestrator builder; do sx "\"\$PY\" -c \"import yaml,sys; c=yaml.safe_load(open(sys.argv[1])); p=(c.get('providers') or {}).get('compatible-endpoint') or {}; print(sys.argv[2], 'provider', (c.get('model') or {}).get('provider'), 'base_url', p.get('base_url'), 'placeholder', p.get('api_key') == 'sk-OPENSHELL-PROXY-REWRITE', 'header', (p.get('extra_headers') or {}).get('X-Hermes-Profile'), 'podman_onecli', 'podman-onecli' in ((c.get('plugins') or {}).get('enabled') or []))\" \"\$HERMES_HOME/profiles/$r/config.yaml\" $r"; done | tee $ART/scenario-$AC/served-config.txt
+     for r in orchestrator builder; do sx "\"\$PY\" -c \"import yaml,sys; c=yaml.safe_load(open(sys.argv[1])); p=(c.get('providers') or {}).get('compatible-endpoint') or {}; print(sys.argv[2], 'provider', (c.get('model') or {}).get('provider'), 'base_url', p.get('base_url'), 'placeholder', p.get('api_key') == 'sk-OPENSHELL-PROXY-REWRITE', 'header_ok', (p.get('extra_headers') or {}).get('X-Hermes-Profile') == 'osh-f64c-' + sys.argv[2], 'podman_onecli', 'podman-onecli' in ((c.get('plugins') or {}).get('enabled') or []))\" \"\$HERMES_HOME/profiles/$r/config.yaml\" $r"; done | tee $ART/scenario-$AC/served-config.txt
      ```
      → expect, for each role, `provider compatible-endpoint base_url https://inference.local/v1 placeholder True
-     header osh-f64c-<role> podman_onecli False`; anything else FAILS Setup.
+     header_ok True podman_onecli False`; anything else FAILS Setup.
    - **Setup 8a — the per-worker ssh config** (`fleet-openshell.md:527-531`, precondition 5). The installer's
      `provision_sshconfig` step only prints each `openshell sandbox ssh-config` block to its log
      (`plugins/nv-coworker-compose/openshell/installer.py:535`, `:755-759`), and nothing writes it into the gateway
@@ -337,7 +356,7 @@ expect_id() {  # G2: the id the PTY route will set, computed the route's own way
 }
 pty_child() {  # G2 selector: exactly one dashboard-descended tui_gateway child with that id + profile
   sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/pty_select.py\" select $DPID $1 $2" | tee $ART/scenario-$AC/pty-select-$3.txt
-  [ "$(awk '$1=="pty_matches"{print $2}' $ART/scenario-$AC/pty-select-$3.txt)" = 1 ] && grep -q " netns $DNS dashboard_netns $DNS$" $ART/scenario-$AC/pty-select-$3.txt || { echo "G2 $3: not exactly one PTY child in the dashboard netns: FAIL" >&2; exit 1; }
+  [ "$(awk '$1=="pty_matches"{print $2}' $ART/scenario-$AC/pty-select-$3.txt)" = 1 ] && grep -qF " netns $DNS dashboard_netns $DNS" $ART/scenario-$AC/pty-select-$3.txt || { echo "G2 $3: not exactly one PTY child in the dashboard netns: FAIL" >&2; exit 1; }
 }
 usage_snap() { sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/route_record.py\" $T0 $ROUTE" > $ART/scenario-$AC/usage-$1.txt || true; }
 win_open() { eval "W0_$1=$(sx 'date +%s.%N')"; usage_snap $1-before; }
@@ -354,7 +373,8 @@ win_close() {  # G4 for window $1: stop at the first unmatched record
 **Route gates on every turn (ADR eeb30a42 G2–G4).** Run `win_open setup` before Setup 5's P3, and `win_close setup`
 after the G3 self-test: the probes' `GET`s are recorded, and the self-test's rejected `POST` must have no router
 record. Then for each step `n` in 1–5, `win_open s<n>` before driving it and `win_close s<n>` after its evidence
-row; at the end, `W0_all=$W0_setup` and `win_close all` reconciles the whole run. `route_reconcile.py` matches by
+row; at the end, `W0_all=$W0_setup`, `cp $ART/scenario-$AC/usage-setup-before.txt $ART/scenario-$AC/usage-all-before.txt`
+and `win_close all` reconciles the whole run. `route_reconcile.py` matches by
 time order plus method+path within ±2 s (router lines carry no PID). It records the first probe pair's skew and
 fails on: a probe that is not 200 or has no router `GET /v1/models`; an allowed `POST` with no router record, or one
 routed before its PID's probe; a rejected `POST` the router saw; a router `POST /v1/chat/completions` that no guard

@@ -173,9 +173,9 @@ def _arm():
 if _DIR:
     try:
         os.makedirs(_DIR, exist_ok=True)
+        _arm()
         with open(os.path.join(_DIR, "%d.armed" % os.getpid()), "w", encoding="utf-8") as fh:
             json.dump({"pid": os.getpid(), "ppid": os.getppid(), "netns": _netns(),
                        "home": os.path.basename(_home().rstrip("/"))}, fh)
-        _arm()
     except ImportError:
         pass  # no httpx in this interpreter: it can send no httpx request to guard
