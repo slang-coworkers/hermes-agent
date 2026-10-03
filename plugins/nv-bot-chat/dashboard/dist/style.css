@@ -1,0 +1,83 @@
+.nv-bot-chat {
+  padding: 1rem 1.25rem;
+  max-width: 60rem;
+}
+.nv-bot-chat-heading {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+.nv-bot-chat-sub {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  margin: 0 0 1rem;
+}
+.nv-bot-chat-list,
+.nv-bot-chat-messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.nv-bot-chat-open {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.nv-bot-chat-open:hover {
+  background: rgba(128, 128, 128, 0.1);
+}
+.nv-bot-chat-profile {
+  font-weight: 600;
+}
+.nv-bot-chat-title {
+  opacity: 0.8;
+}
+.nv-bot-chat-count {
+  margin-left: auto;
+  font-size: 0.8rem;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+.nv-bot-chat-toolbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.nv-bot-chat-toolbar .nv-bot-chat-heading {
+  margin: 0;
+}
+.nv-bot-chat-message {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.15);
+}
+.nv-bot-chat-role {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  opacity: 0.65;
+  margin-bottom: 0.25rem;
+}
+.nv-bot-chat-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.nv-bot-chat-empty,
+.nv-bot-chat-loading,
+.nv-bot-chat-error {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+.nv-bot-chat-error {
+  color: #d33;
+}

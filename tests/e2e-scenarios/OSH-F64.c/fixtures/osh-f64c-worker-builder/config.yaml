@@ -1,0 +1,24 @@
+# OSH-F64.c served coworker seed: builder, in the OSH-F64.b fixture shape. The inference provider
+# holds the FIXED rewrite-trigger placeholder (identical across profiles) + a per-profile
+# X-Hermes-Profile attribution header; both profile children share the one gateway sandbox, so a
+# per-request header, not per-sandbox identity, distinguishes them. The real credential is
+# OpenShell-side, never here.
+model:
+  provider: compatible-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
+providers:
+  compatible-endpoint:
+    base_url: https://inference.local/v1
+    api_mode: chat_completions
+    api_key: sk-OPENSHELL-PROXY-REWRITE
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    extra_headers:
+      X-Hermes-Profile: osh-f64c-builder
+attribution_tag: osh-f64c-builder
+secrets:
+  onecli:
+    enabled: false
+plugins:
+  enabled:
+    - nv-coworker-compose
+    - nv-fleet-gates
