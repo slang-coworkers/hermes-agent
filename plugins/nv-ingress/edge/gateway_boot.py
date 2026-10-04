@@ -35,7 +35,8 @@ def decide(gateway_healthy: bool, start_in_flight: bool) -> str:
 
 
 def _run(argv: List[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=_EXEC_TIMEOUT_SECONDS, check=False)
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                          timeout=_EXEC_TIMEOUT_SECONDS, check=False)
 
 
 def gateway_healthy(gw: Dict[str, Any]) -> bool:

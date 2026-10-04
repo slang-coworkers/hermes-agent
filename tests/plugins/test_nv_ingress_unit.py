@@ -50,7 +50,7 @@ def _hermes(tmp_path: Path, *argv: str) -> subprocess.CompletedProcess:
     env = dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home),
                HERMES_BUNDLED_PLUGINS=str(tmp_path / "bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     return subprocess.run([sys.executable, "-m", "hermes_cli.main", *argv], capture_output=True, text=True,
-                          env=env, cwd=str(REPO_ROOT), timeout=300)
+                          encoding="utf-8", env=env, cwd=str(REPO_ROOT), timeout=300)
 
 
 def _spec_copy(tmp_path: Path, mutate) -> Path:
