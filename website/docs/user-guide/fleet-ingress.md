@@ -189,9 +189,13 @@ evidence.
 
 - **L-HOOK** — the repository hook subscribes the rendered event list
   (`hooks/github-events.json`, which includes `check_run`, `check_suite` and
-  `workflow_run`) and points at the edge's public URL.
+  `workflow_run`) and points at the edge's public URL. The edge listens on
+  host loopback by default (`edge_listen`), so that public URL is a reverse
+  proxy or tunnel the operator runs in front of it.
 - **L-EDGE** — each platform's secret file exists at the path `host/edge.yaml`
   names (mode `0600`, owned by the operator user, outside every sandbox mount).
+  The GitHub file holds the secret bytes exactly as configured on the hook,
+  with no trailing newline: the edge reads that file raw.
   The three user units are installed and enabled, with linger, so they start at
   boot without a login.
 - **L-FWD** — the forward unit is `active` and a loopback connection to the
