@@ -452,3 +452,29 @@ def test_a_redelivery_racing_a_corrupt_entry_is_kept_for_forwarding(tmp_path, mo
     assert path.exists(), "the accepted redelivery was moved away with the corrupt entry"
     assert json.loads(path.read_bytes())["envelope"]["delivery_id"] == "same-id"
     assert not (tmp_path / "spool" / "dead-letter" / path.name).exists()
+
+
+def test_forwarder_survives_a_transient_spool_scan_error(tmp_path, monkeypatch):
+    edge_mod, edge, key = _offline_edge(tmp_path)
+    body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
+                       "issue": {"number": 3, "labels": [{"name": "fleet"}]}}).encode()
+    assert edge.receive("github", _signed_github_headers(edge_mod, key, body, "scan-err"), body)[0] == 202
+    real_glob, failed = edge_mod.Path.glob, []
+
+    def _glob_once_failing(self, pattern):
+        if self == edge.spool and not failed:
+            failed.append(True)
+            raise OSError(5, "transient I/O error")
+        return real_glob(self, pattern)
+
+    forwarded = threading.Event()
+    monkeypatch.setattr(edge_mod.Path, "glob", _glob_once_failing)
+    monkeypatch.setattr(edge, "_post", lambda env: forwarded.set() or True)
+    edge.start()
+    try:
+        assert forwarded.wait(30), "the forwarder died on one spool-scan error and never forwarded"
+        assert failed, "the injected scan error never fired"
+        assert edge._forwarder.is_alive()
+    finally:
+        edge.stop()
+        edge._forwarder.join(10)
