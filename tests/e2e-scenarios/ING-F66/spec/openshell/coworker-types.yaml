@@ -8,8 +8,9 @@
 # The reviewer runs the ci-gate checks gate in provider-read mode inside its
 # plan workflow. The approver runs it credential-free in a new approve workflow,
 # with no provider, and its policy gains GET-only egress to the GitHub API host.
-# The FLEET-F62.c spec itself is unchanged.
-project: nanoclaw-base
+# `project: ing-f66` names the worker sandboxes ing-f66-<role>, inside the live
+# lane's broker prefix. The FLEET-F62.c spec itself is unchanged.
+project: ing-f66
 substrate: openshell
 sandbox_scope: profile
 default_profile: default
@@ -128,7 +129,6 @@ ingress:
   host_python: /usr/bin/python3
   host_dir: /home/ubuntu/.config/nv-ingress
   openshell_bin: /usr/local/bin/openshell
-  edge_listen: 127.0.0.1:8650
   edge_state_dir: /home/ubuntu/.local/state/nv-ingress
   anonymous_reads:
     approver: ["api.github.com:443"]

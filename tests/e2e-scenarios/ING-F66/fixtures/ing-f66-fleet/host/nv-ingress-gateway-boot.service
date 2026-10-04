@@ -1,0 +1,12 @@
+[Unit]
+Description=nv-ingress gateway-boot supervisor
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/home/ubuntu/hermes-agent/plugins/nv-ingress
+ExecStart=/usr/bin/python3 -m edge.gateway_boot --config /home/ubuntu/.config/nv-ingress/edge.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
