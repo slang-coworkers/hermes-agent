@@ -23,7 +23,8 @@ Plugin seams the builder must provide (named in ADR §Design, imported here):
   `hermes ingress status --json` -> {pending, stuck, runaway, refusals, unclaimable, webhook_guard}
   module.drain_once() -> int                      [one drain pass]
   the drain driver: one daemon thread per load, passes only while this process owns the
-    gateway runtime lock (gateway.status), stopped by PluginManager.unload()  [ADR D5, r4]
+    gateway runtime lock -- it calls gateway.status.owns_gateway_runtime_lock() (looked up on
+    the module at each pass) before every pass -- stopped by PluginManager.unload()  [ADR D5]
   skills/ci-gate/scripts/checks_gate.py evaluate(runs, pinned_sha, current_head, waivers);
     CLI <repo> <pr> <sha> --read provider|anonymous
 """
@@ -1282,9 +1283,15 @@ def test_ac_ing_f66_16(ingress, monkeypatch):
     loads: list[PluginManager] = []
     try:
         # A DEFAULT-home process that is not the gateway (the CLI verb, the dashboard) loads the
-        # plugin too; its driver must never run a turn, across more than one drain interval.
+        # plugin too; its driver must never run a turn. Counting the driver's lock checks makes
+        # "no turn" a claim about three skipped passes, not about a quiet runner.
+        lock_checks: list[bool] = []
+        real_owns = gateway_status.owns_gateway_runtime_lock
+        monkeypatch.setattr(gateway_status, "owns_gateway_runtime_lock",
+                            lambda: lock_checks.append(real_owns()) or lock_checks[-1])
         no_lock = _fresh_load()
-        assert not _wait(lambda: started, timeout=2.5), "a load without the gateway runtime lock ran a delivery"
+        assert _wait(lambda: len(lock_checks) >= 3, timeout=30), "the driver never consulted the runtime lock"
+        assert not any(lock_checks) and started == [], "a load without the gateway runtime lock ran a delivery"
         no_lock.unload()
         assert gateway_status.acquire_gateway_runtime_lock()
         manager = _fresh_load()
