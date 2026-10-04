@@ -3092,13 +3092,16 @@ def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
         )
 
 
-def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -> None:
+def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str],
+                             ingress_route: Optional[str] = None) -> None:
     """Every webhook route on the DEFAULT profile carries its OWN non-empty secret
     and an EXPLICIT ``profile:`` binding to a served profile.
 
     Stricter than native (which permits global-secret inheritance and treats an
     omitted ``profile`` as ``default``) so a fleet route can never fall back to a
-    shared secret or an implicit binding.
+    shared secret or an implicit binding. Under ``ingress:`` (ING-F66) the
+    loopback-gated no-auth mode is accepted on the ingress route alone, and only
+    while the webhook host is a loopback literal.
     """
     platforms = default_config.get("platforms")
     if not isinstance(platforms, dict):
@@ -3120,12 +3123,67 @@ def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -
             raise CompositionError(
                 f"webhook route {name!r}: 'secret' must be a non-empty string"
             )
+        if ingress_route is not None and secret == _INGRESS_NO_AUTH:
+            host = str(extra.get("host") or "").strip().lower()
+            if name != ingress_route or host not in _LOOPBACK_LITERALS:
+                raise CompositionError(
+                    f"webhook route {name!r}: the no-auth mode is allowed only on the ingress "
+                    f"route {ingress_route!r} with a loopback webhook host"
+                )
         profile = route.get("profile") if isinstance(route, dict) else None
         if not isinstance(profile, str) or profile not in served:
             raise CompositionError(
                 f"webhook route {name!r}: 'profile' must explicitly bind a served profile "
                 f"(one of {sorted(served)})"
             )
+
+
+_INGRESS_PLUGIN = "nv-ingress"
+_INGRESS_NO_AUTH = "INSECURE_NO_AUTH"
+_LOOPBACK_LITERALS = frozenset({"127.0.0.1", "localhost", "::1"})
+_PLUGIN_SKILL_SEP = ":"
+
+
+def _ingress_module():
+    """The sibling nv-ingress plugin's ``hostrender`` (the single owner of ``ingress:``)."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / _INGRESS_PLUGIN / "hostrender.py"
+    if not path.is_file():
+        raise CompositionError(f"spec declares ingress: but the {_INGRESS_PLUGIN} plugin is not installed")
+    spec = importlib.util.spec_from_file_location("_nv_ingress_hostrender", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _validate_ingress(data: Dict[str, Any], roster: List[str], is_remote: bool) -> Optional[Dict[str, Any]]:
+    if "ingress" not in data:
+        return None
+    try:
+        params = _ingress_module().validate(data["ingress"], roster)
+    except ValueError as exc:
+        raise CompositionError(str(exc)) from exc
+    if params["anonymous_reads"] and not is_remote:
+        raise CompositionError("ingress.anonymous_reads requires substrate: openshell")
+    return params
+
+
+def _render_ingress(default_config: Dict[str, Any], params: Dict[str, Any], orchestrator_profile: str) -> None:
+    """Replace the DEFAULT webhook block with the one loopback, secret-free ingress
+    route and enable nv-ingress with its settings (the guard on) on DEFAULT."""
+    module = _ingress_module()
+    platforms = default_config.setdefault("platforms", {})
+    webhook = platforms.get("webhook") if isinstance(platforms.get("webhook"), dict) else {}
+    extra = dict(webhook.get("extra") or {}) if isinstance(webhook.get("extra"), dict) else {}
+    # The adapter's global secret would sit in the sandbox config; the edge is the only signer.
+    extra.pop("secret", None)
+    extra.update(host="127.0.0.1", port=params["port"],
+                 routes={params["route"]: module.route_block(params)})
+    platforms["webhook"] = {**webhook, "enabled": True, "extra": extra}
+    _ensure_list_member(default_config, "plugins.enabled", _INGRESS_PLUGIN)
+    _set_dotted(default_config, f"plugins.entries.{_INGRESS_PLUGIN}.settings",
+                module.plugin_settings(params, orchestrator_profile))
 
 
 def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
@@ -3594,6 +3652,9 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     skills_dir = pdir / "skills"
     skills_dir.mkdir(exist_ok=True)
     for skill in resolved["skills"]:
+        if isinstance(skill, str) and _PLUGIN_SKILL_SEP in skill:
+            _copy_plugin_skill(skills_dir, tname, skill)
+            continue
         skill = _safe_name("skill", skill)
         src = _safe_join(skills_root, skill, "SKILL.md")
         if not src.is_file():
@@ -3642,6 +3703,24 @@ def _copy_skill_files(src_dir: Path, dest: Path, tname: str, skill: str) -> None
             target.write_bytes(path.read_bytes())
 
 
+def _copy_plugin_skill(skills_dir: Path, tname: str, ref: str) -> None:
+    """``<plugin>:<skill>`` copies that plugin's whole ``skills/<skill>/`` dir (scripts
+    included), so the worker gets the script through the ssh skill sync."""
+    plugin, _, name = ref.partition(_PLUGIN_SKILL_SEP)
+    if plugin != _INGRESS_PLUGIN:
+        raise CompositionError(f"{tname}: plugin skill {ref!r} — only {_INGRESS_PLUGIN}: skills are supported")
+    name = _safe_name("skill", name)
+    src_dir = Path(__file__).resolve().parent.parent / plugin / "skills" / name
+    if not (src_dir / "SKILL.md").is_file():
+        raise CompositionError(f"{tname}: plugin skill {ref!r} has no SKILL.md at {src_dir}")
+    for src in sorted(src_dir.rglob("*")):
+        if not src.is_file() or "__pycache__" in src.parts:
+            continue
+        dest = skills_dir / name / src.relative_to(src_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(src.read_bytes())
+
+
 def _render_route_scripts(pdir: Path) -> None:
     """Materialize the webhook route scripts into the DEFAULT profile's scripts/.
 
@@ -3656,6 +3735,11 @@ def _render_route_scripts(pdir: Path) -> None:
         (scripts_dir / script).write_text(
             (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
         )
+
+
+def _render_ingress_script(pdir: Path) -> None:
+    src = Path(__file__).resolve().parent.parent / _INGRESS_PLUGIN / "route_scripts" / "ingress_stage.py"
+    (pdir / "scripts" / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
@@ -4053,6 +4137,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _require_canonical_profile_names(types, default_profile, orchestrator_profile)
     roster = list(types)
     served: Set[str] = {"default", *roster}
+    # ING-F66: validated before any profile is written, so a bad block leaves no fleet on disk.
+    ingress_params = _validate_ingress(data, roster, is_remote)
 
     # Phase A: resolve every coworker type and the DEFAULT config, then resolve
     # the single fleet-wide session mode ONCE — before rendering any profile.
@@ -4196,6 +4282,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
     rendered: Dict[str, str] = {}
+    anonymous_reads: Dict[str, List[str]] = (ingress_params or {}).get("anonymous_reads") or {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
@@ -4281,7 +4368,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _enforce_multiplex(default_config, roster)
     _enforce_watchdog_floor(default_config)
     _require_canonical_platform_layout(default_config)
-    _validate_webhook_routes(default_config, served)
+    if ingress_params is not None:
+        _render_ingress(default_config, ingress_params, orchestrator_profile)
+    _validate_webhook_routes(default_config, served,
+                             ingress_route=ingress_params["route"] if ingress_params else None)
     if egress_params is not None:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
     # §D7.1 grants are spec-gated (§D4): only the legacy path populates profile_secret_sets; the
@@ -4298,6 +4388,9 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
+    if ingress_params is not None:
+        _render_ingress_script(ddir)
+        _ingress_module().render_host(ingress_params, out_root)
     # OSH-F64.b (D2): render the gateway APF policy for the model-call sandbox (the default
     # profile) — the inference REST provider endpoint (exactly 4 method+paths, no on-endpoint
     # credential field) + the broker 18777 raw hop; the 18255 proxy hop is dropped. The legacy
