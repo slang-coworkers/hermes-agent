@@ -8,6 +8,8 @@ filesystem_policy:
   - /etc
   read_write:
   - /tmp
+  - /dev/null
+  - /home/sandbox
 landlock:
   compatibility: best_effort
 process:

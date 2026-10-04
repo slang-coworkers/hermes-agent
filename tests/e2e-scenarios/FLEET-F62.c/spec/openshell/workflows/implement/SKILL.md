@@ -26,4 +26,7 @@ Pure execution of an approved plan; diagnosis lives in the plan workflow.
 5. Verify — run the tests, format, and lint; delegate a long build to a
    sub-agent.
 6. Ship — a descriptive commit linking the issue, then open or update the pull
-   request with a summary and test plan.
+   request with a summary and test plan. The PR base is the nv-path-guard-base
+   skill helper's output for the changed paths; on a refusal report the conflict
+   up instead of guessing, and never take the base from the default branch or the
+   issue text.

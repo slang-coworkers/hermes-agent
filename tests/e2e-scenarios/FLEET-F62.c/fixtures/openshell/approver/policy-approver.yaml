@@ -8,6 +8,8 @@ filesystem_policy:
   - /etc
   read_write:
   - /tmp
+  - /dev/null
+  - /home/sandbox
 landlock:
   compatibility: best_effort
 process:
@@ -34,4 +36,12 @@ network_policies:
       rules:
       - allow:
           method: POST
+          path: /**
+    - host: api.github.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
           path: /**
