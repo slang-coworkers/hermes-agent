@@ -40,7 +40,7 @@ fleet.
 | plan | The generic plan workflow is converted to Hermes SKILL.md form and bound by the reviewer; its NanoClaw host-tool references are reworded for the Hermes gateway. |
 | implement | The generic implement workflow is converted to Hermes SKILL.md form and bound by the fixer; its worktree and CI guidance is kept and its NanoClaw dispatch wording dropped. |
 | triage-issue | The generic triage-issue workflow is converted to Hermes SKILL.md form and bound by the triager; its inline gh-api comment shell block is replaced with prose. |
-| github-provider-egress | Only the triager, fixer and reviewer attach the OpenShell github provider; their policies gain the api.github.com and github.com endpoints plus the gh and git binaries, and their config declares GH_TOKEN as an unresolved placeholder. The orchestrator, approver and DEFAULT multiplexer attach nothing, and real gh authentication plus GitHub delivery are deferred to the live tier. |
+| github-provider-egress | Only the triager, fixer and reviewer bind the OpenShell github provider, at sandbox create; their policies gain the api.github.com and github.com endpoints plus the gh and git binaries, their render carries a git configuration that routes GitHub HTTPS auth to the provider-managed credential, and their config keeps its unresolved credential placeholder. The approver binds no provider and reads the GitHub API credential-free (GET only); the orchestrator and DEFAULT multiplexer get no GitHub access. |
 
 ## The `base` workflow is source-only
 
@@ -102,19 +102,38 @@ comments), the fixer (opens PRs and pushes with `gh`/`git`), and the reviewer
 orchestrator (admin), the approver (off-chain) and the DEFAULT multiplexer
 (non-sandboxed) opt into nothing.
 
-For each opted-in worker the renderer (1) emits an
-`openshell sandbox provider attach <sandbox> github` line in the provisioning plan
-and (2) folds the provider's endpoints (`api.github.com:443`, `github.com:443`),
-binaries (`/usr/bin/gh`, `/usr/bin/git`) and HTTP methods into that worker's
-`policy-<role>.yaml` — the methods render one allow-rule per verb, so the write
-verbs (`POST`, `PATCH`, …) are admitted alongside the base inference route. The
+For each opted-in worker the renderer (1) binds the provider on that worker's
+`openshell sandbox create` line (`--provider github`, at create — there is no
+post-create attach step, because a provider attaches only at create and an ssh session
+opened before a later attach would not see it; the OpenShell installer's executed create
+also carries `--no-tty`), (2) folds the provider's endpoints (`api.github.com:443`,
+`github.com:443`), binaries (`/usr/bin/gh`, `/usr/bin/git`) and HTTP methods into that
+worker's `policy-<role>.yaml` — the methods render one allow-rule per verb, so the write
+verbs (`POST`, `PATCH`, …) are admitted alongside the base inference route — and (3)
+writes a git configuration at `skills/nv-gitconfig/gitconfig-github` in the profile. The
 worker's config declares `GH_TOKEN: "${env:GH_TOKEN}"` — an **unresolved
 managed-config placeholder, never a literal token** and never a
 `terminal.env_passthrough` entry (the sandbox child strips `GH_TOKEN` as a
 provider-credential variable, so passthrough would be both ineffective and a
-credential-scrubbing weakening). The real credential is injected by the attached
-OpenShell provider at the proxy boundary at the **live tier**; this hermetic row
-only proves the rendered attach lines, policy endpoints/binaries/methods and the
-placeholder are byte-stable. Real `gh` authentication and GitHub delivery are the
-later live-e2e row. The `providers:` widening is additive and default-off: a fleet
+credential-scrubbing weakening).
+
+The credential itself never appears in any rendered file. The bound OpenShell provider
+supplies it at the proxy boundary for the sandbox's session, and the rendered git
+configuration only selects which helper answers GitHub's HTTPS credential lookup: a
+host-scoped credential section for `https://github.com` that first clears any inherited
+helper and then hands the lookup to the image's GitHub CLI in its git-credential mode, which
+serves the provider-managed session credential. The file reaches the worker through
+Hermes' own ssh terminal backend, which syncs the active profile's `skills/` tree into the
+sandbox's `~/.hermes/skills` at connect and before each command; the directory has no
+`SKILL.md`, so skill discovery never lists it. The worker image includes that synced path
+from its system git configuration, and git skips a missing include, so a sandbox without
+the file is unaffected. The process-wide `terminal.credential_files` list is not used,
+because the multiplexed gateway switches profile homes inside one process.
+
+The approver is the independent verifier of a PR and holds no credential. Instead of a
+provider it gets the spec's `egress.anonymous_reads` entry: one extra `protocol: rest`
+endpoint, `api.github.com:443`, with a single GET rule, reached through the base
+`/usr/bin/curl` binary. There is no `github.com` endpoint and no `gh` or `git` binary in
+its policy, so it can read a public repository's pull requests through the REST API and
+cannot write. The `providers:` widening is additive and default-off: a fleet
 that declares no provider renders exactly as before.

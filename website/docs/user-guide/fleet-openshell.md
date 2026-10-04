@@ -304,6 +304,14 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
    and never reaches Ready. This `--from` tag is broker-pinned — not an operator-swappable
    placeholder; re-pinning it means updating both the broker's allowed `--from` and the
    spec's `egress.sandbox_image`. For route (b) the image must additionally ship `sshd`.
+   For the base-NanoClaw fleet the worker image is built from
+   `plugins/nv-coworker-compose/openshell/Dockerfile.worker` at the merged commit and tagged with
+   exactly the fleet spec's `egress.sandbox_image` value on the broker host, so the create line's
+   `--from` resolves to it. That image carries the version-pinned
+   GitHub CLI at `/usr/bin/gh` (the path the github provider's policy names) and a system git
+   include of the profile-synced git configuration (see the
+   [base-NanoClaw port notes](./fleet-nanoclaw-base-port.md)); rebuild and re-tag it after any
+   change to the Dockerfile.
 4. The rendered per-profile ssh config installed into the gateway user's OpenSSH
    configuration (the `openshell sandbox ssh-config <name>` output), so `terminal.ssh_host`
    resolves through the OpenShell `ProxyCommand`, and the per-profile key path referenced
@@ -469,7 +477,14 @@ To back the change out and leave the existing default exactly as before:
 - **Remove the five coworker profiles** (`hermes profile remove <role>` per role) — the
   profiles the install added, never the default profile.
 - **Uninstall the fleet plugins** that were newly installed (default + per-profile); a
-  plugin that pre-existed at the pinned ref is left as the operator had it.
+  plugin that pre-existed at the pinned ref is left as the operator had it. A plugin the
+  install re-pinned with `--force` was snapshotted first into
+  `<home>/.osh-f64-backups/plugins/<name>` (for a served profile,
+  `<home>/profiles/<role>/.osh-f64-backups/plugins/<name>`), beside the plugins dir and never
+  inside it, together with the `.install-metadata.json` sidecar; restore by copying both back
+  into `plugins/`. Snapshots an older installer left inside `plugins/` as
+  `<name>.osh-f64.bak` are moved to the same place by the next install, because a copy inside
+  `plugins/` keeps its manifest name and would load in place of the fresh install.
 - **Restart the gateway** so it re-reads the restored default.
 - **Delete** the `osh-f64-*` worker sandboxes (`openshell sandbox delete`) — each sandbox's
   policy is bound inline by `sandbox create --policy` and is removed with the sandbox, so
@@ -521,14 +536,21 @@ preconditions must hold on `brev-hermes`:
    which lives OpenShell-side and must not reach any sandbox config.
 3. **No `API_SERVER_*` in a profile `.env`.** Do not seed a served profile's `.env` with any
    `API_SERVER_*` value — the multiplexed gateway skips a profile whose `.env` carries one.
-4. **Start from the in-sandbox watchdog.** `openshell sandbox exec` runs in a different
-   network namespace than the gateway, so start the fleet processes from the in-sandbox
-   watchdog, never via `sandbox exec`.
-5. **Per-worker ssh config.** Run `openshell sandbox ssh-config <name>` for each **worker**
-   sandbox and write its `User sandbox` + `ProxyCommand` block into `~/.ssh/config`, so the
-   profile's `terminal.ssh_host` alias resolves to the assigned sandbox. (Single-authority
-   inference drops the §D7 inference chain-dial, **not** the brokered-ssh worker-access path —
-   workers are still reached over ssh.)
+4. **Start the fleet processes with `openshell sandbox exec` plus a background process.** The
+   gateway image has no in-sandbox supervisor, so `hermes serve`, the gateway and the dashboard are
+   each started through `openshell sandbox exec` as a detached background process (its own session,
+   stdin closed, output to a log file), the OSH-F64.c D1 start path. Because `sandbox exec` can land
+   in a different network namespace than the dashboard, every served turn stays behind the
+   fail-closed route gates (the netns and route checks of OSH-F64.c G2–G4): a turn whose route
+   gate cannot prove the path is refused, never served.
+5. **Per-worker ssh config.** The installer runs `openshell sandbox ssh-config <name>` for each
+   **worker** sandbox and persists its `User sandbox` + `ProxyCommand` block into the managed
+   include file `~/.ssh/config.d/openshell-<project>.conf` (one marker-delimited block per alias,
+   replaced on a rerun), and makes `~/.ssh/config` include it once as its first line, so the
+   profile's `terminal.ssh_host` alias resolves to the assigned sandbox. The rest of the
+   operator's `~/.ssh/config` is left as it was. (Single-authority inference drops the §D7
+   inference chain-dial, **not** the brokered-ssh worker-access path — workers are still reached
+   over ssh.)
 6. **Resolvable managed dir.** The `nv-fleet-gates` veto reads the worker-unforgeable
    `expected_ssh_host` map only when `$HERMES_MANAGED_DIR` resolves (`hermes_managed_dir`) to
    the installed managed fragment; if it does not resolve, the veto cannot bind a worker to its
