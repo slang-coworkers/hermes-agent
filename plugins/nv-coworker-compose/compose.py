@@ -4285,6 +4285,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     anonymous_reads: Dict[str, List[str]] = (ingress_params or {}).get("anonymous_reads") or {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
+        if ingress_params is not None:
+            # ctx.get_config reads the ACTIVE profile's settings, so the remap gate in a
+            # coworker's own process needs the orchestrator's name rendered there too.
+            _set_dotted(resolved["config"], f"plugins.entries.{_INGRESS_PLUGIN}.settings.orchestrator_profile",
+                        orchestrator_profile)
         _enforce_retention(resolved["config"])
         # The shared-learnings clone and mount composition are container-substrate
         # writers of terminal.docker_volumes; the remote-ssh substrate has no local

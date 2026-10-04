@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import urllib.error
@@ -104,14 +105,18 @@ def spool_name(source: str, delivery_id: str) -> str:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.unlink(missing_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    # A unique temp file per write: two concurrent requests for one delivery id must never
+    # rename each other's half-written file into place. mkstemp creates it 0600.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     dir_fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -196,9 +201,21 @@ class Edge:
             return
         try:
             entry = json.loads(path.read_bytes())
-        except (OSError, ValueError):
+            env = entry["envelope"]
+            if not isinstance(env, dict) or not env.get("delivery_id"):
+                raise ValueError("no envelope with a delivery id")
+        except FileNotFoundError:
             return
-        if self._post(entry["envelope"]):
+        except OSError:
+            logger.warning("edge: spool entry %s is unreadable; will retry", path.name, exc_info=True)
+            return
+        except (ValueError, KeyError, TypeError):
+            self.dead_letter.mkdir(exist_ok=True)
+            os.replace(path, self.dead_letter / path.name)
+            self._next_attempt.pop(path.name, None)
+            logger.error("edge: spool entry %s is corrupt; moved to dead-letter", path.name)
+            return
+        if self._post(env):
             path.unlink(missing_ok=True)
             self._next_attempt.pop(path.name, None)
             return
@@ -207,7 +224,7 @@ class Edge:
             os.replace(path, self.dead_letter / path.name)
             self._next_attempt.pop(path.name, None)
             logger.error("edge: delivery %s moved to dead-letter after 24 h of failed forwards",
-                         entry["envelope"].get("delivery_id"))
+                         env.get("delivery_id"))
             return
         self._next_attempt[path.name] = (now + min(BACKOFF_CAP_SECONDS, 2.0 ** attempts), attempts + 1)
 

@@ -257,3 +257,81 @@ def test_guard_rebuilds_routes_from_the_file_not_a_stale_cache(tmp_path, monkeyp
     assert set(adapter._routes) == {"ingress", "agent-safe"}
     assert all(r.get("enabled") is not False for r in adapter._routes.values())
     assert material not in json.dumps(adapter._routes)
+
+
+def test_render_names_the_orchestrator_in_every_coworker_and_gates_remap_on_it(tmp_path, monkeypatch):
+    def mutate(data):
+        data["types"]["lead"] = data["types"].pop("orchestrator")
+        data["orchestrator_profile"] = "lead"
+        for room in (data.get("rooms") or {}).values():
+            room["members"] = ["lead" if m == "orchestrator" else m for m in room.get("members") or []]
+
+    out = tmp_path / "out"
+    proc = _hermes(tmp_path, "coworker", "compose", str(_spec_copy(tmp_path, mutate)), "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    for role in ("lead", "triager", "fixer", "reviewer", "approver"):
+        cfg = yaml.safe_load((out / role / "config.yaml").read_text(encoding="utf-8"))
+        assert cfg["plugins"]["entries"]["nv-ingress"]["settings"]["orchestrator_profile"] == "lead", role
+
+    _root, module = _loaded_plugin(tmp_path / "gate", monkeypatch, {"orchestrator_profile": "lead"})
+    monkeypatch.setattr(module, "_active_profile", lambda: "lead")
+    assert module._on_pre_tool_call(tool_name="ingress_remap", args={"repo": "o/r", "pr": 1, "to": "fixer"})["action"] == "approve"
+    monkeypatch.setattr(module, "_active_profile", lambda: "orchestrator")
+    assert module._on_pre_tool_call(tool_name="ingress_remap", args={"repo": "o/r", "pr": 1, "to": "fixer"})["action"] == "block"
+
+
+def _edge_module():
+    edge_dir = PLUGIN_SRC / "edge" / "__init__.py"
+    spec = importlib.util.spec_from_file_location("_nv_ingress_edge_under_test", edge_dir)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _offline_edge(tmp_path: Path):
+    edge_mod = _edge_module()
+    key_file = tmp_path / "gh-key"
+    key = secrets.token_bytes(32)
+    key_file.write_bytes(key)
+    cfg = {"forward_url": "http://127.0.0.1:9/webhooks/ingress", "spool_dir": str(tmp_path / "spool"),
+           "platforms": {"github": {"secret_file": str(key_file)}}}
+    return edge_mod, edge_mod.Edge(cfg), key
+
+
+def test_concurrent_same_id_posts_each_spool_a_complete_entry(tmp_path):
+    import hashlib
+    import hmac
+
+    edge_mod, edge, key = _offline_edge(tmp_path)
+    body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
+                       "issue": {"number": 3, "labels": [{"name": "fleet"}]}}).encode()
+    headers = {"X-GitHub-Event": "issues", "X-GitHub-Delivery": "same-id",
+               "X-Hub-Signature-256": "sha256=" + hmac.new(key, body, hashlib.sha256).hexdigest()}
+    results: list = []
+    start = threading.Barrier(8)
+
+    def post():
+        start.wait(5)
+        results.append(edge.receive("github", headers, body)[0])
+
+    threads = [threading.Thread(target=post) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert results == [202] * 8
+    spooled = list((tmp_path / "spool").glob("*.json"))
+    assert len(spooled) == 1
+    assert json.loads(spooled[0].read_bytes())["envelope"]["delivery_id"] == "same-id"
+    assert not [p for p in (tmp_path / "spool").iterdir() if p.name.startswith(".")], "no temp file left behind"
+
+
+def test_corrupt_spool_entry_is_dead_lettered_and_logged(tmp_path, caplog):
+    _edge_mod, edge, _key = _offline_edge(tmp_path)
+    bad = tmp_path / "spool" / "github-broken.json"
+    bad.write_bytes(b'{"envelope": ')
+    with caplog.at_level("ERROR", logger="nv_ingress.edge"):
+        edge._forward_one(bad, time.time())
+    assert not bad.exists()
+    assert (tmp_path / "spool" / "dead-letter" / "github-broken.json").exists()
+    assert any("github-broken.json" in r.getMessage() and "dead-letter" in r.getMessage() for r in caplog.records)

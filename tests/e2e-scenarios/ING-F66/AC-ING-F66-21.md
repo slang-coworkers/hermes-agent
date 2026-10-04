@@ -81,8 +81,9 @@ Every command runs inside `( source $TB/harness.env && cd $WT && … )`. `SCN` i
 
 1. Open the dashboard. In the profile combobox select `ing-f66-ui-owner`
    (expect the `ing-f66-ui-owner »` context), then open **Sessions** → expect:
-   exactly one session listed for that profile, the seeded one, its id `$S`
-   visible in the row.
+   exactly one session listed for that profile, the seeded one. The row does not
+   render the session id; confirm it is `$S` with the evidence query
+   `select id from sessions` over `profiles/ing-f66-ui-owner/state.db`.
 2. Click that session → expect: the transcript shows the seed turn and, after it,
    a message containing `check_run`, the check name `ing-f66-ui-check`,
    `concluded failure`, and the line `ingress-delivery: github/<that id>/7`.
