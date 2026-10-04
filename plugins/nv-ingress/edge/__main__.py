@@ -20,7 +20,9 @@ def main() -> int:
         cfg = json.load(handle)
     server, thread = make_server(cfg)
     stop = threading.Event()
-    signal.signal(signal.SIGHUP, lambda *_a: server.edge.reload())
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is not None:
+        signal.signal(sighup, lambda *_a: server.edge.reload())
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_a: stop.set())
     stop.wait()
