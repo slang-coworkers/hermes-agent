@@ -173,13 +173,14 @@ def test_drain_runs_only_on_the_driver_thread_and_never_blocks_the_loop(tmp_path
             assert await asyncio.to_thread(started.wait, 10), "the driver never ran a pass"
             beats = 0
             t0 = time.monotonic()
-            while time.monotonic() - t0 < 0.5:
+            while time.monotonic() - t0 < 2.0:
                 await asyncio.sleep(0.05)
                 beats += 1
             return verdict, hook_seconds, beats
 
         verdict, hook_seconds, beats = asyncio.run(scenario())
-        assert verdict["action"] == "skip" and hook_seconds < 0.5, "the hook must only kick the driver"
+        # A pass run inline would hold the hook (and the loop) for the 10 s release bound.
+        assert verdict["action"] == "skip" and hook_seconds < 2.0, "the hook must only kick the driver"
         assert beats >= 5, f"the event loop stalled while a drain pass was blocked ({beats} beats)"
         assert set(passes) == {"nv-ingress-drain"}, passes
     finally:
@@ -188,11 +189,19 @@ def test_drain_runs_only_on_the_driver_thread_and_never_blocks_the_loop(tmp_path
 
 
 def test_driver_idles_without_the_runtime_lock_and_stops_on_unload(tmp_path, monkeypatch):
+    from gateway import status as gateway_status
+
+    consults: list[bool] = []
+    monkeypatch.setattr(gateway_status, "owns_gateway_runtime_lock", lambda: consults.append(False) or False)
     _root, module = _loaded_plugin(tmp_path, monkeypatch, {"drain_interval_seconds": 1})
     passes: list[str] = []
     monkeypatch.setattr(module.bridge, "drain_once", lambda *a, **k: passes.append("pass") or 0)
     module._kick()
-    time.sleep(2.5)
+    # The driver asks for the lock before every pass, so three answers mean three skipped passes.
+    deadline = time.monotonic() + 30
+    while len(consults) < 3 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(consults) >= 3, "the driver never consulted the gateway runtime lock"
     assert passes == [], "a process without the gateway runtime lock ran a drain pass"
     assert _drain_threads(), "the load started no driver thread"
     for manager in list(_MANAGERS):
