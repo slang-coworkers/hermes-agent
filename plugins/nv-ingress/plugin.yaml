@@ -1,0 +1,22 @@
+manifest_version: 1
+name: nv-ingress
+version: 0.1.0
+kind: standalone
+description: >-
+  The fleet's inbound gateway. A host edge verifies GitHub/GitLab signatures with
+  host-held secrets, normalizes each event to envelope v1 and forwards it to a
+  loopback-only, secret-free webhook route in the gateway sandbox; the route's
+  script stages it durably. The plugin delivers it exactly once: a labelled issue
+  to the orchestrator's Bot Chat, a claimed PR's PR/review/CI event into the
+  owner's EXISTING session (resume), and anything unowned to the orchestrator.
+  Ownership is first-claim-wins at PR creation, a replacement inherits it, and a
+  remap is orchestrator-only and approval-gated. Ships the ci-gate checks-API
+  skill and a fail-closed guard on agent-created webhook routes.
+provides_tools:
+  - ingress_remap
+  - ingress_claim_replacement
+provides_hooks:
+  - pre_gateway_dispatch
+  - post_tool_call
+  - pre_tool_call
+  - on_kanban_dispatch_tick

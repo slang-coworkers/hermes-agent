@@ -1,0 +1,134 @@
+# ING-F66 copy of the FLEET-F62.c base-NanoClaw openshell fleet spec, extended
+# with the inbound gateway. The `ingress:` block renders:
+#   - one loopback, secret-free webhook route in the DEFAULT multiplexer, which
+#     replaces the three per-route-secret GitHub routes of the original;
+#   - nv-ingress enabled with its webhook guard;
+#   - the three host user units, the edge host config and the hook-subscription
+#     artefact under host/ and hooks/.
+# The reviewer runs the ci-gate checks gate in provider-read mode inside its
+# plan workflow. The approver runs it credential-free in a new approve workflow,
+# with no provider, and its policy gains GET-only egress to the GitHub API host.
+# The FLEET-F62.c spec itself is unchanged.
+project: nanoclaw-base
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# OpenShell egress: the two BASE egress targets every per-profile policy allows —
+# the OneCLI data-plane hop (172.17.0.1:18255) and the inference route. A worker that
+# opts into a provider (below) adds that provider's role-scoped endpoints on top. This
+# is the merged OSH-F63 (F63) egress shape on the current baseline; sandbox_image is
+# the pinned `--from` the provisioning plan uses.
+# F64.b-target: on OSH-F64.b merge this egress block becomes broker-18777-only
+#   (NO 18255 data-plane hop), with an OpenShell provider placeholder base_url
+#   https://inference.local and key sk-OPENSHELL-PROXY-REWRITE; the renderer and
+#   the golden regenerate and the openshell policy count moves 5 -> 6 (a gateway
+#   policy is added). That needs the unmerged F64.b renderer, so this row ships
+#   the F63 shape and documents the F64.b target in the fleet port notes.
+egress:
+  proxy_addr: "172.17.0.1:18255"
+  inference_route: "inference-api.nvidia.com:443"
+  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
+
+# Optional OpenShell egress providers (generic default-off widening). A worker opts in
+# via its own `providers: [<name>]`; the renderer then (1) emits an
+# `openshell sandbox provider attach <sandbox> <name>` provisioning line and (2) folds
+# the provider's endpoints/binaries/methods into that worker's policy. Absent providers
+# the render is byte-identical to a providers-free fleet. The github provider is attached
+# to the three github-using workers (triager/fixer/reviewer) ONLY — orchestrator (admin),
+# approver (off-chain) and the DEFAULT multiplexer carry none. Binary paths are the pinned
+# image's resolved executables; real `gh` authentication is a live-tier concern (see the
+# fleet port notes), never baked here.
+providers:
+  github:
+    endpoints: ["api.github.com:443", "github.com:443"]
+    binaries: ["/usr/bin/gh", "/usr/bin/git"]
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE"]
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "Base-NanoClaw orchestrator — the elevated fleet-admin coworker; dispatches to the triager and closes the loop on the reviewer's approval."
+    skills: [supervise-issues]
+    context:
+      - "You are the elevated fleet-admin; only you carry the coworker-composition, wiring, room-admin, cron-for-others, and approval tools."
+      - "Every other role runs a restricted per-platform toolset; the same veto denies admin tools to non-orchestrator profiles."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  triager:
+    extends: [base]
+    identity: "Base-NanoClaw triager — first-line engineering; triages issues and mention-gated comments and briefs the fixer."
+    workflows: [triage-issue]
+    providers: [github]
+    ui_meta: {title: "Triager", description: "Fleet triager", shape: "square"}
+  fixer:
+    extends: [base]
+    identity: "Base-NanoClaw fixer — applies the change in its own OpenShell ssh sandbox and iterates the fix head."
+    workflows: [implement]
+    providers: [github]
+    ui_meta: {title: "Fixer", description: "Fleet fixer", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "Base-NanoClaw reviewer — reads the diff in its own OpenShell ssh sandbox and returns a verdict."
+    workflows: [plan]
+    skills: ["nv-ingress:ci-gate"]
+    overlays: [ci-gate]
+    providers: [github]
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+  approver:
+    extends: [base]
+    identity: "Base-NanoClaw approver — the off-chain review-harvest role that gates the final approval; no nv-main base counterpart."
+    workflows: [approve]
+    skills: ["nv-ingress:ci-gate"]
+    ui_meta: {title: "Approver", description: "Fleet approver", shape: "square"}
+
+# Onboarding-only chat membership (NOT the a2a graph — that is wire-manifest.txt).
+rooms:
+  fleet-room:
+    name: "Base-NanoClaw Fleet"
+    members: [orchestrator, triager, fixer, reviewer, approver]
+  review-room:
+    name: "Base-NanoClaw Review"
+    members: [fixer, reviewer, approver]
+
+# DEFAULT-only config. Under `ingress:` the render replaces the whole static
+# webhook route set with the one loopback ingress route, so no route here may
+# carry a platform secret.
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false
+
+# The inbound gateway (ING-F66). Secrets are named only by their host FILE path,
+# outside every sandbox mount; the render copies the paths and never reads them.
+ingress:
+  route: ingress
+  port: 8644
+  replace_routes: true
+  issue_labels: [fleet]
+  self_logins: [slang-coworkers-bot]
+  per_pr_hourly_budget: 30
+  platforms:
+    github:
+      secret_file: /home/ubuntu/.config/nv-ingress/secrets/github
+    gitlab:
+      secret_file: /home/ubuntu/.config/nv-ingress/secrets/gitlab
+  gateway_sandbox: ing-f66-gw
+  gateway_start: [/home/ubuntu/.config/nv-ingress/gateway-start.sh]
+  host_checkout: /home/ubuntu/hermes-agent
+  host_python: /usr/bin/python3
+  host_dir: /home/ubuntu/.config/nv-ingress
+  openshell_bin: /usr/local/bin/openshell
+  edge_listen: 127.0.0.1:8650
+  edge_state_dir: /home/ubuntu/.local/state/nv-ingress
+  anonymous_reads:
+    approver: ["api.github.com:443"]
