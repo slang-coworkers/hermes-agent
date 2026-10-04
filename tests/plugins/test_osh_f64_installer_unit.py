@@ -218,9 +218,14 @@ def test_managed_installed_requires_ssh_host_and_approvals():
         (managed / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
         return inst.collect_home_state(spec, str(_spec_path()))["managed_installed"]
 
-    base = {"plugins": {"entries": {"nv-fleet-gates": {"settings": {"profile_roles": {"builder": "worker"}}}}}}
+    # The fleet maps must EQUAL the spec's render (FLEET-F62.d D7): every served role, its
+    # orchestrator|worker role, and its openshell-<project>-<role> ssh alias.
+    served = [t for t in spec["types"] if t != spec.get("default_profile", "default")]
+    roles = {r: ("orchestrator" if r == spec["orchestrator_profile"] else "worker") for r in served}
+    hosts = {r: f"openshell-{spec['project']}-{r}" for r in served}
+    base = {"plugins": {"entries": {"nv-fleet-gates": {"settings": {"profile_roles": roles}}}}}
     assert _installed(base) is False                               # no expected_ssh_host
-    base["plugins"]["entries"]["nv-fleet-gates"]["settings"]["expected_ssh_host"] = {"builder": "openshell-osh-f64-builder"}
+    base["plugins"]["entries"]["nv-fleet-gates"]["settings"]["expected_ssh_host"] = hosts
     assert _installed(base) is False                               # roles+host but no approval floor
     base["approvals"] = {"mode": "smart"}
     base["security"] = {"approval": {"transport": "builtin"}}

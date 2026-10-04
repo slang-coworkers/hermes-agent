@@ -40,8 +40,8 @@ COWORKERS = ("orchestrator", "triager", "fixer", "reviewer", "approver")
 # Per-role bound skills beyond the shared {base-nanoclaw, codex-critique} (ADR §Design).
 ROLE_EXTRA = {
     "orchestrator": {"supervise-issues"},
-    "triager": {"triage-issue"},
-    "fixer": {"implement"},
+    "triager": {"triage-issue", "nv-path-guard-base"},
+    "fixer": {"implement", "nv-path-guard-base"},
     "reviewer": {"plan"},
     "approver": set(),
 }
@@ -614,7 +614,7 @@ def test_ac_fleet_f62_c_8(tmp_path):
 
 def test_ac_fleet_f62_c_9(tmp_path):
     """The github provider is folded ONLY into {triager, fixer, reviewer} —
-    provider-attach lines, per-endpoint policy allows + gh/git binaries, and a
+    create-time --provider options, per-endpoint policy allows + gh/git binaries, and a
     ${env:GH_TOKEN} placeholder; orchestrator/approver/default carry none."""
     home = _isolated_home(tmp_path)
     out = tmp_path / "out"
@@ -622,13 +622,18 @@ def test_ac_fleet_f62_c_9(tmp_path):
     prov = _render(tmp_path / "prov", home, "--provision-dry-run")
     assert prov.returncode == 0, prov.stderr
 
-    # Exactly the 3 github workers get an attach line and no other sandbox does — a
-    # sorted list, not a set, so a duplicate or an extra attach elsewhere also fails.
-    attach_lines = sorted(ln.strip() for ln in prov.stdout.splitlines()
-                          if "sandbox provider attach" in ln)
-    expected = sorted(f"openshell sandbox provider attach nanoclaw-base-{r} github"
-                      for r in GITHUB_WORKERS)
-    assert attach_lines == expected, f"provider-attach lines {attach_lines} != {expected}"
+    # FLEET-F62.d D1: the provider binds at create. Exactly the 3 github workers carry one
+    # `--provider github` on their create line, no other sandbox does, and no post-create
+    # attach line remains — a sorted list, not a set, so a duplicate also fails.
+    assert not [ln for ln in prov.stdout.splitlines() if "sandbox provider attach" in ln], \
+        "providers bind at create; no post-create attach line may remain"
+    bound = sorted((m.group(1), tuple(shlex.split(ln)[i + 1] for i, tok in enumerate(shlex.split(ln))
+                                      if tok == "--provider"))
+                   for ln in prov.stdout.splitlines()
+                   for m in [re.search(r"sandbox create --name (\S+)", ln)] if m)
+    expected = sorted((f"nanoclaw-base-{r}", ("github",) if r in GITHUB_WORKERS else ())
+                      for r in COWORKERS)
+    assert bound == expected, f"create-time provider bindings {bound} != {expected}"
 
     for role in GITHUB_WORKERS:
         policy = _role_policy(out, role)
@@ -655,8 +660,16 @@ def test_ac_fleet_f62_c_9(tmp_path):
 
     for role in NON_GITHUB_COWORKERS:
         policy = _role_policy(out, role)
-        assert not (GITHUB_ENDPOINTS & _policy_hosts(policy)), f"{role}: policy must not allow github endpoints"
         assert not (GITHUB_BINARIES & _policy_binaries(policy)), f"{role}: policy must not carry gh/git binaries"
+        if role == "orchestrator":
+            assert not (GITHUB_ENDPOINTS & _policy_hosts(policy)), f"{role}: policy must not allow github endpoints"
+            continue
+        # FLEET-F62.d D3: the approver reads the API host credential-free, GET only; no web host.
+        assert GITHUB_ENDPOINTS & _policy_hosts(policy) == {"api.github.com:443"}, \
+            f"{role}: the only GitHub endpoint must be api.github.com:443"
+        api = [_np_endpoint(np, "api.github.com:443") for np in _network_policies(policy)]
+        api = [ep for ep in api if ep is not None]
+        assert len(api) == 1 and _allow_methods(api[0]) == {"GET"}, f"{role}: api.github.com must allow GET only"
     for role in NON_GITHUB_PROFILES:
         assert "GH_TOKEN" not in yaml.safe_dump(_config(_profile_dir(out, role))), f"{role}: must carry no GH_TOKEN"
 
