@@ -181,7 +181,10 @@ class Edge:
             outcome = json.loads(raw or b"{}").get("status")
         except ValueError:
             outcome = None
-        return (status, outcome) in ((202, "accepted"), (200, "duplicate"))
+        acked = (status, outcome) in ((202, "accepted"), (200, "duplicate"))
+        if acked:
+            logger.info("edge: forward of delivery %s acknowledged as %s", env["delivery_id"], outcome)
+        return acked
 
     def _forward_one(self, path: Path, now: float) -> None:
         due, attempts = self._next_attempt.get(path.name, (0.0, 0))
