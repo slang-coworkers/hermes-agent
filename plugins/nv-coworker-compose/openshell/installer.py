@@ -916,8 +916,8 @@ _STATUS_POLL_INTERVAL_S = 2.0
 
 def _run_capture(cmd: List[str]) -> str:
     import subprocess
-    proc = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
+    proc = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
     return proc.stdout or ""
 
 
@@ -1023,7 +1023,8 @@ def _restart_gateway_detached(cmd: List[str], home: Path) -> None:
     for _attempt in range(_STATUS_POLLS):
         time.sleep(_STATUS_POLL_INTERVAL_S)
         try:
-            probe = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True,
+            probe = subprocess.run(["hermes", "gateway", "status"], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
                                    stdin=subprocess.DEVNULL, env=env, timeout=_CAPTURE_TIMEOUT_S)
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
             continue
