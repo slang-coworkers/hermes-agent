@@ -1,7 +1,7 @@
 """Acceptance tests for ING-F66 — the inbound gateway (plugin ``nv-ingress``).
 
 Ships to ``tests/plugins/test_nv_ingress_acceptance.py``. One ``test_ac_ing_f66_<n>``
-per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..18, AC-22, AC-23),
+per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..18, AC-22, AC-23, AC-25),
 in ADR order; AC-19/AC-20/AC-24 (live) and AC-21 (ui) are scenario files under
 ``tests/e2e-scenarios/ING-F66/``. Shape: ``tests/hermes_cli/test_plugin_api_compat.py``
 — isolated HERMES_HOME, empty bundled dir, real ``PluginManager().discover_and_load()``.
@@ -22,6 +22,8 @@ Plugin seams the builder must provide (named in ADR §Design, imported here):
   the `webhook` platform registered when settings.webhook_guard is true [D14 guard adapter]
   `hermes ingress status --json` -> {pending, stuck, runaway, refusals, unclaimable, webhook_guard}
   module.drain_once() -> int                      [one drain pass]
+  the drain driver: one daemon thread per load, passes only while this process owns the
+    gateway runtime lock (gateway.status), stopped by PluginManager.unload()  [ADR D5, r4]
   skills/ci-gate/scripts/checks_gate.py evaluate(runs, pinned_sha, current_head, waivers);
     CLI <repo> <pr> <sha> --read provider|anonymous
 """
@@ -231,9 +233,11 @@ def ingress(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(deliver, "run_cli", _fake_run_cli)
-    return SimpleNamespace(manager=manager, loaded=loaded, module=loaded.module, root=root,
-                           calls=calls, deliver=deliver, ledger=sys.modules[pkg + ".ledger"],
-                           envelope=sys.modules[pkg + ".envelope"], tmp=tmp_path)
+    yield SimpleNamespace(manager=manager, loaded=loaded, module=loaded.module, root=root,
+                          calls=calls, deliver=deliver, ledger=sys.modules[pkg + ".ledger"],
+                          envelope=sys.modules[pkg + ".envelope"], tmp=tmp_path)
+    # Unloading stops this load's drain driver thread (D5), so no driver outlives its test.
+    manager.unload()
 
 
 def _set_profile(monkeypatch, name: str) -> None:
@@ -249,12 +253,14 @@ def _rows(ing, sql: str, args=()) -> list:
         conn.close()
 
 
-def _stage(ing, event: str, delivery: str, payload: dict) -> dict:
+def _stage(ing, event: str, delivery: str, payload: dict, source: str = "github") -> dict:
     """Run the REAL route script exactly as the release adapter does
     (gateway/platforms/webhook_filters.py:228-300: payload JSON on stdin, JSON out)."""
     from gateway.platforms.webhook_filters import WebhookRouteProcessor
 
-    env_payload = ing.envelope.normalize("github", event, _gh_headers(event, delivery), payload)
+    headers = (_gh_headers(event, delivery) if source == "github"
+               else {GL_EVENT_HEADER: event, GL_ID_HEADER: delivery})
+    env_payload = ing.envelope.normalize(source, event, headers, payload)
     keep, out = WebhookRouteProcessor(script_timeout_seconds=30).run_route_script(
         "ingress_stage.py", env_payload)
     assert keep is True and isinstance(out, dict), "a valid envelope is never dropped by staging"
@@ -271,8 +277,8 @@ def _dispatch_event(ing, out: dict, delivery: str, route: str = ROUTE) -> list:
                                    session_store=None, future_additive_field=True)
 
 
-def _ingest(ing, event: str, delivery: str, payload: dict) -> dict:
-    out = _stage(ing, event, delivery, payload)
+def _ingest(ing, event: str, delivery: str, payload: dict, source: str = "github") -> dict:
+    out = _stage(ing, event, delivery, payload, source)
     results = _dispatch_event(ing, out, delivery)
     assert any(isinstance(r, dict) and r.get("action") == "skip" for r in results), \
         "the ingress route must never mint a one-shot webhook session"
@@ -561,7 +567,6 @@ def test_ac_ing_f66_3(ingress, edge_path):
     assert _send_gitlab(edge_path.edge, "Issue Hook", gl_issue, "gl-msg-4", token=_gl_signing_token()) == 401
     assert _send_gitlab(edge_path.edge, "Pipeline Hook", gl_pipe, None) == 401
     _settle(ingress, edge_path, 3)
-    time.sleep(1.0)
     staged = sorted(_rows(ingress, "SELECT delivery_id, kind, source, repo FROM outbox"))
     assert staged == [("gl-msg-1", "issue", "gitlab", REPO), ("gl-msg-2", "ci", "gitlab", REPO),
                       ("gl-msg-3", "ci", "gitlab", REPO)], "one row per GitLab delivery id, retries collapse"
@@ -603,7 +608,6 @@ def test_ac_ing_f66_4(ingress):
                                                           GL_TS_HEADER: now,
                                                           GL_TOKEN_HEADER: edge.secrets["gitlab"].decode()})
     assert (unsigned, wrong, gl_unsigned, gl_wrong, gl_stale, gl_token_only) == (401,) * 6
-    time.sleep(1.0)
     assert relay.connections == 0
     assert not list(Path(edge.cfg["spool_dir"]).glob("*.json"))
     _stop_edge(edge)
@@ -1163,8 +1167,11 @@ def test_ac_ing_f66_13(ingress, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_HOME", str(off))
     off_manager = PluginManager()
     off_manager.discover_and_load()
-    assert off_manager._plugins[PLUGIN_KEY].enabled is True
-    assert platform_registry.get("webhook") is None, "without webhook_guard the built-in adapter must stay in use"
+    try:
+        assert off_manager._plugins[PLUGIN_KEY].enabled is True
+        assert platform_registry.get("webhook") is None, "without webhook_guard the built-in adapter must stay in use"
+    finally:
+        off_manager.unload()
 
 
 def test_ac_ing_f66_14(ingress, tmp_path, monkeypatch):
@@ -1245,45 +1252,95 @@ def test_ac_ing_f66_16(ingress, monkeypatch):
         assert out["stage"] == "new"
     assert ingress.calls == []
 
-    # The restart: a fresh discovery over the same HERMES_HOME. The plugin's own load path
-    # (the synchronous drain pass at the end of register()) must deliver, with no hook fired
-    # here and no new inbound. Delivery runs `subprocess.run` (deliver.run_cli's only call),
-    # so the CLI turn is captured there; any other subprocess still runs for real.
+    # deliver.run_cli's only subprocess call is the CLI turn, so turns are captured here.
+    from gateway import status as gateway_status
+
+    started: list[str] = []
     after: list[dict] = []
+    release = threading.Event()
     real_run = subprocess.run
 
     def _capture(argv, *a, **k):
         if isinstance(argv, (list, tuple)) and "chat" in argv and "--query-file" in argv:
-            qf = argv[list(argv).index("--query-file") + 1]
-            after.append({"argv": list(argv), "prompt": Path(qf).read_text(encoding="utf-8")})
+            prompt = Path(argv[list(argv).index("--query-file") + 1]).read_text(encoding="utf-8")
+            started.append(prompt)
+            release.wait(60)
+            after.append({"argv": list(argv), "prompt": prompt})
             return subprocess.CompletedProcess(argv, 0, "", "")
         return real_run(argv, *a, **k)
 
-    monkeypatch.setattr(subprocess, "run", _capture)
-    for mod in [m for m in sys.modules if m.startswith(ingress.module.__name__)]:
-        monkeypatch.delitem(sys.modules, mod)
-    manager = PluginManager()
-    manager.discover_and_load()
-    assert manager._plugins[PLUGIN_KEY].enabled is True
-    assert [c for c in after if "d-crash" in c["prompt"]], \
-        "the pre-crash row was not delivered by the plugin's own startup drain"
-    assert not [c for c in after if "d-done" in c["prompt"]], "a committed turn was delivered twice"
-    assert _rows(ingress, "SELECT state FROM deliveries WHERE outbox_delivery = 'd-done'") == [("done",)]
-    monkeypatch.setattr(subprocess, "run", real_run)
+    def _fresh_load() -> PluginManager:
+        for mod in [m for m in sys.modules if m.startswith(ingress.module.__name__)]:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+        mgr = PluginManager()
+        loads.append(mgr)
+        mgr.discover_and_load()
+        return mgr
 
-    # Edge side: the forward is down, the event is spooled; a restarted edge re-forwards it.
-    route_port = _free_port()
-    spool = ingress.tmp / "edge-spool-restart"
-    edge = _start_edge(ingress, route_port, spool_dir=spool)  # nothing listens on route_port yet
-    assert _send_github(edge, "issues", "d-spool", _gh_payload("issues", "opened", labels=(LABEL,), issue=55)) == 202
-    assert _wait(lambda: list(spool.glob("*.json")))
-    _stop_edge(edge)
-    route = _start_route(ingress, route_port, _rendered_ingress(ingress.tmp)[1])
-    edge2 = _start_edge(ingress, route_port, spool_dir=spool, secrets_by_platform=edge.secrets)
-    assert _wait(lambda: not list(spool.glob("*.json")), timeout=90), "the spool was never re-forwarded"
-    assert _rows(ingress, "SELECT delivery_id FROM outbox WHERE delivery_id = 'd-spool'") == [("d-spool",)]
-    _stop_edge(edge2)
-    _stop_adapter(route.adapter, route.loop)
+    ingress.manager.unload()
+    monkeypatch.setattr(subprocess, "run", _capture)
+    loads: list[PluginManager] = []
+    try:
+        # A DEFAULT-home process that is not the gateway (the CLI verb, the dashboard) loads the
+        # plugin too; its driver must never run a turn, across more than one drain interval.
+        no_lock = _fresh_load()
+        assert not _wait(lambda: started, timeout=2.5), "a load without the gateway runtime lock ran a delivery"
+        no_lock.unload()
+        assert gateway_status.acquire_gateway_runtime_lock()
+        manager = _fresh_load()
+        # A captured turn cannot finish before `release`, so a delivery run inside register()
+        # would have held the load until the 60 s bound and be recorded in `after` by now.
+        assert after == [], "plugin load ran a delivery inline instead of on the drain driver"
+        assert manager._plugins[PLUGIN_KEY].enabled is True
+        assert _wait(lambda: [p for p in started if "github/d-crash/" in p], timeout=15), \
+            "the pre-crash row was not picked up by the plugin's own drain driver"
+
+        # Reload while that turn is still in flight: the old pass keeps its lease past the
+        # unload join, so every lease attempt of the new load must fail until the turn ends.
+        manager.unload()
+        manager = _fresh_load()
+        new_ledger = sys.modules[manager._plugins[PLUGIN_KEY].module.__name__ + ".ledger"]
+        real_acquire, attempts = new_ledger.acquire_lease, []
+
+        def _record(*a, **k):
+            got = real_acquire(*a, **k)
+            attempts.append(got)
+            return got
+
+        monkeypatch.setattr(new_ledger, "acquire_lease", _record)
+        assert _wait(lambda: attempts, timeout=15), "the reloaded driver never tried to drain"
+        assert not any(attempts), "the reloaded load took the lease of a pass still in flight"
+        release.set()
+        out = _stage(ingress, "check_run", "d-after", _gh_payload("check_run", "completed", conclusion="failure"))
+        assert out["stage"] == "new"
+        assert _wait(lambda: [c for c in after if "github/d-after/" in c["prompt"]], timeout=15), \
+            "the reloaded driver never ran a pass"
+        assert [p for p in started if "github/d-crash/" in p] == [started[0]], "one turn per marker"
+        assert not [p for p in started if "github/d-done/" in p], "a committed turn was delivered twice"
+        assert _rows(ingress, "SELECT state FROM deliveries WHERE outbox_delivery = 'd-done'") == [("done",)]
+        gateway_status.release_gateway_runtime_lock()
+
+        # The fresh load stays registered (its `webhook` guard platform serves the route), and
+        # chat turns stay captured, so no real CLI turn can run from here on.
+        route_port = _free_port()
+        spool = ingress.tmp / "edge-spool-restart"
+        edge = _start_edge(ingress, route_port, spool_dir=spool)  # nothing listens on route_port yet
+        assert _send_github(edge, "issues", "d-spool",
+                            _gh_payload("issues", "opened", labels=(LABEL,), issue=55)) == 202
+        assert _wait(lambda: list(spool.glob("*.json")))
+        _stop_edge(edge)
+        route = _start_route(ingress, route_port, _rendered_ingress(ingress.tmp)[1])
+        edge2 = _start_edge(ingress, route_port, spool_dir=spool, secrets_by_platform=edge.secrets)
+        assert _wait(lambda: not list(spool.glob("*.json")), timeout=90), "the spool was never re-forwarded"
+        assert _rows(ingress, "SELECT delivery_id FROM outbox WHERE delivery_id = 'd-spool'") == [("d-spool",)]
+        _stop_edge(edge2)
+        _stop_adapter(route.adapter, route.loop)
+    finally:
+        release.set()
+        gateway_status.release_gateway_runtime_lock()
+        for mgr in loads:
+            mgr.unload()
+        monkeypatch.setattr(subprocess, "run", real_run)
 
 
 def _unit(path: Path) -> dict:
@@ -1419,3 +1476,82 @@ def test_ac_ing_f66_23(ingress, monkeypatch, capsys, caplog):
     warned = [r for r in caplog.records if r.levelno >= logging.WARNING and "runaway" in r.getMessage().lower()
               and f"{REPO}#7" in r.getMessage()]
     assert len(warned) == 1, "the budget breach is logged once per PR and hour"
+
+
+
+# (event, action, conclusion, the payload field carrying third-party free text, the object holding the PR title)
+_S2_CASES = [
+    ("pull_request", "synchronize", None, ("pull_request", "title"), "pull_request"),
+    ("issue_comment", "created", None, ("comment", "body"), "issue"),
+    ("pull_request_review", "submitted", None, ("review", "body"), "pull_request"),
+    ("pull_request_review_comment", "created", None, ("comment", "body"), "pull_request"),
+    ("check_run", "completed", "failure", ("check_run", "name"), None),
+    ("check_suite", "completed", "failure", ("check_suite", "name"), None),
+    ("workflow_run", "completed", "failure", ("workflow_run", "name"), None),
+]
+
+
+def _gl_s2(kind: str, pr: int):
+    probe = "s2gl" + secrets.token_hex(8)
+    base = {"project": {"path_with_namespace": REPO}, "user": {"username": "octo"}}
+    if kind == "Issue Hook":
+        return {**base, "object_kind": "issue", "labels": [{"title": LABEL}],
+                "object_attributes": {"iid": 70 + pr, "action": "open", "title": probe}}, probe
+    return {**base, "object_kind": "pipeline", "merge_request": {"iid": pr},
+            "object_attributes": {"status": "failed", "sha": "b" * 40, "name": probe, "id": 900 + pr}}, probe
+
+
+def _s2_payload(event, action, conclusion, field, title_obj, pr):
+    probes = {field: "s2probe" + secrets.token_hex(8)}
+    if title_obj:
+        probes.setdefault((title_obj, "title"), "s2title" + secrets.token_hex(8))
+    payload = _gh_payload(event, action, conclusion=conclusion, pr=pr)
+    for (obj, key), value in probes.items():
+        payload[obj][key] = value
+    return payload, list(probes.values())
+
+
+def test_ac_ing_f66_25(ingress, monkeypatch):
+    """A delivery bound for the orchestrator's Bot Chat carries no third-party free text: for an unowned PR update, PR comment, review, review comment and CI event, and for a labelled issue, the prompt names the repo and carries the delivery marker but none of the comment or review body, the issue or PR title or the check name; the owner's delivery of the same PR, comment, review and CI events for a claimed PR still carries the title, the body text and the check name (derived — review S2, trust point 5)."""
+    for i, (event, action, conclusion, field, title_obj) in enumerate(_S2_CASES):
+        payload, probes = _s2_payload(event, action, conclusion, field, title_obj, 41 + i)
+        ingress.calls.clear()
+        _ingest(ingress, event, f"d-s2-unowned-{i}", payload)
+        orch = _deliveries_to(ingress, ORCH)
+        assert len(orch) == 1 and f"github/d-s2-unowned-{i}/{41 + i}" in orch[0]["prompt"]
+        assert REPO in orch[0]["prompt"]
+        assert not [p for p in probes if p in orch[0]["prompt"]], \
+            f"{event}: third-party text reached the orchestrator's prompt"
+
+    title = "s2title" + secrets.token_hex(8)
+    issue = _gh_payload("issues", "opened", labels=(LABEL,), issue=61)
+    issue["issue"]["title"] = title
+    ingress.calls.clear()
+    _ingest(ingress, "issues", "d-s2-issue", issue)
+    orch = _deliveries_to(ingress, ORCH)
+    assert len(orch) == 1 and "github/d-s2-issue" in orch[0]["prompt"]
+    assert title not in orch[0]["prompt"], "an issue title reached the orchestrator's prompt"
+
+    for i, kind in enumerate(("Issue Hook", "Pipeline Hook")):
+        payload, probe = _gl_s2(kind, 51 + i)
+        ingress.calls.clear()
+        _ingest(ingress, kind, f"gl-s2-unowned-{i}", payload, source="gitlab")
+        orch = _deliveries_to(ingress, ORCH)
+        assert len(orch) == 1 and f"gitlab/gl-s2-unowned-{i}" in orch[0]["prompt"]
+        assert probe not in orch[0]["prompt"], f"GitLab {kind}: third-party text reached the orchestrator's prompt"
+
+    _seed_session(ingress.root / "profiles" / OWNER, "S-s2")
+    _claim(ingress, monkeypatch, OWNER, "S-s2", 7)
+    for i, (event, action, conclusion, field, title_obj) in enumerate(_S2_CASES):
+        payload, probes = _s2_payload(event, action, conclusion, field, title_obj, 7)
+        ingress.calls.clear()
+        _ingest(ingress, event, f"d-s2-owned-{i}", payload)
+        owner = _deliveries_to(ingress, OWNER)
+        assert len(owner) == 1 and all(p in owner[0]["prompt"] for p in probes), \
+            f"{event}: the owner must still see the title, body and check name"
+        assert _deliveries_to(ingress, ORCH) == []
+    payload, probe = _gl_s2("Pipeline Hook", 7)
+    ingress.calls.clear()
+    _ingest(ingress, "Pipeline Hook", "gl-s2-owned", payload, source="gitlab")
+    owner = _deliveries_to(ingress, OWNER)
+    assert len(owner) == 1 and probe in owner[0]["prompt"], "the owner must still see the GitLab job name"
