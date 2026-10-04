@@ -16,12 +16,13 @@ orchestrator-only and approval-gated.
 
 from __future__ import annotations
 
-import asyncio
+import contextvars
 import functools
 import json
 import logging
 import sys
 import threading
+import uuid
 from typing import Any, Dict
 
 from . import bridge, envelope, ledger, ownership
@@ -33,9 +34,8 @@ ROUTED_EVENTS = envelope.ROUTED_EVENTS
 _TOOLSET = "nv_ingress"
 _CTX = None
 _KICK = threading.Event()
-_KICKER_LOCK = threading.Lock()
-_KICKER: threading.Thread | None = None
-_LOOP_TASK_STARTED = False
+_LOAD_ID = uuid.uuid4().hex[:12]
+_UNLOAD_JOIN_SECONDS = 5.0
 
 
 def _settings() -> Dict[str, Any]:
@@ -79,52 +79,58 @@ def _safe_handler(fn):
 
 def drain_once() -> int:
     """One drain pass (DEFAULT home only); returns the number of rows delivered."""
-    return bridge.drain_once(_settings())
+    return bridge.drain_once(_settings(), _LOAD_ID)
 
 
-def _kicker_loop() -> None:
-    while True:
-        _KICK.wait()
-        _KICK.clear()
-        try:
-            drain_once()
-        except Exception:
-            logger.warning("nv-ingress drain pass failed", exc_info=True)
+def _owns_runtime_lock() -> bool:
+    try:
+        from gateway import status as gateway_status
+
+        return gateway_status.owns_gateway_runtime_lock()
+    except Exception:
+        return False
+
+
+def _driver_loop(kick: threading.Event, stop: threading.Event, interval: float, load_id: str) -> None:
+    """The only drain driver (D5): a pass on each kick and every ``interval`` seconds,
+    and only in the process holding the gateway runtime lock, so a short-lived
+    DEFAULT-home process (the CLI, the dashboard) never starts a delivery turn."""
+    while not stop.is_set():
+        if _owns_runtime_lock():
+            try:
+                bridge.drain_once(_settings(), load_id, stop)
+            except Exception:
+                logger.warning("nv-ingress drain pass failed", exc_info=True)
+        kick.wait(interval)
+        kick.clear()
+
+
+def _start_driver(ctx) -> None:
+    global _KICK
+    try:
+        interval = max(0.1, float(ctx.get_config("drain_interval_seconds") or 5))
+    except (TypeError, ValueError):
+        interval = 5.0
+    kick, stop = threading.Event(), threading.Event()
+    # The copied context keeps the loading manager's home override on the driver thread.
+    thread = threading.Thread(target=contextvars.copy_context().run,
+                              args=(_driver_loop, kick, stop, interval, _LOAD_ID),
+                              name="nv-ingress-drain", daemon=True)
+    _KICK = kick
+
+    def _stop_driver() -> None:
+        stop.set()
+        kick.set()
+        # A delivery in flight is not interrupted; its lease keeps the next load off the row.
+        thread.join(timeout=_UNLOAD_JOIN_SECONDS)
+
+    ctx.on_unload(_stop_driver)
+    thread.start()
 
 
 def _kick() -> None:
-    """Ask for a drain pass off the caller's thread (never inline on the gateway loop)."""
-    global _KICKER
-    if not bridge.is_ledger_home():
-        return
-    with _KICKER_LOCK:
-        if _KICKER is None or not _KICKER.is_alive():
-            _KICKER = threading.Thread(target=_kicker_loop, name="nv-ingress-drain", daemon=True)
-            _KICKER.start()
+    """Ask the driver for a pass now; the pass never runs on the caller's thread."""
     _KICK.set()
-
-
-async def _drain_loop() -> None:
-    interval = float(_settings().get("drain_interval_seconds") or 5)
-    while True:
-        try:
-            await asyncio.to_thread(drain_once)
-        except Exception:
-            logger.warning("nv-ingress drain pass failed", exc_info=True)
-        await asyncio.sleep(interval)
-
-
-def _ensure_loop_task() -> None:
-    """Start the periodic drain on the running gateway loop, once."""
-    global _LOOP_TASK_STARTED
-    if _LOOP_TASK_STARTED or _CTX is None:
-        return
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    _CTX.spawn_task(_drain_loop(), name="nv-ingress:drain")
-    _LOOP_TASK_STARTED = True
 
 
 # --------------------------------------------------------------------------- hooks
@@ -146,7 +152,6 @@ def _on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwa
         logger.warning("nv-ingress pre_gateway_dispatch filter failed", exc_info=True)
         return None
     try:
-        _ensure_loop_task()
         _kick()
     except Exception:
         logger.warning("nv-ingress drain kick failed", exc_info=True)
@@ -326,9 +331,9 @@ def _routes_configured(config) -> bool:
 
 
 def register(ctx) -> None:
-    global _CTX, _LOOP_TASK_STARTED
+    global _CTX, _LOAD_ID
     _CTX = ctx
-    _LOOP_TASK_STARTED = False
+    _LOAD_ID = uuid.uuid4().hex[:12]
     ctx.register_tool(name="ingress_remap", toolset=_TOOLSET, schema=_REMAP_SCHEMA, handler=_tool_remap,
                       check_fn=_is_orchestrator, description=_REMAP_SCHEMA["description"])
     ctx.register_tool(name="ingress_claim_replacement", toolset=_TOOLSET, schema=_REPLACEMENT_SCHEMA,
@@ -347,17 +352,7 @@ def register(ctx) -> None:
 
         ctx.register_platform(name="webhook", label="Webhook", adapter_factory=GuardedWebhookAdapter,
                               check_fn=check_webhook_requirements, is_connected=_routes_configured)
-    # Startup drain: a restarted gateway delivers what was staged before it went down,
-    # with no new inbound. On a running loop it is the first pass of the periodic task
-    # (off-loop through to_thread); without one it runs here, synchronously.
-    if not bridge.is_ledger_home():
-        return
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            drain_once()
-        except Exception:
-            logger.warning("nv-ingress startup drain failed", exc_info=True)
-        return
-    _ensure_loop_task()
+    # The driver's first pass is also the startup drain: a restarted gateway delivers
+    # what was staged before it went down, with no new inbound.
+    if bridge.is_ledger_home():
+        _start_driver(ctx)

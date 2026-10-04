@@ -6,7 +6,9 @@ but do not assert directly:
 - no global webhook secret survives the ingress render;
 - the routing labels reach the plugin settings;
 - `hermes ingress render-host` writes exactly what compose writes;
-- the periodic drain never blocks the gateway's event loop;
+- the drain runs only on its driver thread, never on the loading thread or the
+  gateway's event loop, and only in the process holding the gateway runtime lock;
+- an orchestrator-bound prompt still names the action, the CI result and the link;
 - the no-auth mode is refused off the ingress route;
 - `hermes ingress status` keeps its documented shape.
 """
@@ -32,6 +34,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SRC = REPO_ROOT / "plugins" / "nv-ingress"
 ING_SPEC = REPO_ROOT / "tests" / "e2e-scenarios" / "ING-F66" / "spec" / "openshell" / "coworker-types.yaml"
 FLEET_PLUGINS = ("nv-coworker-compose", "nv-fleet-gates", "nv-ingress")
+
+
+_MANAGERS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _unload_managers():
+    """Every load starts a drain driver thread; unloading stops it (D5)."""
+    yield
+    while _MANAGERS:
+        _MANAGERS.pop().unload()
 
 
 def _home(tmp_path: Path) -> Path:
@@ -123,42 +136,106 @@ def test_no_auth_mode_is_refused_off_the_ingress_route(monkeypatch):
     mod._validate_webhook_routes(cfg, {"default"}, ingress_route="ingress")
 
 
-def test_periodic_drain_never_blocks_the_event_loop(tmp_path, monkeypatch):
-    from hermes_cli.plugins import PluginManager
+def _drain_threads() -> list:
+    return [t for t in threading.enumerate() if t.name == "nv-ingress-drain" and t.is_alive()]
 
-    root = tmp_path / "root"
-    (root / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, root / "plugins" / "nv-ingress")
-    (root / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["nv-ingress"],
-        "entries": {"nv-ingress": {"settings": {"drain_interval_seconds": 1}}}}}), encoding="utf-8")
-    (tmp_path / "bundled").mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path / "os-home"))
-    monkeypatch.setenv("HERMES_HOME", str(root))
-    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / "bundled"))
-    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
 
+def test_drain_runs_only_on_the_driver_thread_and_never_blocks_the_loop(tmp_path, monkeypatch):
+    from gateway import status as gateway_status
+    from gateway.config import Platform
+
+    passes: list[str] = []
     started, release = threading.Event(), threading.Event()
 
-    async def scenario():
-        manager = PluginManager()
-        manager.discover_and_load()
-        module = manager._plugins["nv-ingress"].module
-        monkeypatch.setattr(module.bridge, "drain_once",
-                            lambda _settings: (started.set(), release.wait(10), 0)[-1])
-        module._LOOP_TASK_STARTED = False
-        module._ensure_loop_task()
-        assert await asyncio.to_thread(started.wait, 10), "the periodic drain never ran"
-        beats = 0
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < 0.5:
-            await asyncio.sleep(0.05)
-            beats += 1
-        release.set()
-        return beats
+    def _slow_pass(_settings, _load_id, _stop=None):
+        passes.append(threading.current_thread().name)
+        started.set()
+        release.wait(10)
+        return 0
 
-    beats = asyncio.run(scenario())
-    assert beats >= 5, f"the event loop stalled while a drain pass was blocked ({beats} beats)"
+    assert gateway_status.acquire_gateway_runtime_lock()
+    try:
+        # A loop-less loading thread, as the gateway's background plugin discovery is.
+        loaded: dict = {}
+        loader = threading.Thread(target=lambda: loaded.update(
+            zip(("root", "module"), _loaded_plugin(tmp_path, monkeypatch, {"drain_interval_seconds": 1}))))
+        loader.start()
+        loader.join(30)
+        module = loaded["module"]
+        monkeypatch.setattr(module.bridge, "drain_once", _slow_pass)
+        event = SimpleNamespace(source=SimpleNamespace(platform=Platform.WEBHOOK, chat_type="webhook",
+                                                       chat_id="webhook:ingress:d-1"))
+
+        async def scenario():
+            t0 = time.monotonic()
+            verdict = module._on_pre_gateway_dispatch(event=event)
+            hook_seconds = time.monotonic() - t0
+            assert await asyncio.to_thread(started.wait, 10), "the driver never ran a pass"
+            beats = 0
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 0.5:
+                await asyncio.sleep(0.05)
+                beats += 1
+            return verdict, hook_seconds, beats
+
+        verdict, hook_seconds, beats = asyncio.run(scenario())
+        assert verdict["action"] == "skip" and hook_seconds < 0.5, "the hook must only kick the driver"
+        assert beats >= 5, f"the event loop stalled while a drain pass was blocked ({beats} beats)"
+        assert set(passes) == {"nv-ingress-drain"}, passes
+    finally:
+        release.set()
+        gateway_status.release_gateway_runtime_lock()
+
+
+def test_driver_idles_without_the_runtime_lock_and_stops_on_unload(tmp_path, monkeypatch):
+    _root, module = _loaded_plugin(tmp_path, monkeypatch, {"drain_interval_seconds": 1})
+    passes: list[str] = []
+    monkeypatch.setattr(module.bridge, "drain_once", lambda *a, **k: passes.append("pass") or 0)
+    module._kick()
+    time.sleep(2.5)
+    assert passes == [], "a process without the gateway runtime lock ran a drain pass"
+    assert _drain_threads(), "the load started no driver thread"
+    for manager in list(_MANAGERS):
+        manager.unload()
+    _MANAGERS.clear()
+    assert not _drain_threads(), "unload left the driver thread running"
+
+
+def test_a_second_load_in_one_process_cannot_take_a_live_pass_lease(tmp_path, monkeypatch):
+    _root, module = _loaded_plugin(tmp_path, monkeypatch)
+    ledger, bridge = module.ledger, module.bridge
+    first, second = bridge._holder("load-a"), bridge._holder("load-b")
+    assert first != second
+    assert ledger.acquire_lease(first, -1.0)
+    assert not ledger.acquire_lease(second, 60.0), "a reloaded plugin took the lease of a pass in flight"
+    ledger.release_lease(first)
+    assert ledger.acquire_lease(second, 60.0)
+
+
+def test_orchestrator_prompt_keeps_the_action_ci_result_and_link(tmp_path, monkeypatch):
+    _root, module = _loaded_plugin(tmp_path, monkeypatch)
+    envelope, deliver = module.envelope, module.deliver
+    probe, sha = "probe" + secrets.token_hex(6), "c" * 40
+    url = "https://github.com/o/r/runs/" + secrets.token_hex(4)
+    gh = envelope.normalize("github", "check_run", {"X-GitHub-Event": "check_run", "X-GitHub-Delivery": "d-b"}, {
+        "action": "completed", "repository": {"full_name": "o/r"}, "sender": {"login": "octo"},
+        "check_run": {"head_sha": sha, "conclusion": "failure", "name": probe, "html_url": url,
+                      "pull_requests": [{"number": 9}], "check_suite": {"head_branch": "b"}}})
+    orch = deliver.prompt(gh, 9, to_orchestrator=True)
+    for fact in ("o/r#9", "check_run", "completed", "concluded failure", sha, url, "ingress-delivery: github/d-b/9"):
+        assert fact in orch, f"{fact!r} missing from the orchestrator prompt"
+    assert probe not in orch
+    assert probe in deliver.prompt(gh, 9, to_orchestrator=False), "the owner prompt keeps the check name"
+
+    gl_url = "https://gitlab.example/o/r/-/issues/4"
+    gl = envelope.normalize("gitlab", "Issue Hook", {"X-Gitlab-Event": "Issue Hook", "webhook-id": "gl-b"}, {
+        "object_kind": "issue", "project": {"path_with_namespace": "o/r"}, "user": {"username": "octo"},
+        "labels": [{"title": "fleet"}], "object_attributes": {"iid": 4, "action": "open", "title": probe,
+                                                              "url": gl_url}})
+    issue = deliver.prompt(gl, None, to_orchestrator=True)
+    for fact in ("o/r issue #4", "opened", gl_url, "ingress-delivery: gitlab/gl-b"):
+        assert fact in issue, f"{fact!r} missing from the orchestrator issue prompt"
+    assert probe not in issue
 
 
 def test_status_has_the_documented_shape(tmp_path, monkeypatch, capsys):
@@ -174,6 +251,7 @@ def test_status_has_the_documented_shape(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / "bundled"))
     manager = PluginManager()
     manager.discover_and_load()
+    _MANAGERS.append(manager)
     capsys.readouterr()
     handler = manager._cli_commands["ingress"]["handler_fn"]
     assert handler(SimpleNamespace(ingress_command="status", json=True)) == 0
@@ -198,6 +276,7 @@ def _loaded_plugin(tmp_path: Path, monkeypatch, settings: dict | None = None):
     monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
     manager = PluginManager()
     manager.discover_and_load()
+    _MANAGERS.append(manager)
     return root, manager._plugins["nv-ingress"].module
 
 
