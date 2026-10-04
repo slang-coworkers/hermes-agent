@@ -232,7 +232,9 @@ def acquire_lease(holder: str, ttl_seconds: float) -> bool:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT holder, expires_at FROM drain_lease WHERE id = 1").fetchone()
         now = time.time()
-        if row is not None and row[0] != holder and row[1] > now and _holder_alive(row[0]):
+        # A live holder past its deadline is a slow delivery, not an abandoned one:
+        # taking its lease would let a second pass run the same pending row.
+        if row is not None and row[0] != holder and _holder_alive(row[0]):
             conn.rollback()
             return False
         conn.execute("INSERT INTO drain_lease (id, holder, expires_at) VALUES (1, ?, ?)"

@@ -18,6 +18,7 @@ from gateway.platforms.webhook import (
     _DYNAMIC_ROUTES_FILENAME,
     _INSECURE_NO_AUTH,
     WebhookAdapter,
+    _is_loopback_host,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class GuardedWebhookAdapter(WebhookAdapter):
         path = get_hermes_home() / _DYNAMIC_ROUTES_FILENAME
         reason: Optional[str] = None
         names: List[str] = []
+        data: object = {}
         if path.exists():
             # Read on every call, never mtime-gated, so a breach cannot hide
             # behind the release's own mtime check.
@@ -60,6 +62,11 @@ class GuardedWebhookAdapter(WebhookAdapter):
             if isinstance(data, dict):
                 names = [str(k) for k in data]
         if reason is None:
+            # Rebuild from the file just read, never from the release's mtime-gated
+            # cache, which can still hold a breaching route after a same-mtime rewrite.
+            self._dynamic_routes = {
+                str(k): v for k, v in data.items()
+                if k not in self._static_routes and _is_loopback_host(self._host)}
             self._routes = {**self._dynamic_routes, **self._static_routes}
             self._set_guard(None, [])
             return
