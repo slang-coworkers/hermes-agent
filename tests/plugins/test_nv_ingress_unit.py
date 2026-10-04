@@ -217,7 +217,8 @@ def test_orchestrator_prompt_keeps_the_action_ci_result_and_link(tmp_path, monke
     envelope, deliver = module.envelope, module.deliver
     probe, sha = "probe" + secrets.token_hex(6), "c" * 40
     url = "https://github.com/o/r/runs/" + secrets.token_hex(4)
-    gh = envelope.normalize("github", "check_run", {"X-GitHub-Event": "check_run", "X-GitHub-Delivery": "d-b"}, {
+    gh_headers = {envelope.GITHUB_EVENT_HEADER: "check_run", envelope.GITHUB_DELIVERY_HEADER: "d-b"}
+    gh = envelope.normalize("github", "check_run", gh_headers, {
         "action": "completed", "repository": {"full_name": "o/r"}, "sender": {"login": "octo"},
         "check_run": {"head_sha": sha, "conclusion": "failure", "name": probe, "html_url": url,
                       "pull_requests": [{"number": 9}], "check_suite": {"head_branch": "b"}}})
@@ -228,7 +229,8 @@ def test_orchestrator_prompt_keeps_the_action_ci_result_and_link(tmp_path, monke
     assert probe in deliver.prompt(gh, 9, to_orchestrator=False), "the owner prompt keeps the check name"
 
     gl_url = "https://gitlab.example/o/r/-/issues/4"
-    gl = envelope.normalize("gitlab", "Issue Hook", {"X-Gitlab-Event": "Issue Hook", "webhook-id": "gl-b"}, {
+    gl_headers = {envelope.GITLAB_EVENT_HEADER: "Issue Hook", envelope.GITLAB_ID_HEADER: "gl-b"}
+    gl = envelope.normalize("gitlab", "Issue Hook", gl_headers, {
         "object_kind": "issue", "project": {"path_with_namespace": "o/r"}, "user": {"username": "octo"},
         "labels": [{"title": "fleet"}], "object_attributes": {"iid": 4, "action": "open", "title": probe,
                                                               "url": gl_url}})
@@ -377,15 +379,20 @@ def _offline_edge(tmp_path: Path):
     return edge_mod, edge_mod.Edge(cfg), key
 
 
-def test_concurrent_same_id_posts_each_spool_a_complete_entry(tmp_path):
+def _signed_github_headers(edge_mod, key: bytes, body: bytes, delivery: str) -> dict:
     import hashlib
     import hmac
 
+    env = edge_mod.envelope
+    return {env.GITHUB_EVENT_HEADER: "issues", env.GITHUB_DELIVERY_HEADER: delivery,
+            edge_mod.GITHUB_SIGNATURE_HEADER: "sha256=" + hmac.new(key, body, hashlib.sha256).hexdigest()}
+
+
+def test_concurrent_same_id_posts_each_spool_a_complete_entry(tmp_path):
     edge_mod, edge, key = _offline_edge(tmp_path)
     body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
                        "issue": {"number": 3, "labels": [{"name": "fleet"}]}}).encode()
-    headers = {"X-GitHub-Event": "issues", "X-GitHub-Delivery": "same-id",
-               "X-Hub-Signature-256": "sha256=" + hmac.new(key, body, hashlib.sha256).hexdigest()}
+    headers = _signed_github_headers(edge_mod, key, body, "same-id")
     results: list = []
     start = threading.Barrier(8)
 
@@ -414,3 +421,25 @@ def test_corrupt_spool_entry_is_dead_lettered_and_logged(tmp_path, caplog):
     assert not bad.exists()
     assert (tmp_path / "spool" / "dead-letter" / "github-broken.json").exists()
     assert any("github-broken.json" in r.getMessage() and "dead-letter" in r.getMessage() for r in caplog.records)
+
+
+def test_a_redelivery_racing_a_corrupt_entry_is_kept_for_forwarding(tmp_path, monkeypatch):
+    edge_mod, edge, key = _offline_edge(tmp_path)
+    body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
+                       "issue": {"number": 3, "labels": [{"name": "fleet"}]}}).encode()
+    path = tmp_path / "spool" / edge_mod.spool_name("github", "same-id")
+    path.write_bytes(b'{"envelope": ')
+    real_loads = edge_mod.json.loads
+
+    def _loads_then_redeliver(raw, *a, **k):
+        if raw == b'{"envelope": ':
+            # The platform redelivers the same id after the forwarder read the corrupt bytes.
+            assert edge.receive("github", _signed_github_headers(edge_mod, key, body, "same-id"), body)[0] == 202
+        return real_loads(raw, *a, **k)
+
+    monkeypatch.setattr(edge_mod.json, "loads", _loads_then_redeliver)
+    edge._forward_one(path, time.time())
+    monkeypatch.setattr(edge_mod.json, "loads", real_loads)
+    assert path.exists(), "the accepted redelivery was moved away with the corrupt entry"
+    assert json.loads(path.read_bytes())["envelope"]["delivery_id"] == "same-id"
+    assert not (tmp_path / "spool" / "dead-letter" / path.name).exists()
