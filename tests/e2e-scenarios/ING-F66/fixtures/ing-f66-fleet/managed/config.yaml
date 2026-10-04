@@ -1,0 +1,27 @@
+approvals:
+  mode: smart
+  timeout: 300
+  cron_mode: deny
+  single_query_mode: deny
+  unattended_mode: deny
+  denial_breaker_threshold: 3
+security:
+  approval:
+    transport: builtin
+    transport_fallback: deny
+plugins:
+  entries:
+    nv-fleet-gates:
+      settings:
+        profile_roles:
+          orchestrator: orchestrator
+          triager: worker
+          fixer: worker
+          reviewer: worker
+          approver: worker
+        expected_ssh_host:
+          orchestrator: openshell-ing-f66-orchestrator
+          triager: openshell-ing-f66-triager
+          fixer: openshell-ing-f66-fixer
+          reviewer: openshell-ing-f66-reviewer
+          approver: openshell-ing-f66-approver

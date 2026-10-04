@@ -1,0 +1,32 @@
+{
+  "events": [
+    "check_run",
+    "check_suite",
+    "issue_comment",
+    "issues",
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "workflow_run"
+  ],
+  "forward_url": "http://@LOOPBACK@:8644/webhooks/ingress",
+  "gateway": {
+    "lock_file": "/home/ubuntu/.local/state/nv-ingress/gateway-boot.lock",
+    "openshell_bin": "/usr/local/bin/openshell",
+    "port": 8644,
+    "sandbox": "ing-f66-gw",
+    "start": [
+      "/home/ubuntu/.config/nv-ingress/gateway-start.sh"
+    ]
+  },
+  "listen": "@LOOPBACK@:8650",
+  "platforms": {
+    "github": {
+      "secret_file": "/home/ubuntu/.config/nv-ingress/secrets/github"
+    },
+    "gitlab": {
+      "secret_file": "/home/ubuntu/.config/nv-ingress/secrets/gitlab"
+    }
+  },
+  "spool_dir": "/home/ubuntu/.local/state/nv-ingress/spool"
+}
