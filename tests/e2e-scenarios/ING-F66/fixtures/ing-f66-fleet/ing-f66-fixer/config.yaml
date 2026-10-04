@@ -36,6 +36,9 @@ plugins:
     nv-coworker-compose:
       settings:
         orchestrator_profile: orchestrator
+    nv-ingress:
+      settings:
+        orchestrator_profile: orchestrator
 terminal:
   backend: ssh
   ssh_host: openshell-ing-f66-fixer
