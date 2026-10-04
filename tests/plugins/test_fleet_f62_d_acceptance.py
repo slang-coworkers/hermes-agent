@@ -784,8 +784,10 @@ def test_ac_fleet_f62_d_13(tmp_path, monkeypatch):
     for cmd in ("git status 2>&1", "ls -la 2>/dev/null", "pytest -q >/dev/null 2>&1", "make 2>&1 | tail -5",
                 "cmd >&2", "cmd &>/dev/null"):
         assert _gate_action(manager, cmd) != "block", f"stream merge counted as a write: {cmd!r}"
+    # A merge or null-device target followed by more word characters names a different file, which bash creates.
     for cmd in ("echo x > notes.txt", "echo x >> notes.txt", "git log 2>err.log", "cmd &> out.log",
-                "cmd >&out.log", "cmd 2>&1 > out.log"):
+                "cmd >&out.log", "cmd 2>&1 > out.log", "echo x >&2+notes.txt", "echo x >&2,n3",
+                'echo x >&2"x"', "echo x >/dev/null+n2"):
         assert _gate_action(manager, cmd) == "block", f"real file redirect not counted as a write: {cmd!r}"
 
 
