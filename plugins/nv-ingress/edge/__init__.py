@@ -140,6 +140,9 @@ class Edge:
         self.reload()
         self._wake = threading.Event()
         self._stop = threading.Event()
+        # A same-id redelivery rewrites the same spool path, so the forwarder moves or
+        # deletes a path only while it still holds the bytes the forwarder read.
+        self._spool_lock = threading.Lock()
         self._next_attempt: Dict[str, Tuple[float, int]] = {}
         self._forwarder = threading.Thread(target=self._forward_loop, name="nv-ingress-forward",
                                            daemon=True)
@@ -169,8 +172,9 @@ class Edge:
         if env["event"] not in self.events:
             return 202, {"status": "ignored", "event": env["event"]}
         entry = {"spooled_at": time.time(), "envelope": env}
-        _atomic_write(self.spool / spool_name(platform, env["delivery_id"]),
-                      json.dumps(entry, sort_keys=True).encode())
+        with self._spool_lock:
+            _atomic_write(self.spool / spool_name(platform, env["delivery_id"]),
+                          json.dumps(entry, sort_keys=True).encode())
         logger.info("edge: spooled %s %s delivery %s", platform, env["event"], env["delivery_id"])
         self._wake.set()
         return 202, {"status": "accepted", "delivery_id": env["delivery_id"]}
@@ -195,12 +199,30 @@ class Edge:
             logger.info("edge: forward of delivery %s acknowledged as %s", env["delivery_id"], outcome)
         return acked
 
+    def _settle(self, path: Path, raw: bytes, dead_letter: bool) -> bool:
+        """Delete or dead-letter ``path`` only if it still holds ``raw``."""
+        with self._spool_lock:
+            try:
+                if path.read_bytes() != raw:
+                    return False
+            except FileNotFoundError:
+                return False
+            if dead_letter:
+                self.dead_letter.mkdir(exist_ok=True)
+                os.replace(path, self.dead_letter / path.name)
+            else:
+                path.unlink(missing_ok=True)
+        self._next_attempt.pop(path.name, None)
+        return True
+
     def _forward_one(self, path: Path, now: float) -> None:
         due, attempts = self._next_attempt.get(path.name, (0.0, 0))
         if due > now:
             return
         try:
-            entry = json.loads(path.read_bytes())
+            with self._spool_lock:
+                raw = path.read_bytes()
+            entry = json.loads(raw)
             env = entry["envelope"]
             if not isinstance(env, dict) or not env.get("delivery_id"):
                 raise ValueError("no envelope with a delivery id")
@@ -210,21 +232,16 @@ class Edge:
             logger.warning("edge: spool entry %s is unreadable; will retry", path.name, exc_info=True)
             return
         except (ValueError, KeyError, TypeError):
-            self.dead_letter.mkdir(exist_ok=True)
-            os.replace(path, self.dead_letter / path.name)
-            self._next_attempt.pop(path.name, None)
-            logger.error("edge: spool entry %s is corrupt; moved to dead-letter", path.name)
+            if self._settle(path, raw, dead_letter=True):
+                logger.error("edge: spool entry %s is corrupt; moved to dead-letter", path.name)
             return
         if self._post(env):
-            path.unlink(missing_ok=True)
-            self._next_attempt.pop(path.name, None)
+            self._settle(path, raw, dead_letter=False)
             return
         if now - float(entry.get("spooled_at") or now) > DEAD_LETTER_AFTER_SECONDS:
-            self.dead_letter.mkdir(exist_ok=True)
-            os.replace(path, self.dead_letter / path.name)
-            self._next_attempt.pop(path.name, None)
-            logger.error("edge: delivery %s moved to dead-letter after 24 h of failed forwards",
-                         env.get("delivery_id"))
+            if self._settle(path, raw, dead_letter=True):
+                logger.error("edge: delivery %s moved to dead-letter after 24 h of failed forwards",
+                             env.get("delivery_id"))
             return
         self._next_attempt[path.name] = (now + min(BACKOFF_CAP_SECONDS, 2.0 ** attempts), attempts + 1)
 
