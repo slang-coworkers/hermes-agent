@@ -135,10 +135,11 @@ def _is_valid_python(code: str) -> bool:
 
 # Redirects that open no file: an fd duplication (`2>&1`, `>&2`, `&>&2`, `1>&-`) and any
 # redirect to the null device. `>&` followed by a name (bash's `>&file`) is a write, so the
-# duplication form only accepts a digit or `-` after `>&`.
+# duplication form only accepts a digit or `-` after `>&`. Bash reads a redirect target up to
+# the next metacharacter, so a match must end there: `>&2+notes.txt` writes `2+notes.txt`.
 _NON_FILE_REDIRECT_RE = re.compile(
-    r"(?:\d*|&)>&(?:\d+|-)(?![\w./-])"
-    r"|(?:\d*|&)>>?\s*/dev/null(?![\w./-])"
+    r"(?:\d*|&)>&(?:\d+|-)(?=$|[\s;&|()<>])"
+    r"|(?:\d*|&)>>?\s*/dev/null(?=$|[\s;&|()<>])"
 )
 
 

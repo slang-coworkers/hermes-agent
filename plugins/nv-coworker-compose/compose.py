@@ -3596,7 +3596,7 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     for skill in resolved["skills"]:
         skill = _safe_name("skill", skill)
         src = _safe_join(skills_root, skill, "SKILL.md")
-        if src.is_symlink() or not src.is_file():
+        if not src.is_file():
             raise CompositionError(f"{tname}: skill {skill!r} has no SKILL.md at {src}")
         dest = skills_dir / skill
         dest.mkdir(exist_ok=True)
@@ -3627,8 +3627,9 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
 
 def _copy_skill_files(src_dir: Path, dest: Path, tname: str, skill: str) -> None:
     """Copy a spec skill's bundled files (e.g. ``scripts/``) beside its SKILL.md, in sorted
-    order so the render is deterministic. A symlink anywhere in the skill fails the render:
-    following it could pull a file from outside the spec tree into a distribution."""
+    order so the render is deterministic. A symlink among the bundled files fails the render:
+    following it could pull a file from outside the spec tree into a distribution (SKILL.md
+    itself is already confined to the spec tree by ``_safe_join``)."""
     for path in sorted(src_dir.rglob("*")):
         rel = path.relative_to(src_dir)
         if "__pycache__" in rel.parts or rel == Path("SKILL.md"):

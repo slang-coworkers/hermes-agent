@@ -439,8 +439,14 @@ plan is byte-for-byte unchanged. The script:
   It must **never run `profile install default`**: `get_profile_dir("default")` resolves
   to `$HERMES_HOME` itself (the user's running Hermes), so the default is edited, never
   reinstalled.
+- On a rerun it **deletes and re-creates** any existing worker sandbox whose recorded policy
+  digest (`<home>/.osh-f64/sandbox-policy/<name>.sha256`) is missing or differs from the current
+  render, discarding that sandbox's local state. A box installed by an older installer has no
+  records, so its first rerun re-creates every worker sandbox.
 - It creates the fleet rooms and wires, then restarts the gateway via the shipped
-  `hermes gateway restart`.
+  `hermes gateway restart`, launched **detached** with its output appended to
+  `<home>/logs/osh-f64-restart.log`; the installer returns after a bounded
+  `hermes gateway status` poll and reports on stderr whether a gateway answered.
 - **Post-install Bot-Mode onboarding (required for `message_agent`).** After the gateway is
   up, the operator runs the fleet onboard step from the default gateway context —
   `hermes -p default onboard coworker <spec> --gateway-url "$GW_URL"` — which creates each
