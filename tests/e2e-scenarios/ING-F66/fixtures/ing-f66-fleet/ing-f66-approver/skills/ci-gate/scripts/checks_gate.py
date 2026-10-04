@@ -60,7 +60,7 @@ def _provider_get(path: str) -> Any:
     gh = shutil.which("gh")
     if gh is None:
         raise ReadUnavailable("GitHub CLI not found")
-    proc = subprocess.run([gh, "api", "-X", "GET", path], capture_output=True, text=True, encoding="utf-8",
+    proc = subprocess.run([gh, "api", "-X", "GET", path], stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                           timeout=_TIMEOUT_SECONDS, check=False)
     return _json_or_unavailable(proc, path)
 
@@ -73,7 +73,7 @@ def _anonymous_get(path: str) -> Any:
     argv = [curl, "-q", "--silent", "--show-error", "--fail", "--max-time", str(_TIMEOUT_SECONDS),
             "-X", "GET", "-H", "Accept: application/vnd.github+json",
             "-H", "X-GitHub-Api-Version: 2022-11-28", f"{API}{path}"]
-    proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+    proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                           timeout=_TIMEOUT_SECONDS + 5, check=False)
     return _json_or_unavailable(proc, path)
 
