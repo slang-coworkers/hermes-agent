@@ -34,3 +34,21 @@ def test_stream_merge_is_not_a_write(command):
 ])
 def test_file_redirect_is_a_write(command):
     assert _predicates().is_mutation("terminal", {"command": command}) is True
+
+
+# Python's `\d`/`\s` are Unicode-aware, bash's fd digits and blanks are not: each of these creates
+# a file (a CRLF script line `echo a >&2` creates `2\r`).
+@pytest.mark.parametrize("command", [
+    "printf x >&٢", "printf x >&2\rprobe", "printf x >&2\vo2", "printf x >&2\fo3",
+    "printf x >&2 o5", "printf x >&2\xa0o6", "printf x >&2\x85o7", "printf x >&2\x1co8",
+    "echo a >&2\r", "echo a >\r/dev/null",
+])
+def test_unicode_or_control_redirect_target_is_a_write(command):
+    assert _predicates().is_mutation("terminal", {"command": command}) is True
+
+
+@pytest.mark.parametrize("command", [
+    "echo a >&2\n", "echo a 2>&1\tls", "echo a >\t/dev/null",
+])
+def test_ascii_blank_still_ends_a_stream_merge(command):
+    assert _predicates().is_mutation("terminal", {"command": command}) is False

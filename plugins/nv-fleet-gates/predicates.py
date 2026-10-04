@@ -137,9 +137,11 @@ def _is_valid_python(code: str) -> bool:
 # redirect to the null device. `>&` followed by a name (bash's `>&file`) is a write, so the
 # duplication form only accepts a digit or `-` after `>&`. Bash reads a redirect target up to
 # the next metacharacter, so a match must end there: `>&2+notes.txt` writes `2+notes.txt`.
+# The classes are ASCII on purpose: bash takes only 0-9 as an fd and only space, tab and newline
+# as blanks, while Python's `\d`/`\s` also match `٢`, `\r`, `\xa0` (`>&2\r` writes `2\r`).
 _NON_FILE_REDIRECT_RE = re.compile(
-    r"(?:\d*|&)>&(?:\d+|-)(?=$|[\s;&|()<>])"
-    r"|(?:\d*|&)>>?\s*/dev/null(?=$|[\s;&|()<>])"
+    r"(?:[0-9]*|&)>&(?:[0-9]+|-)(?=$|[ \t\n;&|()<>])"
+    r"|(?:[0-9]*|&)>>?[ \t]*/dev/null(?=$|[ \t\n;&|()<>])"
 )
 
 
