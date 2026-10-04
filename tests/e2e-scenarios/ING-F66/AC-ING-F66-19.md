@@ -131,7 +131,7 @@ new-chat button: each of those mints a fresh session and would break the
    → expect, within 180 s of `T1`:
    - exactly one new `user` message with `id > ORCH_M0` in session `ORCH_S`. It
      carries the line `ingress-delivery: github/<delivery id>` for one of the two
-     ids, and the issue title.
+     ids.
    - In the ledger, `select stage, count(*) from outbox where repo = '<scratch repo>' and kind = 'issue' group by stage`
      gives one `new` row and one `suppressed` row.
    - That `new` row's delivery has `state = 'done'`. Record `ORCH_M1` = the max
