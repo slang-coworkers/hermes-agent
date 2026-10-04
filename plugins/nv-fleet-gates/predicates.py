@@ -54,8 +54,9 @@ def command_text(canon: str, args: dict) -> str:
 
 
 # Split a shell command on statement/pipe separators so a mutation or a gh-pr
-# verb hiding after `&&`/`;`/`|` in a compound command is not missed.
-_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||[;\n|])\s*")
+# verb hiding after `&&`/`;`/`|` in a compound command is not missed. Only spaces and tabs are
+# trimmed: a `\r` before a separator is part of bash's word (`echo a >&2\r` writes `2\r`).
+_SEGMENT_RE = re.compile(r"[ \t]*(?:&&|\|\||[;\n|])[ \t]*")
 
 
 def _segments(command: str):

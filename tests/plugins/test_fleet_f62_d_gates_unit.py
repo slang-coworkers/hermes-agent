@@ -42,6 +42,7 @@ def test_file_redirect_is_a_write(command):
     "printf x >&٢", "printf x >&2\rprobe", "printf x >&2\vo2", "printf x >&2\fo3",
     "printf x >&2 o5", "printf x >&2\xa0o6", "printf x >&2\x85o7", "printf x >&2\x1co8",
     "echo a >&2\r", "echo a >\r/dev/null",
+    "echo a >&2\r\n", "echo a >&2\r\nls", "echo a >&2\r;ls", "echo a >&2\r && ls",
 ])
 def test_unicode_or_control_redirect_target_is_a_write(command):
     assert _predicates().is_mutation("terminal", {"command": command}) is True
