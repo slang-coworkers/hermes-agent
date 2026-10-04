@@ -257,7 +257,15 @@ class Edge:
     def _forward_loop(self) -> None:
         while not self._stop.is_set():
             self._wake.clear()
-            for path in self._pending():
+            # The edge keeps answering 202 while this thread runs, so a scan error must
+            # never end it: the spooled entries would then wait for a manual restart.
+            try:
+                pending = self._pending()
+            except OSError:
+                logger.warning("edge: spool scan failed; retrying", exc_info=True)
+                self._wake.wait(1.0)
+                continue
+            for path in pending:
                 if self._stop.is_set():
                     return
                 try:
