@@ -36,8 +36,9 @@ def test_file_redirect_is_a_write(command):
     assert _predicates().is_mutation("terminal", {"command": command}) is True
 
 
-# Python's `\d`/`\s` are Unicode-aware, bash's fd digits and blanks are not: each of these creates
-# a file (a CRLF script line `echo a >&2` creates `2\r`).
+# Python's `\d`/`\s` are Unicode-aware, bash's fd digits and blanks are not: each of these names a
+# file (a CRLF script line `echo a >&2` creates `2\r`; `>\r/dev/null` writes when a relative `\r/dev`
+# directory exists).
 @pytest.mark.parametrize("command", [
     "printf x >&٢", "printf x >&2\rprobe", "printf x >&2\vo2", "printf x >&2\fo3",
     "printf x >&2 o5", "printf x >&2\xa0o6", "printf x >&2\x85o7", "printf x >&2\x1co8",
