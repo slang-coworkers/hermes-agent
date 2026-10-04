@@ -133,8 +133,17 @@ def _is_valid_python(code: str) -> bool:
         return False
 
 
+# Redirects that open no file: an fd duplication (`2>&1`, `>&2`, `&>&2`, `1>&-`) and any
+# redirect to the null device. `>&` followed by a name (bash's `>&file`) is a write, so the
+# duplication form only accepts a digit or `-` after `>&`.
+_NON_FILE_REDIRECT_RE = re.compile(
+    r"(?:\d*|&)>&(?:\d+|-)(?![\w./-])"
+    r"|(?:\d*|&)>>?\s*/dev/null(?![\w./-])"
+)
+
+
 def _segment_mutates(seg: str) -> bool:
-    if ">" in seg:  # output redirection (> or >>) writes a file
+    if ">" in _NON_FILE_REDIRECT_RE.sub(" ", seg):  # output redirection (> or >>) writes a file
         return True
     try:
         tokens = shlex.split(seg)

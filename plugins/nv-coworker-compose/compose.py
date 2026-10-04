@@ -1238,9 +1238,12 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     the ssh port are refused on every allow entry, broker included. Opted-in providers
     (FLEET-F62.c) add their role-scoped endpoints in ``_openshell_policy_document``, not
     here. The optional ``filesystem_read_only`` (absolute paths, no wildcard / no ``..``) is
-    returned for ``filesystem_policy.read_only`` and the optional ``binaries`` (absolute
-    paths, a ``*`` glob permitted) for the worker-egress binary allow-list; each absent →
-    ``None`` (the base v1 policy)."""
+    returned for ``filesystem_policy.read_only``, the optional ``filesystem_read_write`` (same
+    grammar, never ``/``) for ``filesystem_policy.read_write``, and the optional ``binaries``
+    (absolute paths, a ``*`` glob permitted) for the worker-egress binary allow-list; each
+    absent → ``None`` (the base v1 policy). The optional ``anonymous_reads`` (role → list of
+    ``host:port``) is returned as a role-keyed map, ``{}`` when absent: each target becomes a
+    credential-free GET-only endpoint in that role's policy (``_openshell_policy_document``)."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
 
@@ -1334,6 +1337,10 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     # explicit null) is validated and fail-closes if malformed.
     read_only = (_validate_openshell_read_only(egress["filesystem_read_only"])
                  if "filesystem_read_only" in egress else None)
+    read_write = (_validate_openshell_read_write(egress["filesystem_read_write"])
+                  if "filesystem_read_write" in egress else None)
+    anonymous_reads = (_validate_openshell_anonymous_reads(egress["anonymous_reads"])
+                       if "anonymous_reads" in egress else {})
     binaries = (_validate_openshell_binaries(egress["binaries"])
                 if "binaries" in egress else None)
     # tls:skip toggle (OpenShell 0.0.72). The raw hops are the OneCLI proxy hops a worker
@@ -1368,6 +1375,8 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
         "allow": allow,
         "sandbox_image": sandbox_image,
         "filesystem_read_only": read_only,
+        "filesystem_read_write": read_write,
+        "anonymous_reads": anonymous_reads,
         "binaries": binaries,
         "raw_hops": raw_hops,
         "chain_addr": chain_addr,
@@ -1406,6 +1415,53 @@ def _validate_openshell_read_only(value: Any) -> List[str]:
                 f"egress.filesystem_read_only entries must be absolute paths without a wildcard "
                 f"or '..', got {path!r}")
         out.append(path)
+    return out
+
+
+def _validate_openshell_read_write(value: Any) -> List[str]:
+    """Validate a PRESENT ``egress.filesystem_read_write`` into the paths appended to the
+    policy's ``filesystem_policy.read_write``: the ``filesystem_read_only`` grammar (non-empty
+    list of absolute paths, no control characters, wildcard or ``..``), and never ``/`` — a
+    write grant on the root would void the Landlock floor."""
+    if not isinstance(value, list) or not value:
+        raise CompositionError(
+            f"egress.filesystem_read_write must be a non-empty list of absolute paths, got {value!r}")
+    out: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise CompositionError(
+                f"egress.filesystem_read_write entries must be non-empty strings, got {entry!r}")
+        if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in entry):
+            raise CompositionError(
+                f"egress.filesystem_read_write entries must not contain control characters, got {entry!r}")
+        path = entry.strip()
+        if (not path.startswith("/") or "*" in path or ".." in path.split("/")
+                or path.rstrip("/") == ""):
+            raise CompositionError(
+                f"egress.filesystem_read_write entries must be absolute paths other than '/' without "
+                f"a wildcard or '..', got {path!r}")
+        out.append(path)
+    return out
+
+
+def _validate_openshell_anonymous_reads(value: Any) -> Dict[str, List[str]]:
+    """Validate a PRESENT ``egress.anonymous_reads`` (role → non-empty list of ``host:port``)
+    into the per-role credential-free read targets. Each target is held to the endpoint grammar
+    and the forbidden-host guard; ``compose()`` checks that every role is a declared type."""
+    if not isinstance(value, dict):
+        raise CompositionError(
+            f"egress.anonymous_reads must be a mapping of role -> [host:port], got {value!r}")
+    out: Dict[str, List[str]] = {}
+    for role, targets in value.items():
+        rname = _safe_name("type", role)
+        if (not isinstance(targets, list) or not targets
+                or not all(isinstance(t, str) and t.strip() for t in targets)):
+            raise CompositionError(
+                f"egress.anonymous_reads.{rname} must be a non-empty list of host:port, got {targets!r}")
+        hosts = [t.strip() for t in targets]
+        for hp in hosts:
+            _assert_openshell_host_allowed(hp)
+        out[rname] = hosts
     return out
 
 
@@ -1734,6 +1790,7 @@ def _openshell_policy_document(
     rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     extra_read_only: Optional[List[str]] = None,
     extra_read_write: Optional[List[str]] = None,
+    anonymous_reads: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section grammar
     from the validated egress targets (§D1.3), plus any opted-in provider
@@ -1750,6 +1807,11 @@ def _openshell_policy_document(
     (e.g. the inference route) stays a ``protocol: rest``/``enforcement: enforce`` HTTP-API
     endpoint. Empty ``raw_hops`` → every endpoint keeps the ``protocol: rest`` shape (the
     OSH-F63 back-compat contract).
+
+    ``anonymous_reads`` (host:port, FLEET-F62.d ``egress.anonymous_reads`` / ING-F66
+    ``ingress.anonymous_reads``) are credential-free read-only egress targets: each renders as a
+    ``protocol: rest`` endpoint with one GET rule and no binary change (the base
+    ``/usr/bin/curl`` is the reader). Empty leaves the document as is.
 
     Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
     base two-endpoint POST-only policy."""
@@ -1807,6 +1869,16 @@ def _openshell_policy_document(
             record = {"path": binary}
             if record not in binary_records:
                 binary_records.append(record)
+    for entry in anonymous_reads or []:
+        _assert_openshell_host_allowed(entry)
+        host, port = _openshell_hostport(entry)
+        endpoints.append({
+            "host": host,
+            "port": port,
+            "protocol": "rest",
+            "enforcement": "enforce",
+            "rules": [{"allow": {"method": "GET", "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
+        })
     return {
         "version": 1,
         "filesystem_policy": {
@@ -1838,6 +1910,7 @@ def _enforce_openshell_policy(
     rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     extra_read_only: Optional[List[str]] = None,
     extra_read_write: Optional[List[str]] = None,
+    anonymous_reads: Optional[List[str]] = None,
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
@@ -1856,7 +1929,8 @@ def _enforce_openshell_policy(
     _write_yaml(pdir / policy_name,
                 _openshell_policy_document(allow, providers, filesystem_read_only,
                                            binaries, raw_hops, rest_overrides,
-                                           extra_read_only, extra_read_write))
+                                           extra_read_only, extra_read_write,
+                                           anonymous_reads))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
     owned = dist.get("distribution_owned")
@@ -1865,9 +1939,32 @@ def _enforce_openshell_policy(
         _write_yaml(dist_path, dist)
 
 
+# FLEET-F62.d D5: the per-profile git config rides the profile's own skills/ tree, which the ssh
+# terminal backend syncs into the worker's ~/.hermes/skills for the ACTIVE profile on every sync.
+# No SKILL.md beside it, so skill discovery never lists it. The worker image's system gitconfig
+# includes the synced path (Dockerfile.worker), and git ignores a missing include target, so a
+# worker without this file is unaffected.
+_OPENSHELL_GITCONFIG_REL = Path("skills") / "nv-gitconfig" / "gitconfig-github"
+# The helper list is reset first so no inherited helper answers for the host; the GitHub CLI's
+# git-credential mode then serves the provider-managed session credential (no value in the file).
+_OPENSHELL_GITCONFIG = (
+    '[credential "https://github.com"]\n'
+    "\thelper =\n"
+    "\thelper = !/usr/bin/gh auth git-credential\n"
+)
+
+
+def _render_openshell_gitconfig(pdir: Path) -> None:
+    """Write the provider-opted worker's GitHub git config into its profile (FLEET-F62.d D5)."""
+    target = pdir / _OPENSHELL_GITCONFIG_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_OPENSHELL_GITCONFIG, encoding="utf-8")
+
+
 def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> List[str]:
     """Build the deterministic ``openshell`` provisioning plan for a remote-ssh fleet:
-    per coworker profile, a sandbox-create + ssh-config line, then the
+    per coworker profile, a sandbox-create line (carrying one ``--provider <name>`` per
+    provider the role opts into, bound at create) + an ssh-config line, then the
     teardown (sandbox-delete). Returns ``[]`` for any non-remote-ssh
     substrate (only openshell has a plan). Computed from spec DATA only (roster, fleet
     name, pinned image) so it is byte-stable across runs — no ``--out`` path appears,
@@ -1891,17 +1988,15 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     # lines (create, ssh-config) precede all teardown lines (delete). No `openshell
     # policy` verb appears: `sandbox create --policy` binds+enforces the policy inline
     # (so `policy set` is redundant) and the broker has no `policy delete` verb.
+    # Providers bind at create (OpenShell 0.0.72 attaches a provider only at create, and an ssh
+    # ControlMaster opened before a later attach may never see it). A providers-free role's
+    # line carries no --provider, so a providers-free fleet's plan stays byte-identical.
     for role in roster:
+        provider_opts = "".join(f" --provider {name}"
+                                for name, _provider in _type_providers(data, role, catalog))
         lines.append(
             f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
-            f"--from {image} --policy policy-{role}.yaml")
-    # Attach each worker's opted-in OpenShell providers after the sandboxes exist. A
-    # providers-free fleet emits no attach line, so its plan stays byte-identical.
-    for role in roster:
-        for name, _provider in _type_providers(data, role, catalog):
-            lines.append(
-                f"openshell sandbox provider attach "
-                f"{_openshell_sandbox_name(fleet_name, role)} {name}")
+            f"--from {image} --policy policy-{role}.yaml{provider_opts}")
     for role in roster:
         lines.append(f"openshell sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
     for role in roster:
@@ -3501,11 +3596,12 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     for skill in resolved["skills"]:
         skill = _safe_name("skill", skill)
         src = _safe_join(skills_root, skill, "SKILL.md")
-        if not src.is_file():
+        if src.is_symlink() or not src.is_file():
             raise CompositionError(f"{tname}: skill {skill!r} has no SKILL.md at {src}")
         dest = skills_dir / skill
         dest.mkdir(exist_ok=True)
         (dest / "SKILL.md").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        _copy_skill_files(src.parent, dest, tname, skill)
 
     overlays = _load_overlays(resolved["overlays"], overlays_root)
     for workflow in resolved["workflows"]:
@@ -3527,6 +3623,22 @@ def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
     })
 
     _write_distribution(pdir, tname, f"Composed Hermes coworker profile: {tname}")
+
+
+def _copy_skill_files(src_dir: Path, dest: Path, tname: str, skill: str) -> None:
+    """Copy a spec skill's bundled files (e.g. ``scripts/``) beside its SKILL.md, in sorted
+    order so the render is deterministic. A symlink anywhere in the skill fails the render:
+    following it could pull a file from outside the spec tree into a distribution."""
+    for path in sorted(src_dir.rglob("*")):
+        rel = path.relative_to(src_dir)
+        if "__pycache__" in rel.parts or rel == Path("SKILL.md"):
+            continue
+        if path.is_symlink():
+            raise CompositionError(f"{tname}: skill {skill!r} contains a symlink at {rel}")
+        if path.is_file():
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
 
 
 def _render_route_scripts(pdir: Path) -> None:
@@ -3985,6 +4097,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 "substrate 'openshell' requires an egress block (the per-profile "
                 "openshell policy allow-set: proxy_addr, inference_route)")
         openshell_params = _validate_openshell_egress(egress_block)
+        unknown_anon = sorted(set(openshell_params["anonymous_reads"]) - set(resolved_by_type))
+        if unknown_anon:
+            raise CompositionError(
+                f"egress.anonymous_reads names {unknown_anon}, which are not declared coworker types")
         provider_catalog = _validate_provider_catalog(data)
         # Resolve every type's provider opt-ins up front, so an unknown provider named by
         # any type fails closed HERE — before the Phase-B loop writes a distribution (the
@@ -4128,6 +4244,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
+            if providers_by_type.get(tname):
+                _render_openshell_gitconfig(pdir)
             if osh_f64b_provider is not None:
                 # OSH-F64.b worker policy = D1 minus inference (workers issue no model call):
                 # the broker 18777 raw hop ONLY; the 18255 proxy hop is dropped from the allow-set.
@@ -4136,13 +4254,17 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                                           providers_by_type.get(tname),
                                           openshell_params["filesystem_read_only"],
                                           openshell_params["binaries"],
-                                          [openshell_params["broker_addr"]])
+                                          [openshell_params["broker_addr"]],
+                                          extra_read_write=openshell_params["filesystem_read_write"],
+                                          anonymous_reads=openshell_params["anonymous_reads"].get(tname))
             else:
                 _enforce_openshell_policy(pdir, tname, openshell_params["allow"],
                                           providers_by_type.get(tname),
                                           openshell_params["filesystem_read_only"],
                                           openshell_params["binaries"],
-                                          openshell_params["raw_hops"])
+                                          openshell_params["raw_hops"],
+                                          extra_read_write=openshell_params["filesystem_read_write"],
+                                          anonymous_reads=openshell_params["anonymous_reads"].get(tname))
         rendered[tname] = str(pdir)
 
     _enforce_retention(default_config)
