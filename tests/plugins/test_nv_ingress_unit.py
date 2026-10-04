@@ -180,3 +180,80 @@ def test_status_has_the_documented_shape(tmp_path, monkeypatch, capsys):
     status = json.loads(capsys.readouterr().out)
     assert set(status) == {"pending", "stuck", "runaway", "refusals", "unclaimable", "webhook_guard"}
     assert status["webhook_guard"] == {"breach": False, "routes": [], "reason": None}
+
+
+def _loaded_plugin(tmp_path: Path, monkeypatch, settings: dict | None = None):
+    from hermes_cli.plugins import PluginManager
+
+    root = tmp_path / "root"
+    (root / "plugins").mkdir(parents=True)
+    shutil.copytree(PLUGIN_SRC, root / "plugins" / "nv-ingress")
+    entry = {"settings": settings} if settings else {}
+    (root / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["nv-ingress"], "entries": {"nv-ingress": entry}}}), encoding="utf-8")
+    (tmp_path / "bundled").mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "os-home"))
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / "bundled"))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    manager = PluginManager()
+    manager.discover_and_load()
+    return root, manager._plugins["nv-ingress"].module
+
+
+def test_lease_is_not_taken_from_a_live_holder_past_its_deadline(tmp_path, monkeypatch):
+    _root, module = _loaded_plugin(tmp_path, monkeypatch)
+    ledger = module.ledger
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        import psutil
+
+        live = f"{sleeper.pid}:{psutil.Process(sleeper.pid).create_time()}:drain"
+        assert ledger.acquire_lease(live, -1.0), "the first holder takes the lease"
+        assert not ledger.acquire_lease("1:0:other", 60.0), "a live holder's lease must not be stolen"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert ledger.acquire_lease("1:0:other", 60.0), "a dead holder's lease is taken"
+
+
+def test_ci_event_matching_two_claimed_prs_waits_instead_of_guessing(tmp_path, monkeypatch):
+    _root, module = _loaded_plugin(tmp_path, monkeypatch)
+    ledger, bridge = module.ledger, module.bridge
+    conn = ledger.connect()
+    try:
+        for pr in (3, 4):
+            conn.execute("INSERT INTO pr_owner (repo, pr, owner_profile, session_id, thread_id, claimed_at)"
+                         " VALUES ('o/r', ?, 'fixer', ?, 't', 0)", (pr, f"s{pr}"))
+            conn.execute("INSERT INTO pr_heads (repo, pr, head_sha, head_branch, open, updated_at)"
+                         " VALUES ('o/r', ?, ?, 'shared', 1, 0)", (pr, f"sha{pr}"))
+        conn.commit()
+        env = {"repo": "o/r", "head_branch": "shared", "head_sha": "unknown"}
+        assert bridge._associate(conn, env) == ("pending", None)
+        assert bridge._associate(conn, {**env, "head_sha": "sha4"}) == ("owned", 4)
+    finally:
+        conn.close()
+
+
+def test_guard_rebuilds_routes_from_the_file_not_a_stale_cache(tmp_path, monkeypatch):
+    root, module = _loaded_plugin(tmp_path, monkeypatch, {"webhook_guard": True})
+    from gateway.config import PlatformConfig
+    from gateway.platforms.webhook import _INSECURE_NO_AUTH
+
+    subs = root / "webhook_subscriptions.json"
+    material = secrets.token_hex(24)
+    subs.write_text(json.dumps({"agent-made": {"secret": material, "events": ["push"]}}), encoding="utf-8")
+    adapter = module.webhook_guard.GuardedWebhookAdapter(PlatformConfig(enabled=True, extra={
+        "host": "127.0.0.1", "port": 0, "routes": {"ingress": {"secret": _INSECURE_NO_AUTH}}}))
+    adapter._reload_dynamic_routes()
+    assert all(r.get("enabled") is False for r in adapter._routes.values())
+
+    # A same-mtime rewrite leaves the release's mtime-gated cache holding the old route.
+    stamp = subs.stat().st_mtime
+    subs.write_text(json.dumps({"agent-safe": {"secret": _INSECURE_NO_AUTH, "events": ["push"]}}),
+                    encoding="utf-8")
+    os.utime(subs, (stamp, stamp))
+    adapter._reload_dynamic_routes()
+    assert set(adapter._routes) == {"ingress", "agent-safe"}
+    assert all(r.get("enabled") is not False for r in adapter._routes.values())
+    assert material not in json.dumps(adapter._routes)

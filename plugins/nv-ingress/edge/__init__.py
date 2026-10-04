@@ -105,7 +105,8 @@ def spool_name(source: str, delivery_id: str) -> str:
 
 def _atomic_write(path: Path, data: bytes) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
-    with open(tmp, "wb") as handle:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
@@ -125,7 +126,8 @@ class Edge:
         self.events = frozenset(cfg.get("events") or envelope.ROUTED_EVENTS)
         self.forward_url = cfg["forward_url"]
         self.spool = Path(os.path.expanduser(cfg["spool_dir"]))
-        self.spool.mkdir(parents=True, exist_ok=True)
+        # Spooled envelopes carry event text; keep them private to the operator user.
+        self.spool.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.dead_letter = self.spool / "dead-letter"
         self.keys: Dict[str, bytes] = {}
         self.reload()

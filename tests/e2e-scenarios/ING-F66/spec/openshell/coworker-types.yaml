@@ -24,12 +24,6 @@ overlays_root: overlays
 # opts into a provider (below) adds that provider's role-scoped endpoints on top. This
 # is the merged OSH-F63 (F63) egress shape on the current baseline; sandbox_image is
 # the pinned `--from` the provisioning plan uses.
-# F64.b-target: on OSH-F64.b merge this egress block becomes broker-18777-only
-#   (NO 18255 data-plane hop), with an OpenShell provider placeholder base_url
-#   https://inference.local and key sk-OPENSHELL-PROXY-REWRITE; the renderer and
-#   the golden regenerate and the openshell policy count moves 5 -> 6 (a gateway
-#   policy is added). That needs the unmerged F64.b renderer, so this row ships
-#   the F63 shape and documents the F64.b target in the fleet port notes.
 egress:
   proxy_addr: "172.17.0.1:18255"
   inference_route: "inference-api.nvidia.com:443"

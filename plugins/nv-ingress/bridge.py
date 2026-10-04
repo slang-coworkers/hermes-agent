@@ -59,12 +59,13 @@ def _associate(conn, env: Dict[str, Any]) -> Tuple[str, Optional[int]]:
     if not claimed:
         return "unowned", None
     sha, branch = env.get("head_sha"), env.get("head_branch")
-    for row in claimed:
-        if sha and row["head_sha"] == sha:
-            return "owned", int(row["pr"])
-    for row in claimed:
-        if branch and row["head_branch"] == branch:
-            return "owned", int(row["pr"])
+    # More than one match is never guessed: the event waits rather than wake the wrong owner.
+    for key, value in (("head_sha", sha), ("head_branch", branch)):
+        matches = {int(row["pr"]) for row in claimed if value and row[key] == value}
+        if len(matches) == 1:
+            return "owned", matches.pop()
+        if matches:
+            return "pending", None
     if branch and all(row["head_branch"] for row in claimed):
         return "unowned", None
     return "pending", None
