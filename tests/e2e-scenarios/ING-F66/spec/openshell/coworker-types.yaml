@@ -21,9 +21,7 @@ overlays_root: overlays
 
 # OpenShell egress: the two BASE egress targets every per-profile policy allows —
 # the OneCLI data-plane hop (172.17.0.1:18255) and the inference route. A worker that
-# opts into a provider (below) adds that provider's role-scoped endpoints on top. This
-# is the merged OSH-F63 (F63) egress shape on the current baseline; sandbox_image is
-# the pinned `--from` the provisioning plan uses.
+# opts into a provider (below) adds that provider's role-scoped endpoints on top.
 egress:
   proxy_addr: "172.17.0.1:18255"
   inference_route: "inference-api.nvidia.com:443"
