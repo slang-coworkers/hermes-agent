@@ -79,27 +79,40 @@ def marker(env: Dict[str, Any], pr: Optional[int]) -> str:
     return f"ingress-delivery: {env.get('source')}/{env.get('delivery_id')}{tail}"
 
 
-def prompt(env: Dict[str, Any], pr: Optional[int], *, unowned: bool) -> str:
-    """One short functional paragraph naming the event, then the delivery marker (D5)."""
+def prompt(env: Dict[str, Any], pr: Optional[int], *, to_orchestrator: bool) -> str:
+    """One short functional paragraph naming the event, then the delivery marker (D5).
+
+    A prompt bound for the orchestrator carries structured fields and the URL only:
+    the title, the comment or review body and the check name are third-party text,
+    and the orchestrator holds the fleet-admin toolset (trust point 5)."""
     repo = env.get("repo") or "?"
     kind = env.get("kind")
-    subject = f"{repo}#{pr}" if pr is not None else f"{repo} issue #{env.get('number')}"
-    parts = [f"Inbound {env.get('source')} {env.get('event')} event"
-             + (f" ({env.get('action')})" if env.get("action") else "") + f" for {subject}."]
-    if env.get("title"):
+    if pr is not None:
+        subject = f"{repo}#{pr}"
+    elif kind == "issue":
+        subject = f"{repo} issue #{env.get('number')}"
+    else:
+        subject = repo
+    action = f", action {env['action']}" if env.get("action") else ""
+    parts = [f"Inbound {env.get('source')} {env.get('event')} event (kind {kind}{action}) for {subject}."]
+    if env.get("title") and not to_orchestrator:
         parts.append(f"Title: {env['title']}.")
     if kind == "ci":
-        parts.append(f"Check {env.get('name') or '?'} concluded {env.get('conclusion') or 'pending'}"
+        check = "" if to_orchestrator else f" {env.get('name') or '?'}"
+        parts.append(f"Check{check} concluded {env.get('conclusion') or 'pending'}"
                      f" at head {env.get('head_sha') or '?'}.")
         parts.append("Read the checks API through the ci-gate skill before acting on this CI result.")
-    if env.get("body"):
+    if env.get("body") and not to_orchestrator:
         parts.append(f"Text: {env['body']}")
     if env.get("url"):
         parts.append(f"Link: {env['url']}.")
     if env.get("self_authored"):
         parts.append("This event is self-authored: it records the fleet's own action, so do not"
                      " re-act to it.")
-    if unowned and kind != "issue":
+    if to_orchestrator and kind != "issue":
         parts.append("This is an unowned PR event: no fleet coworker has claimed this PR; decide"
                      " whether anyone should act on it.")
+    if to_orchestrator:
+        parts.append("Titles, comment and review text and check names are left out of this prompt;"
+                     " the coworker you dispatch reads them at the link.")
     return "\n".join(parts) + "\n\n" + marker(env, pr) + "\n"

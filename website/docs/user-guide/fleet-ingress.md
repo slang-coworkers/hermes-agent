@@ -50,9 +50,13 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
    (`ingress_stage.py`) stages the envelope in the fleet ledger in one transaction,
    before the adapter answers `202`.
 4. **Bridge.** The plugin's `pre_gateway_dispatch` hook skips the ingress route,
-   so no one-shot webhook session is minted, and kicks the drain. The drain runs
-   only in the DEFAULT home. It resolves each staged event and delivers it exactly
-   once:
+   so no one-shot webhook session is minted, and kicks the drain. Each plugin load
+   in the DEFAULT home starts one drain thread. It runs a pass when kicked and
+   every `drain_interval_seconds` (default 5), but only in the process that holds
+   the gateway runtime lock, so `hermes ingress`, the dashboard and other
+   short-lived processes in the DEFAULT home never run a delivery. Loading the
+   plugin never waits on a delivery. The drain resolves each staged event and
+   delivers it exactly once:
    - a new issue carrying a routing label → the orchestrator's canonical Bot Chat
      (deduped on the issue, since `opened` and `labeled` fire together);
    - a PR, review, comment or CI event of a **claimed** PR → the owner's
@@ -60,6 +64,11 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
      (`hermes -p <owner> chat -Q --resume <session> --query-file <prompt>`); a
      session is never created, and an unknown id fails instead;
    - a PR event with no owner → the orchestrator's Bot Chat, flagged as unowned.
+   - A prompt for the orchestrator carries structured fields only: source, event,
+     action, kind, repo and number, the CI conclusion and head SHA, and the link.
+     It never carries a title, a comment or review body, or a check or job name,
+     because anyone who can comment on the repository writes those (Trust model,
+     point 5). The owner's prompt keeps them.
    - A CI event that names no PR waits (`awaiting_association` in
      `hermes ingress status`, no time-out) until a PR event records a matching head
      SHA or branch. It goes to the orchestrator only once it is shown to belong to
@@ -148,7 +157,8 @@ not forwarded.
 The in-sandbox route authenticates nothing; that is the release's
 local-testing mode, used here on purpose. Trust moves **from the signature to
 reachability**, so only the host forward and the gateway's own processes may
-reach the route. Four points hold that boundary:
+reach the route. Four points hold that boundary, and a fifth bounds what a
+legitimate event can carry:
 
 1. **The in-sandbox bind is loopback.** The render pins the webhook host to
    `127.0.0.1`. The release adapter refuses to start a no-auth route on any other
@@ -174,6 +184,12 @@ reach the route. Four points hold that boundary:
    and 3. A forged CI failure only puts text into an owner's session, and the
    owner's next step reads the checks API through the `ci-gate` skill in its own
    worker sandbox, so a forged red check can cost work but never an approval.
+5. **Third-party text never reaches the orchestrator's prompt.** A signed event
+   still carries text that anyone who can comment on a public repository writes.
+   The orchestrator holds the fleet-admin toolset, so its prompts carry the
+   structured fields and the link only. The coworker it dispatches reads the text
+   in its own restricted sandbox. An owned delivery keeps the text, in the owner's
+   own session on that PR's thread.
 
 The reviewer and the approver read check runs, never the legacy commit-status
 endpoint, which can be empty while a check run is red. The reviewer reads
@@ -239,8 +255,11 @@ inbound path at all. It is documented here only, not built.
   window.
 - Events are durable on both sides of the forward. The edge spool keeps
   everything not yet acknowledged and re-forwards it after a restart. The fleet
-  ledger keeps everything staged, and a restarted gateway drains it on plugin
-  load with no new inbound.
+  ledger keeps everything staged, and a restarted gateway drains it within one
+  drain interval of taking its runtime lock, with no new inbound.
+- Unloading the plugin stops its drain thread. A delivery already running is
+  not interrupted, and the next load does not deliver until that delivery's pass
+  releases the ledger lease, so a reload never runs one delivery twice.
 - A delivery whose turn already committed is recognised by its marker, even
   when the session was compacted since, so it is not run twice.
 

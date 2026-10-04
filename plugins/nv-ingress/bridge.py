@@ -32,16 +32,17 @@ def is_ledger_home() -> bool:
         return False
 
 
-def _holder() -> str:
-    """This process as a lease holder: in-process passes are already serialized by
-    ``_PASS_LOCK``, so the lease only arbitrates between processes."""
+def _holder(load_id: str) -> str:
+    """One plugin load as a lease holder. A reloaded plugin in the same process is a
+    different holder, so it cannot take the row a previous load's pass is still
+    delivering (that pass outlives the unload join)."""
     try:
         import psutil
 
         created = psutil.Process(os.getpid()).create_time()
     except Exception:
         created = 0.0
-    return f"{os.getpid()}:{created}:drain"
+    return f"{os.getpid()}:{created}:{load_id}"
 
 
 # --------------------------------------------------------------------------- resolution
@@ -171,7 +172,7 @@ def _deliver_one(row: Tuple, settings: Dict[str, Any]) -> None:
     if target and sessions.marker_present(profile, target, mark):
         _finish(d_id, "done")
         return
-    text = deliver.prompt(env, pr_or_none, unowned=(kind == "bot_chat" and pr_or_none is not None))
+    text = deliver.prompt(env, pr_or_none, to_orchestrator=(kind == "bot_chat"))
     path = deliver.write_prompt(text)
     try:
         argv = (deliver.resume_argv(profile, target, path) if kind == "owner"
@@ -209,12 +210,14 @@ def _finish(d_id: int, state: str) -> None:
         conn.close()
 
 
-def drain_once(settings: Dict[str, Any]) -> int:
-    """One drain pass: plan, resolve, deliver every due row. Returns rows delivered."""
+def drain_once(settings: Dict[str, Any], load_id: str,
+               stop: Optional[threading.Event] = None) -> int:
+    """One drain pass: plan, resolve, deliver every due row. Returns rows delivered.
+    ``stop`` (the unloading driver's) ends the pass before its next row."""
     if not is_ledger_home() or not ledger.exists():
         return 0
     orch = str(settings.get("orchestrator_profile") or "orchestrator")
-    holder = _holder()
+    holder = _holder(load_id)
     with _PASS_LOCK:
         if not ledger.acquire_lease(holder, _LEASE_TTL_SECONDS):
             return 0
@@ -231,7 +234,8 @@ def drain_once(settings: Dict[str, Any]) -> int:
             finally:
                 conn.close()
             for row in due:
-                if not ledger.acquire_lease(holder, _LEASE_TTL_SECONDS):
+                # Renewed before every turn; a live holder is never displaced, whatever its expiry.
+                if (stop is not None and stop.is_set()) or not ledger.acquire_lease(holder, _LEASE_TTL_SECONDS):
                     break
                 try:
                     _deliver_one(row, settings)
