@@ -286,6 +286,10 @@ non-lane `openshell` fleet with `coworker compose`.
 
 ## Operator prerequisites
 
+Inbound platform events (GitHub, GitLab) reach an OpenShell fleet through a signed host
+edge and a loopback forward, with no secret in any sandbox: see
+[Fleet inbound gateway](./fleet-ingress.md).
+
 Before a fleet can be provisioned, the operator must satisfy these prerequisites:
 
 1. A **name-prefixed OpenShell access path** reachable from the provisioning host — a
