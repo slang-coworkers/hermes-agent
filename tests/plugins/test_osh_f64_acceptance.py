@@ -1351,7 +1351,7 @@ def test_ac_osh_f64_13(tmp_path, monkeypatch):
         return {c[c.index("--name") + 1] for c in ran if c[:3] == ["openshell", "sandbox", "create"]}
 
     # Seed each role's rendered policy and the matching recorded digest, so an existing sandbox
-    # reads as created with the current policy and is skipped (FLEET-F62.d D9 drift recreate).
+    # reads as created with the current policy and is skipped rather than re-created.
     for step in create_steps:
         cmd = list(step.command)
         name, policy = cmd[cmd.index("--name") + 1], Path(cmd[cmd.index("--policy") + 1])

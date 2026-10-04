@@ -12,10 +12,11 @@ default branch and never from the issue text.
 
 ## Use
 
-Run the helper beside this file from the checkout, passing every changed or planned
-path relative to the repository root:
+Run the helper that ships in this skill's `scripts/` directory (in a worker sandbox:
+`~/.hermes/skills/nv-path-guard-base/scripts/pick_base.py`), passing the checkout and every
+changed or planned path relative to the repository root:
 
-    python3 scripts/pick_base.py --repo <checkout> <path> [<path> ...]
+    python3 ~/.hermes/skills/nv-path-guard-base/scripts/pick_base.py --repo <checkout> <path> [<path> ...]
 
 - Exit 0: stdout is the one branch whose allowlist owns every path. Use it as the base.
 - Exit 3, no output: no branch, or more than one, owns the whole set. Do not guess.

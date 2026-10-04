@@ -1,4 +1,4 @@
-"""Guard-agreement oracle for the nv-path-guard-base skill's ``pick_base.match`` (FLEET-F62.d D12).
+"""Guard-agreement oracle for the nv-path-guard-base skill's ``pick_base.match``.
 
 The repository path guard decides ownership with ``git check-ignore --no-index`` in a fresh, empty,
 isolated repo (``core.excludesFile=<allowlist>``, ``core.ignoreCase=false``, no inherited ``GIT_*``,

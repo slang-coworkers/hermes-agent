@@ -1808,9 +1808,8 @@ def _openshell_policy_document(
     endpoint. Empty ``raw_hops`` → every endpoint keeps the ``protocol: rest`` shape (the
     OSH-F63 back-compat contract).
 
-    ``anonymous_reads`` (host:port, FLEET-F62.d ``egress.anonymous_reads`` / ING-F66
-    ``ingress.anonymous_reads``) are credential-free read-only egress targets: each renders as a
-    ``protocol: rest`` endpoint with one GET rule and no binary change (the base
+    ``anonymous_reads`` (host:port) are credential-free read-only egress targets: each renders
+    as a ``protocol: rest`` endpoint with one GET rule and no binary change (the base
     ``/usr/bin/curl`` is the reader). Empty leaves the document as is.
 
     Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
@@ -1939,8 +1938,10 @@ def _enforce_openshell_policy(
         _write_yaml(dist_path, dist)
 
 
-# FLEET-F62.d D5: the per-profile git config rides the profile's own skills/ tree, which the ssh
-# terminal backend syncs into the worker's ~/.hermes/skills for the ACTIVE profile on every sync.
+# The per-profile git config rides the profile's own skills/ tree, which the ssh terminal
+# backend syncs into the worker's ~/.hermes/skills for the ACTIVE profile on every sync.
+# terminal.credential_files would not do: that list is cached per process, and the multiplexed
+# gateway switches profile homes inside one process.
 # No SKILL.md beside it, so skill discovery never lists it. The worker image's system gitconfig
 # includes the synced path (Dockerfile.worker), and git ignores a missing include target, so a
 # worker without this file is unaffected.
@@ -1955,7 +1956,6 @@ _OPENSHELL_GITCONFIG = (
 
 
 def _render_openshell_gitconfig(pdir: Path) -> None:
-    """Write the provider-opted worker's GitHub git config into its profile (FLEET-F62.d D5)."""
     target = pdir / _OPENSHELL_GITCONFIG_REL
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_OPENSHELL_GITCONFIG, encoding="utf-8")

@@ -111,11 +111,10 @@ also carries `--no-tty`), (2) folds the provider's endpoints (`api.github.com:44
 worker's `policy-<role>.yaml` — the methods render one allow-rule per verb, so the write
 verbs (`POST`, `PATCH`, …) are admitted alongside the base inference route — and (3)
 writes a git configuration at `skills/nv-gitconfig/gitconfig-github` in the profile. The
-worker's config declares `GH_TOKEN: "${env:GH_TOKEN}"` — an **unresolved
-managed-config placeholder, never a literal token** and never a
-`terminal.env_passthrough` entry (the sandbox child strips `GH_TOKEN` as a
-provider-credential variable, so passthrough would be both ineffective and a
-credential-scrubbing weakening).
+worker profile keeps an **unresolved provider credential reference, never a literal
+value**, and never as a `terminal.env_passthrough` entry: the sandbox child strips
+provider-credential variables, so passthrough would be both ineffective and a
+credential-scrubbing weakening.
 
 The credential itself never appears in any rendered file. The bound OpenShell provider
 supplies it at the proxy boundary for the sandbox's session, and the rendered git

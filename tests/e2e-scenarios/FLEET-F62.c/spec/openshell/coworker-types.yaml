@@ -30,12 +30,11 @@ egress:
   proxy_addr: "172.17.0.1:18255"
   inference_route: "inference-api.nvidia.com:443"
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
-  # FLEET-F62.d: every worker's policy also grants read-write to the null device (git opens it
-  # for discarded stdio) and to the image user's home (login-shell startup files, and the
-  # ~/.hermes tree the ssh terminal backend syncs the profile's skills into).
+  # git opens the null device read-write for discarded stdio, and the image user's home holds
+  # the login shell's startup files and the ~/.hermes tree the ssh terminal backend syncs into.
   filesystem_read_write: ["/dev/null", "/home/sandbox"]
-  # FLEET-F62.d: the approver verifies a PR independently with a credential-free, GET-only read of
-  # the GitHub REST API through the base curl binary. No provider, no web host, no git.
+  # The approver verifies a PR independently of the chain that wrote it, so it reads the public
+  # API without any credential.
   anonymous_reads:
     approver: ["api.github.com:443"]
 

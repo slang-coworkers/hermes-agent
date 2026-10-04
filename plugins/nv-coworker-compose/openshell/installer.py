@@ -954,8 +954,14 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
     main = ssh_dir / "config"
     lines = main.read_text(encoding="utf-8").splitlines(keepends=True) if main.exists() else []
     include = f"Include {inc_rel}\n"
-    kept = [ln for ln in lines if ln.strip() != include.strip()]
-    if lines[:1] != [include] or len(kept) != len(lines) - 1:
+
+    def _is_ours(line: str) -> bool:
+        # OpenSSH keywords are case-insensitive and may be separated from the value by `=`.
+        parts = line.strip().replace("=", " ", 1).split()
+        return len(parts) == 2 and parts[0].lower() == "include" and parts[1] == inc_rel
+
+    kept = [ln for ln in lines if not _is_ours(ln)]
+    if [include, *kept] != lines:
         _atomic_write_text(main, include + "".join(kept))
 
 
@@ -989,7 +995,7 @@ def _provision_create(cmd: List[str], step: Step, ctx: Dict[str, Any]) -> None:
         _run(["openshell", "sandbox", "delete", name])
     _run(cmd)
     record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(digest + "\n", encoding="utf-8")
+    _atomic_write_text(record, digest + "\n")
 
 
 def _gateway_answered(status_stdout: str) -> bool:

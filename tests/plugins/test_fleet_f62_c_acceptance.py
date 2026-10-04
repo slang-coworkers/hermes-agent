@@ -622,9 +622,7 @@ def test_ac_fleet_f62_c_9(tmp_path):
     prov = _render(tmp_path / "prov", home, "--provision-dry-run")
     assert prov.returncode == 0, prov.stderr
 
-    # FLEET-F62.d D1: the provider binds at create. Exactly the 3 github workers carry one
-    # `--provider github` on their create line, no other sandbox does, and no post-create
-    # attach line remains — a sorted list, not a set, so a duplicate also fails.
+    # A sorted list, not a set, so a duplicate binding also fails.
     assert not [ln for ln in prov.stdout.splitlines() if "sandbox provider attach" in ln], \
         "providers bind at create; no post-create attach line may remain"
     bound = sorted((m.group(1), tuple(shlex.split(ln)[i + 1] for i, tok in enumerate(shlex.split(ln))
@@ -664,7 +662,6 @@ def test_ac_fleet_f62_c_9(tmp_path):
         if role == "orchestrator":
             assert not (GITHUB_ENDPOINTS & _policy_hosts(policy)), f"{role}: policy must not allow github endpoints"
             continue
-        # FLEET-F62.d D3: the approver reads the API host credential-free, GET only; no web host.
         assert GITHUB_ENDPOINTS & _policy_hosts(policy) == {"api.github.com:443"}, \
             f"{role}: the only GitHub endpoint must be api.github.com:443"
         api = [_np_endpoint(np, "api.github.com:443") for np in _network_policies(policy)]
