@@ -14,7 +14,7 @@ from gateway.platforms.base import (
     PlatformConfig,
 )
 from gateway.platforms.event import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from gateway.run import GatewayRunner, _async_profile_runtime_scope
 from gateway.session import SessionEntry, SessionSource, SessionStore, build_session_key
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 
@@ -471,15 +471,17 @@ OWNER_PROFILE = "gov-f25-owner"
 
 def _mk_task_and_durable_sub():
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.create_task(
             conn, title="gov-f25/repo#41", assignee=OWNER_PROFILE,
             idempotency_key="gh-pr-gov-f25-41",
         )
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform="api_server", chat_id=OWNER_SESS,
             notifier_profile=OWNER_PROFILE, delivery_mode="wake", retry_policy="durable",
         )
@@ -489,22 +491,25 @@ def _mk_task_and_durable_sub():
 
 
 def _publish(task_id, message, key):
-    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        kb.publish_task_notification(conn, task_id, message, metadata={"idempotency_key": key})
+        kbn.publish_task_notification(conn, task_id, message, metadata={"idempotency_key": key})
     finally:
         conn.close()
 
 
 def _peek_delivery(task_id, board=None):
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect(board=board)
+    conn = kbc.connect(board=board)
     try:
-        sub = kb.list_notify_subs(conn, task_id=task_id)[0]
-        _cur, events = kb.unseen_events_for_sub(
+        sub = kbn.list_notify_subs(conn, task_id=task_id)[0]
+        _cur, events = kbn.unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"],
             chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "", kinds=None,
         )
@@ -520,35 +525,63 @@ def _peek_delivery(task_id, board=None):
 
 
 def _cursor(task_id):
-    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        sub = kb.list_notify_subs(conn, task_id=task_id)[0]
+        sub = kbn.list_notify_subs(conn, task_id=task_id)[0]
         return int(sub.get("last_event_id") or 0)
     finally:
         conn.close()
 
 
 def _sub_exists(task_id):
-    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        return bool(kb.list_notify_subs(conn, task_id=task_id))
+        return bool(kbn.list_notify_subs(conn, task_id=task_id))
     finally:
         conn.close()
 
 
+def _serve_owner_profile(monkeypatch):
+    """Multiplex home serving the route-only secondary owner, whose own state.db
+    holds the owner session — the tag's ownership proof for a stateless api_server
+    destination (``kanban_watchers_notifier._adapter_for_subscription``)."""
+    from pathlib import Path
+
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    root = Path(get_hermes_home())
+    owner = root / "profiles" / OWNER_PROFILE
+    owner.mkdir(parents=True, exist_ok=True)
+    (owner / "config.yaml").write_text("{}\n", encoding="utf-8")
+    db = SessionDB(owner / "state.db")
+    try:
+        db.create_session(OWNER_SESS, source="webui", profile_name=OWNER_PROFILE)
+    finally:
+        db.close()
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
+    return owner
+
+
 def _durable_runner():
     runner = object.__new__(GatewayRunner)
-    # The shared api_server adapter carries the bind coords; the profile scoping
-    # is done by owner_profile on the self-post, so the adapter itself is opaque.
+    # The shared api_server adapter is the only api_server credential; a route-only
+    # secondary owner is served through it once its own store proves the session.
     runner.adapters = {Platform.API_SERVER: SimpleNamespace(
         _host="127.0.0.1", _port=8642, _api_key="k", _model_name="hermes-agent",
         supports_async_delivery=False,  # api_server is non-push → self-post branch
     )}
-    runner._authorization_adapter = MagicMock(return_value=None)
+    runner._profile_adapters = {OWNER_PROFILE: {}}
+    runner._profile_failed_platforms = {}
+    runner._primary_profile_name = "default"
+    runner._kanban_notifier_profile = "default"
+    runner.config = SimpleNamespace(multiplex_profiles=True, profile_routes=[])
     runner._kanban_sub_fail_counts = {}
     return runner
 
@@ -557,13 +590,14 @@ def _durable_runner():
 async def test_durable_wake_targets_secondary_owner_and_advances_on_persist_ack(monkeypatch):
     """A persist-confirmed durable wake resumes the SECONDARY owner's session
     (never the default profile) and advances the cursor exactly once."""
+    _serve_owner_profile(monkeypatch)
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted on o/r#41 @beefcafe", "o/r#41:D1")
 
     calls = []
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
-        calls.append({"session_id": session_id, "owner_profile": owner_profile,
+    async def _ok(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
+        calls.append({"session_id": session_id, "profile": profile,
                       "idempotency_key": idempotency_key, "text": text})
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
@@ -572,11 +606,11 @@ async def test_durable_wake_targets_secondary_owner_and_advances_on_persist_ack(
     await runner._deliver_durable_notifications(_peek_delivery(task_id))
 
     assert len(calls) == 1
-    # (i) resumes the OWNER's session via the profile-scoped mirror.
+    # (i) resumes the OWNER's session, in the owner profile's served scope.
     assert calls[0]["session_id"] == OWNER_SESS
-    assert calls[0]["owner_profile"] == OWNER_PROFILE
-    # (ii) never routed to the default profile (owner_profile is explicit).
-    assert calls[0]["owner_profile"] not in (None, "", "default")
+    assert calls[0]["profile"] == OWNER_PROFILE
+    # (ii) never routed to the default profile (the owner profile is explicit).
+    assert calls[0]["profile"] not in (None, "", "default")
     assert calls[0]["idempotency_key"] == "o/r#41:D1"
     assert "review submitted on o/r#41 @beefcafe" in calls[0]["text"]
     # (iii) persist-ack confirmed (mock returned) → event consumed (SEEN), so a
@@ -588,10 +622,11 @@ async def test_durable_wake_targets_secondary_owner_and_advances_on_persist_ack(
 async def test_durable_wake_no_persist_ack_leaves_cursor_unmoved(monkeypatch):
     """A wake whose response did NOT confirm persistence (deliver_wake raises)
     must NOT advance the cursor and must NOT drop the sub."""
+    _serve_owner_profile(monkeypatch)
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted", "o/r#41:D1")
 
-    async def _no_ack(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _no_ack(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         raise RuntimeError("X-Hermes-Turn-Persisted not true")
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _no_ack)
@@ -609,12 +644,13 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
     RE-DELIVERED on the next tick; after a true ack the cursor has advanced, so
     a later tick does NOT re-run the delivered turn. (v) The retry reuses the
     SAME idempotency key so the server can dedup."""
+    _serve_owner_profile(monkeypatch)
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted", "o/r#41:D1")
 
     keys = []
 
-    async def _first_fails(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _first_fails(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         keys.append(idempotency_key)
         raise RuntimeError("crash before persist ack")
 
@@ -627,7 +663,7 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
     # Next tick: clear the backoff window and let the wake persist this time.
     runner._kanban_durable_backoff.clear()
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _ok(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         keys.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
@@ -640,7 +676,7 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
     # A later tick with no new events must not re-run the delivered turn.
     later_calls = []
 
-    async def _spy(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _spy(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         later_calls.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _spy)
@@ -653,13 +689,14 @@ async def test_durable_crash_before_ack_redelivers_then_no_rerun(monkeypatch):
 async def test_durable_delivers_events_in_cursor_order(monkeypatch):
     """Cursor-contiguity: multiple notification events are delivered in ascending
     id order and the cursor advances past all of them."""
+    _serve_owner_profile(monkeypatch)
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "first", "o/r#41:D1")
     _publish(task_id, "second", "o/r#41:D2")
 
     seen = []
 
-    async def _ok(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _ok(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         seen.append(idempotency_key)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _ok)
@@ -677,10 +714,11 @@ async def test_durable_never_dropped_and_alerts_on_sustained_failure(monkeypatch
     advances the cursor, and earns a loud operator alert on sustained failure."""
     import logging
 
+    _serve_owner_profile(monkeypatch)
     task_id = _mk_task_and_durable_sub()
     _publish(task_id, "review submitted", "o/r#41:D1")
 
-    async def _always_fail(adapter, *, text, session_id, owner_profile=None, idempotency_key=None, require_persist_ack=None):
+    async def _always_fail(adapter, *, text, session_id, profile=None, idempotency_key=None, require_persist_ack=None):
         raise RuntimeError("kanban owner unreachable")
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _always_fail)
@@ -701,8 +739,10 @@ async def test_durable_never_dropped_and_alerts_on_sustained_failure(monkeypatch
 
 def _mk_task_and_durable_push_sub():
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.create_task(
             conn, title="push-durable", assignee="p", idempotency_key="push-durable-1",
@@ -712,7 +752,7 @@ def _mk_task_and_durable_push_sub():
         # create the row as 'default' and set 'durable' directly — exercising the
         # runtime push-guard as defence-in-depth (a durable-push row that reached
         # the delivery path) without tripping the source-side validation.
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform="telegram", chat_id="tg-chat-1",
             notifier_profile="p", chat_type="group",
             delivery_mode="wake", retry_policy="default",
@@ -772,8 +812,8 @@ async def test_durable_push_absent_owner_adapter_never_uses_default(monkeypatch)
     """Fail-closed profile resolution: when a push owner has NO adapter of its
     own, the durable path must NOT fall back to the shared/default push adapter
     (that would deliver to the wrong profile). It records a failure and retains
-    the event; default-adapter fallback is allowed ONLY for api_server, whose
-    profile scoping rides on owner_profile, not on the adapter."""
+    the event; a shared adapter stands in ONLY for a served api_server owner,
+    whose own session store proves the destination."""
     task_id = _mk_task_and_durable_push_sub()
     _publish(task_id, "push note", "push:1")
 
@@ -917,13 +957,15 @@ async def _serve_app(app):
 def _mk_real_durable_sub(session_id=REAL_OWNER_SESS, *, idem="gh-pr-gov-f25-77"):
     """A durable api_server wake sub bound to the owner session, plus its card."""
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.create_task(conn, title="gov-f25/repo#77", assignee=REAL_OWNER,
                               idempotency_key=idem)
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        kb.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id=session_id,
+        kbn.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id=session_id,
                           notifier_profile=REAL_OWNER, delivery_mode="wake", retry_policy="durable")
     finally:
         conn.close()
@@ -933,11 +975,29 @@ def _mk_real_durable_sub(session_id=REAL_OWNER_SESS, *, idem="gh-pr-gov-f25-77")
 def _real_durable_runner(adapter):
     runner = object.__new__(GatewayRunner)
     runner.adapters = {Platform.API_SERVER: adapter}
-    # A secondary owner has no adapter of its own → api_server falls back to the
-    # shared adapter, scoping by owner_profile on the self-post (never push).
-    runner._authorization_adapter = MagicMock(return_value=None)
+    # A route-only secondary owner has no adapter of its own: the multiplex gateway
+    # serves it through the shared api_server adapter once the owner's own store
+    # proves the session, and wakes it in the owner's scope (never the default's).
+    runner._profile_adapters = {REAL_OWNER: {}}
+    runner._profile_failed_platforms = {}
+    runner._primary_profile_name = "default"
+    runner._kanban_notifier_profile = "default"
+    runner.config = SimpleNamespace(multiplex_profiles=True, profile_routes=[])
     runner._kanban_sub_fail_counts = {}
     return runner
+
+
+def _own_real_session(owner_home):
+    """The owner's own state.db holds the session: the ownership proof the served
+    route requires before a secondary profile's api_server wake is authorized."""
+    from hermes_state import SessionDB
+
+    (owner_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    db = SessionDB(owner_home / "state.db")
+    try:
+        db.create_session(REAL_OWNER_SESS, source="webui", profile_name=REAL_OWNER)
+    finally:
+        db.close()
 
 
 def test_real_cross_profile_wake_lands_on_owner_not_default_and_gates_on_ack(tmp_path, monkeypatch):
@@ -950,21 +1010,25 @@ def test_real_cross_profile_wake_lands_on_owner_not_default_and_gates_on_ack(tmp
 
     state = {"persist": True, "calls": []}
     adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+    _own_real_session(owner_home)
 
     async def run():
         srv, port = await _serve_app(app)
         adapter._port = port
         try:
-            # (i) persist-confirmed → resumes the owner session.
-            await deliver_wake(adapter, text="review on o/r#77 [A]", session_id=REAL_OWNER_SESS,
-                               owner_profile=REAL_OWNER, idempotency_key="o/r#77:A1",
-                               require_persist_ack=True)
-            # (iii) a non-persisted turn: bare 200, no ack → durable caller raises.
-            state["persist"] = False
-            with pytest.raises(RuntimeError, match="persist"):
-                await deliver_wake(adapter, text="review on o/r#77 [A2]", session_id=REAL_OWNER_SESS,
-                                   owner_profile=REAL_OWNER, idempotency_key="o/r#77:A2",
+            # A served profile's wake runs in-process under the owner's runtime scope,
+            # which the caller holds (gateway/wake.py `_self_post_chat_completion`).
+            async with _async_profile_runtime_scope(owner_home):
+                # (i) persist-confirmed → resumes the owner session.
+                await deliver_wake(adapter, text="review on o/r#77 [A]", session_id=REAL_OWNER_SESS,
+                                   profile=REAL_OWNER, idempotency_key="o/r#77:A1",
                                    require_persist_ack=True)
+                # (iii) a non-persisted turn: no persistence receipt → durable caller raises.
+                state["persist"] = False
+                with pytest.raises(RuntimeError, match="persist"):
+                    await deliver_wake(adapter, text="review on o/r#77 [A2]", session_id=REAL_OWNER_SESS,
+                                       profile=REAL_OWNER, idempotency_key="o/r#77:A2",
+                                       require_persist_ack=True)
         finally:
             await srv.cleanup()
 
@@ -986,6 +1050,7 @@ def test_real_notifier_advances_cursor_only_on_persist_ack(tmp_path, monkeypatch
 
     state = {"persist": False, "calls": []}
     adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+    _own_real_session(owner_home)
     task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-B")
     _publish(task_id, "review submitted on o/r#77 [B]", "o/r#77:B1")
     runner = _real_durable_runner(adapter)
@@ -1018,6 +1083,7 @@ def test_real_crash_before_ack_redelivers_then_no_rerun(tmp_path, monkeypatch):
     NOT re-run the already-delivered owner turn."""
     state = {"persist": False, "calls": []}
     adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state)
+    _own_real_session(owner_home)
     task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-C")
     _publish(task_id, "review submitted on o/r#77 [C]", "o/r#77:C1")
     runner = _real_durable_runner(adapter)
@@ -1046,11 +1112,15 @@ def test_real_crash_before_ack_redelivers_then_no_rerun(tmp_path, monkeypatch):
 def test_real_ambiguous_ack_retry_deduped_to_one_owner_turn(tmp_path, monkeypatch):
     """(v) An ambiguous same-key retry (the turn persisted but the ack was lost
     in transit, so the caller retries under the SAME Idempotency-Key) is deduped
-    by the api_server idempotency cache to AT MOST ONE owning turn."""
+    by the api_server idempotency cache to AT MOST ONE owning turn.
+
+    Carried on the DEFAULT profile's HTTP self-post: that is the route with an
+    in-transit ack and the idempotency cache. A served secondary profile wakes
+    in-process, where neither exists."""
     from gateway.wake import deliver_wake
 
     state = {"persist": True, "calls": []}
-    adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state)
+    adapter, app, _owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
 
     async def run():
         srv, port = await _serve_app(app)
@@ -1059,22 +1129,21 @@ def test_real_ambiguous_ack_retry_deduped_to_one_owner_turn(tmp_path, monkeypatc
             # Two deliveries of the SAME event: same body + same Idempotency-Key.
             for _ in range(2):
                 await deliver_wake(adapter, text="review on o/r#77 [D]", session_id=REAL_OWNER_SESS,
-                                   owner_profile=REAL_OWNER, idempotency_key="o/r#77:D1",
-                                   require_persist_ack=True)
+                                   idempotency_key="o/r#77:D1", require_persist_ack=True)
         finally:
             await srv.cleanup()
 
     asyncio.run(run())
     # The second call hit the completed-result idempotency cache → the agent ran
-    # once, so exactly one owner turn persisted.
+    # once, so exactly one owning turn persisted.
     assert state["calls"] == [REAL_OWNER_SESS]
-    assert _message_count(owner_home, REAL_OWNER_SESS) == 1
+    assert _message_count(default_home, REAL_OWNER_SESS) == 1
 
 
 # ---------------------------------------------------------------------------
 # The persist-ack chain feeding the header the wake gate reads: the commit bool
 # from _flush_messages_to_session_db must reach the run_conversation result as
-# `turn_persisted` (run_agent._persist_and_drain sets agent._last_turn_persisted;
+# `turn_persisted` (agent/session_persistence._persist_session sets agent._last_turn_persisted;
 # agent/turn_finalizer.finalize_turn copies it into the result), which
 # api_server then emits as X-Hermes-Turn-Persisted. The real cross-profile tests
 # above exercise the header/gate with a persistence-controllable stub; this
@@ -1085,9 +1154,9 @@ def _persist_probe_agent():
     from run_agent import AIAgent
 
     with (
-        patch("run_agent.get_tool_definitions", return_value=[]),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         agent = AIAgent(
             api_key="test-key-1234567890",
@@ -1110,7 +1179,7 @@ def test_turn_persisted_propagates_from_flush_to_result(committed, expected):
     """A real finish_reason=stop turn: the session-db commit bool propagates to
     the run_conversation result's turn_persisted (this is what api_server reads to
     emit X-Hermes-Turn-Persisted, and what the durable wake gate depends on)."""
-    from tests.run_agent.test_run_agent import _mock_response
+    from tests.agent.test_run_agent import _mock_response
 
     agent = _persist_probe_agent()
     agent.client.chat.completions.create.side_effect = [

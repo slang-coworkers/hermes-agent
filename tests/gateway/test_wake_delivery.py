@@ -126,12 +126,45 @@ def test_deliver_wake_require_persist_ack_raises_without_header():
 
 
 def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
-    """With owner_profile set the self-post targets /p/<profile>/v1/chat/completions
-    (the profile-scoped mirror), carries the Idempotency-Key header, and succeeds
+    """A durable wake to a SECONDARY profile resumes that profile's session,
+    carries its stable idempotency key, and succeeds once the turn confirms
+    persistence. A served profile wakes in-process (gateway/wake.py
+    `_self_post_chat_completion`), so the confirmation is the in-process turn's
+    persistence receipt."""
+
+    class ServedApiServerAdapter(ApiServerLikeAdapter):
+        def __init__(self):
+            super().__init__(key="sekrit")
+            self.turns = []
+
+        async def run_internal_session_turn(self, *, session_id, text, profile,
+                                            notification_category="result"):
+            self.turns.append({"session_id": session_id, "profile": profile, "text": text})
+            return True  # the turn's persistence receipt (result["turn_persisted"])
+
+    adapter = ServedApiServerAdapter()
+
+    async def run():
+        await deliver_wake(
+            adapter, text="review submitted", session_id="owner-sid",
+            profile="gov-f25-owner", idempotency_key="o/r#7:D1",
+            require_persist_ack=True,
+        )
+
+    asyncio.run(run())
+    assert adapter.turns == [
+        {"session_id": "owner-sid", "profile": "gov-f25-owner", "text": "review submitted"},
+    ]
+
+
+def test_deliver_wake_require_persist_ack_default_route_sends_key_and_opt_in():
+    """On the default profile's HTTP self-post a durable wake carries the
+    Idempotency-Key and the X-Hermes-Require-Persist opt-in, and succeeds only
     when the response confirms persistence via X-Hermes-Turn-Persisted:true."""
     from aiohttp import web
 
     seen = {}
+    ack = {"value": "true"}
 
     async def handler(request):
         seen["path"] = request.path
@@ -140,37 +173,60 @@ def test_deliver_wake_require_persist_ack_profile_scoped_and_idempotency_key():
         seen["require_persist"] = request.headers.get("X-Hermes-Require-Persist")
         return web.json_response(
             {"choices": [{"message": {"content": "ok"}}]},
-            headers={"X-Hermes-Turn-Persisted": "true"},
+            headers={"X-Hermes-Turn-Persisted": ack["value"]},
         )
 
     async def run():
-        from aiohttp import web as _web
-
-        app = _web.Application()
-        app.router.add_post("/p/{profile}/v1/chat/completions", handler)
-        runner = _web.AppRunner(app)
-        await runner.setup()
-        site = _web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
+        runner, port = await _serve(handler)
         try:
             adapter = ApiServerLikeAdapter(port=port, key="sekrit")
             await deliver_wake(
                 adapter, text="review submitted", session_id="owner-sid",
-                owner_profile="gov-f25-owner", idempotency_key="o/r#7:D1",
-                require_persist_ack=True,
+                idempotency_key="o/r#7:D1", require_persist_ack=True,
             )
+            ack["value"] = "false"
+            with pytest.raises(RuntimeError, match="persist"):
+                await deliver_wake(
+                    adapter, text="review submitted", session_id="owner-sid",
+                    idempotency_key="o/r#7:D1", require_persist_ack=True,
+                )
         finally:
             await runner.cleanup()
 
     asyncio.run(run())
-    assert seen["path"] == "/p/gov-f25-owner/v1/chat/completions"
+    assert seen["path"] == "/v1/chat/completions"
     assert seen["idem"] == "o/r#7:D1"
     assert seen["session_id"] == "owner-sid"
     # A durable caller (require_persist_ack=True) sends the opt-in header so the
     # api_server idempotency cache keeps an unpersisted turn out of cache and
     # re-runs the same-key retry until it commits.
     assert seen["require_persist"] == "1"
+
+
+def test_deliver_wake_require_persist_ack_served_profile_fails_closed_before_any_turn():
+    """Without a persistence receipt on the in-process route, a durable wake to a
+    served profile raises before any turn runs; a non-durable wake still runs."""
+
+    class ServedApiServerAdapter(ApiServerLikeAdapter):
+        def __init__(self):
+            super().__init__(key="sekrit")
+            self.turns = []
+
+        async def run_internal_session_turn(self, *, session_id, text, profile,
+                                            notification_category="result"):
+            self.turns.append(session_id)
+
+    adapter = ServedApiServerAdapter()
+
+    async def run():
+        with pytest.raises(RuntimeError, match="persist"):
+            await deliver_wake(adapter, text="x", session_id="owner-sid",
+                               profile="gov-f25-owner", require_persist_ack=True)
+        assert adapter.turns == []
+        await deliver_wake(adapter, text="x", session_id="owner-sid", profile="gov-f25-owner")
+
+    asyncio.run(run())
+    assert adapter.turns == ["owner-sid"]
 
 
 def test_deliver_wake_retries_429_then_succeeds(monkeypatch):

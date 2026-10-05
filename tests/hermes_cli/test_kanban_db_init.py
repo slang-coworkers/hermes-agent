@@ -6,6 +6,7 @@ from pathlib import Path
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 def _make_legacy_db(path: Path) -> None:
@@ -264,7 +265,7 @@ def test_durable_lease_columns_added_nullable_on_legacy_db(tmp_path, monkeypatch
     db_path = _setup_home(tmp_path, monkeypatch)
     _make_pre_lease_notify_db(db_path)
 
-    with kb.connect(db_path) as conn:
+    with kbc.connect(db_path) as conn:
         cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
         assert "claimed_by" in cols and "lease_until" in cols
         assert cols["claimed_by"]["notnull"] == 0

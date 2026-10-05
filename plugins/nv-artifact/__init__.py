@@ -48,7 +48,7 @@ _TOOLSET = "nv_artifact"
 _CTX = None
 
 # Durable delivery requires this API; fail plugin loading if it is absent.
-from hermes_cli.kanban_db import publish_task_notification
+from hermes_cli.kanban_db_notify import publish_task_notification
 
 # gh pr create intent: the three tokens in order, tolerant of the argv-list form
 # execute_code uses (`['gh','pr','create']`) as well as a bare shell command. A
@@ -107,10 +107,10 @@ def _board(ctx):
 
 
 def _kb_connect(ctx):
-    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     board = _board(ctx)
-    return kb.connect(board=board) if board else kb.connect()
+    return kbc.connect(board=board) if board else kbc.connect()
 
 
 def _ensure_schema(conn) -> None:
@@ -212,10 +212,10 @@ def _register_wake_sub(ctx, task_id, session_id, profile) -> bool:
         )
         return False
     try:
-        import hermes_cli.kanban_db as kb
+        from hermes_cli import kanban_db_notify as kbn
 
         with _kb_connect(ctx) as conn:
-            kb.add_notify_sub(
+            kbn.add_notify_sub(
                 conn, task_id=task_id, platform="api_server", chat_id=session_id,
                 notifier_profile=profile, delivery_mode="wake", retry_policy="durable",
             )

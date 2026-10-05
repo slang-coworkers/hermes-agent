@@ -85,8 +85,8 @@ def _outcomes(base: Path, artifact: str) -> list[tuple]:
 
 
 def _card_session_id(task_id: str):
-    import hermes_cli.kanban_db as kb
-    with kb.connect() as conn:
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
         row = conn.execute("SELECT session_id FROM tasks WHERE id=?", (task_id,)).fetchone()
     return row[0] if row else None
 
@@ -118,7 +118,8 @@ def _webhook_event(delivery, *, route=NOTIFY_ROUTE, pr=7, repo="o/r",
 def _bare_card(profile: str, idem: str) -> str:
     # A card with NO session_id, so a test can prove the claim path binds one.
     import hermes_cli.kanban_db as kb
-    with kb.connect() as conn:
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
         task = kb.create_task(conn, title=idem, assignee=profile, idempotency_key=idem)
         return task if isinstance(task, str) else getattr(task, "id", task)
 
@@ -129,8 +130,8 @@ def _notifications(task_id: str) -> list:
     `_notification_payloads` JSON-decodes these; the plugin's cross-profile WAKE of the
     events is proven in the core test, not here.
     """
-    import hermes_cli.kanban_db as kb
-    with kb.connect() as conn:
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
         try:
             rows = list(conn.execute(
                 "SELECT payload FROM task_events WHERE task_id=? AND kind='notification' ORDER BY id",
@@ -164,9 +165,9 @@ def _seen(base: Path, repo: str, pr: int, delivery_id: str) -> bool:
 
 def _wake_subs(task_id: str) -> list[tuple]:
     """Every notify sub on the owning task as (platform, notifier_profile, delivery_mode, retry_policy)."""
-    import hermes_cli.kanban_db as kb
-    with kb.connect() as conn:
-        # kb.connect() sets row_factory=sqlite3.Row; coerce to plain tuples so the
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        # kbc.connect() sets row_factory=sqlite3.Row; coerce to plain tuples so the
         # equality against the expected tuple compares by value, not object.
         return [tuple(r) for r in conn.execute(
             "SELECT platform, notifier_profile, delivery_mode, retry_policy "
@@ -404,8 +405,9 @@ def test_ac_gov_f25_6(artifact, monkeypatch, capsys):
     # A cross-profile remap targets a DISTINCT task bound to the new owner's
     # session, so its own deliverable route can be installed before the re-point.
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
     card2 = _bare_card("new-owner", "gh-pr-o-r-7-remap")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-new", card2))
     _set_profile(monkeypatch, ORCH_PROFILE)
@@ -553,12 +555,13 @@ def test_remap_registration_atomic(artifact, monkeypatch):
     """A remap to an owner WITH a bound session whose route registration
     fails leaves ownership unchanged; a working retry re-points."""
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     card2 = _bare_card("new-owner", "gh-pr-o-r-7-remap")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S2", card2))
     remap = artifact.manager._cli_commands["pr"]["handler_fn"]
@@ -638,12 +641,13 @@ def test_remap_task_not_owned_by_target_profile_is_refused(artifact, monkeypatch
     `to` while routing to another profile's task would misroute the wake to a
     session that does not exist under `to`'s scope."""
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     other = _bare_card("someone-else", "gh-pr-o-r-7-other")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-other", other))
     remap = artifact.manager._cli_commands["pr"]["handler_fn"]
@@ -659,12 +663,13 @@ def test_remap_unassigned_task_is_refused(artifact, monkeypatch, capsys):
     """A session-bound target task with a null/blank assignee is not owned by
     `--to`, so the remap is refused (never a crash) and ownership is unchanged."""
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     unassigned = _bare_card("new-owner", "gh-pr-o-r-7-unassigned")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id=?, assignee=NULL WHERE id=?", ("S-un", unassigned))
     remap = artifact.manager._cli_commands["pr"]["handler_fn"]
@@ -682,12 +687,13 @@ def test_remap_mixed_case_to_is_normalized_everywhere(artifact, monkeypatch, cap
     and the wake sub's notifier_profile (so the notifier's exact-match filter
     selects it)."""
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     card = _bare_card(OWNER_PROFILE, "gh-pr-o-r-7")
     _dispatch("report_pr_created", {"repo": "o/r", "pr": 7, "task_id": card,
                                     "session_id": "S1", "profile": OWNER_PROFILE})
     target = _bare_card("new-owner", "gh-pr-o-r-7-mc")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", ("S-mc", target))
     remap = artifact.manager._cli_commands["pr"]["handler_fn"]

@@ -1231,14 +1231,14 @@ async def test_publish_task_notification_notify_wake_delivers_and_wakes(kanban_h
     from gateway.config import Platform
 
     note = "PR o/r#7 review comment: please rebase onto main"
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="artifact card", assignee="worker1")
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=tid, platform="telegram", chat_id="chat1",
             delivery_mode="notify+wake",
         )
-        kb.publish_task_notification(conn, tid, note)
+        kbn.publish_task_notification(conn, tid, note)
     finally:
         conn.close()
 
@@ -1293,11 +1293,11 @@ async def test_publish_task_notification_plain_notify_delivers_without_wake(kanb
     from gateway.config import Platform
 
     note = "CI status: green on abc123"
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="notify-only card", assignee="worker1")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
-        kb.publish_task_notification(conn, tid, note)
+        kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
+        kbn.publish_task_notification(conn, tid, note)
     finally:
         conn.close()
 
@@ -1339,14 +1339,14 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
     path claim it."""
     import time
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.create_task(
             conn, title="lease-switch", assignee="p",
             idempotency_key="lease-switch-1",
         )
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
             notifier_profile="p", delivery_mode="wake", retry_policy="durable",
         )
@@ -1354,14 +1354,14 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
         # read that pre-delivery cursor rather than assuming 0, then publish the
         # event the drainer will deliver.
         base_cursor = int(
-            kb.list_notify_subs(conn, task_id=task_id)[0].get("last_event_id") or 0
+            kbn.list_notify_subs(conn, task_id=task_id)[0].get("last_event_id") or 0
         )
-        kb.publish_task_notification(
+        kbn.publish_task_notification(
             conn, task_id, "note", metadata={"idempotency_key": "k1"},
         )
 
         now = int(time.time())
-        assert kb.claim_notify_sub_lease(
+        assert kbn.claim_notify_sub_lease(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
             expected_cursor=base_cursor, token="tok-A", lease_until=now + 3600,
             now=now,
@@ -1375,7 +1375,7 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
                 (task_id,),
             )
 
-        old, new, events = kb.claim_unseen_events_for_sub(
+        old, new, events = kbn.claim_unseen_events_for_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
         )
         assert events == [] and new == old == base_cursor
@@ -1387,7 +1387,7 @@ def test_active_durable_lease_blocks_default_claim_after_policy_switch(kanban_ho
                 "AND chat_id = 'sess-1' AND thread_id = ''",
                 (now - 1, task_id),
             )
-        old2, new2, events2 = kb.claim_unseen_events_for_sub(
+        old2, new2, events2 = kbn.claim_unseen_events_for_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-1",
         )
         assert len(events2) == 1 and new2 > old2
@@ -1400,30 +1400,30 @@ def test_default_snapshot_cannot_claim_after_durable_policy_switch(kanban_home):
     snapshot must not advance-at-claim once the row has switched to 'durable':
     claim_unseen_events_for_sub re-checks the policy inside its txn and leaves a
     durable sub for the peek-then-advance lease path (no ack-less pre-advance)."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.create_task(
             conn, title="policy-switch", assignee="p",
             idempotency_key="policy-switch-1",
         )
         task_id = task if isinstance(task, str) else getattr(task, "id", task)
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-2",
             notifier_profile="p", delivery_mode="wake", retry_policy="default",
         )
         base_cursor = int(
-            kb.list_notify_subs(conn, task_id=task_id)[0].get("last_event_id") or 0
+            kbn.list_notify_subs(conn, task_id=task_id)[0].get("last_event_id") or 0
         )
-        kb.publish_task_notification(
+        kbn.publish_task_notification(
             conn, task_id, "note", metadata={"idempotency_key": "k1"},
         )
 
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-2",
             notifier_profile="p", delivery_mode="wake", retry_policy="durable",
         )
 
-        old, new, events = kb.claim_unseen_events_for_sub(
+        old, new, events = kbn.claim_unseen_events_for_sub(
             conn, task_id=task_id, platform="api_server", chat_id="sess-2",
         )
         assert events == [] and new == old == base_cursor
