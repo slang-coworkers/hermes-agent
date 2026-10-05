@@ -13,7 +13,8 @@ but do not assert directly:
 - `hermes ingress status` keeps its documented shape;
 - the edge scope is rendered only from a spec block, and a malformed block is refused;
 - an edge that cannot record its scope state refuses the delivery instead of
-  spooling an unregistered PR or losing a count.
+  spooling an unregistered PR or losing a count, and an edge never reuses scope
+  state written under other scope rules.
 """
 from __future__ import annotations
 
@@ -531,3 +532,21 @@ def test_an_unwritable_scope_state_refuses_the_delivery_without_spooling(tmp_pat
     assert edge.receive("github", headers, body) == (202, {"status": "accepted", "delivery_id": "scope-io"})
     state = json.loads((tmp_path / "state" / "scope.json").read_bytes())
     assert state["prs"]["5"]["head_branch"] == "ing-fix"
+
+
+def test_scope_state_written_under_other_rules_is_refused_at_start(tmp_path):
+    edge_mod = _edge_module()
+    key_file = tmp_path / "gh-key"
+    key = secrets.token_bytes(32)
+    key_file.write_bytes(key)
+    cfg = {"forward_url": "http://127.0.0.1:9/webhooks/ingress", "spool_dir": str(tmp_path / "state" / "spool"),
+           "platforms": {"github": {"secret_file": str(key_file)}},
+           "scope": {"repo": "o/r", "ref_prefix": "ing-", "label_prefix": "ing-"}}
+    body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
+                       "pull_request": {"number": 5, "head": {"sha": "a" * 40, "ref": "ing-fix"}}}).encode()
+    headers = {**_signed_github_headers(edge_mod, key, body, "scope-rules"),
+               edge_mod.envelope.GITHUB_EVENT_HEADER: "pull_request"}
+    assert edge_mod.Edge(cfg).receive("github", headers, body)[0] == 202
+    assert edge_mod.Edge(cfg).scope.prs["5"]["head_branch"] == "ing-fix", "same rules reuse the registrations"
+    with pytest.raises(ValueError, match="different scope"):
+        edge_mod.Edge({**cfg, "scope": {"repo": "other/r", "ref_prefix": "ing-", "label_prefix": "ing-"}})
