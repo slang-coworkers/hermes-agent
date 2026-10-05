@@ -65,9 +65,11 @@ No fixture is re-installed here.
    - `FWD_PORT` (18644 for this spec) and `SPOOL` = `<edge_state_dir>/spool`,
      from the installed `host/edge.yaml` with `python3 -c`;
    - `systemctl --user is-enabled` for the three units, each `enabled`.
-4. **Budget baseline,** as in AC-19: record `T0`, then the summed call count
-   beside the in-scope delivery count before every step and after the last, and
-   stop at the 24-call cap (Gating).
+4. **Budget baseline,** as in AC-19: record `T0` and `CALLS0` (the summed call
+   count now; when this scenario runs alone, take it before AC-19's Setup step 4
+   instead), then the count minus `CALLS0` beside the in-scope delivery count
+   before every step and after the last, and stop when it reaches the 24-call
+   cap (Gating).
 
 ## Steps
 

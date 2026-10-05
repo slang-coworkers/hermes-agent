@@ -86,9 +86,11 @@ No fixture is re-installed here.
      `profiles/reviewer/state.db` and `profiles/approver/state.db`;
    - `REV_M0`, `APR_M0` and `FIX_M0`: the max `messages.id` in each DB;
    - `FIX_S` and `FIX_N0`, as in AC-19.
-4. **Budget baseline,** as in AC-19: record `T0`, then the summed call count
-   beside the in-scope delivery count before every step and after the last, and
-   stop at the 40-call cap (Gating).
+4. **Budget baseline,** as in AC-19: record `T0` and `CALLS0` (the summed call
+   count now; when this scenario runs alone, take it before AC-19's Setup step 4
+   instead), then the count minus `CALLS0` beside the in-scope delivery count
+   before every step and after the last, and stop when it reaches the 40-call
+   cap (Gating).
 
 Drives resume the stored `Bot Chat` session over the gateway WS, as in AC-19;
 a dashboard drive selects the profile in the profile combobox first.
