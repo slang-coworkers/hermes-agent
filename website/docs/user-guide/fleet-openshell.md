@@ -309,8 +309,8 @@ egress:
     upstream_base_url: "https://inference-api.nvidia.com/v1"
     api_mode: chat_completions
     model_id: aws/anthropic/bedrock-claude-opus-5-5
-    credential_provider: hermes-direct-inference    # the OpenShell provider (see below)
-    credential_env: OSH_DIRECT_INFERENCE_KEY        # the credential key NAME, never a value
+    credential_provider: f64e-inference             # the OpenShell provider (see below)
+    credential_env: NV_INFERENCE_KEY                # the credential key NAME, never a value
     gateway_image: "osh-f64-gateway:<tag>"
     attribution_tag_prefix: osh-f64b
 ```
@@ -321,7 +321,7 @@ What the render does differently in direct mode:
   `protocol: rest` / `enforcement: enforce`, with exactly the four rules. `inference.local` appears
   in no rendered policy or config, and the broker stays the only `tls: skip` hop.
 - **Provider config.** Each served profile's and the gateway default's `api_key` is OpenShell's
-  resolve placeholder for the `credential_env` key, `openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY`.
+  resolve placeholder for the `credential_env` key, `openshell:resolve:env:NV_INFERENCE_KEY`.
   It is a placeholder, safe to render and log. The L7 relay resolves it at the boundary for an
   attached provider, and refuses a request whose placeholder it cannot resolve. `rewrite_placeholder`
   is refused in direct mode.
@@ -343,8 +343,10 @@ What the operator configures:
 
 **Residual (UA-36).** While the OpenShell gateway still has a managed inference route configured
 (`openshell inference set`), `inference.local` stays reachable from every sandbox, and no
-rendered rule governs it. Direct mode moves the fleet's own route off it but can't remove it. That
-needs a gateway with no managed route, or the upstream fix.
+rendered rule governs it. Direct mode moves the fleet's own route off it but can't remove it; only
+a gateway with no managed route, or the upstream fix, does. The operator accepted this residual: the
+fleet's path authority is met by the APF-governed direct route plus a render that never targets
+`inference.local`, and the residual stays tracked on UA-36 rather than gating a fleet.
 
 ## Operator prerequisites
 

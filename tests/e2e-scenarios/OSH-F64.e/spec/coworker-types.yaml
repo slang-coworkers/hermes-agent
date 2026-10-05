@@ -29,8 +29,8 @@ egress:
     upstream_base_url: "https://inference-api.nvidia.com/v1"
     api_mode: chat_completions
     model_id: aws/anthropic/bedrock-claude-opus-5-5
-    credential_provider: hermes-direct-inference  # OpenShell generic provider, attached at gateway create
-    credential_env: OSH_DIRECT_INFERENCE_KEY      # a key NAME; the value lives OpenShell-side only
+    credential_provider: f64e-inference           # OpenShell generic provider, attached at gateway create
+    credential_env: NV_INFERENCE_KEY              # a key NAME; the value lives OpenShell-side only
     gateway_image: "osh-f64-gateway:f64e-<sha7>"  # the tester substitutes the lane tag
     attribution_tag_prefix: osh-f64b
 
