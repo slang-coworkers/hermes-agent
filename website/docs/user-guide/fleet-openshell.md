@@ -284,6 +284,62 @@ The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`
 refuses a spec without `pinned_offline_lane: true` before it touches any state, so render a
 non-lane `openshell` fleet with `coworker compose`.
 
+### Direct-mode inference (OSH-F64.e)
+
+On the pinned OpenShell, `https://inference.local` is intercepted **before** the policy engine
+runs, so the four-path allow-set above governs the destination and credential but not the PATH on
+that route. Setting `egress.inference_provider.mode: direct` moves the model route onto the
+upstream itself, where APF decides every request's method and path. An absent `mode` means
+`managed`, the render described above, unchanged.
+
+```yaml
+egress:
+  inference_route: "inference-api.nvidia.com:443"   # must equal the upstream host:port
+  broker_addr: "172.17.0.1:18777"
+  inference_provider:
+    mode: direct
+    provider: direct-endpoint                       # the Hermes config provider key
+    base_url: "https://inference-api.nvidia.com/v1"
+    upstream_base_url: "https://inference-api.nvidia.com/v1"
+    api_mode: chat_completions
+    model_id: aws/anthropic/bedrock-claude-opus-5-5
+    credential_provider: hermes-direct-inference    # the OpenShell provider (see below)
+    credential_env: OSH_DIRECT_INFERENCE_KEY        # the credential key NAME, never a value
+    gateway_image: "osh-f64-gateway:<tag>"
+    attribution_tag_prefix: osh-f64b
+```
+
+What the render does differently in direct mode:
+
+- **Policy.** The gateway policy's model-route endpoint is the upstream host:port as
+  `protocol: rest` / `enforcement: enforce`, with exactly the four rules. `inference.local` appears
+  in no rendered policy or config, and the broker stays the only `tls: skip` hop.
+- **Provider config.** Each served profile's and the gateway default's `api_key` is OpenShell's
+  resolve placeholder for the `credential_env` key, `openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY`.
+  It is a placeholder, safe to render and log. The L7 relay resolves it at the boundary for an
+  attached provider, and refuses a request whose placeholder it cannot resolve. `rewrite_placeholder`
+  is refused in direct mode.
+- **Plan.** `coworker compose --provision-dry-run` emits one gateway line first:
+  `openshell sandbox create --name <project>-gw --from <gateway_image> --policy policy-gateway.yaml
+  --provider <credential_provider>`. Workers never get the provider: a worker type whose
+  `providers:` list names `credential_provider` is refused at compose time.
+
+What the operator configures:
+
+1. Create a `generic` OpenShell provider named by `credential_provider` that holds the credential
+   under the key named by `credential_env`. The user places the value; it appears in no spec,
+   render, test or doc. Don't reuse `compatible-endpoint` (the managed route) or `github`; compose
+   refuses both.
+2. Create the gateway sandbox with the plan's gateway line, so the provider attaches at CREATE.
+   Legacy attachment is fixed at creation, and `providers_v2_enabled` stays unset.
+3. Check the effective policy with `openshell policy get <project>-gw --full`. The upstream
+   endpoint must carry exactly the four rendered rules.
+
+**Residual (UA-36).** While the OpenShell gateway still has a managed inference route configured
+(`openshell inference set`), `inference.local` stays reachable from every sandbox, and no
+rendered rule governs it. Direct mode moves the fleet's own route off it but can't remove it. That
+needs a gateway with no managed route, or the upstream fix.
+
 ## Operator prerequisites
 
 Before a fleet can be provisioned, the operator must satisfy these prerequisites:
@@ -389,11 +445,11 @@ policies under that root first); with it unset, the gateway-internal render path
 plan is byte-for-byte unchanged. The script:
 
 - **Phase A** installs the spine's `plugins.enabled` set at the pinned commit so `hermes coworker`
-  exists. The set is the spine's, not posture-derived: the shipped legacy §D7 spine lists
-  `nv-coworker-compose`, `nv-fleet-gates` **and** `podman-onecli` (the OneCLI chain-dial needs the
-  last); the shipped OSH-F64.b single-authority spine lists only `nv-coworker-compose` and
-  `nv-fleet-gates` (`podman-onecli` is inert under `egress.inference_provider` and the spine does
-  not enable it).
+  exists. The set is the spine's, minus `podman-onecli` under the single-authority posture: the
+  shipped legacy §D7 spine lists `nv-coworker-compose`, `nv-fleet-gates` **and** `podman-onecli`
+  (the OneCLI chain-dial needs the last); with `egress.inference_provider` present the installer
+  drops `podman-onecli` from whatever the spine lists (it is inert there), and the shipped
+  OSH-F64.b single-authority spine already lists only `nv-coworker-compose` and `nv-fleet-gates`.
 - **Before Phase A's first `plugins install`**, the script writes `plugins.scan_on_install:
   false` into the managed config (the §D6 install-scan guard). Without it the install-time
   scanner returns a DANGEROUS verdict on these first-party plugins — false positives that
