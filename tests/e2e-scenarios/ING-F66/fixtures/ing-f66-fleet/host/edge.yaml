@@ -9,11 +9,11 @@
     "pull_request_review_comment",
     "workflow_run"
   ],
-  "forward_url": "http://@LOOPBACK@:8644/webhooks/ingress",
+  "forward_url": "http://@LOOPBACK@:18644/webhooks/ingress",
   "gateway": {
     "lock_file": "/home/ubuntu/.local/state/nv-ingress/gateway-boot.lock",
     "openshell_bin": "/usr/local/bin/openshell",
-    "port": 8644,
+    "port": 18644,
     "sandbox": "ing-f66-gw",
     "start": [
       "/home/ubuntu/.config/nv-ingress/gateway-start.sh"
@@ -27,6 +27,11 @@
     "gitlab": {
       "secret_file": "/home/ubuntu/.config/nv-ingress/secrets/gitlab"
     }
+  },
+  "scope": {
+    "label_prefix": "ing-f66-",
+    "ref_prefix": "ing-f66-",
+    "repo": "slang-coworkers/nanoclaw"
   },
   "spool_dir": "/home/ubuntu/.local/state/nv-ingress/spool"
 }

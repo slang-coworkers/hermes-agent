@@ -105,9 +105,10 @@ default_config:
 # outside every sandbox mount; the render copies the paths and never reads them.
 ingress:
   route: ingress
-  port: 8644
+  # Host port 8644 is taken by the public relay; the one key serves both sides of the forward.
+  port: 18644
   replace_routes: true
-  issue_labels: [fleet]
+  issue_labels: [ing-f66-fleet]
   self_logins: [slang-coworkers-bot]
   per_pr_hourly_budget: 30
   platforms:
@@ -124,3 +125,9 @@ ingress:
   edge_state_dir: /home/ubuntu/.local/state/nv-ingress
   anonymous_reads:
     approver: ["api.github.com:443"]
+  # The live lane shares slang-coworkers/nanoclaw: the edge forwards only this run's
+  # ing-f66-* refs and labels, and counts and logs the rest (ADR D2 Scope).
+  scope:
+    repo: slang-coworkers/nanoclaw
+    ref_prefix: ing-f66-
+    label_prefix: ing-f66-

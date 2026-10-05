@@ -37,7 +37,7 @@ plugins:
         route: ingress
         orchestrator_profile: orchestrator
         issue_labels:
-        - fleet
+        - ing-f66-fleet
         self_logins:
         - slang-coworkers-bot
         per_pr_hourly_budget: 30
@@ -91,7 +91,7 @@ platforms:
     enabled: true
     extra:
       host: 127.0.0.1
-      port: 8644
+      port: 18644
       routes:
         ingress:
           secret: INSECURE_NO_AUTH

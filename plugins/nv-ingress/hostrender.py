@@ -26,15 +26,20 @@ _KEYS = {
     "route", "port", "platforms", "replace_routes", "issue_labels", "self_logins",
     "per_pr_hourly_budget", "gateway_sandbox", "gateway_start", "anonymous_reads",
     "host_checkout", "host_python", "host_dir", "openshell_bin", "edge_listen", "edge_state_dir",
+    "scope",
 }
 
 
-def _envelope():
-    path = Path(__file__).resolve().parent / "envelope.py"
-    spec = importlib.util.spec_from_file_location("_nv_ingress_envelope_render", path)
+def _sibling(rel: str, name: str):
+    path = Path(__file__).resolve().parent / rel
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _envelope():
+    return _sibling("envelope.py", "_nv_ingress_envelope_render")
 
 
 def routed_events() -> List[str]:
@@ -102,6 +107,11 @@ def validate(block: Any, roster: List[str]) -> Dict[str, Any]:
             if not _HOSTPORT.match(hp):
                 raise ValueError(f"ingress.anonymous_reads.{role}: {hp!r} is not host:port")
         anonymous[role] = hosts
+    try:
+        # The edge parses the same block at start-up; one parser keeps the two from drifting.
+        scope = _sibling("edge/scope.py", "_nv_ingress_scope_render").parse(block.get("scope"))
+    except ValueError as exc:
+        raise ValueError(f"ingress.{exc}") from exc
     params = {
         "route": route,
         "port": port,
@@ -112,6 +122,7 @@ def validate(block: Any, roster: List[str]) -> Dict[str, Any]:
         "gateway_sandbox": gateway_sandbox,
         "gateway_start": gateway_start,
         "anonymous_reads": anonymous,
+        "scope": scope,
     }
     for key, default in (("host_checkout", "%h/hermes-agent"), ("host_python", "/usr/bin/python3"),
                          ("host_dir", "%h/.config/nv-ingress"), ("openshell_bin", "openshell"),
@@ -142,7 +153,7 @@ def plugin_settings(params: Dict[str, Any], orchestrator_profile: str) -> Dict[s
 
 
 def edge_config(params: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    cfg = {
         "listen": params["edge_listen"],
         "forward_url": f"http://{LOOPBACK}:{params['port']}/webhooks/{params['route']}",
         "spool_dir": params["edge_state_dir"].rstrip("/") + "/spool",
@@ -156,6 +167,9 @@ def edge_config(params: Dict[str, Any]) -> Dict[str, Any]:
             "lock_file": params["edge_state_dir"].rstrip("/") + "/gateway-boot.lock",
         },
     }
+    if params.get("scope"):
+        cfg["scope"] = dict(params["scope"])
+    return cfg
 
 
 def _unit(description: str, exec_start: str, *, env: str = "", after: str = "") -> str:

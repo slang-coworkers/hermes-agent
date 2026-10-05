@@ -32,7 +32,10 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
    verifies every request before doing anything else. An unsigned request, a bad
    signature or a stale timestamp gets `401`, and nothing is spooled or forwarded.
    A verified request is normalized to envelope v1 and written to the edge spool
-   (fsync) before the platform gets its `202`.
+   (fsync) before the platform gets its `202`. With an optional `scope` block
+   (see [Edge scope](#edge-scope)) the edge first checks that the event belongs
+   to the scoped repository and refs; an event that does not is answered
+   `202 out_of_scope`, counted and logged, and never spooled.
 2. **Forward.** The edge forwards each spooled envelope to
    `http://127.0.0.1:<port>/webhooks/ingress` through OpenShell's
    `forward service`. The forward is a host-loopback TCP listener relayed to the
@@ -113,7 +116,7 @@ vocabulary, and the raw platform event name is kept in `platform_event`.
 | `head_sha` | the PR head or the CI run's commit |
 | `conclusion` | CI conclusion (or the review state) |
 | `name` | check, job or workflow name |
-| `labels` | issue labels |
+| `labels` | the issue's or MR's labels; for a comment, the labels of the commented issue |
 | `sender` | the acting login or username |
 | `sender_type` | `User` or `Bot` |
 | `url` | link to the object |
@@ -207,9 +210,14 @@ evidence.
   (`hooks/github-events.json`, which includes `check_run`, `check_suite` and
   `workflow_run`) and points at the edge's public URL. The edge listens on
   host loopback by default (`edge_listen`), so that public URL is a reverse
-  proxy or tunnel the operator runs in front of it.
+  proxy or tunnel the operator runs in front of it. On a repository the fleet
+  shares with other work, render the edge with a `scope` block and install the
+  hook only once the scoped edge is running, so unrelated traffic is never
+  spooled.
 - **L-EDGE** — each platform's secret file exists at the path `host/edge.yaml`
   names (mode `0600`, owned by the operator user, outside every sandbox mount).
+  The operator creates it on the host and sets the same value on the hook; it is
+  never shown, logged or relayed.
   The GitHub file holds the secret bytes exactly as configured on the hook,
   with no trailing newline: the edge reads that file raw.
   The three user units are installed and enabled, with linger, so they start at
@@ -221,10 +229,43 @@ evidence.
   with ingress enabled.
 - **L-RST-SB** — restart the gateway sandbox through the broker (the restart
   drill).
-- **L-RST-HOST** — a real host reboot, inside an operator-scheduled window
-  (the reboot drill). A user-manager restart is not a substitute.
+- **L-RST-SVC** — a service-level restart: the OpenShell gateway, the three
+  nv-ingress user units and the forward, not the machine (the restart drill).
+  The operator performs it, or authorizes the exact restart commands. A request
+  sent while the edge itself is down is not accepted, so redeliver it from the
+  hook's delivery log once the edge is back.
 - **L-CHK** — confirm once per worker sandbox that the reviewer reads check
   runs through its provider and the approver reads them credential-free.
+
+## Edge scope
+
+A live test on a repository that carries other traffic renders the edge with an
+optional `scope` block (`ingress.scope` in the spec: `repo`, `ref_prefix`,
+`label_prefix`). It is off by default; with no `scope` every verified event of a
+listed type is spooled and forwarded. With `scope`, the edge applies one more
+test after the event-type filter and before the spool. An event is in scope
+when its repository is `scope.repo` and:
+
+- a PR, review or review comment has a head branch starting with
+  `ref_prefix`. The edge then registers the PR number with its head SHA and
+  branch before it spools the event;
+- a comment is on a registered PR, or on an issue with a label starting with
+  `label_prefix`;
+- an issue carries a label starting with `label_prefix`;
+- a CI event names a registered PR, or, naming none, its head SHA or branch is
+  a registered PR's or its branch starts with `ref_prefix`. A CI event on a
+  `ref_prefix` branch also admits, and registers, a PR it names whose own head
+  ref starts with `ref_prefix` in `scope.repo`. A PR that only targets a
+  prefixed base branch is never admitted. On any other branch, a CI event that
+  names registered and unregistered PRs is forwarded with the registered ones
+  only.
+
+Inside scope nothing is filtered by action. An out-of-scope event is answered
+`202` with status `out_of_scope`, counted per event type and logged with its
+delivery id; it never reaches the spool, the ledger or a session.
+`GET /scope` on the edge listener returns the counts as `{"counts": {...}}`.
+The counts and the PR registrations are kept in `scope.json` in the parent of
+the spool directory, so both survive an edge restart.
 
 ## Slack route
 
@@ -279,6 +320,7 @@ The `ingress:` block of a fleet spec (all optional except where noted):
 | `gateway_sandbox` | required | the gateway sandbox name |
 | `gateway_start` | required | the operator-approved gateway start argv |
 | `anonymous_reads` | `{}` | per role, credential-free GET-only egress targets (`host:port`) |
+| `scope` | none | `repo`, `ref_prefix` and `label_prefix` for the edge scope (see [Edge scope](#edge-scope)); copied into `host/edge.yaml` |
 | `host_checkout`, `host_python`, `host_dir`, `openshell_bin`, `edge_listen`, `edge_state_dir` | see the plugin | host paths the units use |
 
 `hermes ingress render-host <spec> --out <dir>` renders the same `host/` and

@@ -42,15 +42,15 @@ DEAD_LETTER_AFTER_SECONDS = 24 * 3600
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
-def _load_envelope():
-    path = Path(__file__).resolve().parent.parent / "envelope.py"
-    spec = importlib.util.spec_from_file_location("_nv_ingress_edge_envelope", path)
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-envelope = _load_envelope()
+envelope = _load(Path(__file__).resolve().parent.parent / "envelope.py", "_nv_ingress_edge_envelope")
+scope = _load(Path(__file__).resolve().parent / "scope.py", "_nv_ingress_edge_scope")
 # The forward target is host loopback; an inherited proxy env must never reroute it.
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -136,6 +136,8 @@ class Edge:
         self.spool.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.spool, 0o700)
         self.dead_letter = self.spool / "dead-letter"
+        rules = scope.parse(cfg.get("scope"))
+        self.scope = scope.Scope(rules, self.spool.parent / "scope.json", _atomic_write) if rules else None
         self.keys: Dict[str, bytes] = {}
         self.reload()
         self._wake = threading.Event()
@@ -171,6 +173,18 @@ class Edge:
             return 400, {"error": "missing delivery id or event"}
         if env["event"] not in self.events:
             return 202, {"status": "ignored", "event": env["event"]}
+        if self.scope is not None:
+            try:
+                admitted = self.scope.admit(env, payload)
+            except OSError:
+                # Nothing was spooled or counted; a non-2xx makes the platform redeliver.
+                logger.warning("edge: scope state not writable; refusing delivery %s", env["delivery_id"],
+                               exc_info=True)
+                return 503, {"error": "scope state not writable"}
+            if not admitted:
+                logger.info("edge: out of scope %s %s delivery %s (not spooled)", platform, env["event"],
+                            env["delivery_id"])
+                return 202, {"status": "out_of_scope", "event": env["event"], "delivery_id": env["delivery_id"]}
         entry = {"spooled_at": time.time(), "envelope": env}
         with self._spool_lock:
             _atomic_write(self.spool / spool_name(platform, env["delivery_id"]),
@@ -314,6 +328,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self._reply(200, {"status": "ok"})
+        if self.path == "/scope":
+            edge_scope = self.server.edge.scope
+            if edge_scope is None:
+                return self._reply(404, {"error": "no scope configured"})
+            return self._reply(200, {"counts": edge_scope.counts_snapshot()})
         self._reply(404, {"error": "unknown path"})
 
 
