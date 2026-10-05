@@ -1200,7 +1200,7 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
         return val.strip()
 
     mode = block.get("mode", "managed")
-    if mode not in _OSH_F64E_MODES:
+    if not isinstance(mode, str) or mode not in _OSH_F64E_MODES:
         raise CompositionError(
             f"egress.inference_provider.mode must be one of {sorted(_OSH_F64E_MODES)} "
             f"(absent = managed), got {mode!r}")
