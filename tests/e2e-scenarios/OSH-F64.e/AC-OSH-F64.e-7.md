@@ -5,8 +5,8 @@ model: live
 base_url: https://inference-api.nvidia.com/v1
 api_mode: chat_completions
 model_id: aws/anthropic/bedrock-claude-opus-5-5
-api_key: openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY
-credential_provider: hermes-direct-inference
+api_key: openshell:resolve:env:NV_INFERENCE_KEY
+credential_provider: f64e-inference
 spec: spec/coworker-types.yaml
 fixtures:
   - fixtures/osh-f64e-gateway
@@ -33,8 +33,8 @@ never concurrent). Live tier only after LANE READY.
 
 **Lane preconditions (operator, before step 1):** the image `osh-f64-gateway:f64e-<sha7>` built at the
 PR head (never `:pinned`), with its broker `--image` entry, and its LANE v8 `.fork-sha` equal to the PR
-head; OpenShell provider `hermes-direct-inference` (type `generic`, credential key
-`OSH_DIRECT_INFERENCE_KEY`; the user placed the value) created BEFORE the gateway create;
+head; OpenShell provider `f64e-inference` (type `generic`, credential key
+`NV_INFERENCE_KEY`; the user placed the value) created BEFORE the gateway create;
 `providers_v2_enabled` unset. Sandboxes (prefix `osh-f64b-`, admitted): `osh-f64b-gw`,
 `osh-f64b-orchestrator`, `osh-f64b-architect` — 3 in total, shared by the three scenarios.
 
@@ -42,7 +42,7 @@ head; OpenShell provider `hermes-direct-inference` (type `generic`, credential k
    --out <render> --provision-dry-run`, with `gateway_image` set to the lane tag. Record the plan.
 2. Create `osh-f64b-gw` with EXACTLY the plan's gateway line (the AC-OSH-F64.e-4 shape):
    `openshell sandbox create --name osh-f64b-gw --from osh-f64-gateway:f64e-<sha7> --policy
-   <render>/default/policy-gateway.yaml --provider hermes-direct-inference`.
+   <render>/default/policy-gateway.yaml --provider f64e-inference`.
 3. Inside it run `install-into-sandbox.sh tests/e2e-scenarios/OSH-F64.e/spec/coworker-types.yaml --ref
    <head>` (lane-driving rules: per-call `sx` preamble, single-line commands, every long start
    `setsid nohup`-backgrounded, poll slices ≤ 240 s).
@@ -61,7 +61,7 @@ Spend: e-7 ~2 model calls, b-7 ~4 requests, b-6 ~2 model calls — about 8 calls
    real model reply.
 2. Read `architect`'s rendered `config.yaml` and the chat child's environment (names-only, in-process
    capture as on OSH-F64.b, via `python3 -c`) → expect: `providers.<p>.api_key` is OpenShell's resolve
-   placeholder `openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY`, `base_url` is
+   placeholder `openshell:resolve:env:NV_INFERENCE_KEY`, `base_url` is
    `https://inference-api.nvidia.com/v1`, and no credential value appears on disk or in env (only the
    placeholder form).
 3. Read `openshell logs` for the turn → expect: an
