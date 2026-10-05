@@ -93,7 +93,7 @@ openshell sandbox list > "$ART/sandbox-list-before.txt"
    `curl -s -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$SCRATCH_REPO/branches/$BRANCH"` is `200`.
 4. **Teardown (always, even if an earlier step failed).** Delete the scratch branch through the GitHub API
    (`gh api -X DELETE "repos/$SCRATCH_REPO/git/refs/heads/$BRANCH"` from the operator host), `log "branch
-   $BRANCH deleted"`; `openshell sandbox delete "$SB"`, `log "delete $SB"`; `hermes profile remove "$PROFILE" -y`;
+   $BRANCH deleted"`; `openshell sandbox delete "$SB"`, `log "delete $SB"`; `hermes profile delete "$PROFILE" -y`;
    remove the alias block → expect: the branch API returns `404`, and `$SB` is no longer in
    `openshell sandbox list` (saved to `$ART/sandbox-list-after.txt`).
 

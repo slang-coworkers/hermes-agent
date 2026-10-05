@@ -37,7 +37,8 @@ provider exists on the broker.
 - At most **2** concurrent `fleet-f62d-` sandboxes. Count live sandboxes (`openshell sandbox list`) before
   step 1 and start only if at most 16 are live; otherwise record the row `FAIL` with the count.
 - This scenario uses `fleet-f62d-fixer` (recreated if AC-17's teardown removed it) and `fleet-f62d-approver`;
-  both are deleted in teardown even on failure.
+  both are deleted in teardown even on failure. The testbed profile is `fleet-f62d-fixer-18`, not AC-17's
+  name: `hermes profile delete` leaves a tombstone that `hermes profile install` does not clear.
 - GitHub artefacts only on `$SCRATCH_REPO`, branch and PR named `fleet-f62d-scratch-<ts>`.
 
 ## Setup
@@ -49,7 +50,7 @@ create line, policy and gitconfig, plus the approver create line and `policy-app
 set -u
 ART=scenario-AC-FLEET-F62.d-18; mkdir -p "$ART"
 TS=$(date -u +%Y%m%dT%H%M%SZ); BRANCH="fleet-f62d-scratch-$TS"
-FX=fleet-f62d-fixer; AP=fleet-f62d-approver; RENDER=$(mktemp -d)/render
+FX=fleet-f62d-fixer; AP=fleet-f62d-approver; PROFILE=fleet-f62d-fixer-18; RENDER=$(mktemp -d)/render
 UPLOAD=push; PR_OPEN=create; PR_SHUT=close
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$ART/artefacts.txt"; }
 hermes coworker compose tests/e2e-scenarios/FLEET-F62.c/spec/openshell/coworker-types.yaml \
@@ -66,7 +67,7 @@ openshell sandbox list > "$ART/sandbox-list-before.txt"
    exposes), recording only provider names → expect: the `github` provider is listed on `$FX`, and no
    attach command was run.
 2. **Clone, publish and open a draft PR in the fixer.** The git config is never copied by hand: install
-   `$RENDER/fixer` as a throwaway profile `fleet-f62d-fixer` and run the commands through its ssh terminal
+   `$RENDER/fixer` as a throwaway profile `$PROFILE` and run the commands through its ssh terminal
    backend exactly as AC-17 steps 2-3 do, so the stock skills sync delivers it. In the clone:
    `git switch -c "$BRANCH"`, one empty commit, publish with `git "$UPLOAD" origin "$BRANCH"`,
    `log "branch $BRANCH created"`. Then open a draft PR with the image's GitHub CLI:
@@ -87,7 +88,7 @@ openshell sandbox list > "$ART/sandbox-list-before.txt"
 5. **Teardown (always, even if an earlier step failed).** Close the draft PR from the fixer with the GitHub
    CLI (`gh pr "$PR_SHUT" "$PR" --repo "$SCRATCH_REPO"`), `log "pr $PR closed"`; delete the scratch branch
    through the GitHub API, `log "branch $BRANCH deleted"`; `openshell sandbox delete "$FX"` and
-   `openshell sandbox delete "$AP"`, logging each; remove the throwaway profile → expect: the PR is closed,
+   `openshell sandbox delete "$AP"`, logging each; `hermes profile delete "$PROFILE" -y` → expect: the PR is closed,
    the branch API returns `404`, and neither sandbox is in `openshell sandbox list`
    (`$ART/sandbox-list-after.txt`).
 
