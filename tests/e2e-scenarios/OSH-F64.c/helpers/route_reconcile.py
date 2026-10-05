@@ -13,7 +13,9 @@ within TOL seconds of the guard's dispatch time ("sent"), in time order. Rules, 
   2. each guard POST that was allowed consumes one router `POST /v1/chat/completions`;
   3. a rejected guard POST has no router record (nothing unconsumed within TOL of it);
   4. every router POST in the window is consumed;
-  5. per HERMES_HOME basename, the 2xx guard POSTs equal the api_call_count increment.
+  5. per HERMES_HOME basename, the 2xx guard POSTs equal the api_call_count increment;
+  6. no allowed POST comes from a PID a G2 gate left out of its birth count (erratum E7.4): the
+     `fork_descendant` lines of every pty-select-*.txt next to <guard-dir>, i.e. every gate run so far.
 
 The first miss is the verdict. Prints the match table, then "reconcile_ok yes" or "reconcile_ok no
 <rule> <detail>", and the skew of the first probe pair. Exits 0 only when every rule holds.
@@ -59,6 +61,18 @@ def usage(path):
     return totals
 
 
+def excluded_pids(guard_dir):
+    """PIDs any G2 gate left out as a fork_descendant, from the gate outputs win_close finds beside guard/."""
+    pids = set()
+    for path in glob.glob(os.path.join(os.path.dirname(os.path.abspath(guard_dir)), "pty-select-*.txt")):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if parts[:1] == ["fork_descendant"] and len(parts) > 1 and parts[1].isdigit():
+                    pids.add(int(parts[1]))
+    return pids
+
+
 def consume(router, method, path, when):
     for rec in router:
         if not rec["used"] and rec["method"] == method and rec["path"] == path and abs(rec["ts"] - when) <= TOL:
@@ -80,6 +94,7 @@ def main():
     guards = guard_records(guard_dir, t0, t1)
     table, miss, skew = [], None, None
     probe_at, posted, ok_posts = {}, set(), {}
+    excluded = excluded_pids(guard_dir)
     earlier = {}
     for g in guard_records(guard_dir, float("-inf"), t0):
         if g["kind"] == "probe" and g["decision"] == "allowed" and g["status"] == 200:
@@ -89,6 +104,9 @@ def main():
         nonlocal miss
         miss = miss or (rule, detail)
 
+    for g in guards:
+        if g["kind"] == "post" and g["decision"] == "allowed" and g["pid"] in excluded:
+            fail("excluded", "pid %s allowed POST at %.3f" % (g["pid"], g.get("sent", g["ts"])))
     # Pass 1, in dispatch order: probes and allowed POSTs consume router records.
     for g in guards:
         when = g.get("sent", g["ts"])
@@ -136,6 +154,7 @@ def main():
         if delta != ok_posts.get(home, 0):
             fail("usage", "home %s guard_2xx %d != delta %d" % (home, ok_posts.get(home, 0), delta))
     print("\n".join(table))
+    print("excluded_pids", ",".join(str(p) for p in sorted(excluded)) or "-")
     print("first_probe_skew_s", skew if skew is not None else "-")
     print("reconcile_ok", "yes" if miss is None else "no %s %s" % miss)
     sys.exit(0 if miss is None else 1)

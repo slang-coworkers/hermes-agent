@@ -28,8 +28,9 @@ DASH = {"pid": 10, "starttime": 100, "netns": NS, "home": ".hermes", "resume": N
 FP = (20, 500)
 
 
-def child(pid=20, start=500, resume="sidA", home="orchestrator", netns=NS):
-    return {"pid": pid, "starttime": start, "resume": resume, "home": home, "netns": netns}
+def child(pid=20, start=500, resume="sidA", home="orchestrator", netns=NS, ppid=15, parent_start=None):
+    return {"pid": pid, "ppid": ppid, "parent_starttime": parent_start, "starttime": start, "resume": resume,
+            "home": home, "netns": netns}
 
 
 def read(ts, *children):
@@ -384,5 +385,208 @@ def test_observer_records_names_only_births_exits_and_answers_reads(tmp_path):
     assert final["survivors"] == [] and final["unreadable"] == [] and final["recorded"] == 1
     written = "".join(p.read_text(encoding="utf-8") for p in obs.iterdir() if p.is_file())
     assert "canary-value-not-recorded" not in written
-    allowed = {"pid", "ppid", "starttime", "netns", "home", "resume", "event", "ts"}
+    allowed = {"pid", "ppid", "parent_starttime", "starttime", "netns", "home", "resume", "event", "ts"}
     assert all(set(e) <= allowed for e in events + live["children"])
+
+
+FORK = child(pid=21, start=510, ppid=20, parent_start=500)
+REPLAY_NS = "net:[4026535743]"
+REPLAY_SID = "20261005_142821_6b2aba"
+
+
+def _replay_child(pid, start, ppid, parent_start=None):
+    return {"home": "orchestrator", "netns": REPLAY_NS, "pid": pid, "ppid": ppid, "parent_starttime": parent_start,
+            "resume": REPLAY_SID, "starttime": start}
+
+
+def test_initial_replay_3346_3412_excludes_the_exited_fork_descendant(tmp_path):
+    """(a) The caeb365 Step-1 records: PTY child 3346 live, 3412 (ppid 3346) born and exited before the send."""
+    obs, win, guard = tmp_path / "obs", tmp_path / "obs" / "g2" / "s1", tmp_path / "guard"
+    win.mkdir(parents=True)
+    guard.mkdir()
+    gui = tmp_path / "gui.log"
+    gui.write_text("2026-10-05 14:31:46,186 INFO hermes_cli.web_server: pty accepted peer=127.0.0.1 mode=loopback "
+                   "cred=token\n", encoding="utf-8")
+    c0 = pty_select.cursor(str(gui))
+    with open(gui, "a", encoding="utf-8") as fh:
+        fh.write("2026-10-05 14:36:54,843 INFO hermes_cli.web_server: pty accepted peer=127.0.0.1 mode=loopback "
+                 "cred=token\n")
+    c1 = pty_select.cursor(str(gui))
+    (obs / "root.json").write_text(json.dumps({"home": ".hermes", "netns": REPLAY_NS, "pid": 2049, "ppid": 2029,
+                                               "resume": None, "starttime": 11142244}), encoding="utf-8")
+    pty, fork, probe = _replay_child(3346, 11185516, 3327), _replay_child(3412, 11187750, 3346, 11185516), \
+        _replay_child(2416, 11154446, 2405)
+    events = [dict(probe, event="birth", ts=1791210709.4433012), dict(probe, event="exit", ts=1791210710.2721367),
+              dict(pty, event="birth", ts=1791211020.1120718), dict(fork, event="birth", ts=1791211042.29143),
+              dict(fork, event="exit", ts=1791211042.4399135)]
+    (obs / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    (win / "base.json").write_text(json.dumps({"children": [], "count": 0, "cursor": c0, "gui_log": str(gui),
+                                               "ts": 1791210997.84573}), encoding="utf-8")
+    (win / "send.json").write_text(json.dumps({"children": [pty], "count": 1, "cursor": c1, "gui_log": str(gui),
+                                               "ts": 1791211078.2101135}), encoding="utf-8")
+    url = "ws://127.0.0.1:29194/api/pty?channel=c&resume=%s&attach=REDACTED&profile=orchestrator&token=REDACTED"
+    (win / "console.txt").write_text(
+        "[info] OSHWS ready 1791211003.841 /chat\n[info] OSHWS open 1791211016.353 %s\n"
+        "[info] OSHWS url 1791211016.353 /chat resume=%s\n" % (url % REPLAY_SID, REPLAY_SID), encoding="utf-8")
+    (guard / "3346.armed").write_text(json.dumps({"pid": 3346, "ppid": 3327, "netns": REPLAY_NS,
+                                                  "home": "orchestrator"}), encoding="utf-8")
+    selected = tmp_path / "selected.json"
+    out = subprocess.run([sys.executable, str(HERE / "pty_select.py"), "gate", "initial", str(obs), str(guard),
+                          "orchestrator", REPLAY_SID, REPLAY_SID, str(win), str(selected)],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    lines = out.stdout.splitlines()
+    assert lines[0] == "mode initial baseline 0 accepts 1 opens 1 ready 1 births 1 presend 1"
+    assert "fork_descendant 3412 starttime 11187750 parent 3346/11185516 born 1791211042.29143 " \
+           "exited 1791211042.4399135" in lines
+    assert lines[-1] == "g2_ok yes"
+    assert json.loads(selected.read_text(encoding="utf-8")) == [3346, 11185516]
+
+
+def test_second_birth_without_a_matched_parent_still_fails():
+    """(b) An exited second birth whose ppid is no recorded fingerprint still counts: births 2."""
+    stray = child(pid=21, start=510, ppid=19)
+    ok, lines, _ = initial(events=[ev("birth", 2.0, child()), ev("birth", 2.5, stray), ev("exit", 3.0, stray)])
+    assert not ok
+    assert lines[0].endswith("births 2 presend 1")
+    assert not any(line.startswith("fork_descendant") for line in lines)
+
+
+@pytest.mark.parametrize("case", ["parent_exited_before_birth", "reused_parent_pid", "exit_after_send"])
+def test_exited_descendant_of_a_parent_not_live_at_its_birth_is_not_excluded(case):
+    """(c) A historical parent, a reused parent PID, or an exit recorded after the send leaves the birth counted."""
+    if case == "parent_exited_before_birth":
+        old = child(pid=30, start=300)
+        fork = child(pid=31, start=310, ppid=30, parent_start=300)
+        events = [ev("birth", 0.2, old), ev("exit", 0.5, old), ev("birth", 2.0, child()), ev("birth", 2.5, fork),
+                  ev("exit", 3.0, fork)]
+    elif case == "reused_parent_pid":
+        old = child(pid=30, start=300)
+        fork = child(pid=31, start=1001, ppid=30, parent_start=999)
+        events = [ev("birth", 0.2, old), ev("birth", 2.0, child()), ev("birth", 2.5, fork), ev("exit", 2.6, old),
+                  ev("exit", 3.0, fork)]
+    else:
+        events = [ev("birth", 2.0, child()), ev("birth", 2.5, FORK), ev("exit", 9.5, FORK)]
+    ok, lines, _ = initial(events=events)
+    assert not ok
+    assert lines[0].endswith("births 2 presend 1")
+    assert not any(line.startswith("fork_descendant") for line in lines)
+
+
+def test_parent_exits_while_child_live():
+    """(c2) A parent live at the child's birth qualifies even when it exits before the child does."""
+    p = child(pid=22, start=520, ppid=20, parent_start=500)
+    b = child(pid=23, start=530, ppid=22, parent_start=520)
+    ok, lines, chosen = initial(events=[ev("birth", 1.5, child()), ev("birth", 2.0, p), ev("birth", 3.0, b),
+                                        ev("exit", 4.0, p), ev("exit", 5.0, b)])
+    assert ok, lines
+    assert chosen == FP
+    assert lines[0].endswith("births 1 presend 1")
+    assert "fork_descendant 23 starttime 530 parent 22/520 born 3.0 exited 5.0" in lines
+
+
+@pytest.mark.parametrize("mode", ["initial", "reattach", "away", "close"])
+def test_live_direct_descendant_fails_every_gate(mode):
+    """(d) A matched direct descendant still live at the send is never left out, at any gate."""
+    events = [ev("birth", 2.0 if mode == "initial" else 0.5, child()), ev("birth", 2.5, FORK), ev("exit", 3.0, FORK)]
+    assert len(pty_select.fork_descendants(events, (1.0, 9.0), {})) == 1
+    armed, guards = {20: {"netns": NS}, 21: {"netns": NS}}, {20, 21}
+    if mode == "initial":
+        ok, lines, _ = gate("initial", read(1.0), read(9.0, child(), FORK), events=events, armed=armed,
+                            guard_pids=guards)
+    elif mode == "reattach":
+        ok, lines, _ = reattach(presend=read(9.0, child(), FORK), events=events, armed=armed, guard_pids=guards)
+    else:
+        ok, lines, _ = gate(mode, read(1.0, child()), read(9.0, child(), FORK), events=events, accepts=0,
+                            br=browser(), armed=armed, guard_pids=guards)
+    assert not ok
+    assert not any(line.startswith("fork_descendant") for line in lines)
+
+
+@pytest.mark.linux_only
+def test_teardown_counts_a_live_recorded_fork_descendant(tmp_path):
+    """(e) A fork the gates could leave out stays in the observer's teardown accounting while it lives."""
+    mod = tmp_path / "mod" / "tui_gateway"
+    mod.mkdir(parents=True)
+    (mod / "__init__.py").write_text("", encoding="utf-8")
+    stop = tmp_path / "stop"
+    (mod / "entry.py").write_text(
+        "import os, time\nos.fork()\nwhile not os.path.exists(os.environ['STOP']):\n    time.sleep(0.05)\n",
+        encoding="utf-8")
+    # cwd outside the repo, as in the observer test below: -m resolves the stub, not the real gateway.
+    stub = subprocess.Popen([sys.executable, "-m", "tui_gateway.entry"], cwd=tmp_path,
+                            env=dict(os.environ, PYTHONPATH=str(tmp_path / "mod"), STOP=str(stop)))
+    known, recorded = {}, set()
+    try:
+        deadline = time.time() + 15
+        while len(recorded) < 2 and time.time() < deadline:
+            proc_observer.scan(os.getpid(), known, recorded, str(tmp_path / "events.jsonl"))
+            time.sleep(0.05)
+        assert len(recorded) == 2 and any(pid == stub.pid for pid, _ in recorded)
+        (fork,) = [fp for fp in recorded if fp[0] != stub.pid]
+        births = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        stub_fp = [fp for fp in recorded if fp[0] == stub.pid][0]
+        assert [(e["ppid"], e["parent_starttime"]) for e in births if e["pid"] == fork[0]] == [stub_fp]
+        stub.kill()
+        stub.wait()
+        assert proc_observer.post_exit(0, recorded, wait_s=0.3)["survivors"] == [list(fork)]
+    finally:
+        # The fork is reparented once the stub dies, outside the conftest kill guard's subtree: it exits on a file.
+        stop.write_text("", encoding="utf-8")
+        stub.kill()
+        stub.wait()
+        assert proc_observer.post_exit(0, recorded, wait_s=10)["survivors"] == []
+
+
+def _reconcile_dir(tmp_path, posts, excluded=(), window=(99.0, 110.0)):
+    """A host-side scenario dir as win_close leaves it: guard/, openshell.log, usage files, pty-select-*.txt."""
+    scen = tmp_path / "scenario"
+    guard = scen / "guard"
+    guard.mkdir(parents=True)
+    router = []
+    for pid, at in posts:
+        recs = [{"kind": "probe", "method": "GET", "decision": "allowed", "status": 200, "sent": at, "ts": at},
+                {"kind": "post", "method": "POST", "decision": "allowed", "status": 200, "sent": at + 1, "ts": at + 1}]
+        with open(guard / ("%d.jsonl" % pid), "a", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(dict(r, pid=pid, home="orchestrator")) + "\n")
+        router += ["[%.1f] routing proxy inference request method=GET path=/v1/models" % (at + 0.1),
+                   "[%.1f] routing proxy inference request method=POST path=/v1/chat/completions" % (at + 1.1)]
+    (scen / "openshell.log").write_text("\n".join(router) + "\n", encoding="utf-8")
+    in_window = sum(1 for _, at in posts if window[0] <= at + 1 <= window[1])
+    (scen / "usage-before.txt").write_text("usage orchestrator s1 - https://inference.local/v1 0\n", encoding="utf-8")
+    (scen / "usage-after.txt").write_text("usage orchestrator s1 - https://inference.local/v1 %d\n" % in_window,
+                                          encoding="utf-8")
+    (scen / "pty-select-s1.txt").write_text(
+        "mode initial baseline 0 accepts 1 opens 1 ready 1 births 1 presend 1\n"
+        + "".join("fork_descendant %d starttime 11187750 parent 3346/11185516 born 1.0 exited 1.1\n" % pid
+                  for pid in excluded) + "g2_ok yes\n", encoding="utf-8")
+    return scen
+
+
+def _reconcile(scen, window):
+    return subprocess.run([sys.executable, str(HERE / "route_reconcile.py"), str(scen / "guard"),
+                           str(scen / "openshell.log"), str(scen / "usage-before.txt"), str(scen / "usage-after.txt"),
+                           str(window[0]), str(window[1])], capture_output=True, text=True)
+
+
+def test_excluded_fork_post_rejected(tmp_path):
+    """(f) An allowed POST from an excluded fork PID fails G4 even when the selected PID also has allowed POSTs."""
+    posts = [(3346, 100.0), (3412, 103.0)]
+    out = _reconcile(_reconcile_dir(tmp_path / "x", posts, excluded=[3412]), (99.0, 110.0))
+    assert out.returncode == 1, out.stdout
+    assert "reconcile_ok no excluded pid 3412" in out.stdout
+    assert "excluded_pids 3412" in out.stdout.splitlines()
+    control = _reconcile(_reconcile_dir(tmp_path / "c", posts), (99.0, 110.0))
+    assert control.returncode == 0, control.stdout
+    assert "excluded_pids -" in control.stdout.splitlines()
+
+
+def test_excluded_fork_post_only_in_the_run_wide_window_fails(tmp_path):
+    """E7.4: an excluded PID's POST outside every turn window still fails the run-wide `win_close all`."""
+    posts = [(3346, 100.0), (3412, 106.0)]
+    turn = _reconcile(_reconcile_dir(tmp_path / "t", posts, excluded=[3412], window=(99.0, 102.5)), (99.0, 102.5))
+    assert turn.returncode == 0, turn.stdout
+    run_wide = _reconcile(_reconcile_dir(tmp_path / "a", posts, excluded=[3412]), (99.0, 110.0))
+    assert run_wide.returncode == 1, run_wide.stdout
+    assert "reconcile_ok no excluded pid 3412" in run_wide.stdout

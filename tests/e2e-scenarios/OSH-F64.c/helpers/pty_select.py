@@ -148,12 +148,37 @@ def opens_in(lines):
     return ready, opens, urls
 
 
+def fork_descendants(events, window, live):
+    """Window births a gate's birth count leaves out (erratum E7.1-E7.2), as (birth, parent birth, exit) triples.
+
+    Only a fingerprint not live at the send, whose exit was recorded before the send, and whose recorded
+    (ppid, parent_starttime) is another recorded fingerprint that was live when it was born. The dashboard
+    root is never a recorded fingerprint, so a second child the dashboard spawns always counts.
+    """
+    t0, t1 = window
+    births, exits = {}, {}
+    for e in events:
+        (births if e["event"] == "birth" else exits).setdefault(fp(e), e)
+    out = []
+    for key, b in sorted(births.items(), key=lambda kv: kv[1]["ts"]):
+        x = exits.get(key)
+        if not t0 < b["ts"] <= t1 or key in live or x is None or not x["ts"] < t1:
+            continue
+        pk = (b.get("ppid"), b.get("parent_starttime"))
+        p = births.get(pk)
+        if p is not None and pk != key and p["ts"] <= b["ts"] and (pk not in exits or exits[pk]["ts"] > b["ts"]):
+            out.append((b, p, x))
+    return out
+
+
 def decide(mode, profile, expected, canonical, dashboard, baseline, presend, events, accepts, browser,
            armed, guard_pids, selected=None):
     """G2 for one window [C0, send] (D3 bounds 1 and 3 as amended by D3a); returns (ok, lines).
 
     Inputs are records other writers made. baseline / presend: two observer `query` answers (right before the
-    navigation, right before the send). events: the observer's births/exits between them. accepts: the
+    navigation, right before the send). events: the observer's whole events.jsonl; the window's births are
+    those after the baseline up to the send, less `fork_descendants()`, each printed as a `fork_descendant`
+    line (E7.3). Live sets are never filtered (E7.2). accepts: the
     dashboard's gui.log `pty accepted` lines between two byte offsets. browser: (ready, opens, urls) from
     ws_log.js lines between two console cursors. armed / guard_pids: the G3 guard's records. selected: the
     fingerprint the step-1 `initial` window chose (pid, starttime), for every later window.
@@ -175,10 +200,15 @@ def decide(mode, profile, expected, canonical, dashboard, baseline, presend, eve
     ready, opens, urls = browser
     base = {fp(c): c for c in baseline["children"]}
     live = {fp(c): c for c in presend["children"]}
-    births = [e for e in events if e["event"] == "birth"]
+    excluded = fork_descendants(events, (baseline["ts"], presend["ts"]), live)
+    left_out = {fp(b) for b, _, _ in excluded}
+    births = [e for e in events if e["event"] == "birth" and baseline["ts"] < e["ts"] <= presend["ts"]
+              and fp(e) not in left_out]
     dns = dashboard.get("netns", "unreadable")
     lines = ["mode %s baseline %d accepts %d opens %d ready %d births %d presend %d" % (
         mode, len(base), accepts, len(opens), ready, len(births), len(live))]
+    lines += ["fork_descendant %s starttime %s parent %s/%s born %s exited %s" % (
+        b["pid"], b["starttime"], p["pid"], p["starttime"], b["ts"], x["ts"]) for b, p, x in excluded]
     ok = dns != "unreadable" and ready >= 1 and accepts == len(opens)
     chosen = None
     if mode == "initial":
@@ -263,13 +293,12 @@ def gate(mode, obs, guard_dir, profile, expected, canonical, window_dir, selecte
     events = []
     with open(os.path.join(obs, "events.jsonl"), encoding="utf-8") if os.path.exists(os.path.join(obs, "events.jsonl")) else open(os.devnull, encoding="utf-8") as fh:
         for raw in fh:
-            rec = json.loads(raw)
-            if baseline["ts"] < rec["ts"] <= presend["ts"]:
-                events.append(rec)
+            events.append(json.loads(raw))
     with open(os.path.join(window_dir, "console.txt"), encoding="utf-8") as fh:
         browser = opens_in(fh.read().splitlines())
     accepts = accepts_between(baseline["gui_log"], baseline["cursor"], presend["cursor"])
-    pids = {c["pid"] for c in presend["children"]} | {e["pid"] for e in events}
+    pids = {c["pid"] for c in presend["children"]} | {e["pid"] for e in events
+                                                      if baseline["ts"] < e["ts"] <= presend["ts"]}
     armed = {}
     for pid in pids:
         try:

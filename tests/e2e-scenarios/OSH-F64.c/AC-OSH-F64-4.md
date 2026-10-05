@@ -433,7 +433,10 @@ fails on: a probe that is not 200 or has no router `GET /v1/models`; an allowed 
 routed before its PID's probe; a rejected `POST` the router saw; a router `POST /v1/chat/completions` that no guard
 record claims; or a store whose 2xx guard `POST`s differ from its `api_call_count` increment (`.hermes` is the
 `default` store). A turn counts only if its `route-reconcile-s<n>.txt` has `allowed` lines from the PIDs that turn
-used: the G2 PTY child for steps 1–3, the delivery children for steps 3–4, the step-5 CLI for step 5. Before each
+used: the G2 PTY child for steps 1–3, the delivery children for steps 3–4, the step-5 CLI for step 5. A gate leaves
+out of its birth count only an exited direct descendant of a recorded child that was live at its birth, printing it as
+a `fork_descendant` line in `pty-select-<w>.txt` (erratum E7), and every `win_close` (`all` included) fails `excluded`
+on any `allowed` POST from a PID listed in any of those files. Before each
 `win_close`, save the `openshell logs` capture for `osh-f64c-gw` covering the window as `openshell.log` (the format
 OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … method=<M> path=<P>`).
 

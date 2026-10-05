@@ -13,7 +13,8 @@ stays its parent and writes, under <obs-dir>/<name>/:
 - selftest.json: root.json's read plus the same read of a probe process this observer forks under the
   root's env, so the read path is proven on a process other than the root ("ok" false on any miss);
 - events.jsonl: a "birth" line for every new descendant `<python> -m tui_gateway.entry` fingerprint
-  (pid, starttime) seen by a scan every SCAN_S seconds, with its ppid, netns and the two names, and an
+  (pid, starttime) seen by a scan every SCAN_S seconds, with its ppid, netns and the two names, plus the
+  parent's starttime when the parent is a matched fingerprint in the same scan (else null), and an
   "exit" line when that fingerprint is gone;
 - resp-<n>.json: the answer to a req-<n> file (`query`), a synchronous scan of the live descendants;
 - exit.json: the child's return code, written when it exits;
@@ -163,7 +164,9 @@ def scan(root_pid, known, recorded, events):
         rec = read(fp[0])
         known[fp] = rec
         recorded.add(fp)
-        lines.append(dict(rec, event="birth", ts=time.time(), starttime=fp[1]))
+        parent = [p for p in now if p[0] == now[fp] and p != fp]
+        lines.append(dict(rec, event="birth", ts=time.time(), starttime=fp[1],
+                          parent_starttime=parent[0][1] if parent else None))
     for fp in sorted(set(known) - set(now)):
         lines.append(dict(known.pop(fp), event="exit", ts=time.time(), starttime=fp[1]))
     if lines:
