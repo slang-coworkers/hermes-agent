@@ -550,3 +550,9 @@ def test_scope_state_written_under_other_rules_is_refused_at_start(tmp_path):
     assert edge_mod.Edge(cfg).scope.prs["5"]["head_branch"] == "ing-fix", "same rules reuse the registrations"
     with pytest.raises(ValueError, match="different scope"):
         edge_mod.Edge({**cfg, "scope": {"repo": "other/r", "ref_prefix": "ing-", "label_prefix": "ing-"}})
+    state_file = tmp_path / "state" / "scope.json"
+    unbound = json.loads(state_file.read_bytes())
+    unbound.pop("rules")
+    state_file.write_bytes(json.dumps(unbound).encode())
+    with pytest.raises(ValueError, match="different scope"):
+        edge_mod.Edge(cfg)

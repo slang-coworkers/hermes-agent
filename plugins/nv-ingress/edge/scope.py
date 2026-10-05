@@ -53,7 +53,7 @@ class Scope:
         except FileNotFoundError:
             state = {}
         # A corrupt file raises here: starting empty would quietly unregister every PR.
-        if state.get("rules") not in (None, rules):
+        if state and state.get("rules") != rules:
             # Registrations made under other rules could admit traffic this scope excludes.
             raise ValueError(f"{path} was written for a different scope; move it aside to start fresh")
         self.counts: Dict[str, int] = {str(k): int(v) for k, v in _d(state.get("counts")).items()}

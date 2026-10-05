@@ -125,6 +125,9 @@ lane installer builds it. No fixture is re-installed here.
      (`journalctl --user -u nv-ingress-edge.service`).
    - `curl -fsS "http://$EDGE/scope"` → expect HTTP 200 with a `counts` object.
      Save it as `scope-before.json`.
+   - Record `CALLS0` = the `session_model_usage` call count summed over all six
+     profiles now, before Setup step 4, so the fixer instruction's reply counts
+     toward the cap.
 4. **Fixer instruction.** Resume the fixer's `title='Bot Chat'` session (see
    **Drive vs observe**) with one message: "For pull requests whose head branch
    starts with `ing-f66-`, answer each ingress delivery with a one-line
@@ -140,13 +143,10 @@ lane installer builds it. No fixture is re-installed here.
 
    Ledger reads are `python3 -c` over the DEFAULT home's
    `plugin-data/nv-ingress/data.db`. Record `T0` (Unix seconds) now.
-6. **Budget baseline.** The cap counts from the summed `session_model_usage`
-   call count over all six profiles taken just BEFORE Setup step 4, so the
-   fixer instruction's reply counts toward it; record that value as the
-   baseline. Before every step, and after the last, record the count beside
-   the in-scope delivery count
+6. **Budget accounting.** Before every step, and after the last, record the
+   current summed call count minus `CALLS0` beside the in-scope delivery count
    (`select count(*) from deliveries where created_at >= T0` in the ledger), and
-   stop at the 40-call cap (Gating).
+   stop when the difference reaches the 40-call cap (Gating).
 
 **Drive vs observe.** A drive into a coworker's Bot Chat resumes that stored
 `title='Bot Chat'` session over the gateway WS (`$GW_URL`, the FLEET-F62 AC-7
