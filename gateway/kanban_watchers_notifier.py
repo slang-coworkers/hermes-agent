@@ -33,10 +33,14 @@ def _kbn():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "notification")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "notification")
+# A generic caller-supplied event (``kanban_db_notify.publish_task_notification``). Its free-form
+# ``payload["message"]`` is the ping body and is carried into the wake turn inline — there is no
+# i18n status key for it, because the content is the caller's, not a fixed status string.
+NOTIFICATION_KIND = "notification"
 
 
 def diagnostic_event(ev) -> bool:
@@ -293,6 +297,19 @@ class _Collector:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
             return None
+        if str(sub.get("retry_policy") or "default").lower() == "durable":
+            # Durable path (keyed on the policy, never the platform): PEEK — never pre-advance —
+            # and leave route resolution to delivery, which retains + backs off rather than
+            # dropping. The cursor moves only per event, after a persist-confirmed wake.
+            cursor, events = _kbn().unseen_events_for_sub(
+                conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+                thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            )
+            if not events:
+                return None
+            return {"sub": sub, "old_cursor": int(sub.get("last_event_id") or 0), "cursor": cursor,
+                    "events": events, "task": self.kb.get_task(conn, sub["task_id"]), "board": slug,
+                    "durable": True}
         from gateway.config import Platform
         if _adapter_for_subscription(self.runner, Platform(platform), sub, owner_profile or self.notifier_profile) is None:
             _warn_anchorless_thread_sub_once(sub, platform)
@@ -468,7 +485,16 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
+    NOTIFICATION_KIND: lambda ev, n: (
+        f"🔔 {n.head} — {_notification_message(ev)}" if _notification_message(ev) else f"🔔 {n.head} notification",
+        None, None,
+    ),
 }
+
+
+def _notification_message(ev: Any, limit: int = 500) -> str:
+    payload = getattr(ev, "payload", None)
+    return str(payload.get("message") or "")[:limit] if isinstance(payload, dict) else ""
 
 
 # --- Delivery of one claimed batch (one subscription, N events) ---
@@ -572,7 +598,7 @@ class _KanbanNotification:
             # for child tasks; use it only for legacy rows.
             self.session_key = sub["chat_id"] or getattr(task, "session_id", None) or ""
         # i18n keys: gateway.kanban.wake.<kind> for each _WAKE_KINDS entry.
-        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS if k in self.wake_kinds]
+        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS if k in self.wake_kinds and k != NOTIFICATION_KIND]
         _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
         synth = t(
             "gateway.kanban.wake.message",
@@ -585,6 +611,11 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        # Carry each generic notification's free-form message into the wake turn
+        # so the woken session sees the actual content, not a status word.
+        for ev in self.d["events"]:
+            if ev.kind == NOTIFICATION_KIND and _notification_message(ev):
+                synth += "\n" + _notification_message(ev)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
     def _log_woke(self) -> None:
@@ -732,6 +763,11 @@ class _KanbanNotification:
         return True
 
     async def deliver(self) -> None:
+        if self.d.get("durable"):
+            # Crash-safe per-event peek-then-advance delivery; self-contained and
+            # never touches the batched claim/rewind path below.
+            await self.runner._deliver_durable_notifications(self.d)
+            return
         try:
             self.plat = self.platform_cls(self.platform_str)
         except ValueError:

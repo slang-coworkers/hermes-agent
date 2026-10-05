@@ -89,13 +89,21 @@ async def admit_internal_event(adapter: Any, event: Any) -> None:
 
 
 async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None,
-                       notification_category: str = "result", profile: Optional[str] = None) -> None:
+                       notification_category: str = "result", profile: Optional[str] = None,
+                       idempotency_key: Optional[str] = None, require_persist_ack: bool = False) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. ``profile``
     names the served profile that canonically owns a non-push destination; a non-default value is
     delivered in-process under the caller's profile scope (see ``_self_post_chat_completion``).
-    Raises on failure so the caller can rewind/retry."""
+    ``idempotency_key`` (keyword-only, defaulted): when set, sent as the ``Idempotency-Key``
+    request header so a same-key retry is deduped by the api_server's in-flight/completed cache.
+    ``require_persist_ack`` (keyword-only, defaulted False): when True the non-push self-post
+    treats a 2xx as success ONLY if the response also carries ``X-Hermes-Turn-Persisted: true``
+    (a durable caller opts in); when False a 2xx alone is success.
+    Raises on failure (bad arguments, exhausted retries, HTTP error, or — only when
+    ``require_persist_ack`` — a response that does not confirm persistence) so the caller can
+    rewind/retry instead of treating the wake as delivered."""
     if adapter_supports_push(adapter):
         if source is None:
             raise ValueError("deliver_wake: push-capable adapter requires a SessionSource")
@@ -112,6 +120,12 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
         extra["profile"] = profile
     if notification_category == "diagnostic":
         extra["notification_category"] = notification_category
+    # Forward the optional args only when set, so a self-post that passes just
+    # (text, session_id) receives no unexpected keywords.
+    if idempotency_key is not None:
+        extra["idempotency_key"] = idempotency_key
+    if require_persist_ack:
+        extra["require_persist_ack"] = require_persist_ack
     await _self_post_chat_completion(adapter, text=text, session_id=session_id, **extra)
 
 
@@ -184,7 +198,9 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
 
 async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str,
                                       notification_category: str = "result",
-                                      profile: Optional[str] = None) -> None:
+                                      profile: Optional[str] = None,
+                                      idempotency_key: Optional[str] = None,
+                                      require_persist_ack: bool = False) -> None:
     """POST the wake text to the in-pod API server as a normal session turn, using the adapter's
     own bind host/port/key. Session continuation via ``X-Hermes-Session-Id`` is 403-gated on
     ``API_SERVER_KEY``, so a missing key is a hard error rather than a wake in a fresh session
@@ -196,8 +212,21 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     have — and an unprefixed self-post would resume the session in the DEFAULT profile's store.
     The caller already holds the owner profile's runtime scope, so the turn lands in that profile's
     own session. A non-default profile whose adapter cannot run in-process fails closed.
+
+    When ``require_persist_ack`` is set, a 2xx alone is NOT success — the response must also
+    carry ``X-Hermes-Turn-Persisted: true`` (a server-generated ack that the target profile's
+    final turn actually committed); a missing / malformed / ``false`` ack RAISES so a durable
+    caller does not treat an unpersisted turn as delivered. When it is unset (the default), a
+    2xx is success as before.
     """
     if profile and str(profile) != "default":
+        if require_persist_ack:
+            # The in-process route returns no persistence receipt, so nothing could gate the
+            # caller's cursor advance. Fail closed before any turn runs rather than claim
+            # durability that was never confirmed.
+            raise RuntimeError(
+                f"wake for served profile {profile!r} runs in-process and cannot confirm "
+                "persistence; require_persist_ack is unsupported on this route")
         in_process: Any = getattr(adapter, "run_internal_session_turn", None)
         if not callable(in_process):
             raise RuntimeError(
@@ -220,6 +249,15 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
         host = f"[{host}]"  # bare IPv6 literal
     url = f"http://{host}:{port}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "X-Hermes-Session-Id": session_id}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    if require_persist_ack:
+        # Opt-in signal to the api_server idempotency cache: keep an UNPERSISTED
+        # turn OUT of the cache so this durable caller's same-key retry re-runs
+        # until the turn commits. Absent this header the server keeps the
+        # upstream default (cache any completed result). Distinct INBOUND header;
+        # the response-only X-Hermes-Turn-Persisted ack is untouched.
+        headers["X-Hermes-Require-Persist"] = "1"
     payload = {"model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
                "messages": [{"role": "user", "content": text}], "stream": False}
     if notification_category == "diagnostic":
@@ -245,6 +283,26 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
                             f"wake self-post failed for session {session_id}: HTTP {resp.status}: {body}"
                         )
                     await resp.read()
+                    # A 2xx does not prove the turn committed: the handler 200s
+                    # even when the session-db write failed. A durable caller
+                    # (require_persist_ack) requires the server-generated persist
+                    # ack; a missing / malformed / false value is a delivery
+                    # failure (the caller must not advance its cursor). This is
+                    # NOT retried inline — the turn already ran; the durable
+                    # notifier re-delivers later under the same Idempotency-Key
+                    # so the api_server dedups it. Non-durable callers keep the
+                    # prior 2xx-is-success behaviour.
+                    if require_persist_ack:
+                        persisted = str(
+                            resp.headers.get("X-Hermes-Turn-Persisted", "")
+                        ).strip().lower()
+                        if persisted != "true":
+                            raise RuntimeError(
+                                f"wake self-post for session {session_id} did "
+                                f"not confirm persistence (X-Hermes-Turn-"
+                                f"Persisted={persisted!r}); treating as "
+                                f"undelivered"
+                            )
                     logger.info("wake self-post delivered for session %s (attempt %d)", session_id, attempt + 1)
                     return
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
