@@ -261,8 +261,8 @@ _DELETE = object()
 
 def _del_dotted(cfg: Dict[str, Any], dotted: str) -> bool:
     """Remove ``dotted`` from ``cfg`` if present. Returns True when something was removed.
-    Prunes a parent mapping only when it becomes empty AND it is one this edit created the leaf
-    under, so an operator's sibling key never drags an unrelated parent away."""
+    Then prunes, innermost first, every parent mapping the delete left empty, stopping at the
+    first parent that still holds a key, so an operator's sibling key keeps its parent."""
     parts = dotted.split(".")
     stack = []
     cur: Any = cfg
@@ -274,7 +274,6 @@ def _del_dotted(cfg: Dict[str, Any], dotted: str) -> bool:
     if not isinstance(cur, dict) or parts[-1] not in cur:
         return False
     del cur[parts[-1]]
-    # Walk back up pruning now-empty mappings this delete emptied.
     for parent, key in reversed(stack):
         if isinstance(parent.get(key), dict) and not parent[key]:
             del parent[key]
@@ -864,7 +863,8 @@ def _sandbox_exists(name: str) -> bool:
     # so apply halts on an unknown broker state rather than creating over a live sandbox.
     import subprocess
     proc = subprocess.run(
-        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True
+        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True,
+        stdin=subprocess.DEVNULL,
     )
     for line in proc.stdout.splitlines():
         parts = line.split()

@@ -662,7 +662,7 @@ def test_osh_f64_b_inherited_model_and_custom_providers_dropped(loaded, tmp_path
                 assert field not in task_cfg, (
                     f"{role}: auxiliary.{task_name}.{field} survived the gated render"
                 )
-        # C1: inherited §D7 OneCLI chain-dial state scrubbed on the gated path
+        # inherited §D7 OneCLI chain-dial state scrubbed on the gated path
         assert "onecli" not in (cfg.get("secrets") or {}), f"{role}: inherited secrets.onecli survived"
         assert "podman-onecli" not in ((cfg.get("plugins") or {}).get("enabled") or []), (
             f"{role}: podman-onecli still enabled under the single-authority posture"
