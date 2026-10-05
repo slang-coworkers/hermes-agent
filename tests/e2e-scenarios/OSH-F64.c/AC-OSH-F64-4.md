@@ -196,7 +196,7 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      (`hermes_cli/subcommands/dashboard.py:26-31`), which the dashboard's `$P` does not collide with:
      ```bash
      TOK=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
-     sx "$GENV export HERMES_DASHBOARD_SESSION_TOKEN=$TOK; setsid nohup hermes serve --host 127.0.0.1 --port 9119 > \"\$HERMES_HOME/osh-f64c-serve.log\" 2>&1 < /dev/null &"
+     sx "$GENV export HERMES_DASHBOARD_SESSION_TOKEN=$TOK; setsid nohup \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" run \"\$HERMES_HOME/.osh-f64c/observer\" serve -- hermes serve --host 127.0.0.1 --port 9119 > \"\$HERMES_HOME/osh-f64c-serve.log\" 2>&1 < /dev/null &"
      sx -t 300 "until \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/health_ok.py\" 9119; do sleep 2; done"
      GW_URL="ws://127.0.0.1:9119/api/ws?token=$TOK"
      ```
@@ -211,7 +211,7 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
      echo "baseline: $BASE" | tee $ART/scenario-$AC/install-poll.txt
      [ "$BASE" != ambiguous ] || { echo "baseline gateway_state.json unreadable: FAIL" >&2; exit 1; }
      B0=$(echo "$BASE" | cut -d' ' -f1,2)
-     sx "$GENV setsid nohup sh -c '\"\$0\" \"\$@\"; echo \$? > \"\$HERMES_HOME/osh-f64c-install.rc\"' \"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT > \"\$HERMES_HOME/osh-f64c-install.log\" 2>&1 < /dev/null &"
+     sx "$GENV setsid nohup sh -c '\"\$0\" \"\$@\"; echo \$? > \"\$HERMES_HOME/osh-f64c-install.rc\"' \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" run \"\$HERMES_HOME/.osh-f64c/observer\" install -- \"\$HERMES_HOME/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh\" $SPEC --ref $REF --gateway-url '$GW_URL' --policy-root $ROOT > \"\$HERMES_HOME/osh-f64c-install.log\" 2>&1 < /dev/null &"
      RC='if [ -s "$HERMES_HOME/osh-f64c-install.rc" ]; then echo "exited rc=$(cat "$HERMES_HOME/osh-f64c-install.rc")"; exit 0; fi;'
      POLL="i=0; while [ \$i -lt 70 ]; do $RC"
      POLL+=' if [ "$HERMES_HOME/gateway_state.json" -nt "$HERMES_HOME/osh-f64c-install.start" ]; then s=$(w); [ -e "$HERMES_HOME/osh-f64c-install.first-state.json" ] || cp "$HERMES_HOME/gateway_state.json" "$HERMES_HOME/osh-f64c-install.first-state.json";'
@@ -298,7 +298,14 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
    the fleet plugins): `stage $WT/plugins/nv-bot-chat '"$HERMES_HOME/plugins"'` (the helpers were staged in step 2);
    then `sx 'grep -A6 "^plugins:" "$HERMES_HOME/config.yaml" | grep -q nv-bot-chat || hermes -p default plugins enable nv-bot-chat'`.
 4. **Dashboard and the ONE forward**, as AC-OSH-F64-5 Setup steps 6–8:
-   - Start the dashboard on the Setup-5 start path (operator msg 508): `sx "$GENV export HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist; setsid nohup hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"`.
+   - Start the dashboard on the Setup-5 start path (operator msg 508), as the child of the G2 observer, argv and env
+     otherwise unchanged: `sx "$GENV export HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist; setsid nohup \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" run \"\$HERMES_HOME/.osh-f64c/observer\" dashboard -- hermes dashboard --host 127.0.0.1 --port $P --no-open --skip-build > \"\$HERMES_HOME/osh-f64c-dashboard.log\" 2>&1 < /dev/null &"`.
+     A fresh `sx` exec cannot read another exec tree's `/proc/<pid>/environ` or `ns/net` in `osh-f64c-gw`; an
+     ancestor in the same tree can (tester report 6f39ca8, `diag-setup5/ns-mechanism.txt`). So serve, the install and
+     the dashboard each start as the child of `proc_observer.py run` (argv and env unchanged). Each observer writes
+     its child's PID, starttime and netns plus the `HERMES_HOME` basename and `HERMES_TUI_RESUME`, and nothing else
+     from any environ. It also writes a self-test, the birth/exit events of every descendant `tui_gateway.entry`,
+     and answers live re-reads (`proc_observer.py query`).
      `--skip-build` is needed because the sandbox has no npm egress, and `HERMES_WEB_DIST` because the image's
      prebuilt SPA is not at the default `PROJECT_ROOT/hermes_cli/web_dist` (see AC-OSH-F64-5 Setup 6).
    - Wait until `/api/health` reports `"ok": true`:
@@ -311,19 +318,36 @@ commands (`mkdir`, `cp`, `curl`, `socat`, the host redirections, `openshell sand
    - Bridge the Host guard from loopback: `socat TCP-LISTEN:$P,fork,reuseaddr,bind=127.0.0.1 TCP:172.17.0.1:$P & echo $! > $ART/scenario-$AC/socat.pid`.
    - `URL=http://127.0.0.1:$P/`.
    - The session token for API reads is `T=$(curl -s $URL | grep -o '__HERMES_SESSION_TOKEN__="[^"]*"' | cut -d'"' -f2)`.
-5. **The dashboard PID and its netns, then P3, P4 and the G3 self-test, all before step 1.**
-   `netns_record.py` lists the fleet processes; the dashboard PID is the lowest `dashboard` line (a `hermes` →
-   `hermes.real` wrapper chain is one ancestry line, and every PTY child descends from its lowest PID):
+5. **The observers' record, the G2 descendant self-test, then P3, P4 and the G3 self-test, all before step 1.**
+   Fleet PIDs and netns come only from the observers. Each one has read its own child plus a probe it forked
+   under that env. A start that is missing, unreadable or already exited is `FAIL(env)` before any model call, and
+   `.armed` is never substituted. `DNS` is the dashboard observer's read:
    ```bash
-   sx '"$PY" "$HERMES_HOME/.osh-f64c/helpers/netns_record.py"' | tee $ART/scenario-$AC/netns.txt
-   DPID=$(awk '$1=="dashboard"{print $2}' $ART/scenario-$AC/netns.txt | sort -n | head -1)
-   DNS=$(awk -v p="$DPID" '$1=="dashboard" && $2==p {print $3}' $ART/scenario-$AC/netns.txt)
-   [ -n "$DPID" ] && [ -n "$DNS" ] && [ "$DNS" != unreadable ] || { echo "no dashboard PID/netns: FAIL" >&2; exit 1; }
+   OBS='"$HERMES_HOME/.osh-f64c/observer"'
+   sx -t 120 "until [ -s $OBS/dashboard/selftest.json ]; do sleep 1; done; \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" record $OBS serve install dashboard" | tee $ART/scenario-$AC/netns.txt \
+     || { echo "observer record: a fleet start is missing, unreadable or exited: FAIL(env)" >&2; exit 1; }
+   sx "cat $OBS/dashboard/root.json" > $ART/scenario-$AC/dashboard-root.json
+   DPID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' $ART/scenario-$AC/dashboard-root.json)
+   DNS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["netns"])' $ART/scenario-$AC/dashboard-root.json)
    echo "dashboard $DPID $DNS" | tee -a $ART/scenario-$AC/evidence.txt
    ```
+   **G2 descendant self-test (D3 bound 2), after `win_open setup`.** Define the `## Steps` helper block now and
+   run step 0 here: its assertions are unchanged, and it supplies `$ORCH_SID`. Then ONE `/api/pty` WebSocket is
+   opened WITHOUT `attach`, from inside `osh-f64c-gw`. On the legacy 1:1 path the PTY closes on disconnect
+   (`hermes_cli/web_server.py:17535-17546`, `:16141-16175`). The WebSocket sends no keystroke. The observer must
+   record exactly one new dashboard-descended child, from a zero baseline, with readable names and netns =
+   `$DNS`; a live re-read after the close must count 0, and the probed session's message count and latest descendant must be unchanged:
+   ```bash
+   bgrun g2probe '"$PY" "$HERMES_HOME/.osh-f64c/helpers/pty_probe.py" '$P' orchestrator '$ORCH_SID' '$T' "$HERMES_HOME/.osh-f64c/observer/dashboard"' | tee $ART/scenario-$AC/g2-probe.txt \
+     && grep -qF "probe_child_netns $DNS" $ART/scenario-$AC/g2-probe.txt && grep -qx 'probe_after_count 0' $ART/scenario-$AC/g2-probe.txt \
+     && grep -qx 'probe_session_unchanged yes' $ART/scenario-$AC/g2-probe.txt && grep -qx 'probe_new_births 1' $ART/scenario-$AC/g2-probe.txt \
+     || { echo "G2 descendant self-test: FAIL(env)" >&2; exit 1; }
+   ```
+   The other half of the probe's safety evidence is `win_close setup` below: `route-reconcile-setup.txt` must carry
+   no allowed POST (`! grep -qE '^post pid .* POST allowed' $ART/scenario-$AC/route-reconcile-setup.txt`), and the
+   only rejected one is the G3 self-test's, else `FAIL(env)`.
    Each probe below runs on the Setup-5 start path (`bgrun`, guard env set); its own `netns` line must equal `$DNS`,
-   and a non-zero exit stops Setup. Define the `## Steps` helper block (`listing` … `win_close`) now, before P3: the
-   `setup` route window opens here.
+   and a non-zero exit stops Setup. The `setup` route window opened before the G2 probe above.
    - **P3 — the managed route from that netns:**
      `bgrun p3 '"$PY" "$HERMES_HOME/.osh-f64c/helpers/inference_probe.py" default' | tee $ART/scenario-$AC/p3-probe.txt || exit 1`
      → expect `status 200 models <n>`, `rc=0` and `netns $DNS`. Anything else (TLS failure, 401, connect error) is
@@ -354,9 +378,32 @@ row() {  # row <profile> <session> <role> [tool_name] [needle] -> evidence.txt; 
 expect_id() {  # G2: the id the PTY route will set, computed the route's own way right before a connect
   sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/pty_select.py\" expect $1 $2" | awk '$1=="expected_id"{print $2}'
 }
-pty_child() {  # G2 selector: exactly one dashboard-descended tui_gateway child with that id + profile
-  sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/pty_select.py\" select $DPID $1 $2" | tee $ART/scenario-$AC/pty-select-$3.txt
-  [ "$(awk '$1=="pty_matches"{print $2}' $ART/scenario-$AC/pty-select-$3.txt)" = 1 ] && grep -qF " netns $DNS dashboard_netns $DNS" $ART/scenario-$AC/pty-select-$3.txt || { echo "G2 $3: not exactly one PTY child in the dashboard netns: FAIL" >&2; exit 1; }
+AB="agent-browser --session osh-f64c-ac4"   # one fresh session for the whole of ## Steps (ws_log.js binds at its start)
+GUI='"$HERMES_HOME/logs/gui.log"'          # the dashboard's own log (gui mode, hermes_cli/main.py:815-828)
+ab_open() {  # ab_open <url>: a FULL page load, never an SPA click (D3a navigation)
+  $AB open "$1" || { echo "browser open $1: FAIL(env)" >&2; exit 1; }
+}
+ab_console() {  # the browser console; a failed read is an unobservable open log: FAIL(env)
+  $AB console 2>/dev/null || { echo "browser console unreadable: FAIL(env)" >&2; return 1; }
+}
+console_cursor() {  # number of OSHWS lines the browser has logged so far (grep's no-match is a valid 0)
+  local c; c=$(ab_console) || return 1
+  printf '%s\n' "$c" | grep -c 'OSHWS ' || [ $? = 1 ]
+}
+reread() {  # reread <window> base|send: a live observer re-read with the gui.log cursor and the console cursor
+  mkdir -p $ART/scenario-$AC/g2/$1
+  sx "mkdir -p $OBS/dashboard/g2/$1 && \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" query $OBS/dashboard 10 0 g2/$1/$2.json $GUI" > $ART/scenario-$AC/g2/$1/$2.json \
+    || { echo "observer re-read $1/$2: no answer or gui.log unreadable: FAIL(env)" >&2; exit 1; }
+  console_cursor > $ART/scenario-$AC/g2/$1/$2.console-cursor || exit 1
+}
+g2_gate() {  # g2_gate <mode> <profile> <expected-id> <canonical-id> <window>: after `reread <window> base` and `reread <window> send`
+  local w=$ART/scenario-$AC/g2/$5 c0 c1 b64
+  c0=$(cat $w/base.console-cursor); c1=$(cat $w/send.console-cursor)
+  ab_console > $w/console-all.txt || exit 1
+  grep 'OSHWS ' $w/console-all.txt | sed -n "$((c0 + 1)),${c1}p" > $w/console.txt
+  b64=$(base64 -w0 < $w/console.txt)
+  sx "echo $b64 | base64 -d > $OBS/dashboard/g2/$5/console.txt && \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/pty_select.py\" gate $1 $OBS/dashboard \"\$HERMES_HOME/.osh-f64c/guard\" $2 $3 $4 $OBS/dashboard/g2/$5 $OBS/dashboard/g2/selected.json" | tee $ART/scenario-$AC/pty-select-$5.txt \
+    && grep -qx 'g2_ok yes' $ART/scenario-$AC/pty-select-$5.txt || { echo "G2 $5 ($1): FAIL(env)" >&2; exit 1; }
 }
 usage_snap() { sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/route_record.py\" $T0 $ROUTE" > $ART/scenario-$AC/usage-$1.txt || true; }
 win_open() { eval "W0_$1=$(sx 'date +%s.%N')"; usage_snap $1-before; }
@@ -370,7 +417,7 @@ win_close() {  # G4 for window $1: stop at the first unmatched record
 }
 ```
 
-**Route gates on every turn (ADR eeb30a42 G2–G4).** Run `win_open setup` before Setup 5's P3, and `win_close setup`
+**Route gates on every turn (ADR eeb30a42 G2–G4).** Run `win_open setup` before Setup 5's G2 probe, and `win_close setup`
 after the G3 self-test: the probes' `GET`s are recorded, and the self-test's rejected `POST` must have no router
 record. Then for each step `n` in 1–5, `win_open s<n>` before driving it and `win_close s<n>` after its evidence
 row; at the end, `W0_all=$W0_setup`, `cp $ART/scenario-$AC/usage-setup-before.txt $ART/scenario-$AC/usage-all-before.txt`
@@ -390,29 +437,44 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
    `row` call gets the tip; the helper walks `parent_session_id` up from it and prints the canonical ancestor on
    that line. Run
    `row builder $BUILD_SID assistant` → expect the same `hidden=1 title=Bot Chat` shape for the builder.
-1. **Human → the orchestrator's canonical Bot Chat.** In agent-browser, select `orchestrator` in the
-   dashboard profile combobox → expect the `orchestrator »` prompt. Then open `${URL}chat?profile=orchestrator&resume=$ORCH_SID`,
-   keeping `?profile=` in the URL because the SPA's profile scope is initialised from it
-   (`web/src/contexts/ProfileProvider.tsx:37-45`). Use the same URL whenever you return to the chat in steps 2–3.
-   The SPA forwards both to `/api/pty?profile=orchestrator&resume=$ORCH_SID` (`web/src/pages/ChatPage.tsx:1165,1174`).
-   A bare `?profile=` without `resume` can open the active-session file or a fresh session instead
-   (`hermes_cli/web_server.py:17475-17494`), and `message_agent` exists only in the canonical Bot Chat.
-   **G2, immediately before that connect:** `EXP=$(expect_id orchestrator $ORCH_SID)`, the route's own
-   `_session_latest_descendant(canonical_id, db)[0] or canonical_id` over the profile's `state.db` opened read-only
-   (`hermes_cli/web_server.py:16623-16634`; not the listing's `resolved_id`). Once the chat page has connected, and
-   before sending, run `pty_child orchestrator $EXP s1` → exactly one PID in `$DNS`. Every reconnect (a page reload,
-   a re-opened chat URL) recomputes `EXP` and re-runs `pty_child`; a new child must also log its own guard `probe`.
-   Send the parent's step-1 message, `run change P7-$NONCE`, over that SAME connection, and wait (bounded) for the
-   orchestrator's reply. Then open the **Bot Chat** tab and click `orchestrator` → expect: the human line and the
-   orchestrator's acceptance turn are visible → `step-1.png`. Evidence: `echo step-1 >> evidence.txt; row orchestrator <tip> assistant`.
-   Steps 2–3 continue in this same resumed chat and child; `win_close s<n>` must show `allowed` lines from that PID.
-   If the browser reconnects in steps 1–3, recompute `EXP` immediately before the reconnect and, once connected,
-   run `pty_child orchestrator $EXP s<n>r<k>` (`k` counts reconnects in that step).
+1. **Human → the orchestrator's canonical Bot Chat.** Every page change in steps 1–3 is a FULL page load with
+   `ab_open`, never a tab click: ChatPage stays mounted once activated (`web/src/pages/ChatPage.tsx:200-206, :514`),
+   so a click could open a socket nobody sees. The browser session is fresh, so `ws_log.js` binds at its start:
+   `$AB close 2>/dev/null; $AB --init-script $SCN/helpers/ws_log.js open about:blank`. Every `/api/pty` open it
+   records is matched against the dashboard's `pty accepted` lines (D3a bound 1; `OSHWS` lines carry no token).
+   - **Profile, on /sessions:** `reread s1p base`; `ab_open ${URL}sessions`. Select `orchestrator` in the sidebar
+     profile combobox (`web/src/App.tsx:648`) → expect it shown as selected. `reread s1p send`;
+     `g2_gate preconnect orchestrator - $ORCH_SID s1p`: no child at either end, no open, no accept and no birth in
+     the window (the chat host mounts only after the first /chat visit, `App.tsx:407-409`), else `FAIL(env)`.
+   - **Connect:** `EXP=$(expect_id orchestrator $ORCH_SID)`, the route's own `_session_latest_descendant(canonical_id,
+     db)[0] or canonical_id` over the profile's read-only `state.db` (`hermes_cli/web_server.py:16623-16634`). Then
+     `reread s1 base`; `ab_open "${URL}chat?profile=orchestrator&resume=$ORCH_SID"` → expect the `orchestrator »`
+     prompt. `?profile=` stays in the URL because the SPA scope starts from it (`web/src/contexts/ProfileProvider.tsx:43-45`);
+     the SPA forwards both to `/api/pty?profile=orchestrator&resume=…` (`ChatPage.tsx:1165-1174`), and may rewrite
+     `resume` to the latest descendant itself (`:402-426`).
+   - **Initial gate, right before the send:** `reread s1 send`; `g2_gate initial orchestrator $EXP $ORCH_SID s1`.
+     It passes only with no child at the baseline, accepts == browser opens, one open (or two, the second being the
+     recorded rewrite from `$ORCH_SID` to `$EXP`), exactly one new birth with `$EXP` and `orchestrator`, that child
+     alone live, and its netns = `$DNS` = its `.armed` netns with guard records. It writes `g2/selected.json`.
+   Send the parent's step-1 message, `run change P7-$NONCE`, and wait (bounded) for the orchestrator's reply. Then
+   `reread s1t base`; `ab_open ${URL}bot-chat` and click `orchestrator` → expect the human line and the
+   orchestrator's acceptance turn → `step-1.png`; `reread s1t send`; `g2_gate away orchestrator $EXP $ORCH_SID s1t`
+   (0 accepts on the tab page, the selected child still the only live one). Evidence:
+   `echo step-1 >> evidence.txt; row orchestrator <tip> assistant`.
+   **Every return to the chat (steps 2–3, and any reconnect)** is `reread s<n> base`; `EXP=$(expect_id orchestrator
+   $ORCH_SID)`; `ab_open "${URL}chat?profile=orchestrator&resume=$ORCH_SID"`; then, right before the send,
+   `reread s<n> send`; `g2_gate reattach orchestrator $EXP $ORCH_SID s<n>`: the baseline is the selected child alone,
+   one open, one accept, zero births, the same fingerprint, resume, home and netns. An `EXP` change that leaves a
+   second child is `FAIL(env)` → STOP. Each tab visit after it is `reread s<n>t base`; `ab_open ${URL}bot-chat`; …;
+   `reread s<n>t send`; `g2_gate away orchestrator $EXP $ORCH_SID s<n>t`. `win_close s<n>` must show `allowed`
+   lines from the selected PID.
 2. **Unwired `message_agent` → builder.** Drive the orchestrator to message the builder before any wire, as
-   parent step 2 does. In the tab, click **← All Bot Chats**, then `orchestrator` → expect: a `tool` row
+   parent step 2 does, after a return to the chat as above. Then visit the tab by full load and click `orchestrator` →
+   expect: a `tool` row
    carrying the wiring-gate refusal → `step-2.png`. Evidence: `echo step-2 >> evidence.txt; row orchestrator <tip> tool message_agent`.
 3. **Wire, then deliver.** Run `sx 'hermes wire add orchestrator builder'`,
-   then ask the orchestrator in the same chat to send to the builder again → refresh `orchestrator` in the tab →
+   then return to the chat as above and ask the orchestrator to send to the builder again → visit the tab by full load
+   and click `orchestrator` →
    expect: a newer `tool` row carrying the delivery confirmation → `step-3.png`. Evidence: `echo step-3 >> evidence.txt;
    row orchestrator <tip> tool message_agent '"status": "sent"'`. The needle selects the delivery RESULT by its content: a
    successful send returns `{"status": "sent", "to": …}` (release `tools/bot_mode_dm.py:705-714`), while step 2's refusal
@@ -420,9 +482,11 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
 4. **The builder's delivery turn.** This is parent step 4 with the prefix substitution: a `write_file` plan to
    `.hermes/plans/builder.md`, then the `terminal` change inside `osh-f64c-builder`, writing
    `/tmp/osh-f64c-builder.marker`. The delivery child runs `-c "Bot Chat"` (`tools/bot_mode_dm.py:361-378`).
-   Open the tab, **← All Bot Chats**, then `builder` → `timeout 600 agent-browser wait --text "P7-BUILT:$NONCE"` →
+   `reread s4t base`; `ab_open ${URL}bot-chat`, click `builder` → `timeout 600 $AB wait --text "P7-BUILT:$NONCE"` →
    expect: the builder's `P7-BUILT:<nonce>` reply in its canonical Bot Chat → `step-4.png`. Evidence:
-   `echo step-4 >> evidence.txt; row builder <tip> assistant "" "P7-BUILT:$NONCE"`. The parent's routing and
+   `echo step-4 >> evidence.txt; row builder <tip> assistant "" "P7-BUILT:$NONCE"`; `reread s4t send`;
+   `g2_gate away orchestrator $EXP $ORCH_SID s4t` (the delivery child spawns no PTY child, so the selected one
+   is still alone). The parent's routing and
    isolation probes may be recorded too, but they are not graded here.
 5. **The veto, in the builder's Bot Chat.** Run the worker turn inside `osh-f64c-gw` through the local-teammate
    transport (`tools/bot_mode_dm.py:31-33`), so the attempt lands in that Bot Chat. It is a model turn, so it starts
@@ -430,9 +494,22 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
    query file makes no network call and stays a plain `sx`:
    `sx 'printf "%s\n" "Use the cronjob_manage tool to create an hourly cron job named osh-f64c-probe that says hello." > /tmp/osh-f64c-q5.txt'`;
    then `bgrun s5 'hermes -p builder chat --in ~ -c "Bot Chat" -Q --query-file /tmp/osh-f64c-q5.txt' | tee $ART/scenario-$AC/step-5-cli.txt`.
-   Then refresh `builder` in the tab → expect: a `tool` row carrying the `cronjob_manage` denial that names
-   `orchestrator-only` → `step-5.png`. Evidence: `echo step-5 >> evidence.txt; row builder <tip> tool cronjob_manage orchestrator-only`.
-6. **Teardown.** `kill $(cat $ART/scenario-$AC/socat.pid)`; `kill $(cat $ART/scenario-$AC/forward-client.pid) 2>/dev/null`; then delete every `osh-f64c-*` sandbox and policy
+   Then `reread s5t base`; `ab_open ${URL}bot-chat`, click `builder` → expect: a `tool` row carrying the
+   `cronjob_manage` denial that names
+   `orchestrator-only` → `step-5.png`. Evidence: `echo step-5 >> evidence.txt; row builder <tip> tool cronjob_manage orchestrator-only`;
+   `reread s5t send`; `g2_gate away orchestrator $EXP $ORCH_SID s5t`.
+6. **Teardown.** Before anything is deleted (CR3; D3a after-close rule):
+   - `reread close base`; `reread close send`; `g2_gate close orchestrator $EXP $ORCH_SID close`: nothing is live
+     but the selected child, which may stay detached.
+   - `sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/proc_observer.py\" record $OBS serve install dashboard" | tee $ART/scenario-$AC/netns-end.txt || { echo "observer record at teardown: FAIL(env)" >&2; exit 1; }`
+     (an observer whose child already exited is `FAIL(env)`, D3 bound 4); `ab_console > $ART/scenario-$AC/oshws-console.txt || exit 1`.
+   - Stop the dashboard, then require zero: `sx "kill -TERM $DPID"`;
+     `sx -t 120 "until [ -s $OBS/dashboard/final.json ]; do sleep 1; done; cat $OBS/dashboard/final.json" | tee $ART/scenario-$AC/dashboard-final.json`;
+     `python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["survivors"] == [] and d["unreadable"] == [] else 1)' $ART/scenario-$AC/dashboard-final.json || { echo "teardown: a PTY child outlived the dashboard: FAIL(env)" >&2; exit 1; }`.
+     The graceful stop closes every PTY session (`hermes_cli/web_server.py:525`); the observer polls every
+     fingerprint it ever recorded by `/proc/<pid>/stat` alone, so a reparented survivor still counts.
+   - `sx 'tar -C "$HERMES_HOME/.osh-f64c" -czf - observer | base64 -w0' | base64 -d | tar -C $ART/scenario-$AC -xzf -`.
+   Then `$AB close`; `kill $(cat $ART/scenario-$AC/socat.pid)`; `kill $(cat $ART/scenario-$AC/forward-client.pid) 2>/dev/null`; then delete every `osh-f64c-*` sandbox and policy
    (`openshell sandbox delete osh-f64c-gw`, `osh-f64c-orchestrator`, `osh-f64c-builder`, plus their policies
    as the parent's teardown does). Nothing outside `osh-f64c-*` and `$ROOT` is touched.
 
@@ -478,10 +555,16 @@ All files are under `$ART/scenario-AC-OSH-F64-4/`:
   holding a row with `api_call_count > 0`. Any row with `api_call_count > 0` whose `billing_base_url` is not
   `https://inference.local/v1` means a model call left the managed route, and the run FAILS whatever the screenshots
   show; a missing positive control FAILS too.
-- **Network namespaces** (recorded, read with the route record): `netns.txt`, from
-  `sx '"$PY" "$HERMES_HOME/.osh-f64c/helpers/netns_record.py"'` at the end of Setup and again after step 5
-  (append). Every guard record's `netns` must equal the dashboard's `$DNS`.
-- **Route gates:** `p3-probe.txt`, `p4-ssh.txt`, `g1-static.txt`, `g3-selftest.txt`, `pty-select-s1*.txt` (one per connect),
+- **Network namespaces** (recorded, read with the route record): `netns.txt` (Setup 5) and `netns-end.txt`
+  (teardown), from `proc_observer.py record`. Each has one line per start (`serve`, `install`, `dashboard`) with
+  its PID, starttime, netns, self-test result and running state, and ends `record_ok yes`. Every guard record's
+  `netns` must equal the dashboard's `$DNS`.
+- **Route gates:** `p3-probe.txt`, `p4-ssh.txt`, `g1-static.txt`, `g3-selftest.txt`, `g2-probe.txt`, one
+  `pty-select-<window>.txt` per G2 window (`s1`, `s1t`, `s<n>`, `s<n>t`, `close`; each ending `g2_ok yes`) with its
+  `g2/<window>/{base,send}.json` re-reads (gui.log cursor included) and `console.txt` (the window's `OSHWS` lines:
+  page paths, `/api/pty` URLs with `token`/`attach` set to `REDACTED`, the page `resume` value), `oshws-console.txt`,
+  `dashboard-final.json`, and the `observer/` dir (per start: `root.json`, `selftest.json`, `events.jsonl`,
+  `exit.json`, `final.json`; copied at teardown),
   `route-reconcile-{setup,s1..s5,all}.txt` (each must end `reconcile_ok yes`), `usage-*-{before,after}.txt`,
   the copied `guard/` dir (`<pid>.armed` + `<pid>.jsonl`) and `openshell.log`. Every model-emitting PID in
   `route-reconcile-all.txt` must have an `.armed` marker and a `probe` 200 matched to a router `GET /v1/models`
