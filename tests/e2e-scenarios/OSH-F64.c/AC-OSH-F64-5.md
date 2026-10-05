@@ -50,8 +50,14 @@ sx() {  # sx [-t <secs>] '<command>': run it in $SB after $HX; -t bounds it (tim
 }
 # Copy a small local dir into the sandbox through exec argv; needs only `sandbox exec`.
 stage() {  # stage <local-dir> <remote-parent, single-quoted so it expands in the sandbox>
+  local b64 sum f i op='>'   # the broker caps one exec argument at 32768 bytes: send 16 KiB chunks, check, then extract
   b64=$(tar -C "$(dirname "$1")" --exclude=__pycache__ -czf - "$(basename "$1")" | base64 -w0)
-  sx "mkdir -p $2 && echo $b64 | base64 -d | tar -C $2 -xzf -"
+  sum=$(printf %s "$b64" | base64 -d | sha256sum | cut -d' ' -f1); f=/tmp/osh-f64c-stage-$sum
+  for ((i = 0; i < ${#b64}; i += 16384)); do
+    sx "printf %s ${b64:i:16384} $op $f.b64" || { echo "stage $1: chunk at $i not written: FAIL(env)" >&2; exit 1; }; op='>>'
+  done
+  sx "base64 -d $f.b64 > $f.tgz && echo '$sum  $f.tgz' | sha256sum -c - && mkdir -p $2 && tar -C $2 -xzf $f.tgz && rm -f $f.b64 $f.tgz" \
+    || { echo "stage $1: sandbox tarball sha256 is not $sum, or extract failed: FAIL(env)" >&2; exit 1; }
 }
 ```
 
