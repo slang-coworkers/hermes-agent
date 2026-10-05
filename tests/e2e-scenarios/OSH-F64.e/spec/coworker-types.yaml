@@ -1,0 +1,64 @@
+# OSH-F64.e fleet spec (openshell substrate, DIRECT-mode inference).
+# The OSH-F64.b single-authority spec with egress.inference_provider.mode: direct: the model route
+# is an ordinary APF-governed protocol:rest endpoint on the upstream host (the four OSH-F64.b rules),
+# not the policy-bypassing inference.local managed route, and the api_key is OpenShell's opaque
+# resolve placeholder for the generic provider attached to the GATEWAY sandbox alone.
+# Exactly two coworker types: the installer provisions one worker sandbox per declared type, so the
+# live lane is 1 gateway + 2 workers (ADR §Scenario outlines).
+project: osh-f64b
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+install_surfaces: []
+
+egress:
+  inference_route: "inference-api.nvidia.com:443"  # == the upstream host:port (direct mode)
+  broker_addr: "172.17.0.1:18777"                   # lane control plane — the ONLY raw tls:skip hop
+  pinned_offline_lane: true
+  filesystem_read_only: ["/opt/osh-lane"]
+  binaries: ["/usr/bin/python3*", "/opt/hermes/.venv/bin/python"]
+  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
+  inference_provider:
+    mode: direct
+    provider: direct-endpoint             # the Hermes config provider key (providers.direct-endpoint)
+    base_url: "https://inference-api.nvidia.com/v1"
+    upstream_base_url: "https://inference-api.nvidia.com/v1"
+    api_mode: chat_completions
+    model_id: aws/anthropic/bedrock-claude-opus-5-5
+    credential_provider: hermes-direct-inference  # OpenShell generic provider, attached at gateway create
+    credential_env: OSH_DIRECT_INFERENCE_KEY      # a key NAME; the value lives OpenShell-side only
+    gateway_image: "osh-f64-gateway:f64e-<sha7>"  # the tester substitutes the lane tag
+    attribution_tag_prefix: osh-f64b
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "OSH-F64.e orchestrator — the elevated fleet-admin coworker; its model turns run in a profile-scoped child inside the gateway sandbox and reach the upstream through the APF-governed direct route."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  architect:
+    extends: [base]
+    identity: "OSH-F64.e architect — designs the change; its sandbox config holds only OpenShell's resolve placeholder, never the credential."
+    ui_meta: {title: "Architect", description: "Fleet architect", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "OSH-F64.e Fleet"
+    members: [orchestrator, architect]
+
+wires:
+  - [orchestrator, architect]
+
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false
