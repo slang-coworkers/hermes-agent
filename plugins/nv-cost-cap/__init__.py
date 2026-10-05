@@ -162,7 +162,7 @@ def _resolve_immortal(session_id, platform=None) -> bool:
     return immortal
 
 
-def _refresh_effective(session_id) -> float:
+def _refresh_effective(session_id, *, strict=False) -> float:
     """Reconcile from state.db and persist the monotone effective spend.
 
     Never raises: a reconcile failure keeps the previously-persisted effective.
@@ -170,17 +170,24 @@ def _refresh_effective(session_id) -> float:
     stamped ``cost_status='unknown'`` sums to 0.0, so the numeric total is
     fail-OPEN without it (the fast-path ``unpriced_count`` never sees a
     reconcile-only row). Idempotent: only lifts the marker 0 -> 1.
+    ``strict=True`` (resume-card Approve) raises on a missing or unreadable
+    state.db instead, so a failed read can never leave a stale low total looking
+    runnable.
     """
     try:
-        reconciled = policy.reconcile_session(session_id, state_db_path=_state_db_path())
+        reconciled = policy.reconcile_session(session_id, state_db_path=_state_db_path(), strict=strict)
     except Exception:
+        if strict:
+            raise
         logger.warning("nv-cost-cap reconcile failed for %s", session_id, exc_info=True)
         return float(store.get_state(session_id)["effective_usd"])
     try:
-        if (policy.lineage_unknown(session_id, state_db_path=_state_db_path())
+        if (policy.lineage_unknown(session_id, state_db_path=_state_db_path(), strict=strict)
                 and not store.get_state(session_id)["recon_unpriced"]):
             store.set_state(session_id, recon_unpriced=1)
     except Exception:
+        if strict:
+            raise
         logger.warning("nv-cost-cap unknown-pricing scan failed for %s", session_id, exc_info=True)
     return store.bump_effective(session_id, reconciled)
 

@@ -78,3 +78,24 @@ def test_post_lift_probe_failure_still_records_the_resume(env):
     approve = [d for d in _decisions(env, card["card_id"]) if d["decision"] == "approve"]
     assert len(approve) == 1 and all(e["present"] is None for e in approve[0]["outcome"]["after"])
     assert len([m for m in _messages(env) if NOTICE_TAIL in m]) == 1
+
+
+def test_money_reader_fails_after_preflight_keeps_stop(env):
+    """state.db opens and lists sessions, but the spend columns are unreadable: Approve treats the session as open."""
+    import sqlite3
+
+    card = _new_stop(env, "s-badschema", blocked=False)
+    db = env.home / "state.db"
+    db.unlink()
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+        conn.execute("INSERT INTO sessions (id) VALUES ('s-badschema')")
+        conn.commit()
+    finally:
+        conn.close()
+    before = _own_sp(env).read_bytes()
+    res = _approve(env, card["card_id"])
+    assert res["ok"] is False and res["reason"] == "money-block-active", res
+    assert _card(env, card["card_id"])["status"] == "pending"
+    assert _own_sp(env).read_bytes() == before and env.disengage_calls == []

@@ -390,46 +390,23 @@ def open_money_sessions() -> list:
     A session is resolved when it is runnable on its own (``session_resumes`` with the belt ignored) or
     when an applied Stop holds it. The belt is the only lever on profiles whose in-loop hooks are skipped
     (codex app-server), so lifting it while any session is still over budget would let it run past its
-    cap. Fails closed: a session that cannot be refreshed counts as open.
+    cap. Fails closed: the refresh is strict, so a session whose spend cannot be read counts as open.
     """
     refresh = _pkg_attr("_refresh_effective")
     open_ids = []
-    readable = None
     for sid in store.open_mortal_session_ids():
         try:
             if _stopped_by_applied_stop(sid):
                 continue
-            if readable is None:
-                readable = _state_db_readable()
-            # The spend readers degrade a missing / unreadable state.db to "no new spend", which would
-            # let a stale cached total read as runnable; Approve needs a real read.
-            if refresh is None or not readable:
-                raise LookupError("no authoritative spend read (plugin not loaded, or state.db unreadable)")
-            refresh(sid)
+            if refresh is None:
+                raise LookupError("spend refresh unavailable outside the loaded plugin")
+            refresh(sid, strict=True)
             if store.session_resumes(sid, belt_engaged=False):
                 continue
         except Exception:
             logger.warning("nv-cost-cap: money check for session %s failed; treated as open", sid, exc_info=True)
         open_ids.append(sid)
     return open_ids
-
-
-def _state_db_readable() -> bool:
-    from hermes_constants import get_hermes_home
-
-    db_path = get_hermes_home() / "state.db"
-    if not db_path.is_file():
-        return False
-    try:
-        conn = policy._ro_connect(str(db_path))
-        try:
-            conn.execute("SELECT 1 FROM sessions LIMIT 1").fetchall()
-        finally:
-            conn.close()
-    except Exception:
-        logger.warning("nv-cost-cap: state.db at %s is unreadable", db_path, exc_info=True)
-        return False
-    return True
 
 
 # --- resolution -------------------------------------------------------------
