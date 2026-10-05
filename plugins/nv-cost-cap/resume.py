@@ -252,8 +252,11 @@ def _drain_current_profile() -> int:
             logger.warning("nv-cost-cap: resume notice for card %s failed (attempt %d/%d): %s; retrying on the "
                            "next drain", row["card_id"], attempts, NOTICE_MAX_ATTEMPTS, error)
         else:
-            logger.warning("nv-cost-cap: delivering %s for resume card %s failed: %s; the stop is kept "
-                           "(release via `hermes resume`)", row["kind"], row["card_id"], error)
+            # A notice exists only after disengage() returned True, so its failure must not claim the stop held.
+            disposition = ("the stop WAS lifted; pause again if needed" if row["kind"] == "notice"
+                           else "the stop is kept (release via `hermes resume`)")
+            logger.warning("nv-cost-cap: delivering %s for resume card %s failed: %s; %s",
+                           row["kind"], row["card_id"], error, disposition)
     return claimed
 
 

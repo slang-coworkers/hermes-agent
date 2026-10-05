@@ -99,3 +99,23 @@ def test_money_reader_fails_after_preflight_keeps_stop(env):
     assert res["ok"] is False and res["reason"] == "money-block-active", res
     assert _card(env, card["card_id"])["status"] == "pending"
     assert _own_sp(env).read_bytes() == before and env.disengage_calls == []
+
+
+def test_exhausted_notice_warning_says_the_stop_was_lifted(env, caplog):
+    """A post-resume notice that used all its attempts warns that the stop WAS lifted, never that it was kept."""
+    import json
+    import logging
+
+    import tools.send_message_tool as smt
+
+    env.monkeypatch.setattr(smt, "send_message_tool", lambda args, **k: json.dumps(
+        {"error": "down"} if NOTICE_TAIL in args.get("message", "") else {"success": True}))
+    card = _new_stop(env, "s-notice-down", blocked=False)
+    with caplog.at_level(logging.WARNING):
+        assert _approve(env, card["card_id"])["reason"] == "resumed"
+        for _ in range(3):
+            env.mod.resume.drain_outbox_once()
+    final = [r.getMessage() for r in caplog.records
+             if card["card_id"] in r.getMessage() and "delivering notice" in r.getMessage()]
+    assert len(final) == 1, [r.getMessage() for r in caplog.records]
+    assert "WAS lifted" in final[0] and "stop is kept" not in final[0], final[0]
