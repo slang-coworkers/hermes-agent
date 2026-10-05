@@ -1,0 +1,32 @@
+identity: "OSH-F64.e fleet base (direct-mode inference)"
+config:
+  model:
+    provider: direct-endpoint
+    default: aws/anthropic/bedrock-claude-opus-5-5
+  providers:
+    # The direct-mode provider: the upstream /v1 base (the OpenAI SDK posts
+    # {base_url}/chat/completions → the policy-allowed /v1/chat/completions). The api_key is
+    # OpenShell's resolve placeholder for the attached provider's OSH_DIRECT_INFERENCE_KEY: the L7
+    # relay swaps it for the credential at the boundary, so the sandbox never holds the value.
+    direct-endpoint:
+      base_url: https://inference-api.nvidia.com/v1
+      api_mode: chat_completions
+      api_key: openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY
+      default_model: aws/anthropic/bedrock-claude-opus-5-5
+  timezone: Asia/Kolkata
+  secrets:
+    onecli:
+      enabled: false
+  plugins:
+    enabled:
+      - nv-coworker-compose
+      - nv-fleet-gates
+    entries:
+      nv-fleet-gates:
+        settings:
+          enforce_sandbox: true
+          edges_db_path: /tmp/hermes-fleet/edges.db
+          admin_tools:
+            - onboard_coworker
+            - onboard_project
+            - create_agent
