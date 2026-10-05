@@ -10,7 +10,10 @@ but do not assert directly:
   gateway's event loop, and only in the process holding the gateway runtime lock;
 - an orchestrator-bound prompt still names the action, the CI result and the link;
 - the no-auth mode is refused off the ingress route;
-- `hermes ingress status` keeps its documented shape.
+- `hermes ingress status` keeps its documented shape;
+- the edge scope is rendered only from a spec block, and a malformed block is refused;
+- an edge that cannot record its scope state refuses the delivery instead of
+  spooling an unregistered PR or losing a count.
 """
 from __future__ import annotations
 
@@ -102,6 +105,26 @@ def test_ingress_render_writes_the_routing_labels_into_the_plugin_settings(tmp_p
     spec = yaml.safe_load(ING_SPEC.read_text(encoding="utf-8"))
     assert settings["issue_labels"] == spec["ingress"]["issue_labels"]
     assert settings["orchestrator_profile"] == spec["orchestrator_profile"]
+
+
+def test_edge_scope_is_rendered_only_from_the_spec_block(tmp_path):
+    def drop_scope(data):
+        data["ingress"].pop("scope")
+
+    out = tmp_path / "out"
+    proc = _hermes(tmp_path, "coworker", "compose", str(_spec_copy(tmp_path, drop_scope)), "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    assert "scope" not in json.loads((out / "host" / "edge.yaml").read_text(encoding="utf-8"))
+
+    def bad_scope(data):
+        data["ingress"]["scope"] = {"repo": "o/r", "ref_prefix": "x-"}
+
+    bad_out = tmp_path / "bad-out"
+    shutil.rmtree(tmp_path / "spec")
+    proc = _hermes(tmp_path, "coworker", "compose", str(_spec_copy(tmp_path, bad_scope)), "--out", str(bad_out))
+    assert proc.returncode != 0
+    assert "ingress.scope" in proc.stderr + proc.stdout
+    assert not (bad_out / "host" / "edge.yaml").exists()
 
 
 def test_render_host_matches_the_compose_host_artefacts(tmp_path):
@@ -478,3 +501,33 @@ def test_forwarder_survives_a_transient_spool_scan_error(tmp_path, monkeypatch):
     finally:
         edge.stop()
         edge._forwarder.join(10)
+
+
+def test_an_unwritable_scope_state_refuses_the_delivery_without_spooling(tmp_path, monkeypatch):
+    edge_mod = _edge_module()
+    key_file = tmp_path / "gh-key"
+    key = secrets.token_bytes(32)
+    key_file.write_bytes(key)
+    edge = edge_mod.Edge({"forward_url": "http://127.0.0.1:9/webhooks/ingress",
+                          "spool_dir": str(tmp_path / "state" / "spool"),
+                          "platforms": {"github": {"secret_file": str(key_file)}},
+                          "scope": {"repo": "o/r", "ref_prefix": "ing-", "label_prefix": "ing-"}})
+    body = json.dumps({"action": "opened", "repository": {"full_name": "o/r"},
+                       "pull_request": {"number": 5, "head": {"sha": "a" * 40, "ref": "ing-fix"}}}).encode()
+    headers = {**_signed_github_headers(edge_mod, key, body, "scope-io"),
+               edge_mod.envelope.GITHUB_EVENT_HEADER: "pull_request"}
+    real_write = edge.scope._write
+
+    def _failing_write(path, data):
+        raise OSError(28, "no space left on device")
+
+    monkeypatch.setattr(edge.scope, "_write", _failing_write)
+    code, _reply = edge.receive("github", headers, body)
+    assert code >= 500, "a delivery whose PR registration was not recorded must be redelivered"
+    assert not list(edge.spool.glob("*.json")), "nothing may be spooled ahead of its registration"
+    assert edge.scope.prs == {}, "memory must not run ahead of the scope file"
+
+    monkeypatch.setattr(edge.scope, "_write", real_write)
+    assert edge.receive("github", headers, body) == (202, {"status": "accepted", "delivery_id": "scope-io"})
+    state = json.loads((tmp_path / "state" / "scope.json").read_bytes())
+    assert state["prs"]["5"]["head_branch"] == "ing-fix"

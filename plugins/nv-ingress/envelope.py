@@ -120,7 +120,8 @@ def _github(event: str, headers: Mapping[str, Any], p: Dict[str, Any]) -> Dict[s
     elif event == "issue_comment":
         env.update(number=_int(issue.get("number")), title=issue.get("title"),
                    body=_clip(_d(p.get("comment")).get("body")),
-                   url=_d(p.get("comment")).get("html_url"))
+                   url=_d(p.get("comment")).get("html_url"),
+                   labels=[str(lbl.get("name")) for lbl in issue.get("labels") or [] if _d(lbl).get("name")])
         if issue.get("pull_request") and env["number"] is not None:
             env["pr_numbers"] = [env["number"]]
         else:
