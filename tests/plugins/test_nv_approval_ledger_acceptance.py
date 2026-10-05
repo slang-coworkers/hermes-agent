@@ -178,7 +178,7 @@ def test_ac_gov_f24_3(ledger, monkeypatch):
     assert _rows(ledger.root, repo="o/r", pr=11, commit_sha="f00") == []
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config_readonly",
+        "hermes_cli.plugins.load_config_readonly",
         lambda: {"plugins": {"entries": {PLUGIN_KEY: {"settings": {"review_route": "pr-review"}}}}},
     )
     _set_profile(monkeypatch, "reviewer")
@@ -362,7 +362,7 @@ def test_mc1_human_verdict_write_failure_is_logged_not_silently_dropped(ledger, 
 def test_sc1_traversal_ledger_profile_fails_closed(ledger, monkeypatch):
     """A traversal/absolute ledger_profile is rejected: the write fails closed with no row (no ledger outside the profile tree)."""
     monkeypatch.setattr(
-        "hermes_cli.config.load_config_readonly",
+        "hermes_cli.plugins.load_config_readonly",
         lambda: {"plugins": {"entries": {PLUGIN_KEY: {"settings": {"writers": ["reviewer"], "ledger_profile": "../evil"}}}}},
     )
     out = _dispatch(
