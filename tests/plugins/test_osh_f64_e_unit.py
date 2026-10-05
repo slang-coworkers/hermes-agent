@@ -90,6 +90,7 @@ def test_managed_render_keeps_the_fixed_trigger(compose_mod, tmp_path):
 
 
 @pytest.mark.parametrize("mutate", [
+    pytest.param(lambda ip: ip.update(mode=["direct"]), id="non-string-mode"),
     pytest.param(lambda ip: ip.update(upstream_base_url="https://other.example/v1"),
                  id="upstream-differs-from-base-url"),
     pytest.param(lambda ip: ip.update(credential_provider="bad name"), id="unsafe-provider-name"),

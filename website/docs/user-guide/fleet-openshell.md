@@ -237,14 +237,19 @@ providers:
 `sk-OPENSHELL-PROXY-REWRITE` is **identical across every profile** — it is the token that
 fires the OpenShell L7 **credential rewrite**, NOT an identity. The real credential lives
 OpenShell-side as `COMPATIBLE_API_KEY` and **never appears in any sandbox config**. So
-OpenShell + APF is the sole authority for destination, method, path, and credential: a
-per-profile badge can never supersede APF.
+OpenShell, not the profile, decides the destination and the credential: a per-profile badge
+can never supersede it. The PATH is a different matter: OpenShell intercepts
+`inference.local` before the policy engine runs, so the rendered four-path rules never see a
+managed-route request. The managed route's own protocol list is the only path gate there
+(UA-36); [direct mode](#direct-mode-inference-osh-f64e) moves the route to where APF decides it.
 
 **Per-profile attribution.** Both profile children share the one gateway (model-call)
-sandbox, so a per-request header — not a per-sandbox identity — distinguishes them in the
-OpenShell / inference logs: the render sets a distinct non-secret
-`X-Hermes-Profile: osh-f64b-<role>` request header per served profile. It is applied under
-`chat_completions`, the mode in which a custom provider's `extra_headers` reach the request.
+sandbox, so only a per-request field could tell them apart: the render sets a distinct
+non-secret `X-Hermes-Profile: osh-f64b-<role>` request header per served profile, applied
+under `chat_completions`, the mode in which a custom provider's `extra_headers` reach the
+request. The header reaches the upstream, but OpenShell v0.0.72 logs no request header, so
+`openshell logs` cannot attribute a request to a profile (UA-37). Hermes' own
+`session_model_usage` rows in each profile's `state.db` are the attribution of record.
 
 **COST-F30 metering (replacement path).** With the OneCLI tunnel dropped, the model call
 goes direct to the OpenShell provider, whose response carries token usage that Hermes
@@ -287,9 +292,10 @@ non-lane `openshell` fleet with `coworker compose`.
 ### Direct-mode inference (OSH-F64.e)
 
 On the pinned OpenShell, `https://inference.local` is intercepted **before** the policy engine
-runs, so the four-path allow-set above governs the destination and credential but not the PATH on
-that route. Setting `egress.inference_provider.mode: direct` moves the model route onto the
-upstream itself, where APF decides every request's method and path. An absent `mode` means
+runs: the managed route fixes the destination and injects the credential, but the rendered
+four-path rules never see its requests. Setting `egress.inference_provider.mode: direct` moves the
+model route onto the upstream itself, an ordinary `protocol: rest` endpoint where APF decides every
+request's method and path. An absent `mode` means
 `managed`, the render described above, unchanged.
 
 ```yaml
