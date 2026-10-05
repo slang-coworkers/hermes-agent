@@ -1123,6 +1123,45 @@ def test_ac_cost_f30_b_14(env):
     assert [c["args"]["target"] for c in env.sent if NOTICE_TAIL in c["args"].get("message", "")] == [TARGET]
 
 
+def test_erratum_e1_notice_bounded_retry(env):
+    """Erratum E1 (AC-COST-F30.b-14 evidence): a post-resume notice whose send fails transiently is retried by the drain, at most 3 attempts in total (AC-2 still covers failed cards, which are never retried)."""
+    import tools.send_message_tool as smt
+
+    notice_failures_left = {"n": 1}
+
+    def _flaky(args, **k):
+        env.sent.append({"tool": "send_message", "args": dict(args)})
+        if NOTICE_TAIL in args.get("message", "") and notice_failures_left["n"] > 0:
+            notice_failures_left["n"] -= 1
+            return json.dumps({"error": "transient: adapter timeout"})
+        return json.dumps({"success": True})
+
+    env.monkeypatch.setattr(smt, "send_message_tool", _flaky)
+    card = _new_stop(env, "s-e1", blocked=False)
+    assert _approve(env, card["card_id"])["reason"] == "resumed"
+    rows = [r for r in env.mod.store.resume_outbox() if r["card_id"] == card["card_id"] and r["kind"] == "notice"]
+    assert len(rows) == 1 and rows[0]["status"] == "failed" and rows[0]["attempts"] == 1, rows
+    _drain(env)
+    rows = [r for r in env.mod.store.resume_outbox() if r["card_id"] == card["card_id"] and r["kind"] == "notice"]
+    assert rows[0]["status"] == "sent" and rows[0]["attempts"] == 2, rows
+    assert len([m for m in _messages(env) if NOTICE_TAIL in m]) == 2  # 1 failed attempt + 1 delivered
+
+    # permanent failure: exactly 3 attempts, then it stays failed
+    _clear_all(env)
+    env.sent.clear()
+    env.monkeypatch.setattr(smt, "send_message_tool", lambda args, **k: env.sent.append(
+        {"tool": "send_message", "args": dict(args)}) or json.dumps(
+        {"error": "down"} if NOTICE_TAIL in args.get("message", "") else {"success": True}))
+    card2 = _new_stop(env, "s-e1b", blocked=False)
+    assert _approve(env, card2["card_id"])["reason"] == "resumed"
+    for _ in range(5):
+        _drain(env)
+    notice_sends = [m for m in _messages(env) if NOTICE_TAIL in m]
+    assert len(notice_sends) == 3, notice_sends
+    rows = [r for r in env.mod.store.resume_outbox() if r["card_id"] == card2["card_id"] and r["kind"] == "notice"]
+    assert rows[0]["status"] == "failed" and rows[0]["attempts"] == 3, rows
+
+
 def test_ac_cost_f30_b_15(env):
     """AC-COST-F30.b-15: (mitigation 4) a granted Approve reply states the residual window — a pause written in the same instant can be lifted too, and core closes it only with upstream UA-28."""
     card = _new_stop(env, "s-window", blocked=False)
