@@ -71,8 +71,8 @@ REVIEWER_ALLOWLIST = ["git clean -fdx"]
 # refused unattended on every profile; per-role binding is proven by the allowlists above,
 # not by differing floors. It is a best-effort in-surface backstop covering the common,
 # combined, and global-option forms, NOT an exhaustive force-push detector, and NOT a
-# guarantee that no force/tag/release spelling runs unattended (shell-wrapped detector-
-# evading forms remain fail-open, AC-7). Robust refusal is the core dangerous-command
+# guarantee that no force/tag/release spelling runs unattended (a force `f` at cluster
+# position 4+ remains fail-open, AC-7). Robust refusal is the core dangerous-command
 # detector's job — see the ADR §CORE-CHANGE detector ask / the GOV-ENF core row. The globs are fnmatch (fnmatch.fnmatchcase,
 # as _match_user_deny_rule uses): `--forc*` matches --force/--force-with-lease in any
 # argument order; the -f cluster globs use `[!- ]` (not-dash, not-space) to keep the force
@@ -130,6 +130,14 @@ FLOOR_DENY_PROBES = [
     "git -C /tmp/repo push origin +main:main",   # +refspec behind a global option
     "git -C /tmp/repo tag -f v9.9.9",            # tag behind a global option
     "gh --repo o/r release delete v9.9.9",       # release behind a global option
+    # Shell-wrapped / spacing forms: the floor matches each command segment
+    # (tools/approval_detection.py:1354-1394), so the wrapper no longer hides them.
+    "cd repo && git tag v1",
+    "git  tag  v1",
+    "cd repo && gh release create v9",
+    "cd repo && git push origin +main:main",
+    "cd repo && git -C . push --force",
+    "cd repo && git push -uf origin main",
 ]
 # Negative controls: common commands the floor must NOT over-match (incl. a global-option
 # NORMAL push, proving the -* / *push* tolerance does not block a plain push).
@@ -141,34 +149,16 @@ FLOOR_ALLOW_PROBES = [
     "git commit -m 'push +1'",
     "git commit -m 'add tag support'",
 ]
-# AC-4 ship-gate (i): a deny-EVADING but DETECTOR-COVERED command. The anchored deny floor
-# misses the shell wrapper, but detect_dangerous_command searches (.search) over command
-# variants (approval.py:2552-2555), so single_query_mode=deny still REFUSES it before spawn.
-# The refusal is the detector's, NOT the floor's — so it is `approved is False` WITHOUT
-# `user_deny` — which is exactly the render's real fail-safe mechanism where it holds.
+# AC-4 ship-gate (i): a shell-wrapped, DETECTOR-COVERED command. The deny floor matches each
+# command segment (tools/approval_detection.py:1354-1394), so it is refused by the floor
+# (`user_deny`) ahead of the detector.
 WRAPPED_DETECTED_DENY_PROBE = "cd repo && git push --force"
-# AC-7: the deny-EVADING AND detector-EVADING class. Two sub-classes: (a) shell-wrapped/
-# spacing tag/release and wrapped +refspec — DANGEROUS_PATTERNS has no tag/release/+refspec
-# entry anywhere in the list (approval.py:945-1271); (b) wrapped force-push whose spelling
-# the force regexes (approval.py:1227-1228) also miss — a git global option splitting
-# `git ... push`, or the force flag inside a combined cluster. In both the anchored floor
-# misses the wrapper AND the pattern detector misses the verb, so neither of the two layers
-# GOV-F23 configures refuses them; with Tirith allowing/disabled they are PERMITTED PAST the
+# AC-7: the deny-EVADING AND detector-EVADING class: neither the anchored floor nor the
+# pattern detector refuses these, so with Tirith allowing/disabled they are PERMITTED PAST the
 # native guard (fall through to approval.py:4997 approved:True). This is the UNMET invariant,
 # owned by the GOV-ENF core row — recorded honestly, never hidden; GOV-F23 claims NO safety
 # credit for it.
 FAILOPEN_PROBES = [
-    "cd repo && git tag v1",
-    "git  tag  v1",
-    "cd repo && gh release create v9",
-    "cd repo && git push origin +main:main",
-    # Wrapped force-push forms the detector ALSO misses: the
-    # detector regex needs a CONTIGUOUS `git push` + a standalone `--force`/`-f` token
-    # (approval.py:1227-1228), so a git global option splitting the pair, or the force
-    # flag inside a combined cluster, evades it — and the anchored floor misses the
-    # wrapper. (Unwrapped, both are floor-caught; wrapped, both are fail-open.)
-    "cd repo && git -C . push --force",   # global option splits `git ... push`
-    "cd repo && git push -uf origin main",  # force flag inside a combined -uf cluster
     # DIRECT (unwrapped) force-push whose combined cluster puts the force `f` at
     # position 4+, past the floor's positions-1-3 short-cluster globs AND the core
     # detector's standalone-`-f` requirement (approval.py:1227-1228) — a direct
@@ -445,6 +435,7 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
     which the empty DEFAULT does NOT close — a core gap owned by GOV-ENF/P8 with no
     isolation credit, unaffected only for separate-process `chat -q` workers."""
     import tools.approval as ta
+    import tools.approval_context as tac
     from hermes_cli import managed_scope
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
@@ -492,7 +483,7 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         # (a) the builder as a single-query worker (own process, own allowlist)
         _load_allowlist_for(builder_home, builder_mgd)
         monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
-        assert ta._get_single_query_approval_mode() == "deny"
+        assert tac._get_single_query_approval_mode() == "deny"
         # allowlisted flagged verb: short-circuits approved BEFORE the single-query deny
         assert ta.detect_dangerous_command(ALLOW_PROBE)[0], "ALLOW_PROBE not flagged — bypass meaningless"
         assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is True
@@ -511,14 +502,12 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         # Negative controls: the floor must NOT over-match these common commands.
         for probe in FLOOR_ALLOW_PROBES:
             assert ta._match_user_deny_rule(probe) is None, probe
-        # Ship-gate (i): a deny-EVADING but DETECTOR-COVERED command is still REFUSED before
-        # spawn — by the detector via single_query_mode=deny, NOT by the floor. This is the
-        # render's real fail-safe mechanism: the floor MISSES the wrapper (no user_deny), yet
-        # the command does not execute because detection is position-independent.
-        assert ta._match_user_deny_rule(WRAPPED_DETECTED_DENY_PROBE) is None
+        # Ship-gate (i): a shell-wrapped, DETECTOR-COVERED command is REFUSED before spawn by
+        # the floor (user_deny), which matches each command segment.
+        assert ta._match_user_deny_rule(WRAPPED_DETECTED_DENY_PROBE) is not None
         assert ta.detect_dangerous_command(WRAPPED_DETECTED_DENY_PROBE)[0] is True
         wd_res = ta.check_all_command_guards(WRAPPED_DETECTED_DENY_PROBE, "local")
-        assert wd_res["approved"] is False and not wd_res.get("user_deny")
+        assert wd_res["approved"] is False and wd_res.get("user_deny") is True
         monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION", raising=False)
 
         # (b) in-gateway LAUNCH BASELINE (NOT steady-state isolation): at gateway launch the
@@ -537,8 +526,8 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is False  # empty launch baseline
         # managed cron_mode=deny overrides the injected profile-local cron_mode=approve, and all
         # three unattended resolvers are effective from the managed fragment (not just raw YAML):
-        assert ta._get_cron_approval_mode() == "deny"
-        assert ta._get_unattended_approval_mode() == "deny"
+        assert tac._get_cron_approval_mode() == "deny"
+        assert tac._get_unattended_approval_mode() == "deny"
         assert ta.check_all_command_guards(ALLOW_PROBE, "local")["approved"] is False  # cron_mode=deny denies the DETECTED command
 
         # HONEST record of the in-gateway cross-profile allowlist UNION leak — a core behavior
@@ -629,6 +618,7 @@ def test_ac_gov_f23_7(tmp_path, monkeypatch):
     signal GOV-ENF closed the gap, and this test is updated then. A PASS here means the gap
     is present and documented as expected, NOT that the invariant is met."""
     import tools.approval as ta
+    import tools.approval_context as tac
     from hermes_cli import managed_scope
 
     home = _write_home(tmp_path, monkeypatch)
@@ -656,7 +646,7 @@ def test_ac_gov_f23_7(tmp_path, monkeypatch):
             ta._permanent_approved.clear()
         ta.load_permanent_allowlist()
         monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
-        assert ta._get_single_query_approval_mode() == "deny"
+        assert tac._get_single_query_approval_mode() == "deny"
         # Isolate the layer GOV-F23 configures. The unattended-deny branch ALSO consults the
         # Tirith content scanner (approval.py:4828+), an independent subsystem (security.tirith_*)
         # this row neither configures nor relies on. Neutralize it to `allow` so the assertion
