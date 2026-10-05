@@ -18,8 +18,12 @@ Per-profile tables:
   * ``estop_receipt`` — the opaque ownership token the plugin embedded (top-level
     ``nv_cost_cap_receipt``) in the ESTOP sentinel it last published; ``estop_receipt()``
     reports ownership only when the on-disk sentinel still carries that exact token.
-    The plugin NEVER removes a sentinel; the token exists for the upstream owner-scoped
-    disengage (UA-28) to identify the plugin's own stop.
+    Outside the approval card the plugin NEVER removes a sentinel; the token binds a resume
+    card to its stop and lets the upstream owner-scoped disengage (UA-28) identify it.
+  * ``resume_cards`` / ``resume_outbox`` / ``resume_decisions`` (COST-F30.b) — one approval
+    card per owned publish, its at-most-once delivery queue, and the append-only audit
+    (UPDATE/DELETE triggers abort). The ONLY release is an authorized matching Approve,
+    which calls core ``agent.estop.disengage()`` once (see ``resume.py``).
 
 The one fleet-uniform value — the owner-pinned fleet-default ceiling — lives in
 ``fleet_default`` in the DEFAULT profile's plugin_db, opened under a
@@ -104,10 +108,40 @@ def _ensure_schema(conn) -> None:
     # The opaque token the plugin embedded (as the top-level `nv_cost_cap_receipt` field) in the
     # profile-local ESTOP sentinel it last published (a single row). estop_receipt() reports ownership
     # only when the on-disk sentinel still carries this exact token, so an operator `hermes pause` is
-    # never mistaken for the plugin's own stop. The token lets the UPSTREAM owner-scoped disengage
-    # (UA-28) identify the plugin's sentinel; this release never reads it to clear anything.
+    # never mistaken for the plugin's own stop. The resume card (COST-F30.b) binds this token to its
+    # stop, and the UPSTREAM owner-scoped disengage (UA-28) can use it the same way; outside the
+    # approval card nothing reads it to clear anything.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS estop_receipt (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)"
+    )
+    # COST-F30.b: one resume card per owned publish, its delivery outbox, and the append-only
+    # decision record. Card status changes are CAS only (UPDATE ... WHERE status = <expected>).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resume_cards ("
+        "card_id TEXT PRIMARY KEY, profile TEXT NOT NULL, session_id TEXT, origin TEXT NOT NULL, "
+        "sentinel_path TEXT NOT NULL, candidates_json TEXT NOT NULL, published_body BLOB NOT NULL, "
+        "receipt TEXT NOT NULL, reason TEXT, engaged_at TEXT, "
+        "spend_usd REAL, cap_usd REAL, ceiling_usd REAL, created_at REAL NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'pending', status_reason TEXT, superseded_by TEXT, claimed_at REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resume_outbox ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, card_id TEXT NOT NULL, kind TEXT NOT NULL, "
+        "target TEXT, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, "
+        "created_at REAL NOT NULL, sent_at REAL, attempts INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resume_decisions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, card_id TEXT NOT NULL, ts TEXT NOT NULL, actor TEXT, "
+        "decision TEXT NOT NULL, stop_json TEXT, candidates_json TEXT, outcome_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS resume_decisions_no_update BEFORE UPDATE ON resume_decisions "
+        "BEGIN SELECT RAISE(ABORT, 'append-only'); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS resume_decisions_no_delete BEFORE DELETE ON resume_decisions "
+        "BEGIN SELECT RAISE(ABORT, 'append-only'); END"
     )
     conn.commit()
 
@@ -595,8 +629,9 @@ def apply_effect(episode_id: str) -> str:
     kind's ABSOLUTE baseline, clears ``blocked``, and writes ``status='applied'`` in that SAME tx;
     a mortal Stop sets ``blocked=1`` then ENGAGES the belt (via the atomic link-publish); a ceiling
     clears ``blocked`` only when the new ceiling is above current spend, AFTER its exact-value config
-    write succeeds and only while still at the claimed generation. The plugin never UNLINKS or clears
-    the ESTOP sentinel on any path (Stop/breach may engage it; nothing removes it).
+    write succeeds and only while still at the claimed generation. No resolution path here UNLINKS or
+    clears the ESTOP sentinel (Stop/breach may engage it); the only release is outside it, the
+    approval card's ``resume.approve_resume`` through core ``disengage()``.
     A ceiling config-write failure leaves the row ``pending`` and returns ``DEFERRED`` for the
     reconciler; for Stop, ``status='applied'`` is marked LAST after the engage side-effect.
     """
@@ -656,13 +691,14 @@ def apply_effect(episode_id: str) -> str:
     if decision == "stop":
         # Publish the belt through the OWNED engage seam so the upstream owner-scoped disengage
         # (UA-28) can later tell this stop from an operator pause; the committed blocked=1 above is
-        # the authoritative gate. The plugin never removes it — the belt is left for a manual resume.
-        engage_owned(session_id, reason=f"session {session_id} stopped by operator")
+        # the authoritative gate. Outside the approval card the plugin never removes it — the belt is
+        # left for the card's Approve or a manual `hermes resume`.
+        engage_owned(session_id, reason=f"session {session_id} stopped by operator", origin="stop")
         return _mark_applied(episode_id)
     if decision == "continue":
         # The money-side mutation AND the applied-row write committed together in the one tx above;
-        # the plugin never removes the profile ESTOP sentinel, so any engaged belt is LEFT and the
-        # session resumes only after an operator lifts it.
+        # outside the approval card the plugin never removes the profile ESTOP sentinel, so any engaged
+        # belt is LEFT and the session resumes only after it is lifted (card Approve or `hermes resume`).
         return APPLIED
 
     # ceiling: the config write, re-evaluation, conditional unblock and applied-row write all happen
@@ -681,8 +717,8 @@ def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen, amount_usd):
     the staleness decision: a newer generation that cancels the resolution as stale also prevents the
     ceiling from being written, and a failed write rolls back with nothing applied. ``write_profile_ceiling``
     touches only config.yaml (its own file lock), never the plugin_db, so holding BEGIN IMMEDIATE across it
-    cannot self-deadlock. Returns APPLIED, or a cancel/deferred status. The plugin never touches the ESTOP
-    sentinel.
+    cannot self-deadlock. Returns APPLIED, or a cancel/deferred status. The ceiling path never touches the
+    ESTOP sentinel.
     """
     conn = _cas_conn()
     try:
@@ -750,8 +786,8 @@ def record_estop_receipt(token: str) -> None:
     """Record the OPAQUE ownership token the plugin embedded in the sentinel it just published (single
     row). Public + discrete so ``engage_owned`` calls it as the one post-link receipt-write seam.
     Opens its own connection. Stores only the token — never the sentinel body / reason — so the
-    UPSTREAM owner-scoped disengage (UA-28) can identify the plugin's own sentinel later; this release
-    never reads it to decide a clear, because it never clears the belt."""
+    resume card can bind its stop and the UPSTREAM owner-scoped disengage (UA-28) can identify the
+    plugin's own sentinel later. Outside the approval card nothing reads it to decide a clear."""
     conn = _conn()
     try:
         conn.execute("DELETE FROM estop_receipt")
@@ -785,12 +821,13 @@ def estop_receipt() -> Optional[str]:
     return None
 
 
-def engage_owned(session_id, *, reason=None) -> None:
+def engage_owned(session_id, *, reason=None, origin="breach") -> None:
     """The ONE engage seam (breach AND Stop). Publish an OWNED profile-local ESTOP sentinel by
     ATOMIC no-replace ``os.link`` and record its opaque ``nv_cost_cap_receipt`` token as the ownership
-    receipt, so the UPSTREAM owner-scoped disengage (UA-28) can later tell the plugin's own stop from
-    an operator ``hermes pause``. This release NEVER removes a sentinel — the token is written for
-    identification only.
+    receipt, so the plugin's own stop is told apart from an operator ``hermes pause``. Outside the
+    approval card the plugin NEVER removes a sentinel. Only after the link AND the receipt write
+    both succeeded does it raise one resume card (``origin`` ``breach`` | ``stop``) bound to the
+    exact published bytes (COST-F30.b); a card failure never affects the stop.
 
     A same-dir temp is fully written + fsynced, then ``os.link(temp, sentinel)`` publishes it: if any
     sentinel already exists (an operator pause, or a concurrent engager) the link raises
@@ -801,6 +838,7 @@ def engage_owned(session_id, *, reason=None) -> None:
     write that fails AFTER a successful link leaves the linked sentinel and adopts no ownership — it
     never removes it on cleanup (that would race the lockless core primitive). Idempotent; never raises.
     """
+    published = None
     try:
         from agent import estop
 
@@ -831,6 +869,7 @@ def engage_owned(session_id, *, reason=None) -> None:
                     pass
                 return
             record_estop_receipt(receipt)
+            published = (sentinel, body.encode("utf-8"), payload)
         finally:
             # Remove the same-dir temp — never the sentinel (after a successful link the sentinel is a
             # second name for this inode; on EEXIST it is the operator pause we left untouched).
@@ -840,12 +879,25 @@ def engage_owned(session_id, *, reason=None) -> None:
                 pass
     except Exception:
         logger.warning("nv-cost-cap: engaging owned profile ESTOP failed", exc_info=True)
+        return
+    if published is None:
+        return
+    try:
+        sentinel, body_bytes, payload = published
+        _resume_module().raise_card(
+            session_id, origin=origin, sentinel=sentinel, published_body=body_bytes,
+            receipt=payload["nv_cost_cap_receipt"], reason=payload["reason"],
+            engaged_at=payload["engaged_at"],
+        )
+    except Exception:
+        logger.warning("nv-cost-cap: raising the resume card for session %s failed; the stop is kept "
+                       "(release via `hermes resume`)", session_id, exc_info=True)
 
 
 def estop_engaged() -> bool:
     """Whether ANY ESTOP sentinel is engaged for the current profile (fleet-root-inclusive, matching
     ``estop.is_engaged()``). Used ONLY to report ``estop_disposition``/``manual_resume_required`` on a
-    granted resolution — the plugin never acts on it to clear the belt (it never clears). Fails toward
+    granted resolution — no COST-F30 resolution acts on it to clear the belt. Fails toward
     True: if the engaged state cannot be read, surface the manual-resume requirement rather than imply
     the belt lifted."""
     try:
@@ -860,7 +912,7 @@ def estop_engaged() -> bool:
 def session_resumes(session_id: str, *, belt_engaged: Optional[bool] = None) -> bool:
     """Whether the JUST-RESOLVED session is actually runnable now — its OWN post-resolution predicates
     all false (``blocked==0`` AND not unpriced AND not over-ceiling) AND no ESTOP belt engaged. The
-    belt is never lifted by the plugin, so this stays False while any sentinel stands. ``belt_engaged``
+    belt is never lifted by a resolution, so this stays False while any sentinel stands. ``belt_engaged``
     lets the caller pass a belt snapshot it already sampled, so a resolution reads the ESTOP state ONCE
     and reports internally consistent ``resumes``/``estop_disposition`` (a concurrent pause/resume
     cannot make them disagree); None ⇒ sample it here. ``is_engaged()`` is fleet-root-inclusive, so a
@@ -1155,3 +1207,219 @@ def pending_escalations() -> List[Dict[str, Any]]:
             "blocked": bool(r[9]) if r[9] is not None else False,
         })
     return out
+
+
+# --- COST-F30.b: resume cards, outbox, append-only decisions ----------------
+
+def _resume_module():
+    """``resume`` as a package sibling, or path-loaded on the ctx-free dashboard import (no parent package)."""
+    try:
+        from . import resume
+    except ImportError:
+        import importlib.util
+        import sys
+
+        name = "nv_cost_cap_resume"
+        resume = sys.modules.get(name)
+        if resume is None:
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / "resume.py")
+            resume = importlib.util.module_from_spec(spec)
+            sys.modules[name] = resume
+            spec.loader.exec_module(resume)
+    return resume
+
+
+_CARD_COLUMNS = ("card_id", "profile", "session_id", "origin", "sentinel_path", "candidates_json",
+                 "published_body", "receipt", "reason", "engaged_at", "spend_usd", "cap_usd", "ceiling_usd",
+                 "created_at", "status", "status_reason", "superseded_by", "claimed_at")
+_OUTBOX_COLUMNS = ("id", "card_id", "kind", "target", "body", "status", "error", "created_at", "sent_at",
+                   "attempts")
+
+
+def _card_from_row(row) -> Dict[str, Any]:
+    card = dict(zip(_CARD_COLUMNS, row))
+    card["candidates"] = json.loads(card.pop("candidates_json"))
+    card["published_body"] = bytes(card["published_body"])
+    return card
+
+
+def _stop_json(card) -> str:
+    return json.dumps({k: card.get(k) for k in ("profile", "sentinel_path", "receipt", "reason", "engaged_at",
+                                                "session_id", "origin")})
+
+
+def _insert_decision(conn, card_id, ts, actor, decision, stop, candidates, outcome) -> None:
+    conn.execute(
+        "INSERT INTO resume_decisions (card_id, ts, actor, decision, stop_json, candidates_json, outcome_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (card_id, ts, actor, decision, stop if isinstance(stop, str) else json.dumps(stop),
+         None if candidates is None else json.dumps(candidates), json.dumps(outcome or {})),
+    )
+
+
+def _insert_outbox(conn, card_id, kind, target, body, created_at) -> None:
+    conn.execute(
+        "INSERT INTO resume_outbox (card_id, kind, target, body, status, created_at) "
+        "VALUES (?, ?, ?, ?, 'pending', ?)",
+        (card_id, kind, target, body, float(created_at)),
+    )
+
+
+def _in_tx(fn):
+    conn = _cas_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        out = fn(conn)
+        conn.execute("COMMIT" if out is not False else "ROLLBACK")
+        return out
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def record_resume_card(card, *, target, body, ts) -> None:
+    """One tx: supersede any older pending card of this profile, insert the card and its outbox row."""
+    def _tx(conn):
+        older = conn.execute(
+            f"SELECT {', '.join(_CARD_COLUMNS)} FROM resume_cards WHERE status = 'pending'"
+        ).fetchall()
+        for row in older:
+            old = _card_from_row(row)
+            conn.execute(
+                "UPDATE resume_cards SET status = 'superseded', status_reason = 'superseded', superseded_by = ? "
+                "WHERE card_id = ? AND status = 'pending'", (card["card_id"], old["card_id"]))
+            _insert_decision(conn, old["card_id"], ts, PLUGIN_KEY, "refused:superseded", _stop_json(old), None,
+                             {"superseded_by": card["card_id"]})
+        conn.execute(
+            "INSERT INTO resume_cards (card_id, profile, session_id, origin, sentinel_path, candidates_json, "
+            "published_body, receipt, reason, engaged_at, spend_usd, cap_usd, ceiling_usd, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (card["card_id"], card["profile"], card["session_id"], card["origin"], card["sentinel_path"],
+             json.dumps(card["candidates"]), sqlite3.Binary(card["published_body"]), card["receipt"],
+             card["reason"], card["engaged_at"], card["spend_usd"], card["cap_usd"], card["ceiling_usd"],
+             float(card["created_at"])),
+        )
+        _insert_outbox(conn, card["card_id"], "card", target, body, card["created_at"])
+        return True
+
+    _in_tx(_tx)
+
+
+def transition_card(card_id, expected, new_status, *, decision, actor, ts, stop, candidates=None,
+                    outcome=None, claimed_at=None, outbox=None) -> bool:
+    """CAS ``status == expected`` → ``new_status`` (None keeps the status) and append the decision row, plus an
+    optional outbox row, in ONE tx. False (nothing written) when the card is not in ``expected``."""
+    status_reason = decision.split(":", 1)[1] if decision.startswith("refused:") else decision
+
+    def _tx(conn):
+        row = conn.execute("SELECT status FROM resume_cards WHERE card_id = ?", (card_id,)).fetchone()
+        if row is None or row[0] != expected:
+            return False
+        if new_status is not None:
+            conn.execute(
+                "UPDATE resume_cards SET status = ?, status_reason = ?, claimed_at = COALESCE(?, claimed_at) "
+                "WHERE card_id = ? AND status = ?", (new_status, status_reason, claimed_at, card_id, expected))
+        _insert_decision(conn, card_id, ts, actor, decision, stop, candidates, outcome)
+        if outbox is not None:
+            _insert_outbox(conn, card_id, outbox["kind"], outbox["target"], outbox["body"], outbox["created_at"])
+        return True
+
+    return bool(_in_tx(_tx))
+
+
+def resume_card(card_id) -> Optional[Dict[str, Any]]:
+    conn = _conn()
+    try:
+        row = conn.execute(f"SELECT {', '.join(_CARD_COLUMNS)} FROM resume_cards WHERE card_id = ?",
+                           (card_id,)).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else _card_from_row(row)
+
+
+def resume_cards(status=None) -> List[Dict[str, Any]]:
+    """Every resume card of the current profile (optionally one status), oldest first."""
+    conn = _conn()
+    try:
+        sql = f"SELECT {', '.join(_CARD_COLUMNS)} FROM resume_cards"
+        rows = (conn.execute(sql + " WHERE status = ? ORDER BY created_at ASC, card_id ASC", (status,))
+                if status is not None else conn.execute(sql + " ORDER BY created_at ASC, card_id ASC")).fetchall()
+    finally:
+        conn.close()
+    return [_card_from_row(r) for r in rows]
+
+
+def resume_decisions(card_id=None) -> List[Dict[str, Any]]:
+    """The append-only decision record (optionally one card), in insertion order."""
+    conn = _conn()
+    try:
+        sql = "SELECT card_id, ts, actor, decision, stop_json, candidates_json, outcome_json FROM resume_decisions"
+        rows = (conn.execute(sql + " WHERE card_id = ? ORDER BY id ASC", (card_id,))
+                if card_id is not None else conn.execute(sql + " ORDER BY id ASC")).fetchall()
+    finally:
+        conn.close()
+    return [{"card_id": r[0], "ts": r[1], "actor": r[2], "decision": r[3],
+             "stop": json.loads(r[4]) if r[4] else {}, "candidates": json.loads(r[5]) if r[5] else None,
+             "outcome": json.loads(r[6]) if r[6] else {}} for r in rows]
+
+
+def resume_outbox() -> List[Dict[str, Any]]:
+    conn = _conn()
+    try:
+        rows = conn.execute(f"SELECT {', '.join(_OUTBOX_COLUMNS)} FROM resume_outbox ORDER BY id ASC").fetchall()
+    finally:
+        conn.close()
+    return [dict(zip(_OUTBOX_COLUMNS, r)) for r in rows]
+
+
+def outbox_claimable(notice_max_attempts: int) -> List[Dict[str, Any]]:
+    """Rows the drain may claim: every ``pending`` row, plus a ``failed`` post-resume notice (never a card, never
+    ``no-target``) that has not yet used its ``notice_max_attempts`` sends (erratum E1)."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            f"SELECT {', '.join(_OUTBOX_COLUMNS)} FROM resume_outbox WHERE status = 'pending' "
+            "OR (kind = 'notice' AND status = 'failed' AND COALESCE(error, '') != 'no-target' AND attempts < ?) "
+            "ORDER BY id ASC", (int(notice_max_attempts),)).fetchall()
+    finally:
+        conn.close()
+    return [dict(zip(_OUTBOX_COLUMNS, r)) for r in rows]
+
+
+def claim_outbox_row(row_id, status, attempts) -> Optional[int]:
+    """CAS one row ``status/attempts → sending/attempts+1``; return the new attempt count, or None if lost."""
+    def _tx(conn):
+        cur = conn.execute(
+            "UPDATE resume_outbox SET status = 'sending', attempts = attempts + 1 "
+            "WHERE id = ? AND status = ? AND attempts = ?", (row_id, status, int(attempts)))
+        return int(attempts) + 1 if cur.rowcount == 1 else False
+
+    out = _in_tx(_tx)
+    return None if out is False else out
+
+
+def finish_outbox_row(row_id, status, error, *, sent_at=None) -> None:
+    conn = _conn()
+    try:
+        conn.execute("UPDATE resume_outbox SET status = ?, error = ?, sent_at = ? WHERE id = ? AND status = 'sending'",
+                     (status, error, sent_at, row_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def open_mortal_session_ids() -> List[str]:
+    """Sessions of the current profile that are neither immortal nor closed (``ended_at`` unset)."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT session_id FROM cap_state WHERE immortal = 0 AND (ended_at IS NULL OR ended_at = '') "
+            "ORDER BY session_id ASC").fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]

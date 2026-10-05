@@ -32,7 +32,7 @@ import math
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from . import policy, store
+from . import policy, resume, store
 from .escalation import (  # noqa: F401  (re-exported as the plugin's public COST-F30 API)
     handle_cost_command,
     principal_from_event,
@@ -314,9 +314,10 @@ def _session_stopped(session_id, *, today, platform=None):
 def _engage_estop(session_id) -> None:
     # Publish the profile-local ESTOP belt through the OWNED engage seam: an atomic no-replace
     # os.link that leaves any pre-existing sentinel (an operator pause, a concurrent engager)
-    # byte-for-byte and records a receipt only for a sentinel this plugin itself published. The
-    # plugin never lifts the belt; the receipt is read only by the UA-28 upstream owner-scoped
-    # resume, so that resume can distinguish the plugin's own cost-stop from an operator pause.
+    # byte-for-byte and records a receipt only for a sentinel this plugin itself published, then
+    # raises the resume card for it. Outside the approval card the plugin never lifts the belt; the
+    # receipt binds the card to this exact stop (and lets the UA-28 upstream owner-scoped resume
+    # tell the plugin's own cost-stop from an operator pause).
     # Engage is scoped to the SERVING profile home; when that profile IS `default` the home is the
     # fleet root, so the belt is fleet-wide there (docs note this; estop_on_breach: false opts out).
     store.engage_owned(session_id)
@@ -648,15 +649,15 @@ _COST_OUTCOME_MESSAGES = {
 
 
 # Verbatim operator notice a granted Continue surfaces while a profile ESTOP belt remains engaged.
-# The plugin never unlinks the sentinel (manual-resume release), so the money block clears but the
-# session stays paused until an operator lifts the belt.
+# Outside the approval card the plugin never unlinks the sentinel, so the money block clears but the
+# session stays paused until the belt is lifted (the card's Approve or `hermes resume`).
 _MANUAL_RESUME_NOTICE = (
     "Continue applied — the per-session cost block is cleared, but the profile ESTOP belt remains "
     "engaged (gates cron/kanban/new inbounds); resume via `hermes resume` or the UA-28 upstream lock"
 )
 
 # Appended to a granted set-ceiling outcome when the belt is LEFT, so a ceiling reply never implies the
-# session will run while the profile ESTOP belt (which the plugin never lifts) still gates it. Mirrors
+# session will run while the profile ESTOP belt (which no resolution lifts) still gates it. Mirrors
 # the desktop/dashboard card's ceiling belt-left text.
 _CEILING_BELT_LEFT_SUFFIX = (
     "The per-session cost block is cleared, but the profile ESTOP belt remains engaged; "
@@ -702,7 +703,8 @@ def _cost_outcome_text(result) -> str:
                             " or the UA-28 upstream lock.")
                 return msg
             if belt_left:
-                # The money block cleared, but the belt the plugin never lifts still gates the session.
+                # The money block cleared, but the belt (lifted only by the card's Approve or `hermes
+                # resume`) still gates the session.
                 return f"⚠️ Cost cap: ceiling set{amt}. {_CEILING_BELT_LEFT_SUFFIX}"
             return f"✅ Cost cap: ceiling set{amt}."
         return "✅ Cost cap: resolution applied."
@@ -730,6 +732,7 @@ def _deliver_notice(gateway, event, text) -> None:
 
 
 _reconcile_loop_started = False
+_drain_loop_started = False
 
 
 def _maybe_start_reconcile_loop() -> None:
@@ -758,9 +761,48 @@ def _maybe_start_reconcile_loop() -> None:
         logger.warning("nv-cost-cap reconcile loop start failed", exc_info=True)
 
 
+def _maybe_start_drain_loop() -> None:
+    """Start the periodic resume-card outbox drain ONCE, from the gateway loop thread.
+
+    The drain sends through core's send engine, which hands adapter sends to this same loop, so each
+    pass runs in a worker thread rather than blocking the loop.
+    """
+    global _drain_loop_started
+    if _drain_loop_started or _CTX is None:
+        return
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return  # spawn_task needs the gateway loop; an off-loop caller leaves the start to the next inbound
+    try:
+        interval = max(1, _cfg_int("resume_card_drain_seconds", 5))
+
+        async def _loop():
+            while True:
+                try:
+                    await asyncio.sleep(interval)
+                    await asyncio.to_thread(resume.drain_outbox_once)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("nv-cost-cap resume drain loop iteration failed", exc_info=True)
+
+        _CTX.spawn_task(_loop(), name="nv-cost-cap-resume-drain")
+        _drain_loop_started = True
+    except Exception:
+        logger.warning("nv-cost-cap resume drain loop start failed", exc_info=True)
+
+
+def _resume_command_reply(result) -> str:
+    return result.get("text") or "Cost cap: could not process that /cost resume command."
+
+
 def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs):
     try:
         _maybe_start_reconcile_loop()
+        _maybe_start_drain_loop()
         # COST-F30: intercept `/cost <continue|stop|ceiling ...>` and resolve it in-plugin
         # BEFORE the boundary/skip logic — a blocked session would otherwise skip its own
         # `/cost`. The command is dropped from dispatch (never a wasted model turn); the
@@ -768,6 +810,17 @@ def _pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs
         # Continue clears the per-session money block, but if a profile ESTOP belt is engaged the
         # plugin leaves it, so the notice reports manual_resume_required rather than a resume.
         cost_text = _cost_command_text(event)
+        if cost_text is not None and [t.lower() for t in cost_text.split()[1:2]] == ["resume"]:
+            # COST-F30.b: a resume-card reply from the approver channel. The card id pins its owning
+            # profile, so no chat session is resolved; the core ESTOP turn gate runs after this hook.
+            try:
+                outcome = resume.handle_resume_command(cost_text, principal_from_event(event))
+            except Exception:
+                logger.warning("nv-cost-cap /cost resume handling failed", exc_info=True)
+                outcome = {"ok": False, "reason": "error",
+                           "text": "Cost cap: the resume command failed; the stop is kept."}
+            _deliver_notice(gateway, event, _resume_command_reply(outcome))
+            return {"action": "skip", "reason": "nv-cost-cap: /cost resume handled"}
         if cost_text is not None:
             session_id = _resolve_session_id(event, gateway, session_store)
             if session_id:
