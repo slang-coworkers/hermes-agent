@@ -1,0 +1,47 @@
+# The inline dummy api_key survives message_agent's recipient subprocess,
+# which strips ANTHROPIC_* (tools/environments/local.py:359-361); the remote
+# host lets the OneCLI egress proxy inject the real credential without relying
+# on a loopback port. The literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-loop-f37-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
+# smart mode surfaces the gated-edge approve as an INTERACTIVE hold; an
+# unattended / single_query session would auto-deny it instead (AC-A2A-F19-2).
+approvals:
+  mode: smart
+plugins:
+  enabled:
+    - nv-fleet-gates
+  entries:
+    nv-fleet-gates:
+      settings:
+        profile: loop-f37-worker-a
+        # Distinct from the AC-CH-F51-1 edges store so the two live scenarios do
+        # not collide when installed into the same shared testbed home. The
+        # scenario Setup seeds exactly one GATED edge worker-a -> orch here.
+        edges_db_path: /tmp/loop-f37-a2a-fleet-edges.db
+        profile_roles:
+          loop-f37-worker-a: worker
+          loop-f37-orch: orchestrator
+        enforce_sandbox: false
+        plan_gate: false
+        required_stages:
+          - OUTPUT_REVIEW
+        stage_markers:
+          - "[Fix Report]"
+          - "[Review Verdict]"
+          - "[Resolution]"
+          - "[handoff]"
+        admin_tools:
+          - onboard_coworker
+          - onboard_project
+          - create_agent

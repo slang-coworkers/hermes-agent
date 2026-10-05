@@ -1,0 +1,8 @@
+name: loop-f37-bot-a
+version: 0.1.0
+description: "LOOP-F37 live wired-only messaging scenario — bot A (the message_agent sender). Runs nv-fleet-gates against a shared edges store; used to prove an unwired send is refused-not-logged and a wired send round-trips."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

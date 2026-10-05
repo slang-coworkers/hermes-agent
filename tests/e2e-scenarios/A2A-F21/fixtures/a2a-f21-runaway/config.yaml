@@ -1,0 +1,37 @@
+# A2A-F21 AC-A2A-F21-5 fixture — single-agent live runaway circuit-breaker.
+#
+# Live provider block (LOOP-F35/F37 §Scenario outlines form, adapted): this is a
+# single interactive Bot Chat with NO message_agent recipient subprocess, so the
+# key resolves from THIS profile's own .env via key_env — the testbed standard.
+# The dummy ANTHROPIC_API_KEY is written post-install by the scenario Setup (a
+# committed .env is gitignored and excluded from profile install), so it is never
+# on disk in the repo. The real credential is injected by the OneCLI egress proxy
+# at the inference-api.nvidia.com hop; the value on disk is a placeholder.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    api: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    model: aws/anthropic/bedrock-claude-opus-4-8
+    key_env: ANTHROPIC_API_KEY
+# Keep the exact-failure threshold low so the live scenario trips within budget.
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  warn_after:
+    exact_failure: 2
+  hard_stop_after:
+    exact_failure: 2
+# Isolate the tool-loop guardrail (the behaviour under test) from the approval
+# gate: `sh -c 'echo boom; exit 1'` is benign but classified dangerous ("shell
+# command via -c/-lc flag") and cannot be command-allowlisted (it contains a
+# shell operator), so under smart/manual mode it would be held for approval and
+# never execute — the failures would never accumulate. mode: off auto-runs the
+# benign command so the failures accumulate and the circuit-breaker trips; the
+# guardrail's before_call/after_call are independent of the approval gate.
+approvals:
+  mode: "off"
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

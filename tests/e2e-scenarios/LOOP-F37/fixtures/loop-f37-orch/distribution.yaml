@@ -1,0 +1,8 @@
+name: loop-f37-orch
+version: 0.1.0
+description: "LOOP-F37 AC-A2A-F19-3 live gated-edge-approval scenario — orch (the orchestrator recipient). Receives the released message_agent from loop-f37-worker-a once the operator approves the gated-edge hold; the delivered inbound row in its state.db proves the release."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

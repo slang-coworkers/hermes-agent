@@ -1,0 +1,23 @@
+manifest_version: 1
+name: nv-artifact
+version: 0.1.0
+kind: standalone
+description: >-
+  Fleet PR→session ownership index (first-claim-wins) plus per-artifact outcome
+  and cost analytics. A post_tool_call observer claims (repo, pr) for the worker
+  whose terminal/execute_code `gh pr create` produced the PR URL; a
+  pre_gateway_dispatch observer durably enqueues later webhook events for a
+  claimed PR onto the owning kanban card and returns skip, so the kanban notifier
+  wakes the owning (possibly secondary-profile) session via the api_server
+  profile-scoped mirror instead of minting an orphan session; kanban terminal +
+  on_session_end append one outcomes(artifact, terminal_outcome, cost_usd,
+  profile) row per artifact. Read via orchestrator-only `hermes pr remap` /
+  `hermes outcomes funnel|winrate|cost-per-merge` and a dashboard page.
+provides_tools:
+  - report_pr_created
+  - resolve_pr_owner
+provides_hooks:
+  - post_tool_call
+  - pre_gateway_dispatch
+  - on_session_end
+  - kanban_task_completed

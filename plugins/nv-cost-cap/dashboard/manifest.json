@@ -1,0 +1,11 @@
+{
+  "name": "nv-cost-cap",
+  "label": "Cost cap",
+  "description": "Cost-escalation approval card — Continue / Stop / set an exact ceiling for a session that crossed its Tier-1/Tier-2 budget. Every resolution is authorized against configured operators and applied exactly once.",
+  "icon": "Shield",
+  "version": "0.1.0",
+  "tab": { "path": "/nv-cost-cap", "hidden": true },
+  "slots": ["header-banner"],
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

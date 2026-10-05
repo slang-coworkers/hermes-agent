@@ -308,6 +308,11 @@ Semantics are honest at-least-once:
 Disable with `gateway.delivery_ledger: false` in `config.yaml` (restores the
 old behavior: in-flight responses are lost on crash).
 
+For the full delivery model — the attempt budget, adapter-reconnect redelivery,
+the persistent dead-target registry, and the outbound destination ACL that
+governs which destinations an agent may send to — see
+[Outbound destination ACL and delivery retries](/user-guide/features/outbound-destination-acl-and-delivery).
+
 ### Session continuity
 
 Gateway conversations do not reset after inactivity or at a daily boundary. Use `/new`

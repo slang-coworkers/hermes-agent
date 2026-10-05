@@ -33,6 +33,14 @@ by the limit: swapping an entry for a longer one can still overflow, so the new
 content must be shortened (or another entry removed) to fit.
 :::
 
+:::tip Running a fleet of agents?
+When several coworkers run as [profiles](/user-guide/profiles) of one gateway, each
+profile's `MEMORY.md`/`USER.md` and its `SOUL.md` persona are isolated by Hermes home.
+See [Per-agent file memory & persona](/user-guide/fleet-per-agent-memory) for the
+OKF→native mapping, the one-time migration runbook, and how the fleet render raises
+each profile's memory limits and leaves `write_approval` off for unattended bots.
+:::
+
 ## How Memory Appears in the System Prompt
 
 At the start of every session, memory entries are loaded from disk and rendered into the system prompt as a frozen block:

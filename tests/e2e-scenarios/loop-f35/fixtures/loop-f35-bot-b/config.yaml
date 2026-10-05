@@ -1,0 +1,18 @@
+# Live provider block (LOOP-F35 §Scenario outlines / ## Amendment 2): a
+# self-contained on-disk provider block so the delivery subprocess — whose env
+# is sanitized of provider secrets — can still resolve a provider. base_url is
+# the container's loopback LiteLLM; api_key is a dummy literal (never a real
+# key). The real credential is injected at the substrate's egress hop when
+# LiteLLM forwards upstream.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: http://127.0.0.1:38403
+    api_mode: anthropic_messages
+    api_key: dummy-loop-f35-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
