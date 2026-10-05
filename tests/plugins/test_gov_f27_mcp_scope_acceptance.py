@@ -698,6 +698,7 @@ def test_ac_gov_f27_7(tmp_path, monkeypatch):
         )
 
     server = SimpleNamespace(
+        name="docs-ro",
         _tools=[_tool("search_docs"), _tool("delete_docs")],
         session=MagicMock(),
         tool_timeout=30.0,
