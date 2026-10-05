@@ -97,6 +97,20 @@ def readable(rec):
             and rec["starttime"] != "unreadable")
 
 
+def settled_read(pid, tries=50):
+    """Avoid a false unreadable result while exec populates /proc/<pid>/environ.
+
+    /proc/<pid>/stat can appear first; a persistently denied read remains unreadable after bounded retries.
+    """
+    rec = read(pid)
+    for _ in range(tries):
+        if readable(rec):
+            break
+        time.sleep(SCAN_S)
+        rec = read(pid)
+    return rec
+
+
 def descendants(root):
     """(pid, starttime) -> ppid for every live `<python> -m tui_gateway.entry` under root (ppid walk)."""
     parent = {}
@@ -129,16 +143,11 @@ def write_json(path, obj):
 
 def selftest(child):
     """Read the root, then a probe forked under the root's env, through the same read path."""
-    root = read(child.pid)
-    probe_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
+    root = settled_read(child.pid)
+    probe_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                   env=os.environ.copy(), stdin=subprocess.DEVNULL)
     try:
-        probe = None
-        for _ in range(50):
-            if stat_fields(probe_proc.pid):
-                probe = read(probe_proc.pid)
-                break
-            time.sleep(SCAN_S)
+        probe = settled_read(probe_proc.pid)
     finally:
         probe_proc.kill()
         probe_proc.wait()
@@ -184,7 +193,7 @@ def run(obs_root, name, argv):
     os.makedirs(obs, exist_ok=True)
     child = subprocess.Popen(argv)
     time.sleep(SCAN_S)
-    write_json(os.path.join(obs, "root.json"), read(child.pid))
+    write_json(os.path.join(obs, "root.json"), settled_read(child.pid))
     write_json(os.path.join(obs, "selftest.json"), selftest(child))
     known, recorded = {}, set()
     events = os.path.join(obs, "events.jsonl")

@@ -285,6 +285,45 @@ def test_probe_session_state_change_is_rejected(tmp_path, monkeypatch, change):
     assert _probe({FP}, open_ws=_Socket(on_open=mutate), state_fn=pty_select.session_state) == 1
 
 
+def test_settled_read_rereads_a_read_taken_before_the_environ_is_set(monkeypatch):
+    reads = iter([dict(DASH, home=""), dict(DASH, home="")] + [DASH] * 5)
+    monkeypatch.setattr(proc_observer, "read", lambda pid: next(reads))
+    monkeypatch.setattr(proc_observer, "SCAN_S", 0)
+    assert proc_observer.settled_read(10) == DASH
+
+
+def test_settled_read_returns_a_denied_read_as_unreadable_after_bounded_tries(monkeypatch):
+    denied = dict(DASH, home="unreadable", netns="unreadable")
+    calls = []
+    monkeypatch.setattr(proc_observer, "read", lambda pid: calls.append(pid) or denied)
+    monkeypatch.setattr(proc_observer, "SCAN_S", 0)
+    assert proc_observer.settled_read(10, tries=3) == denied
+    assert len(calls) == 4
+
+
+@pytest.mark.linux_only
+def test_selftest_passes_when_each_first_read_lands_before_the_environ_is_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    real, seen = proc_observer.read, set()
+
+    def first_read_in_exec_window(pid):
+        rec = real(pid)
+        if pid not in seen:
+            seen.add(pid)
+            return dict(rec, home="")
+        return rec
+
+    monkeypatch.setattr(proc_observer, "read", first_read_in_exec_window)
+    root = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], stdin=subprocess.DEVNULL)
+    try:
+        result = proc_observer.selftest(root)
+    finally:
+        root.kill()
+        root.wait()
+    assert result["ok"] is True
+    assert result["root"]["home"] == "h" and result["probe"]["home"] == "h"
+
+
 @pytest.mark.linux_only
 def test_post_exit_reports_a_surviving_reparented_child(tmp_path):
     survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
