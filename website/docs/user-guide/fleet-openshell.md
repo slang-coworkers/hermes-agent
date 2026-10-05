@@ -298,21 +298,22 @@ model route onto the upstream itself, an ordinary `protocol: rest` endpoint wher
 request's method and path. An absent `mode` means
 `managed`, the render described above, unchanged.
 
+In direct mode `egress.inference_route` must equal the upstream host:port
+(`inference-api.nvidia.com:443`), and `egress.broker_addr` stays `172.17.0.1:18777`. The
+`egress.inference_provider` block then reads:
+
 ```yaml
-egress:
-  inference_route: "inference-api.nvidia.com:443"   # must equal the upstream host:port
-  broker_addr: "172.17.0.1:18777"
-  inference_provider:
-    mode: direct
-    provider: direct-endpoint                       # the Hermes config provider key
-    base_url: "https://inference-api.nvidia.com/v1"
-    upstream_base_url: "https://inference-api.nvidia.com/v1"
-    api_mode: chat_completions
-    model_id: aws/anthropic/bedrock-claude-opus-5-5
-    credential_provider: f64e-inference             # the OpenShell provider (see below)
-    credential_env: NV_INFERENCE_KEY                # the credential key NAME, never a value
-    gateway_image: "osh-f64-gateway:<tag>"
-    attribution_tag_prefix: osh-f64b
+inference_provider:
+  mode: direct
+  provider: direct-endpoint                       # the Hermes config provider key
+  base_url: "https://inference-api.nvidia.com/v1"
+  upstream_base_url: "https://inference-api.nvidia.com/v1"
+  api_mode: chat_completions
+  model_id: aws/anthropic/bedrock-claude-opus-5-5
+  credential_provider: f64e-inference             # the OpenShell provider (see below)
+  credential_env: NV_INFERENCE_KEY                # the credential key NAME, never a value
+  gateway_image: "osh-f64-gateway:<tag>"
+  attribution_tag_prefix: osh-f64b
 ```
 
 What the render does differently in direct mode:
