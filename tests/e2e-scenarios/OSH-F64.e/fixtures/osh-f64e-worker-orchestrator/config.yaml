@@ -1,0 +1,22 @@
+# OSH-F64.e served coworker seed: orchestrator. The provider holds OpenShell's resolve placeholder for
+# OSH_DIRECT_INFERENCE_KEY (identical across profiles; resolved at the relay for the gateway's
+# attached provider) + the per-profile X-Hermes-Profile attribution header. No credential here.
+model:
+  provider: direct-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
+providers:
+  direct-endpoint:
+    base_url: https://inference-api.nvidia.com/v1
+    api_mode: chat_completions
+    api_key: openshell:resolve:env:OSH_DIRECT_INFERENCE_KEY
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    extra_headers:
+      X-Hermes-Profile: osh-f64b-orchestrator
+attribution_tag: osh-f64b-orchestrator
+secrets:
+  onecli:
+    enabled: false
+plugins:
+  enabled:
+    - nv-coworker-compose
+    - nv-fleet-gates
