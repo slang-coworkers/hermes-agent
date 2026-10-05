@@ -53,6 +53,9 @@ class Scope:
         except FileNotFoundError:
             state = {}
         # A corrupt file raises here: starting empty would quietly unregister every PR.
+        if state.get("rules") not in (None, rules):
+            # Registrations made under other rules could admit traffic this scope excludes.
+            raise ValueError(f"{path} was written for a different scope; move it aside to start fresh")
         self.counts: Dict[str, int] = {str(k): int(v) for k, v in _d(state.get("counts")).items()}
         self.prs: Dict[str, Dict[str, Any]] = {str(k): _d(v) for k, v in _d(state.get("prs")).items()}
 
@@ -75,7 +78,8 @@ class Scope:
             else:
                 counts[env["event"]] = counts.get(env["event"], 0) + 1
             # Persist first: memory never runs ahead of what a restart would read back.
-            self._write(self.path, json.dumps({"counts": counts, "prs": prs}, sort_keys=True).encode())
+            self._write(self.path, json.dumps({"counts": counts, "prs": prs, "rules": self.rules},
+                                              sort_keys=True).encode())
             self.counts, self.prs = counts, prs
             return ok
 

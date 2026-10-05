@@ -140,9 +140,11 @@ lane installer builds it. No fixture is re-installed here.
 
    Ledger reads are `python3 -c` over the DEFAULT home's
    `plugin-data/nv-ingress/data.db`. Record `T0` (Unix seconds) now.
-6. **Budget baseline.** Record the `session_model_usage` call count summed over
-   all six profiles (Setup step 4's reply included). Before every step, and
-   after the last, record it beside the in-scope delivery count
+6. **Budget baseline.** The cap counts from the summed `session_model_usage`
+   call count over all six profiles taken just BEFORE Setup step 4, so the
+   fixer instruction's reply counts toward it; record that value as the
+   baseline. Before every step, and after the last, record the count beside
+   the in-scope delivery count
    (`select count(*) from deliveries where created_at >= T0` in the ledger), and
    stop at the 40-call cap (Gating).
 
