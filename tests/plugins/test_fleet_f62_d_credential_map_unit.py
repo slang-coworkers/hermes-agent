@@ -64,7 +64,7 @@ def _run(extra_env):
     assert sh, "a POSIX sh is required"
     script = f'. "{_fragment()}"; env'
     env = {"PATH": "/usr/bin:/bin", **extra_env}
-    return subprocess.run([sh, "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+    return subprocess.run([sh, "-c", script], capture_output=True, text=True, encoding="utf-8", env=env, stdin=subprocess.DEVNULL,
                           timeout=30)
 
 
@@ -120,7 +120,7 @@ def test_e_fragment_prints_nothing(with_provider):
     _cli, provider = _names()
     sh = shutil.which("sh")
     env = {"PATH": "/usr/bin:/bin", **({provider: SYNTHETIC} if with_provider else {})}
-    proc = subprocess.run([sh, "-c", f'. "{_fragment()}"'], capture_output=True, text=True, env=env,
+    proc = subprocess.run([sh, "-c", f'. "{_fragment()}"'], capture_output=True, text=True, encoding="utf-8", env=env,
                           stdin=subprocess.DEVNULL, timeout=30)
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == "", "the fragment must be silent"
 
