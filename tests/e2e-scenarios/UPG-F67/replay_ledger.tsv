@@ -135,10 +135,10 @@ gateway/wake.py	caller does not treat an unpersisted turn as delivered. When it 
 gateway/wake.py	(the default), a 2xx is success as before.	gateway/wake.py:91	c2:gateway/wake.py:91
 gateway/wake.py	# Profile-scoped mirror resumes a secondary-profile session; owner_profile	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
 gateway/wake.py	# None targets the unprefixed same-profile endpoint.	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
-gateway/wake.py	"path = ""/v1/chat/completions"""	gateway/wake.py:221	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"path = ""/v1/chat/completions"""	gateway/wake.py:221	tag-model:gateway/wake.py:250
 gateway/wake.py	if owner_profile:	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
 gateway/wake.py	"path = f""/p/{owner_profile}{path}"""	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
-gateway/wake.py	"url = f""http://{host}:{port}{path}"""	gateway/wake.py:221	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"url = f""http://{host}:{port}{path}"""	gateway/wake.py:221	tag-model:gateway/wake.py:250
 hermes_cli/kanban_db.py	"if ""retry_policy"" not in notify_cols:"	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
 hermes_cli/kanban_db.py	_add_column_if_missing(	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
 hermes_cli/kanban_db.py	"""kanban_notify_subs"","	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
