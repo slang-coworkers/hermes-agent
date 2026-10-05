@@ -1,8 +1,12 @@
 """Behavior-contract acceptance tests for the nv-coworker-compose plugin (LOOP-F35)."""
 
 import argparse
+import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -10,7 +14,8 @@ import yaml
 from hermes_cli.plugins import PluginManager
 
 PLUGIN_KEY = "nv-coworker-compose"
-PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / PLUGIN_KEY
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_SRC = REPO_ROOT / "plugins" / PLUGIN_KEY
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "loop-f35"
 FIXTURE_SPEC = FIXTURE_DIR / "coworker-types.yaml"
 EXPECTED_FILE = FIXTURE_DIR / "expected.yaml"
@@ -505,3 +510,40 @@ def test_ac_self_f56_4(tmp_path, monkeypatch):
         assert len(present) == max_files, f"bounded scan surfaced {len(present)} of {len(markers)} files, expected {max_files}"
         assert excluded not in scaffold_text, "excluded binary leaked into the scaffold"
         assert env_secret not in scaffold_text, ".env secret leaked into the scaffold"
+
+
+_LOAD_PROBE = """
+import json, sys
+from hermes_cli.plugins import PluginManager
+before = "gateway.config" in sys.modules
+manager = PluginManager()
+manager.discover_and_load()
+loaded = manager._plugins["nv-coworker-compose"]
+print(json.dumps({
+    "before": before,
+    "after": "gateway.config" in sys.modules,
+    "enabled": loaded.enabled,
+    "error": loaded.error,
+    "coworker": "coworker" in manager._cli_commands,
+}))
+"""
+
+
+def test_plugin_load_leaves_gateway_config_unimported(tmp_path, monkeypatch):
+    """A real load of the plugin (import + register) does not import gateway.config and still
+    registers `hermes coworker`: a cold gateway.config import can outlast the per-plugin load
+    deadline (plugins.load_timeout_seconds) and silently disable the plugin."""
+    _write_home(tmp_path, monkeypatch)
+    env = dict(os.environ)
+    env["HERMES_ENABLE_PROJECT_PLUGINS"] = "0"
+    # A fresh interpreter: this test process has gateway.config imported already.
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test-controlled paths
+        [sys.executable, "-c", _LOAD_PROBE],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["before"] is False, "precondition: the plugin loader itself must not import gateway.config"
+    assert result["enabled"] is True and result["error"] is None, result
+    assert result["coworker"] is True, "`hermes coworker` not registered after a real plugin load"
+    assert result["after"] is False, "loading nv-coworker-compose imported gateway.config"

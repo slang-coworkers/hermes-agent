@@ -25,7 +25,6 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from gateway.config import Platform, coerce_systemd_watchdog_seconds, platform_binds_port
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 from hermes_constants import get_default_hermes_root, get_hermes_home
 
@@ -424,6 +423,8 @@ def _is_platform_key(key: Any) -> bool:
     iterating the enum."""
     if not isinstance(key, str):
         return False
+    from gateway.config import Platform
+
     try:
         Platform(key)
         return True
@@ -2747,6 +2748,8 @@ _SYSTEMD_WATCHDOG_FLOOR = 30
 
 
 def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
+    from gateway.config import coerce_systemd_watchdog_seconds
+
     # Take the value the loader would resolve: the ROOT spelling wins over the nested
     # gateway.* one (gateway/config.py from_dict), then run it through the SAME core
     # coercion the runtime uses so a bool, an out-of-range int (which the runtime would
@@ -2976,6 +2979,8 @@ def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
     ``config.yaml`` and break the runtime platform merge, discarding the
     multiplex/allowlist enforcement the loader would otherwise apply.
     """
+    from gateway.config import Platform
+
     platforms = config.get("platforms")
     if isinstance(platforms, dict):
         for key, block in platforms.items():
@@ -3042,6 +3047,8 @@ def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
     ``platform_binds_port`` predicate — no vendored port set — so the policy
     tracks core exactly.
     """
+    from gateway.config import platform_binds_port
+
     platforms = config.get("platforms")
     if not isinstance(platforms, dict):
         return
