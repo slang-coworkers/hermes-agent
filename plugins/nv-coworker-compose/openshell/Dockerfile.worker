@@ -39,4 +39,7 @@ RUN useradd --create-home --uid 10001 --shell /bin/bash sandbox \
 # skills/ tree, which the ssh terminal backend syncs into ~/.hermes/skills. git skips a missing
 # include target, so a worker without that file (approver, orchestrator) is unaffected.
 RUN git config --system include.path /home/sandbox/.hermes/skills/nv-gitconfig/gitconfig-github
+# The provider exposes its session credential under its own name, which the GitHub CLI does not
+# read; the ssh terminal's login shell maps it (value-free, only when present).
+COPY profile.d/nv-github-session.sh /etc/profile.d/nv-github-session.sh
 USER sandbox

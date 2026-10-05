@@ -305,7 +305,9 @@ Before a fleet can be provisioned, the operator must satisfy these prerequisites
    placeholder; re-pinning it means updating both the broker's allowed `--from` and the
    spec's `egress.sandbox_image`. For route (b) the image must additionally ship `sshd`.
    For the base-NanoClaw fleet the worker image is built from
-   `plugins/nv-coworker-compose/openshell/Dockerfile.worker` at the merged commit and tagged with
+   `plugins/nv-coworker-compose/openshell/Dockerfile.worker` at the merged commit, with
+   `plugins/nv-coworker-compose/openshell/` as the build context (its `COPY` of the
+   `profile.d/` login-shell fragment resolves against it), and tagged with
    exactly the fleet spec's `egress.sandbox_image` value on the broker host, so the create line's
    `--from` resolves to it. That image carries the version-pinned
    GitHub CLI at `/usr/bin/gh` (the path the github provider's policy names) and a system git

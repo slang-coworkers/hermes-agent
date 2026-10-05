@@ -129,6 +129,14 @@ from its system git configuration, and git skips a missing include, so a sandbox
 the file is unaffected. The process-wide `terminal.credential_files` list is not used,
 because the multiplexed gateway switches profile homes inside one process.
 
+The provider places its session credential under its own name, which neither the GitHub CLI
+nor git reads. The worker image therefore ships a value-free login-shell fragment in
+`/etc/profile.d/` that, only when the provider's credential is present, makes it visible
+under the names the CLI reads, and never overrides a name already set. The ssh terminal
+backend captures its environment from a login shell, so every terminal command of a
+provider-opted worker sees it. A non-login `openshell sandbox exec` does not read
+`/etc/profile.d/`, so a manual `gh` through `sandbox exec` needs a login shell.
+
 The approver is the independent verifier of a PR and holds no credential. Instead of a
 provider it gets the spec's `egress.anonymous_reads` entry: one extra `protocol: rest`
 endpoint, `api.github.com:443`, with a single GET rule, reached through the base
