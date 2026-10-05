@@ -146,7 +146,13 @@ def test_rejects_an_initial_child_that_does_not_match(field, value):
 def test_rejects_an_armed_netns_mismatch_or_missing_guard_records():
     assert not initial(armed={20: {"netns": "net:[2]"}})[0]
     assert not initial(armed={})[0]
-    assert not initial(guard_pids=set())[0]
+    assert not reattach(guard_pids=set())[0]
+    assert not gate("away", read(1.0, child()), read(9.0, child()), accepts=0, br=(1, [], []), guard_pids=set())[0]
+
+
+def test_initial_accepts_a_fresh_child_before_its_first_guard_record():
+    ok, lines, _ = initial(guard_pids=set())
+    assert ok and any(line.endswith("guard no") for line in lines)
 
 
 def test_rejects_a_close_that_leaves_another_child():
@@ -354,8 +360,10 @@ def test_observer_records_names_only_births_exits_and_answers_reads(tmp_path):
         "time.sleep(0.4)\n" % str(tmp_path / "mod"), encoding="utf-8")
     obs_root = tmp_path / "obs"
     env = dict(os.environ, HERMES_HOME=str(tmp_path / "h"), OSH_F64C_TEST_CANARY="canary-value-not-recorded")
+    # cwd outside the repo: `-m tui_gateway.entry` would otherwise import the real gateway from the cwd entry
+    # that -m puts first on sys.path, not the stub on PYTHONPATH.
     proc = subprocess.Popen([sys.executable, str(HERE / "proc_observer.py"), "run", str(obs_root), "dashboard",
-                             "--", sys.executable, str(root)], env=env)
+                             "--", sys.executable, str(root)], env=env, cwd=tmp_path)
     obs = obs_root / "dashboard"
     deadline = time.time() + 15
     while not (obs / "events.jsonl").exists() and time.time() < deadline:

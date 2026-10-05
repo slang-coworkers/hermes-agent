@@ -169,7 +169,8 @@ def decide(mode, profile, expected, canonical, dashboard, baseline, presend, eve
       `selected` alone with the same resume, home and netns.
     - away (a page other than /chat): zero accepts; the live set at the end is `selected` alone.
     - close: no accept without an open, and the live set at the end has nothing but `selected`.
-    The chosen child's netns must equal the dashboard's and its .armed netns, and it must have guard records.
+    The chosen child's netns must equal the dashboard's and its .armed netns, and, in every mode but initial, it
+    must have guard records.
     """
     ready, opens, urls = browser
     base = {fp(c): c for c in baseline["children"]}
@@ -211,7 +212,8 @@ def decide(mode, profile, expected, canonical, dashboard, baseline, presend, eve
         a = armed.get(chosen["pid"]) or {}
         armed_ns = a.get("netns") or "absent"
         has_guard = chosen["pid"] in guard_pids
-        ok = ok and chosen["netns"] == dns and armed_ns == dns and has_guard
+        # A fresh PTY child may have no G3 request record before its first turn; the post-turn away gate requires one.
+        ok = ok and chosen["netns"] == dns and armed_ns == dns and (has_guard or mode == "initial")
         lines.append("pty_child %s starttime %s resume %s home %s netns %s dashboard_netns %s armed_netns %s guard %s" % (
             chosen["pid"], chosen["starttime"], chosen["resume"], chosen["home"], chosen["netns"], dns, armed_ns,
             "yes" if has_guard else "no"))

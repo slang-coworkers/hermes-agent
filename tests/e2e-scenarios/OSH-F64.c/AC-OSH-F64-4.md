@@ -461,7 +461,9 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
    - **Initial gate, right before the send:** `reread s1 send`; `g2_gate initial orchestrator $EXP $ORCH_SID s1`.
      It passes only with no child at the baseline, accepts == browser opens, one open (or two, the second being the
      recorded rewrite from `$ORCH_SID` to `$EXP`), exactly one new birth with `$EXP` and `orchestrator`, that child
-     alone live, and its netns = `$DNS` = its `.armed` netns with guard records. It writes `g2/selected.json`.
+     alone live, and its netns = `$DNS` = its `.armed` netns. It writes `g2/selected.json`. The child may have no G3
+     request record before its first turn, so its guard records are required from the step-1 tab visit's
+     `away` gate on, and by `win_close s1`.
    Send the parent's step-1 message, `run change P7-$NONCE`, and wait (bounded) for the orchestrator's reply. Then
    `reread s1t base`; `ab_open ${URL}bot-chat` and click `orchestrator` → expect the human line and the
    orchestrator's acceptance turn → `step-1.png`; `reread s1t send`; `g2_gate away orchestrator $EXP $ORCH_SID s1t`
