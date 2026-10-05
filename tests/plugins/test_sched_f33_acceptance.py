@@ -127,6 +127,7 @@ def _install_agent_stubs(monkeypatch, observed):
     import sys
 
     import cron.scheduler as sched
+    import cron.scheduler_delivery as sched_delivery
 
     observed.setdefault("prompts", [])
     observed.setdefault("agent_runs", 0)
@@ -159,7 +160,7 @@ def _install_agent_stubs(monkeypatch, observed):
             "api_mode": "chat_completions",
         },
     )
-    monkeypatch.setattr(sched, "_resolve_origin", lambda job: None)
+    monkeypatch.setattr(sched_delivery, "_resolve_origin", lambda job: None)
     monkeypatch.setattr(sched, "_resolve_delivery_target", lambda job: None)
     monkeypatch.setattr(sched, "_resolve_cron_enabled_toolsets", lambda job, cfg: None)
     monkeypatch.setenv("HERMES_CRON_TIMEOUT", "0")
@@ -269,14 +270,15 @@ def test_ac_sched_f33_2(tmp_path, monkeypatch):
 def test_ac_sched_f33_3(monkeypatch):
     """The scheduler honors the rendered cron.script_timeout_seconds: with no module or env override, script-timeout resolution returns the configured value (30) and falls back to 3600 when the key is absent."""
     import cron.scheduler as scheduler
+    import cron.scheduler_script as scheduler_script
 
     # skip the higher-precedence module-override and env branches so config wins
     monkeypatch.setattr(scheduler, "_SCRIPT_TIMEOUT", scheduler._DEFAULT_SCRIPT_TIMEOUT)
     monkeypatch.delenv("HERMES_CRON_SCRIPT_TIMEOUT", raising=False)
     monkeypatch.setattr(scheduler, "load_config", lambda: {"cron": {"script_timeout_seconds": 30}})
-    assert scheduler._get_script_timeout() == 30
+    assert scheduler_script._get_script_timeout() == 30
     monkeypatch.setattr(scheduler, "load_config", lambda: {"cron": {}})
-    assert scheduler._get_script_timeout() == scheduler._DEFAULT_SCRIPT_TIMEOUT
+    assert scheduler_script._get_script_timeout() == scheduler._DEFAULT_SCRIPT_TIMEOUT
 
 
 # --------------------------------------------------------------------------- #
@@ -333,10 +335,10 @@ def test_ac_sched_f33_5(agent_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ac_sched_f33_6(agent_env, monkeypatch):
     """A pre-task script that exits nonzero does NOT gate the run — its failure is surfaced as ## Script Error context and the agent still runs (the NanoClaw-parity difference: only wakeAgent:false gates)."""
-    import cron.scheduler as scheduler
+    import cron.scheduler_script as scheduler_script
 
     _write_script(agent_env, "fail.py", "import sys\nsys.stderr.write('boom')\nsys.exit(3)\n")
-    ok, output = scheduler._run_job_script("fail.py")
+    ok, output = scheduler_script._run_job_script("fail.py")
     assert ok is False
     assert "exited with code 3" in output
 
