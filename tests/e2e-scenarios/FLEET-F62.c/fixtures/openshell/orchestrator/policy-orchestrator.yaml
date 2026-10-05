@@ -10,6 +10,7 @@ filesystem_policy:
   - /tmp
   - /dev/null
   - /home/sandbox
+  - /workspace
 landlock:
   compatibility: best_effort
 process:

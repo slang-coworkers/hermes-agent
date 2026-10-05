@@ -32,7 +32,9 @@ egress:
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
   # git opens the null device read-write for discarded stdio, and the image user's home holds
   # the login shell's startup files and the ~/.hermes tree the ssh terminal backend syncs into.
-  filesystem_read_write: ["/dev/null", "/home/sandbox"]
+  # /workspace is the image WORKDIR, where workers clone and work; include_workdir does not make
+  # it writable.
+  filesystem_read_write: ["/dev/null", "/home/sandbox", "/workspace"]
   # The approver verifies a PR independently of the chain that wrote it, so it reads the public
   # API without any credential.
   anonymous_reads:
