@@ -34,7 +34,6 @@ gateway.config. None is the decomposed gateway/run_inbound.py path.
 from __future__ import annotations
 
 import shutil
-import sys
 import types as _types
 from pathlib import Path
 
@@ -288,10 +287,9 @@ def test_ac_rt_f01_3(loaded, tmp_path, monkeypatch):
     assert platform_binds_port("webhook", None) is True
     assert platform_binds_port("feishu", {"connection_mode": "websocket"}) is False
 
-    # prove the render routes through the imported predicate (not a literal set):
+    # prove the render routes through core's predicate (not a literal set):
     # forcing platform_binds_port true makes an otherwise-accepted platform refuse.
-    compose_mod = sys.modules[module.compose.__module__]
-    monkeypatch.setattr(compose_mod, "platform_binds_port", lambda p, e=None: True)
+    monkeypatch.setattr("gateway.config.platform_binds_port", lambda p, e=None: True)
     spec = _clean_spec()  # telegram is not port-binding and is normally accepted
     with pytest.raises(module.CompositionError):
         _render(module, tmp_path, spec, "forced")
