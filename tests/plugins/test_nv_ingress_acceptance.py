@@ -1,7 +1,7 @@
 """Acceptance tests for ING-F66 — the inbound gateway (plugin ``nv-ingress``).
 
 Ships to ``tests/plugins/test_nv_ingress_acceptance.py``. One ``test_ac_ing_f66_<n>``
-per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..18, AC-22, AC-23, AC-25),
+per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..18, AC-22, AC-23, AC-25, AC-26),
 in ADR order; AC-19/AC-20/AC-24 (live) and AC-21 (ui) are scenario files under
 ``tests/e2e-scenarios/ING-F66/``. Shape: ``tests/hermes_cli/test_plugin_api_compat.py``
 — isolated HERMES_HOME, empty bundled dir, real ``PluginManager().discover_and_load()``.
@@ -22,6 +22,9 @@ Plugin seams the builder must provide (named in ADR §Design, imported here):
   the `webhook` platform registered when settings.webhook_guard is true [D14 guard adapter]
   `hermes ingress status --json` -> {pending, stuck, runaway, refusals, unclaimable, webhook_guard}
   module.drain_once() -> int                      [one drain pass]
+  edge config `scope` {repo, ref_prefix, label_prefix} -> 202 {"status": "out_of_scope"} for
+    out-of-scope events, `GET /scope` -> {"counts": {<event>: n}}; registrations in
+    <parent of spool_dir>/scope.json                                     [ADR D2 Scope, r7]
   the drain driver: one daemon thread per load, passes only while this process owns the
     gateway runtime lock -- it calls gateway.status.owns_gateway_runtime_lock() (looked up on
     the module at each pass) before every pass -- stopped by PluginManager.unload()  [ADR D5]
@@ -422,7 +425,7 @@ def _gl_signing_token() -> bytes:
     return b"whsec_" + base64.b64encode(secrets.token_bytes(32))
 
 
-def _start_edge(ing, forward_port: int, *, spool_dir: Path | None = None, secrets_by_platform=None):
+def _start_edge(ing, forward_port: int, *, spool_dir: Path | None = None, secrets_by_platform=None, scope=None):
     """The REAL host edge on an ephemeral loopback port; signing material is generated now."""
     secrets_by_platform = secrets_by_platform or {"github": secrets.token_bytes(32),
                                                   "gitlab": _gl_signing_token()}
@@ -439,6 +442,8 @@ def _start_edge(ing, forward_port: int, *, spool_dir: Path | None = None, secret
            "forward_url": f"http://127.0.0.1:{forward_port}/webhooks/{ROUTE}",
            "spool_dir": str(spool_dir or (ing.tmp / "edge-spool")),
            "events": sorted(ing.module.ROUTED_EVENTS), "platforms": platforms}
+    if scope is not None:
+        cfg["scope"] = dict(scope)
     server, _thread = edge.make_server(cfg)
     return SimpleNamespace(module=edge, server=server, port=port, secrets=secrets_by_platform, cfg=cfg)
 
@@ -1412,7 +1417,7 @@ def test_ac_ing_f66_18(ingress):
         "the GitLab mapping must state the 19.0+ signing-token prerequisite"
     slack = sections["Slack route"].lower()
     assert "outbound" in slack and "inbound" in slack and "not built" in slack
-    for lane in ("L-HOOK", "L-EDGE", "L-FWD", "L-VAL", "L-RST-SB", "L-RST-HOST", "L-CHK"):
+    for lane in ("L-HOOK", "L-EDGE", "L-FWD", "L-VAL", "L-RST-SB", "L-RST-SVC", "L-CHK"):
         assert lane in sections["Operator lane"], lane
 
 
@@ -1562,3 +1567,160 @@ def test_ac_ing_f66_25(ingress, monkeypatch):
     _ingest(ingress, "Pipeline Hook", "gl-s2-owned", payload, source="gitlab")
     owner = _deliveries_to(ingress, OWNER)
     assert len(owner) == 1 and probe in owner[0]["prompt"], "the owner must still see the GitLab job name"
+
+
+def _scope_payload(event: str, delivery_kind: str, *, pr: int, branch: str, head: str, labels=(), nums=None):
+    if event == "issues":
+        return _gh_payload("issues", "opened", labels=labels, issue=pr)
+    if event == "issue_comment":
+        payload = _gh_payload("issue_comment", "created", pr=pr)
+        if delivery_kind == "plain-issue":
+            payload["issue"].pop("pull_request")
+        payload["issue"]["labels"] = [{"name": n} for n in labels]
+        return payload
+    return _gh_payload(event, "completed" if event in CI_EVENTS else "opened", pr=pr, head=head, branch=branch,
+                       conclusion="failure" if event in CI_EVENTS else None, pr_numbers=nums)
+
+
+def _get_json(port: int, path: str) -> dict:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _post_status(port: int, path: str, body: bytes, headers: dict) -> tuple[int, dict]:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body, method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}
+
+
+def _send_scoped(edge, event: str, delivery: str, payload: dict) -> tuple[int, dict]:
+    body = json.dumps(payload).encode()
+    return _post_status(edge.port, "/github", body, {**_gh_headers(event, delivery),
+                                                     GH_SIG_HEADER: _gh_sign(edge.secrets["github"], body)})
+
+
+def test_ac_ing_f66_26(ingress, edge_path, tmp_path, caplog):
+    """With an `ingress.scope` block (repo, ref prefix, label prefix) the edge forwards only in-scope events: a PR of another repo, an unrelated PR, an unrelated comment, an unrelated CI event, a numberless CI event of an unregistered head and an issue without a prefix label are each answered 202 `out_of_scope`, counted per event type and logged with their delivery id, and are never spooled, forwarded or delivered (zero orchestrator deliveries); a scoped PR, a comment on it, a comment on a prefix-labelled issue, a numberless CI event of its head, a numberless CI event on a prefix branch and a prefix-labelled issue are forwarded; a mixed CI event on a non-prefix head is forwarded with only the registered PR numbers; a CI event on a prefix head branch naming a not-yet-registered PR whose own head ref has the prefix in the scoped repo is forwarded with that number and registers it; a PR associated only by its base branch is not admitted; the PR registration and the counts survive an edge restart; the rendered host config carries the spec's scope block; with no `scope` block every event is forwarded as before (derived — operator msg 356 item 1)."""
+    import logging
+
+    out = tmp_path / "scope-render"
+    _render(tmp_path, out)
+    spec = yaml.safe_load(ING_SPEC.read_text(encoding="utf-8"))
+    rendered = yaml.safe_load((out / "host" / "edge.yaml").read_text(encoding="utf-8"))
+    assert rendered["scope"] == spec["ingress"]["scope"] == {
+        "repo": "slang-coworkers/nanoclaw", "ref_prefix": "ing-f66-", "label_prefix": "ing-f66-"}
+    assert rendered["gateway"]["port"] == spec["ingress"]["port"] == 18644
+
+    def _ci_with_prs(event: str, *, branch: str, head: str, prs) -> dict:
+        """A CI payload whose `pull_requests[]` entries carry their own head/base refs and repos, as GitHub sends them."""
+        payload = _gh_payload(event, "completed", head=head, branch=branch, conclusion="failure", pr_numbers=[])
+        payload[event]["pull_requests"] = [
+            {"number": n, "head": {"ref": h_ref, "sha": head, "repo": {"id": 1, "name": h_repo.split("/")[-1],
+                                                                       "url": f"https://api.github.com/repos/{h_repo}"}},
+             "base": {"ref": b_ref, "sha": "0" * 40, "repo": {"id": 1, "name": REPO.split("/")[-1],
+                                                              "url": f"https://api.github.com/repos/{REPO}"}}}
+            for n, h_ref, h_repo, b_ref in prs]
+        return payload
+
+    scope = {"repo": REPO, "ref_prefix": "ing-f66-", "label_prefix": "ing-f66-"}
+    spool = tmp_path / "scope-state" / "spool"
+    edge = _start_edge(ingress, edge_path.relay.port, spool_dir=spool, scope=scope)
+    in_head, out_head = "c" * 40, "d" * 40
+    out_cases = [
+        ("pull_request", "s-out-pr", _scope_payload("pull_request", "pr", pr=90, branch="feature-x", head=out_head)),
+        ("issue_comment", "s-out-comment", _scope_payload("issue_comment", "pr", pr=90, branch="", head="")),
+        ("check_run", "s-out-ci", _scope_payload("check_run", "ci", pr=90, branch="feature-x", head=out_head)),
+        ("check_suite", "s-out-ci-nonum", _scope_payload("check_suite", "ci", pr=0, branch="feature-x",
+                                                          head=out_head, nums=[])),
+        ("issues", "s-out-issue", _scope_payload("issues", "issue", pr=91, branch="", head="", labels=(LABEL,))),
+    ]
+    foreign = _scope_payload("pull_request", "pr", pr=93, branch="ing-f66-scratch-1-fix", head="e" * 40)
+    foreign["repository"]["full_name"] = "other/repo"
+    out_cases.append(("pull_request", "s-out-foreign-repo", foreign))
+    with caplog.at_level(logging.INFO):
+        for event, delivery, payload in out_cases:
+            code, reply = _send_scoped(edge, event, delivery, payload)
+            assert (code, reply.get("status")) == (202, "out_of_scope"), f"{delivery}: {code} {reply}"
+            assert not list(spool.glob(f"*{delivery}*")), f"{delivery} was spooled"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert all(d in logged for _e, d, _p in out_cases), "every out-of-scope delivery id is logged"
+    counts = _get_json(edge.port, "/scope")["counts"]
+    assert counts == {"pull_request": 2, "issue_comment": 1, "check_run": 1, "check_suite": 1, "issues": 1}
+
+    in_cases = [
+        ("pull_request", "s-in-pr", _scope_payload("pull_request", "pr", pr=7, branch="ing-f66-scratch-1-fix",
+                                                   head=in_head)),
+        ("issue_comment", "s-in-comment", _scope_payload("issue_comment", "pr", pr=7, branch="", head="")),
+        ("issue_comment", "s-in-labelled", _scope_payload("issue_comment", "plain-issue", pr=95, branch="", head="",
+                                                          labels=("ing-f66-fleet",))),
+        ("check_suite", "s-in-ci-nonum", _scope_payload("check_suite", "ci", pr=0, branch="other", head=in_head,
+                                                        nums=[])),
+        ("check_run", "s-in-ci-mixed", _scope_payload("check_run", "ci", pr=7, branch="feature-x",
+                                                      head=out_head, nums=[7, 90])),
+        ("check_run", "s-in-ci-preregister", _ci_with_prs(
+            "check_run", branch="ing-f66-scratch-2-fix", head="f" * 40,
+            prs=[(96, "ing-f66-scratch-2-fix", REPO, "ing-f66-scratch-2-base"),
+                 (97, "feature-z", REPO, "ing-f66-scratch-2-base"),
+                 (98, "ing-f66-scratch-2-fix", "other/repo", "ing-f66-scratch-2-base")])),
+        ("issues", "s-in-issue", _scope_payload("issues", "issue", pr=92, branch="", head="",
+                                                labels=("ing-f66-fleet",))),
+        ("workflow_run", "s-in-ci-prefix", _scope_payload("workflow_run", "ci", pr=0, branch="ing-f66-other",
+                                                          head="e" * 40, nums=[])),
+    ]
+    for event, delivery, payload in in_cases:
+        code, reply = _send_scoped(edge, event, delivery, payload)
+        assert (code, reply.get("status")) == (202, "accepted"), f"{delivery}: {code} {reply}"
+    assert _wait(lambda: len(edge_path.route.hooked) >= len(in_cases)), "in-scope events were not forwarded"
+    assert _wait(lambda: not list(spool.glob("*.json")))
+    ingress.module.drain_once()
+    staged = {r[0]: r for r in _rows(ingress, "SELECT delivery_id, envelope FROM outbox")}
+    assert set(staged) == {d for _e, d, _p in in_cases}, "only in-scope events reach the ledger"
+    assert json.loads(staged["s-in-ci-mixed"][1])["pr_numbers"] == [7], "a mixed CI event keeps registered PRs only"
+    assert json.loads(staged["s-in-ci-preregister"][1])["pr_numbers"] == [96], \
+        "a prefix-head CI event registers its own not-yet-registered prefix PR"
+    code, reply = _send_scoped(edge, "check_suite", "s-in-after-preregister",
+                               _scope_payload("check_suite", "ci", pr=96, branch="feature-y", head="9" * 40, nums=[96]))
+    assert (code, reply.get("status")) == (202, "accepted"), "a later event naming the registered PR is in scope"
+    code, reply = _send_scoped(edge, "check_run", "s-ci-base-only", _ci_with_prs(
+        "check_run", branch="feature-z", head="8" * 40,
+        prs=[(97, "feature-z", REPO, "ing-f66-scratch-3-base")]))
+    assert (code, reply.get("status")) == (202, "out_of_scope"), "a PR associated only by its base branch is not admitted"
+    code, reply = _send_scoped(edge, "check_suite", "s-ci-base-only-later",
+                               _scope_payload("check_suite", "ci", pr=97, branch="feature-z", head="8" * 40, nums=[97]))
+    assert (code, reply.get("status")) == (202, "out_of_scope"), "a base-only PR must not have been registered"
+    for n, pr_head, pr_repo in ((97, "feature-z", REPO), (98, "ing-f66-scratch-2-fix", "other/repo")):
+        code, reply = _send_scoped(edge, "check_run", f"s-ci-not-admitted-{n}", _ci_with_prs(
+            "check_run", branch="ing-f66-scratch-4-fix", head="7" * 40,
+            prs=[(n, pr_head, pr_repo, "ing-f66-scratch-4-base")]))
+        assert (code, reply.get("status")) == (202, "out_of_scope"), f"PR {n} must be neither admitted nor registered"
+    assert _wait(lambda: not list(spool.glob("*.json")))
+    assert _wait(lambda: len(edge_path.route.hooked) >= len(in_cases) + 1)
+    assert len(edge_path.route.hooked) == len(in_cases) + 1, "only s-in-after-preregister was forwarded after the in-scope set"
+    counts = _get_json(edge.port, "/scope")["counts"]
+    to_orch = _deliveries_to(ingress, ORCH)
+    assert not [c for c in to_orch for _e, d, _p in out_cases if f"github/{d}" in c["prompt"]]
+
+    _stop_edge(edge)
+    edge = _start_edge(ingress, edge_path.relay.port, spool_dir=spool, scope=scope,
+                       secrets_by_platform=edge.secrets)
+    assert _get_json(edge.port, "/scope")["counts"] == counts, "the out-of-scope counts survive an edge restart"
+    code, reply = _send_scoped(edge, "check_run", "s-in-after-restart",
+                               _scope_payload("check_run", "ci", pr=7, branch="other", head=in_head, nums=[7]))
+    assert (code, reply.get("status")) == (202, "accepted"), "the PR registration must survive an edge restart"
+    assert _wait(lambda: not list(spool.glob("*.json"))), "the after-restart event was never forwarded"
+    _stop_edge(edge)
+
+    open_edge = _start_edge(ingress, edge_path.relay.port, spool_dir=tmp_path / "no-scope" / "spool")
+    before = len(edge_path.route.hooked)
+    try:
+        for event, delivery, payload in out_cases:
+            code, reply = _send_scoped(open_edge, event, delivery + "-open", payload)
+            assert (code, reply.get("status")) == (202, "accepted"), f"no scope must forward {delivery}"
+        assert _wait(lambda: len(edge_path.route.hooked) >= before + len(out_cases)), \
+            "without a scope block every listed event is forwarded"
+    finally:
+        _stop_edge(open_edge)
