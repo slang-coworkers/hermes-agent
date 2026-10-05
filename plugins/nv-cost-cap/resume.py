@@ -394,17 +394,42 @@ def open_money_sessions() -> list:
     """
     refresh = _pkg_attr("_refresh_effective")
     open_ids = []
+    readable = None
     for sid in store.open_mortal_session_ids():
         try:
-            if refresh is None:
-                raise LookupError("spend refresh unavailable outside the loaded plugin")
+            if _stopped_by_applied_stop(sid):
+                continue
+            if readable is None:
+                readable = _state_db_readable()
+            # The spend readers degrade a missing / unreadable state.db to "no new spend", which would
+            # let a stale cached total read as runnable; Approve needs a real read.
+            if refresh is None or not readable:
+                raise LookupError("no authoritative spend read (plugin not loaded, or state.db unreadable)")
             refresh(sid)
-            if store.session_resumes(sid, belt_engaged=False) or _stopped_by_applied_stop(sid):
+            if store.session_resumes(sid, belt_engaged=False):
                 continue
         except Exception:
             logger.warning("nv-cost-cap: money check for session %s failed; treated as open", sid, exc_info=True)
         open_ids.append(sid)
     return open_ids
+
+
+def _state_db_readable() -> bool:
+    from hermes_constants import get_hermes_home
+
+    db_path = get_hermes_home() / "state.db"
+    if not db_path.is_file():
+        return False
+    try:
+        conn = policy._ro_connect(str(db_path))
+        try:
+            conn.execute("SELECT 1 FROM sessions LIMIT 1").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.warning("nv-cost-cap: state.db at %s is unreadable", db_path, exc_info=True)
+        return False
+    return True
 
 
 # --- resolution -------------------------------------------------------------
@@ -509,6 +534,7 @@ def approve_resume(card_id, principal) -> dict:
             return _result(False, "money-block-active", card_id, REFUSAL_TEXT["money-block-active"].format(
                 sessions=", ".join(open_ids), card_id=card_id), open_sessions=open_ids)
 
+        stays = _stays_stopped(card)
         if not _decide(card, "pending", "approving", "attempt", principal, snap=snap1, claimed_at=_clock()):
             return _result(False, "already-resolved", card_id)
 
@@ -520,25 +546,44 @@ def approve_resume(card_id, principal) -> dict:
         try:
             lifted = estop.disengage()
         except Exception as exc:
-            _decide(card, "approving", "resume-failed", "resume-failed", principal, snap=snap1,
+            _decide(card, _CLAIMED, "resume-failed", "resume-failed", principal, snap=snap1,
                     outcome={"error": type(exc).__name__})
             return _result(False, "resume-failed", card_id)
         if not lifted:
-            return _refuse(card, "already-resumed", principal, snap1, expected="approving")
-        return _granted(card, principal, snap1, paths)
+            _decide(card, _CLAIMED, "refused", "refused:already-resumed", principal, snap=snap1)
+            return _result(False, "already-resumed", card_id)
+        return _granted(card, principal, snap1, paths, stays)
 
 
-def _granted(card, principal, snap1, paths) -> dict:
+# A slow call can outlive the reconciler's interrupted-after window; the outcome still lands on the card.
+_CLAIMED = ("approving", "interrupted")
+
+
+def _granted(card, principal, snap1, paths, stays) -> dict:
+    """Record a resume that HAS happened. Nothing here may turn it into a reported failure."""
     ts = _iso(_clock())
-    stays = _stays_stopped(card)
-    after = [{"path": p, "present": Path(p).exists()} for p in paths]
+    after = []
+    for p in paths:
+        try:
+            after.append({"path": p, "present": Path(p).exists()})
+        except OSError:
+            after.append({"path": p, "present": None})
     target = _setting("resume_card_target", None)
     notice = _NOTICE_TEXT.format(session_id=card["session_id"], actor=principal, ts=ts)
     if stays:
         notice += f"; {stays}"
-    _decide(card, "approving", "approved", "approve", principal, snap=snap1, outcome={"after": after},
-            ts=ts, outbox={"kind": "notice", "target": str(target) if target else None, "body": notice,
-                           "created_at": _clock()})
+    outbox = {"kind": "notice", "target": str(target) if target else None, "body": notice, "created_at": _clock()}
+    try:
+        if not _decide(card, _CLAIMED, "approved", "approve", principal, snap=snap1, outcome={"after": after},
+                       ts=ts, outbox=outbox):
+            logger.warning("nv-cost-cap: resume card %s changed status during its resume; recording the "
+                           "approve anyway", card["card_id"])
+            store.append_decision(card["card_id"], decision="approve", actor=principal, ts=ts,
+                                  stop=_stop_identity(card), candidates=snap1, outcome={"after": after},
+                                  outbox=outbox)
+    except Exception:
+        logger.warning("nv-cost-cap: recording the resume of card %s failed; the stop WAS lifted",
+                       card["card_id"], exc_info=True)
     kick_drain()
     text = _RESUMED_TEXT.format(profile=card["profile"], card_id=card["card_id"])
     if stays:

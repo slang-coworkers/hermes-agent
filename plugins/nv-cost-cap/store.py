@@ -1312,24 +1312,38 @@ def record_resume_card(card, *, target, body, ts) -> None:
 
 def transition_card(card_id, expected, new_status, *, decision, actor, ts, stop, candidates=None,
                     outcome=None, claimed_at=None, outbox=None) -> bool:
-    """CAS ``status == expected`` → ``new_status`` (None keeps the status) and append the decision row, plus an
-    optional outbox row, in ONE tx. False (nothing written) when the card is not in ``expected``."""
+    """CAS ``status in expected`` → ``new_status`` (None keeps the status) and append the decision row, plus an
+    optional outbox row, in ONE tx. ``expected`` is one status or a tuple of them. False (nothing written)
+    when the card is not in ``expected``."""
     status_reason = decision.split(":", 1)[1] if decision.startswith("refused:") else decision
+    allowed = (expected,) if isinstance(expected, str) else tuple(expected)
 
     def _tx(conn):
         row = conn.execute("SELECT status FROM resume_cards WHERE card_id = ?", (card_id,)).fetchone()
-        if row is None or row[0] != expected:
+        if row is None or row[0] not in allowed:
             return False
         if new_status is not None:
             conn.execute(
                 "UPDATE resume_cards SET status = ?, status_reason = ?, claimed_at = COALESCE(?, claimed_at) "
-                "WHERE card_id = ? AND status = ?", (new_status, status_reason, claimed_at, card_id, expected))
+                "WHERE card_id = ? AND status = ?", (new_status, status_reason, claimed_at, card_id, row[0]))
         _insert_decision(conn, card_id, ts, actor, decision, stop, candidates, outcome)
         if outbox is not None:
             _insert_outbox(conn, card_id, outbox["kind"], outbox["target"], outbox["body"], outbox["created_at"])
         return True
 
     return bool(_in_tx(_tx))
+
+
+def append_decision(card_id, *, decision, actor, ts, stop, candidates=None, outcome=None, outbox=None) -> None:
+    """Append a decision row (plus an optional outbox row) with no status check, for an outcome that already
+    happened and must be on record whatever the card's status became meanwhile."""
+    def _tx(conn):
+        _insert_decision(conn, card_id, ts, actor, decision, stop, candidates, outcome)
+        if outbox is not None:
+            _insert_outbox(conn, card_id, outbox["kind"], outbox["target"], outbox["body"], outbox["created_at"])
+        return True
+
+    _in_tx(_tx)
 
 
 def resume_card(card_id) -> Optional[Dict[str, Any]]:

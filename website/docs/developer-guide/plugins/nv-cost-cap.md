@@ -288,8 +288,8 @@ the window too. Upstream UA-28, an owner-aware ESTOP lock in core, closes it.
 
 - Set `resume_card_target` on **every** profile that can produce a stop: any profile with
   `estop_on_breach` (default true), and any profile where a mortal Stop can be resolved.
-  Without it the card is recorded `failed: no-target`, nothing is posted, and the only release
-  is `hermes resume`.
+  Without it the card is recorded `failed: no-target` and nothing is posted. The card id is then
+  only in the profile's plugin_db, so in practice the release is `hermes resume`.
 - Enable nv-cost-cap (`plugins.enabled`) on the profile that serves the approver channel.
   Otherwise the `/cost resume …` reply never reaches the plugin.
 - A card is raised only when the stopping process's `HERMES_HOME` maps to a named profile
