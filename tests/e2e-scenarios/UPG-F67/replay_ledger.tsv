@@ -1,4 +1,4 @@
-# path	stripped fork-added line (d0402936)	tag relocation anchor (v2026.9.24 file:line)	disposition: c2:<file:line> carries it | tag-model:<file:line> tag mechanism replaced it | superset:<tag file:line> | excluded:<ruling>
+# path	stripped fork-added line (d0402936)	tag relocation anchor (v2026.9.24 file:line; validated by replay_check.py)	disposition (not read by replay_check.py): c2:<file:line @C2 f602f80b4a> carries it | tag-model:<file:line @C2 f602f80b4a> the v2026.9.24 mechanism used there replaced it | superset:<file:line @v2026.9.24> | excluded:<ruling>
 apps/desktop/e2e/fixtures.ts	${autoTitleDefault}${displaySection}${extraConfig ? `\n${extraConfig.trim()}\n` : ''}`	apps/desktop/e2e/fixtures.ts:219	superset:apps/desktop/e2e/fixtures.ts:219
 gateway/kanban_watchers.py	"_d_platform = (sub.get(""platform"") or """").lower()"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
 gateway/kanban_watchers.py	"if (sub.get(""retry_policy"") or ""default"").lower() == ""durable"":"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
