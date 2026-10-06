@@ -182,7 +182,7 @@ async def test_ac_iso_f17_3(tmp_path, monkeypatch):
     """The restart/stop exit-code contract holds at the producer and consumer seams: the
     runner produces 75 on a via-service drain and 78 on fatal config; the systemd unit
     force-restarts on 75 and prevents restart on 78; the s6 finish maps 78->125; launchd
-    relaunches."""
+    relaunches on a non-zero exit (KeepAlive: {SuccessfulExit: false})."""
     import gateway.status as gw_status
     from hermes_cli import gateway as gw
     from hermes_cli.service_manager import S6ServiceManager
@@ -223,7 +223,7 @@ async def test_ac_iso_f17_3(tmp_path, monkeypatch):
     assert fatal_runner.exit_code != GATEWAY_SERVICE_RESTART_EXIT_CODE
 
     # Consumer: the systemd unit force-restarts on the restart code, prevents on fatal;
-    # s6 finish maps 78->125 (permanent stop); launchd relaunches unconditionally.
+    # s6 finish maps 78->125 (permanent stop); launchd relaunches on a non-zero exit.
     unit = gw.generate_systemd_unit(system=False)
     assert "Restart=always" in unit
     assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
@@ -236,9 +236,10 @@ async def test_ac_iso_f17_3(tmp_path, monkeypatch):
         f'if [ "$1" = "{GATEWAY_FATAL_CONFIG_EXIT_CODE}" ]; then\n  exit 125\nfi'
         in finish
     )
-    # KeepAlive must be boolean true (unconditional relaunch), not a conditions dict.
+    # launchd cannot honor a per-code prevent list, so a clean exit parks and every
+    # non-zero exit (75, crashes) relaunches (hermes_cli/gateway_launchd.py:404-413).
     launchd = plistlib.loads(gw.generate_launchd_plist().encode("utf-8"))
-    assert launchd["KeepAlive"] is True
+    assert launchd["KeepAlive"] == {"SuccessfulExit": False}
     # 75/78 are the external OS-supervisor protocol contract, not a version snapshot.
     assert GATEWAY_SERVICE_RESTART_EXIT_CODE == 75
     assert GATEWAY_FATAL_CONFIG_EXIT_CODE == 78
