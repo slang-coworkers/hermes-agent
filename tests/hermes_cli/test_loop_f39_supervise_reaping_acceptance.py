@@ -92,10 +92,10 @@ def test_ac_loop_f39_1(tmp_path, monkeypatch):
     """hermes worktree reaping never reaps a tree with uncommitted tracked changes or unique unpushed commits, and a clean merged/pushed tree carrying untracked scratch is classified reap-archive with its untracked files archived (never destroyed) before removal.
 
     Uses REAL git worktrees so worktree_gc._dirty_split runs live `git status`; only
-    the offline/remote/merge leaf probes on `cli` are stubbed for offline determinism.
+    the offline/remote/merge leaf probes on `hermes_cli.worktree_ops` are stubbed for offline determinism.
     """
     from hermes_cli import worktree_gc as wg
-    import cli
+    from hermes_cli import worktree_ops as wops
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -114,15 +114,15 @@ def test_ac_loop_f39_1(tmp_path, monkeypatch):
     assert _git(wtdir / "unpushed", "commit", "-q", "-m", "feature").returncode == 0
     (wtdir / "reap-me" / "scratch.txt").write_text("draft pr body\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli, "_repo_is_shallow", lambda *a, **k: False)
-    monkeypatch.setattr(cli, "_load_worktree_merge_cache", lambda *a, **k: {})
-    monkeypatch.setattr(cli, "_save_worktree_merge_cache", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_fetch_remote_branch_heads", lambda *a, **k: {})
-    monkeypatch.setattr(cli, "_worktree_lock_is_live", lambda *a, **k: "none")
-    monkeypatch.setattr(cli, "_worktree_has_unpushed_commits",
+    monkeypatch.setattr(wops, "_repo_is_shallow", lambda *a, **k: False)
+    monkeypatch.setattr(wops, "_load_worktree_merge_cache", lambda *a, **k: {})
+    monkeypatch.setattr(wops, "_save_worktree_merge_cache", lambda *a, **k: None)
+    monkeypatch.setattr(wops, "_fetch_remote_branch_heads", lambda *a, **k: {})
+    monkeypatch.setattr(wops, "_worktree_lock_is_live", lambda *a, **k: "none")
+    monkeypatch.setattr(wops, "_worktree_has_unpushed_commits",
                         lambda path, *a, **k: Path(path).name == "unpushed")
-    monkeypatch.setattr(cli, "_worktree_commits_all_merged_upstream", lambda *a, **k: False)
-    monkeypatch.setattr(cli, "_worktree_branch_pushed_exact", lambda *a, **k: False)
+    monkeypatch.setattr(wops, "_worktree_commits_all_merged_upstream", lambda *a, **k: False)
+    monkeypatch.setattr(wops, "_worktree_branch_pushed_exact", lambda *a, **k: False)
 
     records = {r.name: r for r in wg.audit_worktrees(str(repo), with_sizes=False)}
     assert records["tracked-dirty"].verdict == "keep"
@@ -130,13 +130,13 @@ def test_ac_loop_f39_1(tmp_path, monkeypatch):
     assert records["reap-me"].verdict == "reap-archive"
     assert "scratch.txt" in records["reap-me"].untracked
 
-    # The reaper archives under Path.home()/.hermes, not the active HERMES_HOME (UA-24):
-    # pin Path.home at a scratch dir so the archive lands there, never the real home.
-    fake_home = tmp_path / "fake-home"
-    fake_home.mkdir()
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    # The reaper archives under the active HERMES_HOME (get_hermes_home()): pin it at a
+    # scratch dir so the archive lands there, never the real home.
+    archive_home = tmp_path / "archive-home"
+    archive_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(archive_home))
     actions = wg.reclaim_worktrees(str(repo), records=[records["reap-me"]])
-    archived = list((fake_home / ".hermes" / "archive" / "worktree-prune").rglob("scratch.txt"))
+    archived = list((archive_home / "archive" / "worktree-prune").rglob("scratch.txt"))
     assert archived, f"untracked scratch must be archived before removal; actions={actions}"
     assert not (wtdir / "reap-me").exists()
 
