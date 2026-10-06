@@ -31,7 +31,7 @@ DOC_PATH = "website/docs/user-guide/slang-coworkers-pause-restart-wake.md"
 @pytest.fixture
 def hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    estop._reset_log_state_for_tests()
+    estop._logged_components.clear()
     return tmp_path
 
 
@@ -102,13 +102,13 @@ def test_ac_iso_f12_2(tmp_path, monkeypatch):
     bot_b.mkdir(parents=True)
 
     monkeypatch.setenv("HERMES_HOME", str(bot_a))
-    estop._reset_log_state_for_tests()
+    estop._logged_components.clear()
     assert cmd_pause(argparse.Namespace(reason="per-bot")) == 0
     assert (bot_a / "ESTOP").exists()
     assert estop.is_engaged() is True
 
     monkeypatch.setenv("HERMES_HOME", str(bot_b))
-    estop._reset_log_state_for_tests()
+    estop._logged_components.clear()
     assert estop.is_engaged() is False
 
     (root / "ESTOP").write_text('{"reason": "fleet stop"}\n', encoding="utf-8")
