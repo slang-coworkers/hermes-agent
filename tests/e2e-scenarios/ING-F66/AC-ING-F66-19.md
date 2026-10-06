@@ -88,7 +88,10 @@ lane installer builds it. No fixture is re-installed here.
    - stage the PR head;
    - run `install-into-sandbox.sh tests/e2e-scenarios/ING-F66/spec/openshell/coworker-types.yaml --ref <head sha> --gateway-url "$GW_URL" --policy-root <lane root>`;
    - start fleet processes from the in-sandbox watchdog, never via
-     `sandbox exec`.
+     `sandbox exec`. The gateway start in step 2 is the one exception: it is a
+     detached `sandbox exec` background start, the base's documented start path
+     (`website/docs/user-guide/fleet-openshell.md:547-553`), and it supersedes
+     this line for the gateway start.
 
    Expect: five `ing-f66-<role>` worker sandboxes Ready, and `nv-ingress`
    installed in every profile, because it enters through the spine.
@@ -101,8 +104,30 @@ lane installer builds it. No fixture is re-installed here.
    - `plugins.entries.nv-ingress`;
    - `nv-ingress` in `plugins.enabled`.
 
-   Then copy `render/default/scripts/ingress_stage.py` to `$HERMES_HOME/scripts/`
-   and restart the gateway.
+   Then copy `render/default/scripts/ingress_stage.py` to `$HERMES_HOME/scripts/`.
+
+   **Instrumented gateway start (E6).** This start replaces the plain gateway
+   restart after the ingress-key merge, in this order:
+   1. Stop the gateway the installer left running (`hermes gateway stop` in the
+      DEFAULT home).
+   2. Confirm its pid is gone. A start against a running gateway refuses
+      (release `hermes_cli/gateway.py:6391`). If the stop fails, Setup is
+      FAIL(env) with no retry.
+   3. Make the one instrumented start: the `sandbox exec … setsid nohup hermes
+      gateway run …` start is one `sh -lc` line. In that same line, after every
+      `export` and immediately before the gateway launch, it:
+      - runs L-VAL check 1 and check 2 (the ADR's §Operator-lane steps), with
+        `$PY` the entrypoint's trusted interpreter, resolved in-sandbox from the
+        `_HERMES_PYTHON=` line of `/usr/local/bin/nemoclaw-start`:
+        `timeout 15s "$PY" -I /usr/local/lib/nemoclaw/validate-hermes-env-secret-boundary.py env-file /sandbox/.hermes/.env`
+        and
+        `timeout 15s "$PY" -I /usr/local/lib/nemoclaw/validate-hermes-env-secret-boundary.py runtime-env`;
+      - writes the name-only boolean of the private-URL override the URL guard
+        reads (`tools/url_safety.py:252`), `set` or `unset`, never a value;
+      - writes the exit codes, the guard's stderr lines and that boolean to
+        `$HERMES_HOME/.ing-f66/lval.txt`;
+      - then launches the gateway in that same environment and appends its pid
+        to the same file.
 
    Expect:
    - `hermes ingress status --json` in the DEFAULT home prints
@@ -115,7 +140,10 @@ lane installer builds it. No fixture is re-installed here.
 3. **Host units and the scoped edge.**
    - On the host, run `hermes ingress render-host <spec> --out <host dir>`. This
      writes `host/` and `hooks/`; they match `fixtures/ing-f66-fleet/host/`, with
-     `@LOOPBACK@` standing for the loopback address in the reference copy.
+     `@LOOPBACK@` standing for the loopback address in the reference copy. The
+     same token stands for it in the five worker configs
+     (`fixtures/ing-f66-fleet/ing-f66-<role>/config.yaml`, the chain-dial
+     `proxy_rewrite`).
    - Confirm the operator evidence for L-EDGE and L-FWD: the three
      `nv-ingress-*.service` units are `active` with linger.
    - With `python3 -c` over the INSTALLED edge config (`<host_dir>/edge.yaml`),
