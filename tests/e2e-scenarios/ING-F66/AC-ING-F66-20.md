@@ -104,17 +104,27 @@ a dashboard drive selects the profile in the profile combobox first.
      `$HERMES_HOME/.ing-f66/lval.txt` from the instrumented gateway start
      (AC-ING-F66-19 Setup step 2):
      - check 1 and check 2 both exit 0;
-     - the recorded pid equals the RUNNING gateway's pid (the pid in the
-       DEFAULT home's `gateway.pid`, release `gateway/status.py:217-220`).
+     - the recorded pid equals the RUNNING gateway's pid. That pid is the `pid`
+       field of the DEFAULT home's `gateway.pid` (release
+       `gateway/status.py:217-220`, written at start by `write_pid_file`,
+       `gateway/status.py:1144-1160`). It is read raw from the file together
+       with that pid's live `/proc/<pid>/cmdline`, which is a `gateway run`
+       command. It is never read through `get_running_pid()`,
+       `hermes gateway status` or `hermes gateway stop` (E10): those reject the
+       wrapper's `hermes.real` cmdline (`gateway/status.py:505-510`) and remove
+       the file. If `gateway.pid` is absent or unreadable, step 1 is FAIL(env),
+       not a PASS. AC-19 Setup's process and lock records corroborate the raw
+       pid-file comparison and never replace it.
 
      If the pids differ (the gateway was restarted in between, for example by
      the gateway-boot unit), the tester does NOT start a second gateway on top,
      because a start against a running gateway refuses (release
-     `hermes_cli/gateway.py:6391`). It stops the running gateway first
-     (`hermes gateway stop` in the DEFAULT home), confirms the pid is gone, then
-     repeats its instrumented start and records both pids. If the stop fails,
-     step 1 is FAIL(env), with no retry. A non-zero exit, a missing file or a
-     pid mismatch is not a PASS.
+     `hermes_cli/gateway.py:6391`). It stops the running gateway with AC-19
+     Setup's stop step (E10): `hermes gateway stop` in the DEFAULT home, then
+     the recorded-pid SIGTERM path if that stop finds no gateway. It then
+     repeats its one instrumented start, makes the post-start records, and
+     records both pids. If the stop step fails, step 1 is FAIL(env), with no
+     retry. A non-zero exit, a missing file or a pid mismatch is not a PASS.
    - The operator also runs, through the box read verb, a host-side boolean
      substring scan of the gateway sandbox's `$HERMES_HOME` files for the bytes
      of the host-held platform secret files that `host/edge.yaml` names →

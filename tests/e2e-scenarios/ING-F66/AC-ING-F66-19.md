@@ -115,13 +115,41 @@ lane installer builds it. No fixture is re-installed here.
    Then copy `render/default/scripts/ingress_stage.py` to `$HERMES_HOME/scripts/`.
 
    **Instrumented gateway start (E6).** This start replaces the plain gateway
-   restart after the ingress-key merge, in this order:
-   1. Stop the gateway the installer left running (`hermes gateway stop` in the
-      DEFAULT home).
-   2. Confirm its pid is gone. A start against a running gateway refuses
-      (release `hermes_cli/gateway.py:6391`). If the stop fails, Setup is
-      FAIL(env) with no retry.
-   3. Make the one instrumented start: the `sandbox exec … setsid nohup hermes
+   restart after the ingress-key merge, in this order: the stop step (E10),
+   then the one instrumented start.
+   1. **Stop step (E10).** Run `hermes gateway stop` in the DEFAULT home. It can
+      report that no gateway is running while a gateway process for the DEFAULT
+      home is still alive. That happens because the image's `hermes` wrapper
+      execs `hermes.real`, an entry token the core matcher rejects (release
+      `gateway/status.py:505-510`), so the stop finds no pid and removes
+      `gateway.pid` (`_cleanup_invalid_pid_path`, `gateway/status.py:832-852`,
+      called from `get_running_pid` at `gateway/status.py:2447` and `:2472`). In
+      that case the tester first makes four read-only records:
+      - that process's `/proc/<pid>/cmdline`;
+      - its start time (`/proc/<pid>/stat` field 22);
+      - a `/proc/*/cmdline` scan showing it is the only `gateway run|restart`
+        process in the sandbox;
+      - the image's own `gateway.status` runtime record (`read_runtime_status`,
+        `gateway/status.py:1278`). Its `pid` must equal that pid, its
+        `start_time` must equal `/proc/<pid>/stat` field 22, and its
+        `hermes_home` must resolve to the DEFAULT home. That process's
+        `/proc/<pid>/cmdline` must be the image's
+        `hermes.real gateway run|restart` command. A persisted record can
+        outlive its process, so any mismatch is FAIL(env), with no SIGTERM and
+        no retry.
+
+      It then sends SIGTERM to that pid, the signal the release stop sends
+      (`hermes_cli/gateway.py:2514-2527`), waits up to 10 s, and confirms the pid
+      is gone. The stop step succeeds when no gateway process for the DEFAULT
+      home is alive. A start refuses when it recognises a running gateway
+      (release `hermes_cli/gateway.py:6391`), but a wrapper-started gateway is
+      not recognised (`gateway/status.py:505-510`), so only this check rules out
+      starting a second gateway on top of it. Setup is FAIL(env), with no
+      SIGKILL and no retry, if the process is still alive after 10 s, if a
+      record above cannot be made or does not hold, or if the scan finds a
+      second `gateway run|restart` process. The rule "if the stop fails, Setup
+      is FAIL(env) with no retry" covers this whole stop step.
+   2. Make the one instrumented start: the `sandbox exec … setsid nohup hermes
       gateway run …` start is one `sh -lc` line. In that same line, after every
       `export` and immediately before the gateway launch, it:
       - runs L-VAL check 1 and check 2 (the ADR's §Operator-lane steps), with
@@ -136,6 +164,21 @@ lane installer builds it. No fixture is re-installed here.
         `$HERMES_HOME/.ing-f66/lval.txt`;
       - then launches the gateway in that same environment and appends its pid
         to the same file.
+   3. **After the one instrumented start (E10),** the tester records three
+      things:
+      - a `/proc/*/cmdline` scan showing exactly one `gateway run|restart`
+        process, whose pid is the pid appended to `lval.txt`;
+      - the ingress port `:18644` listening (a loopback health probe answering,
+        as in step 6);
+      - as read-only corroboration, the runtime lock held by that pid: the
+        device and inode of the DEFAULT home's `gateway.lock`
+        (`gateway/status.py:223-228`, taken with `flock(LOCK_EX)` at
+        `gateway/status.py:876`) match a live `FLOCK` line for that pid in
+        `/proc/locks`.
+
+      A second gateway process, or `:18644` not listening, is Setup FAIL(env).
+      The lock line only corroborates and never replaces the pid and port
+      checks.
 
    Expect:
    - `hermes ingress status --json` in the DEFAULT home prints
@@ -296,6 +339,7 @@ All of it goes under `$ART/scenario-AC-ING-F66-19/`:
 - `budget.txt`: the summed `session_model_usage` call count beside the
   in-scope delivery count, before and after each step.
 - `lanes/` holds the operator evidence for L-HOOK, L-EDGE and L-FWD.
+- The stop-step and post-start records (E10) from Setup step 2.
 - `teardown.txt`: kept or torn down, with the commands' exit statuses.
 - No step's evidence contains a header value, a signature, or any secret
   material (D13).
