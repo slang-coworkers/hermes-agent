@@ -426,14 +426,16 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
     deny), a non-allowlisted flagged verb is DENIED (single_query_mode=deny), and
     its deny-floor verb is user-deny BLOCKED. (b) In-gateway LAUNCH BASELINE: with
     the process-global allowlist loaded from the DEFAULT profile's EMPTY allowlist,
-    a non-allowlisted DETECTED verb run in an in-gateway cron context is DENIED by
-    cron_mode=deny (and the managed cron_mode=deny overrides a conflicting
-    profile-local cron_mode=approve, proving the overlay wins). This proves the DENY
-    MODE, not isolation: the same block then HONESTLY records the cross-profile
-    allowlist UNION leak (load_permanent UNIONs into the shared process-global set,
-    approval.py:3062-3065; the allowlist short-circuit :4784 precedes the cron deny),
-    which the empty DEFAULT does NOT close — a core gap owned by GOV-ENF/P8 with no
-    isolation credit, unaffected only for separate-process `chat -q` workers."""
+    nothing is allowlisted at launch; a non-allowlisted DETECTED verb run in an
+    in-gateway cron context is DENIED by cron_mode=deny (and the managed
+    cron_mode=deny overrides a conflicting profile-local cron_mode=approve, proving
+    the overlay wins). The same block then proves cross-profile allowlist ISOLATION,
+    which holds at v2026.9.24 (upstream 9c9e7ab6e5: a routed profile's permanent
+    allowlist is its own set, tools/approval.py:328-347, and load_permanent replaces
+    rather than unions, :372-376): the builder's own entry governs under its
+    override, and after the switch to the reviewer the builder's entry is neither
+    matched nor approved while the reviewer's own entry is matched. At v2026.8.31
+    this block recorded the opposite, the union leak then owned by GOV-ENF/P8."""
     import tools.approval as ta
     import tools.approval_context as tac
     from hermes_cli import managed_scope
@@ -510,12 +512,13 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         assert wd_res["approved"] is False and wd_res.get("user_deny") is True
         monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION", raising=False)
 
-        # (b) in-gateway LAUNCH BASELINE (NOT steady-state isolation): at gateway launch the
-        # process-global allowlist is the DEFAULT profile's EMPTY set, so a non-allowlisted
-        # DETECTED command is denied by cron_mode=deny. This proves the DENY MODE works — it
-        # does NOT prove the empty DEFAULT provides cross-profile isolation (see the union-leak
-        # record below). fresh-config readers scoped to the builder profile via a home override.
+        # (b) in-gateway LAUNCH BASELINE: at gateway launch the process-global allowlist is the
+        # DEFAULT profile's EMPTY set. The fresh-config readers are then scoped to the builder
+        # profile via a home override, under which the builder's OWN allowlist governs
+        # (tools/approval.py:328-347), and a non-allowlisted DETECTED command is denied by
+        # cron_mode=deny.
         _load_allowlist_for(default_home, default_mgd)      # _permanent_approved <- DEFAULT (empty)
+        assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is False  # empty launch baseline
         override_token = set_hermes_home_override(str(builder_home))
         managed_scope.invalidate_managed_cache()
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
@@ -523,34 +526,30 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         # context (is_cli/is_ask False, tools/approval.py:4788-4790,4805); scrub both.
         monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
         monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
-        assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is False  # empty launch baseline
+        assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is True  # builder's own set governs
         # managed cron_mode=deny overrides the injected profile-local cron_mode=approve, and all
         # three unattended resolvers are effective from the managed fragment (not just raw YAML):
         assert tac._get_cron_approval_mode() == "deny"
         assert tac._get_unattended_approval_mode() == "deny"
-        assert ta.check_all_command_guards(ALLOW_PROBE, "local")["approved"] is False  # cron_mode=deny denies the DETECTED command
+        assert ta.detect_dangerous_command(NONALLOW_PROBE)[0]
+        assert ta._command_matches_permanent_allowlist(NONALLOW_PROBE) is False
+        assert ta.check_all_command_guards(NONALLOW_PROBE, "local")["approved"] is False  # cron_mode=deny denies the DETECTED command
 
-        # HONEST record of the in-gateway cross-profile allowlist UNION leak — a core behavior
-        # GOV-F23 config CANNOT close (owned by GOV-ENF/P8, NO isolation credit): load_permanent()
-        # UNIONs each profile's allowlist into the ONE shared-gateway process-global set
-        # (approval.py:3062-3065), and the allowlist short-circuit (:4784) fires BEFORE the cron
-        # deny (:4876). So once a builder in-gateway session init unions builder's allowlist in, a
-        # builder-allowlisted command is APPROVED even under cron_mode=deny — the empty DEFAULT
-        # baseline does not survive it. (Separate-process kanban `chat -q` workers keep their own
-        # _permanent_approved and are unaffected; this leak is specific to in-gateway multiplex.)
-        # Prove the CROSS-profile leak, not same-profile allowlisting: after builder's session init
-        # unions its allowlist into the shared set, SWITCH the active override to the reviewer
-        # profile (whose OWN allowlist does NOT contain ALLOW_PROBE) and show ALLOW_PROBE is still
-        # matched + approved — builder's entry leaked across the profile boundary. A future
-        # profile-keyed isolation (GOV-ENF/P8) would flip these to False.
-        ta.load_permanent_allowlist()  # builder home active -> UNIONs builder's allowlist into the shared set
+        # Cross-profile ISOLATION (v2026.9.24, upstream 9c9e7ab6e5): each routed profile's permanent
+        # allowlist is its own set (tools/approval.py:328-347) and load_permanent replaces rather
+        # than unions (:372-376). Load the builder's allowlist, then SWITCH the override to the
+        # reviewer profile (whose own allowlist does NOT contain ALLOW_PROBE): the builder's entry
+        # must be neither matched nor approved there, and the reviewer's own entry must match. At
+        # v2026.8.31 this block recorded the opposite (the union leak, then owned by GOV-ENF/P8).
+        ta.load_permanent_allowlist()  # builder home active -> the builder's own set
         reviewer_home, _reviewer_mgd = _materialize(rendered["reviewer"], "reviewer")
         reset_hermes_home_override(override_token)
         override_token = set_hermes_home_override(str(reviewer_home))
         managed_scope.invalidate_managed_cache()
         assert ALLOW_PROBE not in (_raw_config(rendered["reviewer"]).get("command_allowlist") or [])  # not reviewer's own
-        assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is True  # builder's allowlist leaked into the shared set — visible to reviewer
-        assert ta.check_all_command_guards(ALLOW_PROBE, "local")["approved"] is True  # short-circuit approves before cron deny — the UNMET cross-profile core gap, GOV-ENF owns it
+        assert ta._command_matches_permanent_allowlist(ALLOW_PROBE) is False
+        assert ta.check_all_command_guards(ALLOW_PROBE, "local")["approved"] is False
+        assert ta._command_matches_permanent_allowlist(NONALLOW_PROBE) is True  # reviewer's own entry
     finally:
         if override_token is not None:
             reset_hermes_home_override(override_token)
