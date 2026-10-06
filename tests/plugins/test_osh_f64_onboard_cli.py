@@ -71,9 +71,10 @@ def test_onecli_onboard_cli_default_context(tmp_path, monkeypatch):
     for var in ("HERMES_SUPERVISED_CHILD", "HERMES_S6_SUPERVISED_CHILD",
                 "HERMES_GATEWAY_EXTERNAL_SUPERVISOR", "INVOCATION_ID"):
         monkeypatch.delenv(var, raising=False)
-    # resolve_profile_env("builder") requires the named profile dir under the root; "default"
-    # resolves to the root itself (hermes_cli/profiles.py:2489).
+    # resolve_profile_env("builder") requires a live named profile under the root: the dir plus an
+    # identity marker (hermes_constants.py _PROFILE_IDENTITY_MARKERS); "default" resolves to the root.
     (home / "profiles" / "builder").mkdir(parents=True)
+    (home / "profiles" / "builder" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
 
     entry = manager._cli_commands["onecli-onboard"]
     assert entry["setup_fn"] is not None and entry["handler_fn"] is not None
