@@ -2673,7 +2673,7 @@ def _require_canonical_profile_names(
     """Refuse a spec whose profile names would desynchronize the multiplex joins.
 
     A coworker type name is used byte-identically as its profile directory, its
-    ``multiplex_profile_allowlist`` entry, and any webhook ``profile:`` binding,
+    ``park_non_fleet_profiles`` roster entry, and any webhook ``profile:`` binding,
     so all three must agree with what ``profiles_to_serve`` will serve: the root
     is always served as the literal ``"default"`` and named profiles are stored
     canonical (lowercase, validated). A ``default_profile`` other than
@@ -2714,16 +2714,19 @@ def _require_canonical_profile_names(
             )
 
 
-def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> None:
-    """Force the DEFAULT profile into multiplexer mode serving exactly ``roster``.
+def _enforce_multiplex(default_config: Dict[str, Any]) -> None:
+    """Force the DEFAULT profile into multiplexer mode.
 
-    Written explicitly and never by assumption: a spec that omits the keys — or
+    Written explicitly and never by assumption: a spec that omits the key — or
     sets a hostile root ``multiplex_profiles: false`` — must still render a
     multiplexing default. Core reads the ROOT spelling with precedence over the
     nested ``gateway.*`` one, so a surviving root value would win; POP both
-    spellings, then write only the canonical nested keys the effective parsed
-    config resolves to. (The ``GATEWAY_MULTIPLEX_PROFILES`` env override is the
-    operator's deployment box, outside a render's reach.)
+    spellings, then write only the canonical nested key. A spec's
+    ``multiplex_profile_allowlist`` is popped too: core no longer reads it (config
+    migration 42 -> 43 deletes it), so the multiplexer serves every live, unparked
+    named profile and the fleet is scoped by ``park_non_fleet_profiles`` instead.
+    (The ``GATEWAY_MULTIPLEX_PROFILES`` env override is the operator's deployment
+    box, outside a render's reach.)
     """
     nested = default_config.get("gateway")
     for key in ("multiplex_profiles", "multiplex_profile_allowlist"):
@@ -2731,7 +2734,31 @@ def _enforce_multiplex(default_config: Dict[str, Any], roster: List[str]) -> Non
         if isinstance(nested, dict):
             nested.pop(key, None)
     _set_dotted(default_config, "gateway.multiplex_profiles", True)
-    _set_dotted(default_config, "gateway.multiplex_profile_allowlist", roster)
+
+
+def park_non_fleet_profiles(roster: List[str]) -> List[str]:
+    """Park every live named profile outside ``roster`` so the multiplexing DEFAULT
+    serves exactly ``default`` + the roster.
+
+    Writes the same ``gateway.parked`` marker that ``hermes -p <name> gateway stop``
+    writes, which ``profiles_to_serve`` skips; a roster profile is never touched,
+    and an already-parked profile is left alone, so a re-run is a no-op. A
+    ``gateway.standalone`` profile is skipped: it already opted out of the host,
+    which never parks one (hermes_cli/gateway_profile_lifecycle.py). Returns the
+    names parked by this call.
+    """
+    from hermes_cli.profiles import parked_marker_path, profiles_to_serve
+
+    fleet = set(roster)
+    parked: List[str] = []
+    for name, home in profiles_to_serve(True, include_parked=True):
+        if name == "default" or name in fleet:
+            continue
+        marker = parked_marker_path(home)
+        if not marker.exists():
+            marker.touch()
+            parked.append(name)
+    return parked
 
 
 # Supervision floor (FLEET-F62). The DEFAULT multiplexer gateway runs as a
@@ -4188,7 +4215,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _enforce_deny_floor(default_config)
     _render_engage(default_config)
     _apply_session_mode(default_config, session_flags, is_default=True)
-    _enforce_multiplex(default_config, roster)
+    _enforce_multiplex(default_config)
     _enforce_watchdog_floor(default_config)
     _require_canonical_platform_layout(default_config)
     _validate_webhook_routes(default_config, served)

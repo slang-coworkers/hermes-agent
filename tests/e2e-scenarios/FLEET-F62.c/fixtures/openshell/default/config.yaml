@@ -33,12 +33,6 @@ plugins:
           default: {}
 gateway:
   multiplex_profiles: true
-  multiplex_profile_allowlist:
-  - orchestrator
-  - triager
-  - fixer
-  - reviewer
-  - approver
   systemd_watchdog_seconds: 30
 platforms:
   webhook:

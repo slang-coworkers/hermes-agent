@@ -44,7 +44,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
   platforms:
     webhook:
       extra:

@@ -34,12 +34,6 @@ plugins:
           default: {}
 gateway:
   multiplex_profiles: true
-  multiplex_profile_allowlist:
-  - orchestrator
-  - architect
-  - builder
-  - tester
-  - reviewer
   systemd_watchdog_seconds: 30
 terminal:
   backend: ssh

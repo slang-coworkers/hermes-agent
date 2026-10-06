@@ -162,10 +162,15 @@ def test_ac_rt_f01_1(loaded, tmp_path, monkeypatch):
 
     monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
 
+    def _no_allowlist(raw):
+        assert "multiplex_profile_allowlist" not in raw
+        assert "multiplex_profile_allowlist" not in (raw.get("gateway") or {})
+
     out = _render(module, tmp_path, _clean_spec(), "omit")
-    cfg = GatewayConfig.from_dict(_read_yaml(out / "default" / "config.yaml"))
+    raw = _read_yaml(out / "default" / "config.yaml")
+    cfg = GatewayConfig.from_dict(raw)
     assert cfg.multiplex_profiles is True
-    assert set(cfg.multiplex_profile_allowlist) == set(ROSTER)
+    _no_allowlist(raw)
 
     contradict = _clean_spec()
     contradict["default_config"]["multiplex_profiles"] = False
@@ -175,16 +180,22 @@ def test_ac_rt_f01_1(loaded, tmp_path, monkeypatch):
         "multiplex_profile_allowlist": ["nested-stale"],
     }
     out2 = _render(module, tmp_path, contradict, "contradict")
-    cfg2 = GatewayConfig.from_dict(_read_yaml(out2 / "default" / "config.yaml"))
+    raw2 = _read_yaml(out2 / "default" / "config.yaml")
+    cfg2 = GatewayConfig.from_dict(raw2)
     assert cfg2.multiplex_profiles is True
-    assert set(cfg2.multiplex_profile_allowlist) == set(ROSTER)
+    _no_allowlist(raw2)
 
+    # The tag serves every live, unparked named profile (hermes_cli/profiles.py
+    # profiles_to_serve); the fleet is scoped by parking whatever is not in the roster.
     profiles_root = hermes_home / "profiles"
     profiles_root.mkdir(exist_ok=True)
     for name in ROSTER:
         shutil.copytree(out2 / name, profiles_root / name)
     (profiles_root / "intruder").mkdir()
-    served = {name for name, _ in profiles_to_serve(cfg2.multiplex_profiles, cfg2.multiplex_profile_allowlist)}
+    (profiles_root / "intruder" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    assert "intruder" in {name for name, _ in profiles_to_serve(cfg2.multiplex_profiles)}
+    module.park_non_fleet_profiles(ROSTER)
+    served = {name for name, _ in profiles_to_serve(cfg2.multiplex_profiles)}
     assert served == {"default", "orchestrator", "worker"}
     assert "intruder" not in served
 

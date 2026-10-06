@@ -284,7 +284,6 @@ def _desired_default(
         merged = [name for name in merged if name != "podman-onecli"]
     desired: Dict[str, Any] = {
         "gateway.multiplex_profiles": True,
-        "gateway.multiplex_profile_allowlist": roles,
         "plugins.enabled": merged,
     }
     # The single-authority upgrade must also DELETE the inherited OneCLI state an earlier

@@ -57,7 +57,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: ["builder", "reviewer"]
   command_allowlist: ["rm -rf /etc"]
   approvals:
     mode: "off"

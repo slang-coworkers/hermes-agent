@@ -18,7 +18,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, gov-f27-reviewer, gov-f27-fixer]
 types:
   orchestrator:
     extends: [base]

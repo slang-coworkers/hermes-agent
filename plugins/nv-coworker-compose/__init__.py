@@ -45,6 +45,7 @@ from .compose import (
     build_provision_plan,
     compose,
     load_spec,
+    park_non_fleet_profiles,
 )
 from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT_SCHEMA
 
@@ -746,6 +747,12 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
                 _install(rendered[tname], tname)
             except Exception as exc:
                 failures.append(f"install {tname}: {exc}")
+        # The multiplexer serves every live, unparked named profile; parking the
+        # rest is what scopes the gateway to this fleet.
+        try:
+            park_non_fleet_profiles(list(types))
+        except Exception as exc:
+            failures.append(f"park non-fleet profiles: {exc}")
 
         revisions = _profile_revisions()
         for tname, tinfo in types.items():
@@ -1038,7 +1045,7 @@ def register(ctx) -> None:
 
 
 __all__ = [
-    "compose", "load_spec", "CompositionError",
+    "compose", "load_spec", "CompositionError", "park_non_fleet_profiles",
     "onboard_coworker", "onboard_project",
     "activate_shared_learnings",
     "validate_gateway_url", "_gateway_preflight", "_ws_probe",
