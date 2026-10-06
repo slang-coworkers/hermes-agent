@@ -382,3 +382,93 @@ def test_ac_osh_f64_e_6(loaded, tmp_path, monkeypatch):
 
     runbook = RUNBOOK.read_text(encoding="utf-8")
     assert "not posture-derived" not in runbook, "S6: the Phase A plugin set IS posture-derived"
+
+
+F62C_OPENSHELL_SPEC = REPO_ROOT / "tests" / "e2e-scenarios" / "FLEET-F62.c" / "spec" / "openshell" / "coworker-types.yaml"
+
+
+def _anon_read(cfg, role, target):
+    cfg["egress"].setdefault("anonymous_reads", {}).setdefault(role, []).append(target)
+
+
+ANON_READ_SHAPE = ("rest", "enforce", [{"allow": {"method": "GET", "path": "/**"}}])
+GW_COLLISION = r"type name 'gw' collides with the direct-mode gateway sandbox"
+
+
+def _anon_read_shape(ep, host, port):
+    return ((ep.get("host"), int(ep.get("port")), ep.get("protocol"), ep.get("enforcement"), ep.get("rules"))
+            == (host, port, *ANON_READ_SHAPE))
+
+
+def _refused(loaded, tmp_path, name, mutate, source, match):
+    """Like _compose_bad, but the refusal must be the named guard's (match) and must come before any
+    distribution is written, so an unrelated validation error cannot pass for it."""
+    bad_dir = tmp_path / name
+    shutil.copytree(source.parent, bad_dir)
+    types_path = bad_dir / "coworker-types.yaml"
+    cfg = yaml.safe_load(types_path.read_text(encoding="utf-8"))
+    mutate(cfg)
+    types_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(loaded.module.CompositionError, match=match):
+        loaded.module.compose(str(types_path), str(tmp_path / f"{name}-out"))
+    assert not list((tmp_path / f"{name}-out").rglob("config.yaml")), (
+        f"{name}: the guard must fail closed before any distribution is written")
+
+
+def test_ac_osh_f64_e_8(loaded, tmp_path):
+    """(derived) Under the single-authority posture (egress.inference_provider present, either mode), an egress.anonymous_reads target whose canonical host:port is the inference route or the OneCLI hop 172.17.0.1:18255 raises CompositionError before any config.yaml is written; a worker anonymous_reads on an unrelated host still renders exactly one GET /** endpoint for it in that worker's policy and in no other policy; and the FLEET-F62.c openshell spec (no inference_provider) still renders its approver api.github.com:443 read."""
+    _, block = _direct_block()
+    up_host, up_port = _upstream_hostport(block)
+    managed = yaml.safe_load(MANAGED_SPEC.read_text(encoding="utf-8"))
+    managed_route = managed["egress"]["inference_route"]
+    cases = [
+        ("managed-route", MANAGED_SPEC, managed_route),
+        ("managed-onecli", MANAGED_SPEC, "172.17.0.1:18255"),
+        ("managed-onecli-alias", MANAGED_SPEC, "Host.Docker.Internal.:18255"),
+        ("direct-route", DIRECT_SPEC, f"{up_host}:{up_port}"),
+        ("direct-route-variant", DIRECT_SPEC, f"{up_host.upper()}.:{up_port}"),
+        ("direct-onecli", DIRECT_SPEC, "172.17.0.1:18255"),
+    ]
+    for name, source, target in cases:
+        _refused(loaded, tmp_path, name, lambda c, t=target: _anon_read(c, "architect", t), source,
+                 match="anonymous_reads")
+
+    for name, source in (("direct-unrelated", DIRECT_SPEC), ("managed-unrelated", MANAGED_SPEC)):
+        root = tmp_path / name
+        shutil.copytree(source.parent, root / "spec")
+        path = root / "spec" / "coworker-types.yaml"
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+        _anon_read(cfg, "architect", "registry.example.org:443")
+        path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        policies, _, _ = _render(loaded, path, root / "out")
+        holders = {p: [e for e in _endpoints(pol) if e.get("host") == "registry.example.org"]
+                   for p, pol in policies.items()}
+        assert [e for p, eps in holders.items() for e in eps if p != "policy-architect"] == [], (
+            f"{name}: an architect anonymous read must reach no other policy, got {holders}")
+        eps = holders.get("policy-architect") or []
+        assert len(eps) == 1 and _anon_read_shape(eps[0], "registry.example.org", 443), (
+            f"{name}: the unrelated anonymous read must stay one GET /** endpoint, got {eps}")
+
+    f62c, _, _ = _render(loaded, F62C_OPENSHELL_SPEC, tmp_path / "f62c-out")
+    approver = [e for e in _endpoints(f62c["policy-approver"]) if e.get("host") == "api.github.com"]
+    assert len(approver) == 1 and _anon_read_shape(approver[0], "api.github.com", 443), (
+        f"FLEET-F62.c approver read must render unchanged without inference_provider, got {approver}")
+
+
+def test_ac_osh_f64_e_9(loaded, tmp_path):
+    """(derived) In direct mode, compose() refuses a coworker type named gw with CompositionError before any config.yaml is written (the same collision build_provision_plan already refuses); on the managed spec a type named gw still renders."""
+    def _add_gw(cfg):
+        cfg["types"]["gw"] = dict(cfg["types"]["architect"])
+
+    _refused(loaded, tmp_path, "direct-gw-type", _add_gw, DIRECT_SPEC, match=GW_COLLISION)
+    with pytest.raises(loaded.module.CompositionError, match=GW_COLLISION):
+        _plan(loaded, DIRECT_SPEC, _add_gw)
+
+    root = tmp_path / "managed-gw-type"
+    shutil.copytree(MANAGED_SPEC.parent, root / "spec")
+    path = root / "spec" / "coworker-types.yaml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    _add_gw(cfg)
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    _, configs, _ = _render(loaded, path, root / "out")
+    assert "gw" in configs, "managed mode has no gateway line, so a type named gw must still render"
