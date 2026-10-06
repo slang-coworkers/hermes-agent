@@ -41,9 +41,25 @@ def _write_profile(
     return prof
 
 
+# the checkout UNDER TEST: the fleet's park step lives in nv-coworker-compose
+_COMPOSE_PY = Path(__file__).resolve().parents[2] / "plugins" / "nv-coworker-compose" / "compose.py"
+
+
+def _compose_module(monkeypatch):
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("iso_f17_nv_coworker_compose", _COMPOSE_PY)
+    mod = importlib.util.module_from_spec(spec)
+    # compose.py's frozen dataclasses resolve cls.__module__ via sys.modules at class creation.
+    monkeypatch.setitem(sys.modules, spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_ac_iso_f17_1(tmp_path, monkeypatch):
-    """One multiplex gateway serves default + valid allowlisted named profiles; a
-    named profile absent from the allowlist is excluded."""
+    """One multiplex gateway serves default + the fleet roster; a named profile
+    outside the roster is parked and excluded."""
     from hermes_cli import profiles as profiles_mod
     from gateway import run as gateway_run
 
@@ -51,17 +67,24 @@ def test_ac_iso_f17_1(tmp_path, monkeypatch):
     _write_profile(home, "bota")
     _write_profile(home, "botb")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    park_non_fleet_profiles = _compose_module(monkeypatch).park_non_fleet_profiles
 
-    served = profiles_mod.profiles_to_serve(multiplex=True, profile_allowlist=["bota"])
+    # Before parking the multiplexer serves every live named profile, so the exclusion
+    # below is the park's doing (hermes_cli/profiles.py:1050-1076).
+    before = {name for name, _home in profiles_mod.profiles_to_serve(multiplex=True)}
+    assert before == {"default", "bota", "botb"}
+
+    park_non_fleet_profiles(["bota"])
+    served = profiles_mod.profiles_to_serve(multiplex=True)
     names = {name for name, _home in served}
-    assert "default" in names
-    assert "bota" in names
-    # Differential: a named profile absent from the allowlist is excluded — a regression
-    # that ignored the allowlist would sweep botb in and flip this.
-    assert "botb" not in names
+    assert names == {"default", "bota"}
+    # Differential: the non-fleet profile is parked and the roster profile is not — a park
+    # that ignored the roster would either sweep botb in or drop bota.
+    assert profiles_mod.profile_is_parked(home / "profiles" / "botb")
+    assert not profiles_mod.profile_is_parked(home / "profiles" / "bota")
 
     # The gateway-config-to-roster wiring resolves the same set.
-    cfg = SimpleNamespace(multiplex_profiles=True, multiplex_profile_allowlist=["bota"])
+    cfg = SimpleNamespace(multiplex_profiles=True)
     homes = gateway_run._multiplex_profile_homes(cfg)
     wired = {name for name, _home in homes}
     assert "default" in wired and "bota" in wired and "botb" not in wired
