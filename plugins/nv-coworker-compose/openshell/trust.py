@@ -274,14 +274,51 @@ def config_bridge_no_proxy(config: Any) -> List[Tuple[str, List[str]]]:
     return out
 
 
+def _env_text_as_loaded(raw: bytes) -> Optional[str]:
+    """The text a ``load_hermes_dotenv()`` reload parses from these bytes: the release pre-sanitize
+    (UTF-16 BOM decode, UTF-32 left as is, embedded NULs stripped, per-line strip) rebuilt in
+    memory, because the release sanitizer rewrites the file and the preflight must not."""
+    import codecs
+
+    if raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
+        return None
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        try:
+            lines = raw.decode("utf-16").splitlines()
+        except UnicodeDecodeError:
+            return None
+    else:
+        lines = raw.decode("utf-8-sig", errors="replace").splitlines()
+        if lines and lines[0].startswith("�"):
+            # The release sanitizer leaves such a file untouched; its loader then falls back to latin-1.
+            try:
+                raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return raw.removeprefix(codecs.BOM_UTF8).decode("latin-1")
+            return raw.decode("utf-8-sig")
+    out = []
+    for line in lines:
+        line = line.replace("\x00", "")
+        stripped = line.strip()
+        out.append(line if not stripped or stripped.startswith("#") else stripped)
+    return "\n".join(out) + "\n"
+
+
 def _env_file_assignments(path: Path) -> Dict[str, Optional[str]]:
-    """A dotenv file parsed the way Hermes loads it (python-dotenv, ``utf-8-sig``), so quoting,
-    inline comments and ``export`` read exactly as at runtime."""
-    if not path.is_file():
+    """A dotenv file parsed the way a Hermes reload loads it (release pre-sanitize, then
+    python-dotenv), so quoting, inline comments, ``export`` and stray NULs read as at runtime."""
+    import io
+
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return {}
+    text = _env_text_as_loaded(raw)
+    if text is None:
         return {}
     from dotenv import dotenv_values
 
-    return dict(dotenv_values(path, encoding="utf-8-sig"))
+    return dict(dotenv_values(stream=io.StringIO(text)))
 
 
 def env_file_clashes(path: Path, *, keyed: bool) -> List[str]:

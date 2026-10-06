@@ -109,7 +109,8 @@ def _compose(spec, out, home, *extra):
                HERMES_BUNDLED_PLUGINS=str(home.parent.parent / "empty-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(spec), "--out", str(out), *extra],
-        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(REPO_ROOT),
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -686,8 +687,9 @@ def _cli(home, *argv):
     env = dict(os.environ)
     env.update(HOME=str(home.parent), HERMES_HOME=str(home),
                HERMES_BUNDLED_PLUGINS=str(home.parent.parent / "empty-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
-    return subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", *argv], capture_output=True, text=True,
-                          env=env, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL)
+    return subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", *argv], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", env=env, cwd=str(REPO_ROOT),
+                          stdin=subprocess.DEVNULL)
 
 
 def test_ac_fleet_f62_e_15(tmp_path):
@@ -817,15 +819,16 @@ def test_ac_fleet_f62_e_17(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("line", ["SSL_CERT_FILE=/persisted/copied-ca.pem", "export REQUESTS_CA_BUNDLE=/persisted/copied-ca.pem",
                                   "NO_PROXY=localhost,172.17.0.1", "no_proxy=localhost,host.docker.internal",
-                                  "NO_PROXY=localhost,172.17.0.1:10256"])
+                                  "NO_PROXY=localhost,172.17.0.1:10256", "NO_PRO\x00XY=localhost,172.17.0.1"])
 def test_ac_fleet_f62_e_18(tmp_path, monkeypatch, line):
     """(derived) `install-trust` and `install-openshell` refuse, before any edit, a target-home `$HERMES_HOME/.env` that sets a CA env name (spec declares the key) or a NO_PROXY spelling listing a docker-bridge entry (every openshell spec, keyless included), because that `.env` is reloaded with override on every `load_hermes_dotenv()` while the trust source applies once per home. They name the file and the variable, never the value."""
-    var = line.split("=", 1)[0].split()[-1]
+    var = line.split("=", 1)[0].split()[-1].replace("\x00", "")
     value = line.partition("=")[2]
     home = _isolated_home(tmp_path)
     (home / ".env").write_text(line + "\n", encoding="utf-8")
     monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
     before = (home / "config.yaml").read_bytes()
+    env_bytes = (home / ".env").read_bytes()
     proc = _cli(home, "install-trust", str(F62C_SPEC))
     text = proc.stdout + proc.stderr
     assert proc.returncode != 0, f"{var}: install-trust must refuse a home .env that a reload re-plants over the trust source"
@@ -836,10 +839,12 @@ def test_ac_fleet_f62_e_18(tmp_path, monkeypatch, line):
     monkeypatch.setenv("HOME", str(tmp_path / "user"))
     monkeypatch.setenv("HERMES_HOME", str(home))
     lane_spec = _spec_copy(tmp_path, F62C_SPEC, lambda d: d["egress"].update(pinned_offline_lane=True), tag="lane")
+    (home / ".env").write_bytes(env_bytes)  # the CLI start above may have normalized it in place
     with pytest.raises(Exception) as exc:
         _installer("fleet_f62e_inst_ac18").build_plan({}, str(lane_spec), SHA)
     assert var in str(exc.value), f"build_plan must refuse a home .env naming {var}: {exc.value!r}"
     assert ".env" in str(exc.value) and value not in str(exc.value), "build_plan must name the file, never the value"
+    assert (home / ".env").read_bytes() == env_bytes, "the dry-run preflight must not rewrite the home .env"
 
     if var.lower() == "no_proxy":
         keyless_lane = _spec_copy(tmp_path, F62C_SPEC, lambda d: (d["egress"].pop("openshell_trust", None),
