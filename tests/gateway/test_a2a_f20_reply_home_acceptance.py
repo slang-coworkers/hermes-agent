@@ -109,7 +109,8 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
         )
     )
 
-    assert result["status"] == "sent"
+    assert result["status"] == "queued"
+    assert result["delivery_id"]
     assert len(calls) == 1
     call = calls[0]
     # background + notify_on_complete = the reply lands as a completion

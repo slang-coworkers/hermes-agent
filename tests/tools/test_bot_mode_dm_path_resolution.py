@@ -142,7 +142,8 @@ def test_ac_msg_deliv_1(tmp_path, monkeypatch):
             target="@researcher", message="ping", agent=agent
         )
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "queued"
+    assert result["delivery_id"]
     assert len(calls) == 1
 
     _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
@@ -164,7 +165,8 @@ def test_ac_msg_deliv_2(tmp_path, monkeypatch):
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "queued"
+    assert result["delivery_id"]
     assert len(calls) == 1
 
     _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
