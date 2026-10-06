@@ -5,8 +5,7 @@ Two pytest: criteria (the v2 set is 5: AC-1/2/5 are sandbox: scenario files, not
     docker_volumes CA ro-mount, docker_persist_across_processes:false, docker_image,
     container_memory/cpu.
   - test_ac_iso_f14_4 — spawn argv under a fake runtime: run + both probe shapes, and the
-    persist-gated reuse-ps contrast (persist:false suppresses it; persist:true emits the
-    podman-3.4.4-broken {{.Label "hermes-egress"}} ps).
+    persist-gated reuse-ps contrast (persist:false suppresses it; persist:true emits it).
 
 Discovery harness mirrors tests/hermes_cli/test_plugin_api_compat.py; the argv-capture harness
 mirrors tests/tools/test_docker_environment.py. No network; nothing written under ~/.hermes.
@@ -342,10 +341,6 @@ def _token_after(argv, flag):
     return None
 
 
-def _fmt_after(argv):
-    return _token_after(argv, "--format")
-
-
 def test_ac_iso_f14_4(tmp_path, monkeypatch):
     """Driving a _DockerEnvironment spawn from a rendered profile under a fake runtime that captures forwarded argv proves the render's posture reaches podman: the run -d spawn carries --memory <pinned>m, --cpus <pinned>, the image positional, and each egress docker_env key as name-only -e KEY; the cgroup probe (run --rm --cpus 0.5 --memory 64m --pids-limit 32 <image> sleep 0) and the disk-quota probe (create --storage-opt size=1m hello-world) both appear; and with the rendered docker_persist_across_processes:false no reuse ps fires, whereas a persist_across_processes:true control DOES emit the ps bearing the podman-3.4.4-broken {{.Label "hermes-egress"}} format."""
     module = _load(tmp_path, monkeypatch)
@@ -428,7 +423,5 @@ def test_ac_iso_f14_4(tmp_path, monkeypatch):
     )
     ps_calls2 = [c for c in calls2 if len(c) > 1 and c[1] == "ps"]
     assert ps_calls2, f"persist:true must fire the reuse ps probe, got none: {calls2!r}"
-    fmt = _fmt_after(ps_calls2[0]) or ""
-    # The egress-off ps uses the label formatter broken on podman 3.4.4's psReporter — the exact
-    # gap that makes the reuse probe return None and motivates the render pinning persist false.
-    assert '.Label "hermes-egress"' in fmt, f"reuse ps must use the {{.Label \"hermes-egress\"}} formatter: {fmt!r}"
+    # The ps --format string is not asserted: the tag's probe filters on the egress label instead
+    # of templating {{.Label}} (tools/environments/docker.py _find_reusable_container, #99213).
