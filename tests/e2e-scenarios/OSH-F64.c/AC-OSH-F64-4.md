@@ -426,14 +426,14 @@ win_close() {  # G4 for window $1: stop at the first unmatched record
 **Route gates on every turn (ADR eeb30a42 G2–G4).** Run `win_open setup` before Setup 5's G2 probe, and `win_close setup`
 after the G3 self-test: the probes' `GET`s are recorded, and the self-test's rejected `POST` must have no router
 record. Then for each step `n` in 1–5, `win_open s<n>` before driving it and `win_close s<n>` after its evidence
-row; at the end, `W0_all=$W0_setup`, `cp $ART/scenario-$AC/usage-setup-before.txt $ART/scenario-$AC/usage-all-before.txt`
+row (except `s4`, which opens inside step 3 and overlaps `s3`; see step 3); at the end, `W0_all=$W0_setup`, `cp $ART/scenario-$AC/usage-setup-before.txt $ART/scenario-$AC/usage-all-before.txt`
 and `win_close all` reconciles the whole run. `route_reconcile.py` matches by
 time order plus method+path within ±2 s (router lines carry no PID). It records the first probe pair's skew and
 fails on: a probe that is not 200 or has no router `GET /v1/models`; an allowed `POST` with no router record, or one
 routed before its PID's probe; a rejected `POST` the router saw; a router `POST /v1/chat/completions` that no guard
 record claims; or a store whose 2xx guard `POST`s differ from its `api_call_count` increment (`.hermes` is the
 `default` store). A turn counts only if its `route-reconcile-s<n>.txt` has `allowed` lines from the PIDs that turn
-used: the G2 PTY child for steps 1–3, the delivery children for steps 3–4, the step-5 CLI for step 5. A gate leaves
+used: the G2 PTY child for steps 1–3, the delivery child for step 4 (and for step 3 only if it posted before `win_close s3`), the step-5 CLI for step 5. A gate leaves
 out of its birth count only an exited direct descendant of a recorded child that was live at its birth, printing it as
 a `fork_descendant` line in `pty-select-<w>.txt` (erratum E7), and every `win_close` (`all` included) fails `excluded`
 on any `allowed` POST from a PID listed in any of those files. Before each
@@ -484,20 +484,25 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
    expect: a `tool` row
    carrying the wiring-gate refusal → `step-2.png`. Evidence: `echo step-2 >> evidence.txt; row orchestrator <tip> tool message_agent`.
 3. **Wire, then deliver.** Run `sx 'hermes wire add orchestrator builder'`,
-   then return to the chat as above and ask the orchestrator to send to the builder again → visit the tab by full load
+   then return to the chat as above and ask the orchestrator to send to the builder again. The delegation names the
+   builder's plan path as `/tmp/.hermes/plans/builder.md`: the worker policy allows writes only under `/tmp`, and the
+   plan gate's `_PLAN_RE` (`plugins/nv-fleet-gates/predicates.py:195`) accepts it. Run `win_open s4` immediately
+   before that send, since the builder's delivery starts with it, so `s4` overlaps `s3`. Then visit the tab by full load
    and click `orchestrator` →
    expect: a newer `tool` row carrying the delivery confirmation → `step-3.png`. Evidence: `echo step-3 >> evidence.txt;
    row orchestrator <tip> tool message_agent '"status": "sent"'`. The needle selects the delivery RESULT by its content: a
    successful send returns `{"status": "sent", "to": …}` (release `tools/bot_mode_dm.py:705-714`), while step 2's refusal
-   is an `{"error": …}` payload (`:233-238`). Its `row <msg-id>` must also be newer than step 2's.
+   is an `{"error": …}` payload (`:233-238`). Its `row <msg-id>` must also be newer than step 2's. `win_close s3` after
+   this row.
 4. **The builder's delivery turn.** This is parent step 4 with the prefix substitution: a `write_file` plan to
-   `.hermes/plans/builder.md`, then the `terminal` change inside `osh-f64c-builder`, writing
+   `/tmp/.hermes/plans/builder.md`, then the `terminal` change inside `osh-f64c-builder`, writing
    `/tmp/osh-f64c-builder.marker`. The delivery child runs `-c "Bot Chat"` (`tools/bot_mode_dm.py:361-378`).
    `reread s4t base`; `ab_open ${URL}bot-chat`, click `builder` → `timeout 600 $AB wait --text "P7-BUILT:$NONCE"` →
    expect: the builder's `P7-BUILT:<nonce>` reply in its canonical Bot Chat → `step-4.png`. Evidence:
    `echo step-4 >> evidence.txt; row builder <tip> assistant "" "P7-BUILT:$NONCE"`; `reread s4t send`;
    `g2_gate away orchestrator $EXP $ORCH_SID s4t` (the delivery child spawns no PTY child, so the selected one
-   is still alone). The parent's routing and
+   is still alone). `win_close s4` after the `P7-BUILT` row; `route-reconcile-s4.txt` must carry an `allowed` POST
+   from the delivery child. The parent's routing and
    isolation probes may be recorded too, but they are not graded here.
 5. **The veto, in the builder's Bot Chat.** Run the worker turn inside `osh-f64c-gw` through the local-teammate
    transport (`tools/bot_mode_dm.py:31-33`), so the attempt lands in that Bot Chat. It is a model turn, so it starts
