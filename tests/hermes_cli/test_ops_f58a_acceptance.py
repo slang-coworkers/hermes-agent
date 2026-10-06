@@ -246,22 +246,53 @@ def test_ac_ops_f58_a_6() -> None:
     assert "sessions.auto_prune" in low or "mem-f44" in low
 
 
-def test_ac_ops_f58_a_7(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ac_ops_f58_a_7(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, isolated_update_runtime
+) -> None:
     """Fleet-wide config migration upgrades installed sibling profiles.
 
-    A configured sibling behind the current version is migrated up on disk with
-    user settings preserved; the active profile is left untouched.
+    `hermes update` pulling from a git remote migrates a configured sibling
+    behind the current version up to it on disk with user settings preserved,
+    re-reading config after the pull; its sibling pass skips the active profile.
     """
+    import subprocess
+
     import yaml
 
-    import hermes_cli.profiles as profiles_mod
+    import hermes_cli.main as hermes_main
+    import hermes_cli.main_install_repair as main_install_repair
+    import hermes_cli.main_web_build as main_web_build
     import hermes_cli.update_cmd as update_cmd
-    import hermes_constants
-    from hermes_cli.config import DEFAULT_CONFIG
+    import hermes_cli.update_cmd_deps as update_cmd_deps
+    import hermes_cli.update_cmd_fleet as update_cmd_fleet
+    import hermes_cli.update_cmd_maint as update_cmd_maint
+    from hermes_cli import managed_uv
+    from hermes_cli.config import DEFAULT_CONFIG, check_config_version, load_config
     from hermes_cli.config_migrations import SUPPORT_FLOOR_VERSION
+    from hermes_constants import (
+        get_hermes_home_override, reset_hermes_home_override, set_hermes_home_override)
+
+    def _git(cwd: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "VERSION").write_text("1\n", encoding="utf-8")
+    _git(origin, "add", "VERSION")
+    _git(origin, "commit", "-qm", "c1")
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "clone", "-q", str(origin), str(checkout))
+    (origin / "VERSION").write_text("2\n", encoding="utf-8")
+    _git(origin, "commit", "-aqm", "c2")
+    pulled_sha = _git(origin, "rev-parse", "HEAD")
 
     latest = int(DEFAULT_CONFIG["_config_version"])
-    profiles_root = tmp_path / "profiles"
+    profiles_root = tmp_path / "hermes" / "profiles"
 
     def _write_profile(name: str) -> Path:
         home = profiles_root / name
@@ -274,21 +305,65 @@ def test_ac_ops_f58_a_7(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         )
         return home
 
-    # Both start behind, so "active skipped" is proven by the active file NOT moving.
+    # Both start behind, so "active skipped" is proven by the sibling pass never
+    # scoping to the active home, not by the active config already being current.
     active = _write_profile("active")
     sibling = _write_profile("research")
-    active_before = (active / "config.yaml").read_bytes()
+    monkeypatch.setenv("HERMES_HOME", str(active))
 
-    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
-    monkeypatch.setattr(hermes_constants, "get_process_hermes_home", lambda: active)
-    monkeypatch.setattr(update_cmd, "_reload_config_modules", lambda: None)
+    checks: list[tuple[str | None, str]] = []
+    real_check = update_cmd._run_config_check_fresh
 
-    migrated = update_cmd._migrate_sibling_profile_configs()
+    def _spy_check():
+        checks.append((get_hermes_home_override(), _git(checkout, "rev-parse", "HEAD")))
+        return real_check()
 
-    assert "research" in [m[0] for m in migrated] and "active" not in [m[0] for m in migrated]
+    monkeypatch.setattr(update_cmd, "_run_config_check_fresh", _spy_check)
+
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", checkout)
+    monkeypatch.setattr(hermes_main, "_resolve_update_branch", lambda args: "main")
+    monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: False)
+    monkeypatch.setattr(
+        hermes_main, "_get_origin_url",
+        lambda *a, **k: "https://github.com/NousResearch/hermes-agent.git",
+    )
+    monkeypatch.setattr(update_cmd, "_is_fork", lambda *a, **k: False)
+    monkeypatch.setattr(hermes_main, "_run_pre_update_backup", lambda *a, **k: None)
+    monkeypatch.setattr(hermes_main, "_capture_active_lazy_features", lambda: [])
+    monkeypatch.setattr(hermes_main, "_capture_active_tool_dependencies", lambda: [])
+    monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
+    monkeypatch.setattr(hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None)
+    monkeypatch.setattr(main_web_build, "_record_bytecode_fingerprint", lambda *a, **k: None)
+    monkeypatch.setattr(hermes_main, "_build_web_ui", lambda *a, **k: None)
+    monkeypatch.setattr(main_web_build, "_build_web_ui", lambda *a, **k: None)
+    # The fake checkout has no package to install: dependency, Node and Desktop
+    # syncs would otherwise run against this test's own venv.
+    monkeypatch.setattr(update_cmd, "_sync_python_dependencies_after_pull", lambda *a, **k: None)
+    monkeypatch.setattr(update_cmd, "_update_node_dependencies", lambda: [])
+    monkeypatch.setattr(update_cmd_deps, "_update_node_dependencies", lambda: [])
+    monkeypatch.setattr(update_cmd, "_rebuild_desktop_after_update", lambda *a, **k: True)
+    monkeypatch.setattr(update_cmd_maint, "_sync_profiles_after_update", lambda: None)
+    monkeypatch.setattr(update_cmd, "_post_update_sqlite_runtime_status", lambda: (True, None))
+    monkeypatch.setattr(update_cmd_fleet, "_force_kill_stuck_gateways", lambda *a, **k: None)
+    monkeypatch.setattr(managed_uv, "update_managed_uv", lambda **kw: None)
+
+    hermes_main.cmd_update(SimpleNamespace(branch=None, yes=False, force=False, force_venv=False))
+    out = capsys.readouterr().out
+
+    assert _git(checkout, "rev-parse", "HEAD") == pulled_sha
     sib = yaml.safe_load((sibling / "config.yaml").read_text(encoding="utf-8"))
     assert sib["_config_version"] == latest and sib["model"]["provider"] == "nous"
-    assert (active / "config.yaml").read_bytes() == active_before
+    assert "Profile 'research'" in out and "Profile 'active'" not in out
+    assert checks and all(head == pulled_sha for _home, head in checks)
+    scoped = {Path(home).resolve() for home, _head in checks if home}
+    assert sibling.resolve() in scoped and active.resolve() not in scoped
+    token = set_hermes_home_override(sibling)
+    try:
+        assert check_config_version() == (latest, latest)
+        assert load_config()["model"]["provider"] == "nous"
+    finally:
+        reset_hermes_home_override(token)
 
 
 def test_ac_ops_f58_a_8(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
