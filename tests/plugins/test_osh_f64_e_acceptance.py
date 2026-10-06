@@ -31,7 +31,8 @@ def loaded(tmp_path, monkeypatch):
     """Load nv-coworker-compose from an isolated HERMES_HOME via the real scanner."""
     hermes_home = tmp_path / "home"
     (hermes_home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / "nv-coworker-compose")
+    shutil.copytree(PLUGIN_SRC, hermes_home / "plugins" / "nv-coworker-compose",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (hermes_home / "config.yaml").write_text(
         yaml.safe_dump({"plugins": {"enabled": ["nv-coworker-compose"]}}), encoding="utf-8")
     bundled = tmp_path / "bundled"
