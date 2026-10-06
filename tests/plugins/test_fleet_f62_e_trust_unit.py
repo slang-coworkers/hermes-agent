@@ -16,7 +16,9 @@ BRIDGE_PROBES = (("172.17.0.1", 18777), ("172.17.0.1", 18255), ("172.17.0.1", No
 FORMS = ["localhost", "127.0.0.1", "::1", "10.200.0.1", ".svc.cluster.local", "172.17.0.1", "172.17.0.1:18777",
          "172.17.0.1:10256", "[172.17.0.1]:18777", "host.docker.internal", "HOST.DOCKER.INTERNAL.",
          "host.docker.internal:10256", "172.17.0.0/16", "172.16.0.0/12", "0.0.0.0/0", "*", ".172.17.0.1",
-         "*.docker.internal", ".docker.internal", "docker.internal", "10.0.0.0/8", "example.com"]
+         "*.docker.internal", ".docker.internal", "docker.internal", "10.0.0.0/8", "example.com",
+         "*.docker.internal:10256", ".docker.internal:18777", "docker.internal:10256", "*:10256",
+         "example.com:18777", "10.200.0.1:3128"]
 
 
 @pytest.fixture(scope="module")
@@ -32,7 +34,11 @@ def _release_bypasses(entry, monkeypatch):
 
     monkeypatch.setenv("NO_PROXY", entry)
     monkeypatch.delenv("no_proxy", raising=False)
+    # Bridge hops are proxy-only on every port, so a port-qualified token counts on its own port.
+    port = entry.rsplit(":", 1)[-1] if entry.count(":") == 1 and entry.rsplit(":", 1)[-1].isdigit() else None
     hops = [f"{h}:{p}" if p else h for h, p in BRIDGE_PROBES]
+    if port:
+        hops += [f"172.17.0.1:{port}", f"host.docker.internal:{port}"]
     return (any(base.should_bypass_proxy([hop]) for hop in hops)
             or any(base.is_host_excluded_by_no_proxy(h, entry) for h, _ in BRIDGE_PROBES))
 
@@ -40,7 +46,8 @@ def _release_bypasses(entry, monkeypatch):
 @pytest.mark.parametrize("entry", FORMS)
 def test_bridge_entry_agrees_with_release_matchers(trust, monkeypatch, entry):
     host = entry.strip("[").split("]")[0].rsplit(":", 1)[0] if entry.count(":") == 1 or entry.startswith("[") else entry
-    names_bridge = host.lower().rstrip(".") in ("172.17.0.1", "host.docker.internal")
+    # A ``*`` host is refused on any port, by choice: a port never narrows a bridge hop (stricter than the release matchers).
+    names_bridge = host.lower().rstrip(".") in ("172.17.0.1", "host.docker.internal", "*")
     assert trust.is_bridge_entry(entry) is (names_bridge or _release_bypasses(entry, monkeypatch))
 
 
@@ -111,22 +118,143 @@ def test_strip_inherited_only_on_fleet_homes(trust):
     assert env["NO_PROXY"] == "localhost"
 
 
-def test_source_fetch_never_raises_on_hostile_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("NO_PROXY", "localhost,172.17.0.1")
+def _trust_source_cls():
+    import sys
     from importlib import import_module
 
     pkg = TRUST_PY.parent
-    spec = importlib.util.spec_from_file_location(
-        "fleet_f62e_unit_pkg", pkg / "__init__.py", submodule_search_locations=[str(pkg)])
-    mod = importlib.util.module_from_spec(spec)
-    import sys
+    name = "fleet_f62e_unit_pkg"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, pkg / "__init__.py", submodule_search_locations=[str(pkg)])
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return import_module(f"{name}.trust_source").OpenShellTrustSource
 
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    source = import_module(f"{spec.name}.trust_source").OpenShellTrustSource()
+
+def test_source_fetch_never_raises_on_hostile_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "localhost,172.17.0.1")
+    source = _trust_source_cls()()
     for cfg in ({}, {"bundle": 7}, {"bundle": str(tmp_path / "nope")}, {"bundle": "/", "merge": "x"}):
-        result = source.fetch(cfg, tmp_path)
+        result = source.fetch({"enabled": True, **cfg}, tmp_path)
         assert result.ok and result.secrets["NO_PROXY"] == "localhost"
         assert not set(result.secrets) & {"SSL_CERT_FILE", "CURL_CA_BUNDLE"}
         assert result.warnings
     assert os.environ["NO_PROXY"] == "localhost,172.17.0.1", "fetch must not mutate the process env"
+
+
+def test_derive_bundle_concurrent_writers_leave_a_complete_bundle(trust, tmp_path):
+    import threading
+
+    live, dest = tmp_path / "live.pem", tmp_path / "out" / "ca.pem"
+    live.write_text("LIVE" * 4096, encoding="utf-8")
+    errors = []
+
+    def _write():
+        try:
+            for _ in range(20):
+                trust.derive_bundle(str(live), [], dest)
+        except Exception as exc:  # collected and asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert dest.read_text(encoding="utf-8") == "LIVE" * 4096 + "\n"
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["ca.pem"]
+
+
+def test_fetch_ca_stat_error_keeps_no_proxy(tmp_path, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "localhost,172.17.0.1")
+    source = _trust_source_cls()()
+    live = tmp_path / "live.pem"
+    live.write_text("PEM", encoding="utf-8")
+    real_stat = Path.stat
+
+    def _vanishing_stat(self, *a, **kw):
+        if self == live:
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_file", lambda self: True if self == live else real_stat(self).st_mode & 0o170000 == 0o100000)
+    monkeypatch.setattr(Path, "stat", _vanishing_stat)
+    result = source.fetch({"enabled": True, "bundle": str(live)}, tmp_path)
+    assert result.ok, result.error
+    assert result.secrets.get("NO_PROXY") == "localhost"
+    assert "SSL_CERT_FILE" not in result.secrets
+    assert any(str(live) in w for w in result.warnings)
+
+
+_MARKED = {"plugins": {"entries": {"nv-coworker-compose": {"settings": {"openshell_fleet": True}}}}}
+
+
+@pytest.mark.parametrize("secrets, expect", [
+    ({"onecli": {"enabled": True}}, True),
+    ({"onecli": {"enabled": True}, "openshell_trust": {"enabled": True, "bundle": "/b.pem"}}, False),
+    ({"onecli": {"enabled": False}}, False),
+    ({"onecli": {"enabled": "yes"}}, False),
+    ({"sources": ["onecli"], "preserve_existing": ["X"]}, False),
+    (None, False),
+])
+def test_no_proxy_guard_selects_keyless_fleet_homes_with_another_source(trust, secrets, expect):
+    cfg = dict(_MARKED, secrets=secrets) if secrets is not None else dict(_MARKED)
+    assert trust.guards_no_proxy(cfg) is expect
+    plain = {"terminal": {"backend": "ssh"}, "secrets": secrets}
+    assert trust.guards_no_proxy(plain) is False, "a non-fleet home is never guarded"
+
+
+def _home_with(tmp_path, monkeypatch, cfg):
+    import yaml
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def test_guarded_source_protects_no_proxy_and_fetches_nothing(tmp_path, monkeypatch):
+    home = _home_with(tmp_path, monkeypatch, dict(_MARKED, secrets={"onecli": {"enabled": True}}))
+    monkeypatch.setenv("NO_PROXY", "localhost,172.17.0.1")
+    source = _trust_source_cls()()
+    assert source.is_enabled({}) is True
+    assert source.protected_env_vars({}) == frozenset({"NO_PROXY", "no_proxy"})
+    result = source.fetch({}, home)
+    assert result.ok and result.secrets == {} and not result.warnings
+
+
+def test_keyed_or_unguarded_source_protects_nothing(tmp_path, monkeypatch):
+    _home_with(tmp_path, monkeypatch, dict(_MARKED, secrets={"onecli": {"enabled": False}}))
+    source = _trust_source_cls()()
+    assert source.is_enabled({}) is False
+    assert source.protected_env_vars({}) == frozenset()
+    keyed = {"enabled": True, "bundle": "/b.pem"}
+    assert source.is_enabled(keyed) is True
+    assert source.protected_env_vars(keyed) == frozenset()
+
+
+@pytest.mark.parametrize("raw", [
+    "NO_PROXY=localhost ,172.17.0.1\n".encode("utf-8"),
+    "NO_PROXY=localhost\u0085,host.docker.internal\n".encode("utf-8"),
+    b"A=1\rNO_PROXY=172.17.0.1\r",
+    "﻿NO_PROXY=localhost ,172.17.0.1\r\n".encode("utf-16"),
+])
+def test_env_preview_splits_lines_like_the_release_reload(trust, tmp_path, monkeypatch, raw):
+    from hermes_cli import env_loader
+
+    preview = tmp_path / "preview.env"
+    preview.write_bytes(raw)
+    runtime = tmp_path / "runtime.env"
+    runtime.write_bytes(raw)
+    for name in ("NO_PROXY", "no_proxy", "A"):
+        monkeypatch.delenv(name, raising=False)
+    env_loader._sanitize_env_file_if_needed(runtime)
+    env_loader._load_dotenv_with_fallback(runtime, override=True)
+    loaded = os.environ.get("NO_PROXY", "")
+    assert trust.bridge_entries(loaded), f"precondition: the release reload keeps the bridge entry: {loaded!r}"
+    assert trust.env_file_clashes(preview, keyed=False) == ["NO_PROXY"]
+    assert preview.read_bytes() == raw, "the preflight must not rewrite the file"

@@ -134,10 +134,13 @@ def is_bridge_entry(entry: str) -> bool:
     if not token:
         return False
     host, _ = _split_host_port(token)
-    if host in _BRIDGE_HOSTS:
+    if host in _BRIDGE_HOSTS or host == "*":
         return True
+    # A token's port never narrows it: every bridge hop is proxy-only on every port, so the
+    # host part alone is judged too (``*.docker.internal:10256`` bypasses ``…:10256``).
     return any(
-        _entry_matches(token, probe_host, probe_port) or _suffix_matches(token, probe_host)
+        _entry_matches(t, probe_host, probe_port) or _suffix_matches(t, probe_host)
+        for t in {token, host} if t
         for probe_host, probe_port in _BRIDGE_PROBES
     )
 
@@ -186,10 +189,15 @@ def derive_bundle(live: str, merge: Iterable[str], dest: Path) -> None:
         if not text:
             raise TrustError(f"{path} is empty")
         texts.append(text)
+    import tempfile
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f"{dest.name}.tmp-{os.getpid()}")
+    # One temp file per call: a multiplexer may hydrate the same home from two threads.
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{dest.name}.tmp-", dir=str(dest.parent))
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text("\n".join(texts) + "\n", encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(texts) + "\n")
         os.chmod(tmp, 0o644)
         os.replace(tmp, dest)
     finally:
@@ -279,29 +287,42 @@ def _env_text_as_loaded(raw: bytes) -> Optional[str]:
     (UTF-16 BOM decode, UTF-32 left as is, embedded NULs stripped, per-line strip) rebuilt in
     memory, because the release sanitizer rewrites the file and the preflight must not."""
     import codecs
+    import io
+
+    def _lines(encoding: str, errors: str) -> List[str]:
+        # Universal newlines (\n, \r\n, \r only), as the release sanitizer's readlines() splits;
+        # str.splitlines() would also split on U+2028 and similar, which the runtime keeps in a value.
+        with io.TextIOWrapper(io.BytesIO(raw), encoding=encoding, errors=errors, newline=None) as fh:
+            return fh.readlines()
 
     if raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
         return None
-    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+    utf16 = raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE)
+    if utf16:
         try:
-            lines = raw.decode("utf-16").splitlines()
+            lines = _lines("utf-16", "strict")
         except UnicodeDecodeError:
             return None
     else:
-        lines = raw.decode("utf-8-sig", errors="replace").splitlines()
-        if lines and lines[0].startswith("�"):
+        lines = _lines("utf-8-sig", "replace")
+        if lines and lines[0].startswith("\ufffd"):
             # The release sanitizer leaves such a file untouched; its loader then falls back to latin-1.
             try:
                 raw.decode("utf-8-sig")
             except UnicodeDecodeError:
                 return raw.removeprefix(codecs.BOM_UTF8).decode("latin-1")
             return raw.decode("utf-8-sig")
+    rewritten = utf16
     out = []
     for line in lines:
-        line = line.replace("\x00", "")
-        stripped = line.strip()
-        out.append(line if not stripped or stripped.startswith("#") else stripped)
-    return "\n".join(out) + "\n"
+        body = line.replace("\x00", "").rstrip("\r\n")
+        stripped = body.strip()
+        new = (body if not stripped or stripped.startswith("#") else stripped) + "\n"
+        rewritten = rewritten or new != line
+        out.append(new)
+    text = "".join(out)
+    # A rewritten file is reloaded as utf-8-sig, which drops one more leading U+FEFF.
+    return text.removeprefix("\ufeff") if rewritten else text
 
 
 def _env_file_assignments(path: Path) -> Dict[str, Optional[str]]:
@@ -378,6 +399,21 @@ def is_openshell_fleet_config(cfg: Any) -> bool:
     terminal = cfg.get("terminal")
     backend = terminal.get("backend") if isinstance(terminal, dict) else None
     return backend == "ssh" and _settings("nv-fleet-gates").get("expected_backend") == "ssh"
+
+
+def guards_no_proxy(cfg: Any) -> bool:
+    """D10b: a keyless openshell fleet home whose ``secrets`` enables another source, which a later
+    apply (the post-discovery refresh) could use to re-plant a bridge NO_PROXY after D10's strip."""
+    if not is_openshell_fleet_config(cfg):
+        return False
+    secrets = cfg.get("secrets")
+    if not isinstance(secrets, dict):
+        return False
+    own = secrets.get(SOURCE_NAME)
+    if isinstance(own, dict) and own.get("enabled"):
+        return False
+    return any(name != SOURCE_NAME and isinstance(section, dict) and section.get("enabled") is True
+               for name, section in secrets.items())
 
 
 def strip_inherited_no_proxy(environ: MutableMapping[str, str], cfg: Any) -> List[str]:
