@@ -98,17 +98,31 @@ a dashboard drive selects the profile in the profile combobox first.
 ## Steps
 
 1. **Validator, no secret, no override (≤ 60 s).**
-   - The operator runs the NemoClaw env validator in `ing-f66-gw` with ingress
-     enabled (lane L-VAL) → expect: pass.
-   - The operator runs a host-side boolean substring scan of the gateway
-     sandbox's `$HERMES_HOME` files for the bytes of the host-held platform
-     secret files that `host/edge.yaml` names → expect: `no match`. The scan
-     prints only the boolean: no material, no digest, no length.
-   - The operator reads the environment of the RUNNING gateway process. Its pid
-     is in the DEFAULT home's `gateway.pid` (release `gateway/status.py:217-220`).
-     The check is whether that environment carries the private-URL override the
-     URL guard reads (release `tools/url_safety.py:252`). The report gives the
-     variable's name and `set` or `unset` only, never a value.
+   - L-VAL in `ing-f66-gw` (E6). The lane runs it: the operator through the box
+     read verb, or the tester in-sandbox through the broker where the lane
+     allows it; the report records which. → expect: pass. The evidence is
+     `$HERMES_HOME/.ing-f66/lval.txt` from the instrumented gateway start
+     (AC-ING-F66-19 Setup step 2):
+     - check 1 and check 2 both exit 0;
+     - the recorded pid equals the RUNNING gateway's pid (the pid in the
+       DEFAULT home's `gateway.pid`, release `gateway/status.py:217-220`).
+
+     If the pids differ (the gateway was restarted in between, for example by
+     the gateway-boot unit), the tester does NOT start a second gateway on top,
+     because a start against a running gateway refuses (release
+     `hermes_cli/gateway.py:6391`). It stops the running gateway first
+     (`hermes gateway stop` in the DEFAULT home), confirms the pid is gone, then
+     repeats its instrumented start and records both pids. If the stop fails,
+     step 1 is FAIL(env), with no retry. A non-zero exit, a missing file or a
+     pid mismatch is not a PASS.
+   - The operator also runs, through the box read verb, a host-side boolean
+     substring scan of the gateway sandbox's `$HERMES_HOME` files for the bytes
+     of the host-held platform secret files that `host/edge.yaml` names →
+     expect: `no match`. The scan prints only the boolean, never the material or
+     a digest of it.
+   - Last, `lval.txt` gives the private-URL env override the URL guard reads
+     (release `tools/url_safety.py:252`) by name, `set` or `unset` only, never a
+     value, for that same recorded gateway process.
 
    → expect `unset`. `set` fails this step and the scenario (fail closed).
 2. **Both readers refuse (one shared 180 s deadline).** Send both requests
@@ -131,8 +145,11 @@ a dashboard drive selects the profile in the profile combobox first.
    - the operator lists the scratch PR's reviews and confirms there is no
      `APPROVED` review and no approval on it.
 3. **Restart, then deliver (restart ≤ 120 s, delivery ≤ 180 s).**
-   - The operator restarts the gateway sandbox `ing-f66-gw` through the broker
-     (lane L-RST-SB) and records `T3`. Nobody runs any other command.
+   - Restart the gateway sandbox (L-RST-SB, E6): `openshell sandbox restart
+     ing-f66-gw` through the broker, or the box read verb's H11. The lane runs
+     it: the operator through the box read verb, or the tester through the
+     broker where the lane allows it; the report records which. Record `T3`.
+     Nobody runs any other command.
    - Wait for three signals:
      - the gateway ready marker in the in-sandbox gateway log;
      - `systemctl --user is-active nv-ingress-forward.service` reporting `active`
@@ -174,7 +191,8 @@ All of it goes under `$ART/scenario-AC-ING-F66-20/`:
   - both `checks_gate.py` argv and JSON lines, quoted from the tool rows;
   - the unit status with timestamps, and the health probe;
   - the fixer message rows by id.
-- `lanes/` holds the operator evidence for L-VAL, L-RST-SB and L-CHK.
+- `lanes/` holds the lane evidence for L-VAL (`lval.txt`), L-RST-SB and L-CHK,
+  each with who ran it (E6).
 - `budget.txt` holds the summed `session_model_usage` call count beside the
   in-scope delivery count, before and after each step.
 - `teardown.txt`: kept or torn down, with the commands' exit statuses.
