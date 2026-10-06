@@ -585,6 +585,7 @@ def _kanban_conn(tmp_path, monkeypatch):
 def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     """The kanban dispatcher reclaims a dead-worker claim but extends a live one with a
     fresh heartbeat."""
+    from hermes_cli import kanban_db_dispatch as kbd
     kb, conn = _kanban_conn
     host = kb._claimer_id().split(":", 1)[0]
     now = int(time.time())
@@ -592,7 +593,7 @@ def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     # (a) dead worker, expired claim -> reclaimed.
     dead = kb.create_task(conn, title="dead", assignee="a")
     kb.claim_task(conn, dead, claimer=f"{host}:w1")
-    kb._set_worker_pid(conn, dead, 4242421)
+    kbd._set_worker_pid(conn, dead, 4242421)
     conn.execute(
         "UPDATE tasks SET claim_expires=?, last_heartbeat_at=? WHERE id=?",
         (now - 3600, now - 1800, dead),
@@ -607,7 +608,7 @@ def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     # (b) live worker, expired claim but FRESH heartbeat -> extended, NOT reclaimed (differential).
     live = kb.create_task(conn, title="live", assignee="a")
     kb.claim_task(conn, live, claimer=f"{host}:w2")
-    kb._set_worker_pid(conn, live, 4242422)
+    kbd._set_worker_pid(conn, live, 4242422)
     conn.execute(
         "UPDATE tasks SET claim_expires=?, last_heartbeat_at=? WHERE id=?",
         (now - 60, now - 1, live),
@@ -628,7 +629,7 @@ def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     # heartbeat -> extended; stale heartbeat -> not extended.
     stale = kb.create_task(conn, title="stale", assignee="a")
     kb.claim_task(conn, stale, claimer=f"{host}:w3")
-    kb._set_worker_pid(conn, stale, 4242423)
+    kbd._set_worker_pid(conn, stale, 4242423)
     conn.execute(
         "UPDATE tasks SET claim_expires=?, last_heartbeat_at=? WHERE id=?",
         (now - 60, now - (2 * 60 * 60), stale),
@@ -657,19 +658,19 @@ def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     # concrete reclaim/crash values (an int count and a task-id list), not just presence.
     rec2 = kb.create_task(conn, title="rec2", assignee="a")
     kb.claim_task(conn, rec2, claimer=f"{host}:d1")
-    kb._set_worker_pid(conn, rec2, 4242431)
+    kbd._set_worker_pid(conn, rec2, 4242431)
     conn.execute(
         "UPDATE tasks SET claim_expires=?, last_heartbeat_at=? WHERE id=?",
         (now - 3600, now - 1800, rec2),
     )
     cr2 = kb.create_task(conn, title="cr2", assignee="a")
     kb.claim_task(conn, cr2, claimer=f"{host}:d2")
-    kb._set_worker_pid(conn, cr2, 4242432)
+    kbd._set_worker_pid(conn, cr2, 4242432)
     conn.execute(
         "UPDATE tasks SET claim_expires=?, started_at=? WHERE id=?",
         (now + 3600, now - 100, cr2),
     )
-    kb._record_worker_exit(4242432, 1 << 8)  # WIFEXITED, WEXITSTATUS=1 -> nonzero exit
+    kbd._record_worker_exit(4242432, 1 << 8)  # WIFEXITED, WEXITSTATUS=1 -> nonzero exit
     conn.commit()
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     result = kb.dispatch_once(conn, dry_run=True)
@@ -681,6 +682,7 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
     """The dispatcher's respawn guards defer re-dispatch: a recent rate-limited run
     holds under cooldown; an auth/quota failure yields blocker_auth; a clean task is
     respawnable. (The rate-limit sentinel exit code is EX_TEMPFAIL=75.)"""
+    from hermes_cli import kanban_db_dispatch as kbd
     kb, conn = _kanban_conn
     assert kb.KANBAN_RATE_LIMIT_EXIT_CODE == 75
 
@@ -728,13 +730,13 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
     # bounded streak. Below the limit the task stays respawnable; at the limit it trips.
     host = kb._claimer_id().split(":", 1)[0]
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
-    monkeypatch.setattr(kb, "_PROTOCOL_VIOLATION_FAILURE_LIMIT", 2, raising=False)
+    monkeypatch.setattr(kbd, "_PROTOCOL_VIOLATION_FAILURE_LIMIT", 2, raising=False)
 
     def _one_violation(task_id: str, pid: int) -> None:
         kb.claim_task(conn, task_id, claimer=f"{host}:pv")
-        kb._set_worker_pid(conn, task_id, pid)
+        kbd._set_worker_pid(conn, task_id, pid)
         # raw POSIX wait status for a clean exit code 0 (os.WIFEXITED -> True, WEXITSTATUS -> 0)
-        kb._record_worker_exit(pid, 0)
+        kbd._record_worker_exit(pid, 0)
         kb.detect_crashed_workers(conn)
 
     pv = kb.create_task(conn, title="pv", assignee="a")
