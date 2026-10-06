@@ -47,6 +47,19 @@ _TRAIT_DOMAIN: Dict[str, str] = {
 # keeps them usable only on the orchestrator profile.
 _SELF_PLUGIN = "nv-coworker-compose"
 
+
+def _load_trust():
+    # By path, not a relative import: this module is also loaded standalone by file path.
+    import importlib.util
+    path = Path(__file__).resolve().parent / "openshell" / "trust.py"
+    spec = importlib.util.spec_from_file_location("_osh_trust_compose", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_trust = _load_trust()
+
 # Transcript-retention keys enforced as fleet invariants on every rendered
 # profile (the DEFAULT multiplexer and every coworker), written whether the input
 # spec omits them or declares a different value. Pinned explicitly so a re-pin to
@@ -1371,7 +1384,12 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     if not isinstance(pinned_offline_lane, bool):
         raise CompositionError(
             f"egress.pinned_offline_lane must be true or false, got {pinned_offline_lane!r}")
+    try:
+        openshell_trust = _trust.trust_from_spec({"egress": egress})
+    except _trust.TrustError as exc:
+        raise CompositionError(str(exc)) from None
     return {
+        "openshell_trust": openshell_trust,
         "allow": allow,
         "sandbox_image": sandbox_image,
         "filesystem_read_only": read_only,
@@ -1557,11 +1575,12 @@ _CHAIN_DIAL_FORCED_VARS = frozenset({
 
 
 def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
-                                  chain_addr: str, ca_bundle: str) -> None:
+                                  chain_addr: str, ca_bundle: Optional[str]) -> None:
     """Repoint a served coworker's profile-scoped child model turn through the operator
     onecli-chain (OSH-F64 §D7). Written into the RAW per-profile config, since secret
     hydration reads raw config, not the managed overlay; pinned-offline-lane only, per
-    served coworker (never the default profile)."""
+    served coworker (never the default profile). ``ca_bundle`` None forces no CA: a fleet
+    declaring ``egress.openshell_trust`` takes its CA names from that source instead."""
     secrets = config.get("secrets")
     if isinstance(secrets, dict):
         preserved = secrets.get("preserve_existing")
@@ -1579,7 +1598,42 @@ def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
     _set_dotted(config, "secrets.onecli.enabled", True)
     _set_dotted(config, "secrets.onecli.override_existing", True)
     _set_dotted(config, "plugins.entries.podman-onecli.settings.proxy_rewrite", chain_addr)
-    _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
+    if ca_bundle is not None:
+        _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
+
+
+def _forbid_bridge_no_proxy(config: Dict[str, Any], profile_name: str) -> None:
+    """Refuse a top-level NO_PROXY/no_proxy scalar listing the docker bridge (FLEET-F62.e D6):
+    the gateway bridges top-level scalars into the env, and a bridge entry makes a client dial
+    the hop directly, which the sandbox does not route."""
+    for name, entries in _trust.config_bridge_no_proxy(config):
+        raise CompositionError(
+            f"profile {profile_name!r}: top-level {name} lists docker-bridge entry {entries[0]!r} "
+            f"(every bridge hop is reachable only through the sandbox proxy; NO_PROXY must never "
+            f"list 172.17.0.1 or host.docker.internal)")
+
+
+def _validate_openshell_trust_profile(config: Dict[str, Any], profile_name: str) -> None:
+    """Pre-pass refusals for a profile that will carry ``secrets.openshell_trust`` (D3, D9):
+    without nv-coworker-compose the source never registers, and a preserved CA or NO_PROXY
+    name outranks the source's override."""
+    enabled = _get_dotted(config, "plugins.enabled")
+    if not isinstance(enabled, list) or _SELF_PLUGIN not in enabled:
+        raise CompositionError(
+            f"profile {profile_name!r}: {_trust.SPEC_KEY} needs {_SELF_PLUGIN} in plugins.enabled "
+            f"(it registers the {_trust.SOURCE_NAME} secret source)")
+    clash = _trust.preserved_trust_names(config.get("secrets"))
+    if clash:
+        raise CompositionError(
+            f"profile {profile_name!r}: secrets.preserve_existing must not carve out {clash} while "
+            f"{_trust.SPEC_KEY} is declared — a preserved value outranks the trust source's override")
+
+
+def _enforce_openshell_trust(config: Dict[str, Any], trust: Dict[str, Any]) -> None:
+    """Render the start-time trust source's config: its section plus first claim in
+    ``secrets.sources`` (first claim wins across sources)."""
+    _set_dotted(config, f"secrets.{_trust.SOURCE_NAME}", _trust.trust_block(trust))
+    _set_dotted(config, "secrets.sources", _trust.with_trust_source(_get_dotted(config, "secrets.sources")))
 
 
 def _enforce_openshell_secret_sets(config: Dict[str, Any], served_profiles: List[str],
@@ -4140,6 +4194,10 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         fleet_name = _safe_name("project", data.get("project", "fleet"))
         keys_dir = _openshell_keys_dir()
     else:
+        if isinstance(egress_block, dict) and _trust.SOURCE_NAME in egress_block:
+            raise CompositionError(
+                f"{_trust.SPEC_KEY} is openshell-only (the live OpenShell bundle has no consumer "
+                f"on substrate {descriptor.substrate!r})")
         egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
         openshell_params = None
         providers_by_type = {}
@@ -4148,6 +4206,16 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # OSH-F64.b single-authority posture is spec-gated on egress.inference_provider (ADR §D4):
     # non-None only on openshell + when the spec declares it. Absent → the legacy §D7 render.
     osh_f64b_provider = openshell_params.get("inference_provider") if openshell_params else None
+    openshell_trust = openshell_params.get("openshell_trust") if openshell_params else None
+
+    # FLEET-F62.e: NO_PROXY and trust-input refusals on the resolved configs, before Phase B
+    # writes anything, so a refusal leaves no partial fleet.
+    if is_remote:
+        prepass = [*resolved_by_type.items(), (default_profile, {"config": default_config})]
+        for pname, presolved in prepass:
+            _forbid_bridge_no_proxy(presolved["config"], pname)
+            if openshell_trust is not None:
+                _validate_openshell_trust_profile(presolved["config"], pname)
 
     # Shared-learnings clone (MEM-F43) — enforced per coworker type below, never on
     # the DEFAULT/multiplexer gateway root. Mount composition (ISO-F13) owns each
@@ -4239,9 +4307,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
             elif openshell_params["pinned_offline_lane"]:
                 _enforce_openshell_chain_dial(resolved["config"], tname,
                                               openshell_params["chain_addr"],
-                                              openshell_params["ca_bundle"])
+                                              None if openshell_trust else openshell_params["ca_bundle"])
             if openshell_params["pinned_offline_lane"]:
                 _disable_firecrawl_providers(resolved["config"])
+            if openshell_trust is not None:
+                _enforce_openshell_trust(resolved["config"], openshell_trust)
         pdir = out_root / tname
         _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
         if is_remote:
@@ -4296,6 +4366,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _enforce_openshell_inference_provider(default_config, default_profile, osh_f64b_provider)
     if is_remote and openshell_params["pinned_offline_lane"]:
         _disable_firecrawl_providers(default_config)
+    if openshell_trust is not None:
+        _enforce_openshell_trust(default_config, openshell_trust)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
     # OSH-F64.b (D2): render the gateway APF policy for the model-call sandbox (the default

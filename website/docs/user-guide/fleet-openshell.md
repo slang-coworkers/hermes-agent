@@ -536,9 +536,19 @@ platform disabled.
 Before a served coworker can complete a live turn over the OpenShell lane, six
 preconditions must hold on `brev-hermes`:
 
-1. **OpenShell Sandbox CA trusted.** The gateway CA bundle must carry the **OpenShell
-   Sandbox CA** (`/etc/openshell-tls/ca-bundle.pem`), or TLS to `inference.local` fails
-   (curl exit 60) and no served turn can complete.
+1. **OpenShell Sandbox CA trusted, from the live bundle.** Declare the live bundle in the
+   fleet spec as `egress.openshell_trust.bundle: /etc/openshell-tls/ca-bundle.pem` (on the
+   legacy chain-dial lane, add `merge: [/etc/osh-lane/onecli-ca.pem]`). The render gives
+   every profile a `secrets.openshell_trust` source; for a fleet that `install-openshell`
+   does not install, run `hermes coworker install-trust <spec>` once for the gateway home.
+   The source re-derives the trust env from the live bundle at every Hermes start, so a
+   sandbox restart that re-mints the CA needs no edit. Never copy the bundle, and never put
+   a CA env name in a profile `.env` or the managed `.env`: the installers refuse one, and a
+   copied path goes stale on the next restart. Without this trust, TLS to `inference.local`
+   fails (curl exit 60) and no served turn can complete. NO_PROXY never lists `172.17.0.1`
+   or `host.docker.internal`: the render and the installers refuse it, and every Hermes
+   start strips it from the inherited env, because every bridge hop is reachable only
+   through the sandbox proxy.
 2. **Rewrite-trigger placeholder only.** Each served profile's model-provider config holds
    only the `sk-OPENSHELL-PROXY-REWRITE` placeholder — **never** `COMPATIBLE_API_KEY`,
    which lives OpenShell-side and must not reach any sandbox config.
