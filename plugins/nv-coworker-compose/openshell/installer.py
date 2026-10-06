@@ -41,6 +41,10 @@ _OSH_PLUGINS = ("nv-coworker-compose", "nv-fleet-gates", "podman-onecli")
 # OSH-owned managed paths: the veto's role map + the openshell ssh-host anchor.
 _FLEET_GATES = "nv-fleet-gates"
 _BACKUP_SUFFIX = ".osh-f64.bak"
+# Plugin snapshots live in a sibling of the scanned plugins dir: a copy inside plugins/ keeps
+# its manifest name, so discovery would load it under the same key as the fresh install.
+_SNAPSHOT_ROOT = ".osh-f64-backups"
+_SIDECAR = ".install-metadata.json"
 # Marker recording that the managed config did NOT exist before the install. The §D6
 # scan-guard write (step 0.5) creates the managed config in Phase A, so without recording
 # the original absence a later phase would snapshot the installer's OWN scan-guard file and
@@ -121,6 +125,26 @@ def _coworker_roles(spec: Dict[str, Any]) -> List[str]:
     types = spec.get("types") or {}
     default_profile = spec.get("default_profile", "default")
     return [name for name in types if name != default_profile]
+
+
+def _type_provider_names(spec: Dict[str, Any], role: str) -> List[str]:
+    """The OpenShell providers a role binds at sandbox create, in declared order (deduped),
+    each checked against the top-level ``providers:`` catalog. Mirrors compose's provider
+    resolution without importing compose (the dry-run runs before the plugin is installed)."""
+    names = ((spec.get("types") or {}).get(role) or {}).get("providers")
+    if names is None:
+        return []
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError(f"{role}: providers must be a list of provider names, got {names!r}")
+    catalog = spec.get("providers") or {}
+    out: List[str] = []
+    for name in names:
+        if name not in catalog:
+            raise ValueError(
+                f"{role}: unknown provider {name!r} (not declared in the top-level providers: catalog)")
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _require_openshell(spec: Dict[str, Any]) -> None:
@@ -394,8 +418,17 @@ def managed_config_diff(
     ``nv-fleet-gates`` settings (``profile_roles`` + ``expected_ssh_host``) the render emits.
     Rendered keys win on conflict — the fleet policy is machine-wide and authoritative — while
     any UNRELATED machine policy the operator keeps there is preserved by the deep merge. (An
-    nv-fleet-gates-only merge would silently drop the rendered approval floor, GOV-F23.)"""
-    return _deep_merge(existing_managed or {}, rendered_managed or {})
+    nv-fleet-gates-only merge would silently drop the rendered approval floor, GOV-F23.)
+
+    The two fleet maps (``profile_roles``, ``expected_ssh_host``) are replaced whole, not merged:
+    a role an older render had but this one does not must not survive into the veto's map."""
+    merged = _deep_merge(existing_managed or {}, rendered_managed or {})
+    rendered_settings = _get_dotted(rendered_managed or {}, f"plugins.entries.{_FLEET_GATES}.settings")[1]
+    if isinstance(rendered_settings, dict):
+        for key in ("profile_roles", "expected_ssh_host"):
+            if key in rendered_settings:
+                merged["plugins"]["entries"][_FLEET_GATES]["settings"][key] = copy.deepcopy(rendered_settings[key])
+    return merged
 
 
 def _plugin_step(prefix: List[str], name: str, ref: str, state: Optional[Dict[str, Any]]) -> Optional[Step]:
@@ -412,14 +445,30 @@ def _plugin_step(prefix: List[str], name: str, ref: str, state: Optional[Dict[st
     return None
 
 
+def _snapshot_dir(plugins_dir: str) -> str:
+    """Where snapshots of ``plugins_dir`` live: ``<plugins parent>/.osh-f64-backups/plugins``."""
+    return str(Path(plugins_dir).parent / _SNAPSHOT_ROOT / "plugins")
+
+
 def _snapshot_step(plugins_dir: str, name: str) -> Step:
     """Snapshot a plugin's directory + the shared install-metadata sidecar before a
-    ``--force`` reinstall overwrites them, so a rollback can restore the prior version."""
+    ``--force`` reinstall overwrites them, so a rollback can restore the prior version. The
+    snapshot goes outside the scanned plugins dir (``_snapshot_dir``)."""
+    target = _snapshot_dir(plugins_dir)
     return Step(
-        f"# snapshot {plugins_dir}/{name} + {plugins_dir}/.install-metadata.json before reinstall",
+        f"# snapshot {plugins_dir}/{name} + {plugins_dir}/{_SIDECAR} -> {target} before reinstall",
         "plugin_snapshot",
-        data={"plugin_dir": f"{plugins_dir}/{name}", "sidecar": f"{plugins_dir}/.install-metadata.json"},
+        data={"plugin_dir": f"{plugins_dir}/{name}", "sidecar": f"{plugins_dir}/{_SIDECAR}",
+              "snapshot_dir": target},
     )
+
+
+def _legacy_snapshots(plugins_dir: Path) -> List[str]:
+    """Snapshot dirs an older installer left INSIDE ``plugins_dir`` (``<name>.osh-f64.bak``)."""
+    if not plugins_dir.is_dir():
+        return []
+    return sorted(str(p) for p in plugins_dir.iterdir()
+                  if p.is_dir() and not p.is_symlink() and p.name.endswith(_BACKUP_SUFFIX))
 
 
 def _render_out_dir() -> str:
@@ -462,6 +511,15 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
 
     steps: List[Step] = []
     mutated = False
+
+    # Legacy snapshots inside a scanned plugins dir shadow the fresh install under the same key,
+    # so they move out first — on every run that finds one, --force planned or not.
+    legacy = list(home_state.get("legacy_snapshots") or [])
+    if legacy:
+        dirs = sorted({str(Path(p).parent) for p in legacy})
+        steps.append(Step(f"# migrate legacy plugin snapshots out of {', '.join(dirs)}",
+                          "legacy_snapshot_migrate", data={"snapshots": legacy}))
+        mutated = True
 
     # Step 0 — snapshot the ORIGINAL config(s) BEFORE any mutation: a later `plugins
     # install --enable` rewrites config.yaml, and the managed write overwrites the veto
@@ -531,7 +589,12 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
             if policy_root
             else f"{out}/{role}/policy-{role}.yaml"
         )
-        steps.append(Step(["openshell", "sandbox", "create", "--name", sandbox, "--from", image, "--policy", policy], "provision_create"))
+        # --no-tty: an executed create must not open an interactive session. Providers bind at
+        # create, the same set compose's provisioning plan prints.
+        providers = [tok for name in _type_provider_names(spec, role) for tok in ("--provider", name)]
+        steps.append(Step(["openshell", "sandbox", "create", "--name", sandbox, "--from", image,
+                           "--policy", policy, "--no-tty", *providers], "provision_create",
+                          data={"rendered_policy": f"{out}/{role}/policy-{role}.yaml"}))
         steps.append(Step(["openshell", "sandbox", "ssh-config", sandbox], "provision_sshconfig"))
 
     # Install the five coworker profiles FROM the rendered distributions (never default).
@@ -663,6 +726,17 @@ def _profile_dir(home: Path, role: str) -> Path:
     return home / "profiles" / role
 
 
+def _managed_fleet_maps(spec: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """The nv-fleet-gates ``profile_roles`` and ``expected_ssh_host`` maps compose renders into
+    the managed fragment for this spec: each served role → orchestrator|worker, and → its ssh
+    alias ``openshell-<project>-<role>`` (compose's alias rule, computed without importing it)."""
+    project = spec.get("project", "fleet")
+    orchestrator = spec.get("orchestrator_profile", "orchestrator")
+    roles = _coworker_roles(spec)
+    return ({r: ("orchestrator" if r == orchestrator else "worker") for r in roles},
+            {r: f"openshell-{project}-{r}" for r in roles})
+
+
 def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     """Build the installer's view of an EXISTING home from the filesystem only — no
     render, no hermes import — so the dry-run transcript is producible in a fresh
@@ -685,6 +759,7 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
         if (home / "plugins" / name).exists():
             installed[name] = {"ref": _installed_revision(home_meta, name), "enabled": name in cfg_enabled}
 
+    legacy_snapshots = _legacy_snapshots(home / "plugins")
     profile_plugins: Dict[str, Dict[str, Any]] = {}
     present_profiles: List[str] = []
     for role in roles:
@@ -692,6 +767,7 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
         if not pdir.exists():
             continue
         present_profiles.append(role)
+        legacy_snapshots += _legacy_snapshots(pdir / "plugins")
         pconf = pdir / "config.yaml"
         pcfg = yaml.safe_load(pconf.read_text(encoding="utf-8")) or {} if pconf.exists() else {}
         penabled = set(((pcfg.get("plugins") or {}).get("enabled")) or [])
@@ -720,8 +796,11 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     # a re-run would plan a scanned `plugins install`/`--force` the DANGEROUS verdict refuses
     # (--force cannot override it), so the scan-guard write must be scheduled to backfill it.
     scan_guarded = ((managed_config.get("plugins") or {}).get("scan_on_install") is False)
-    managed_installed = (bool(fleet_settings.get("profile_roles"))
-                         and bool(fleet_settings.get("expected_ssh_host"))
+    # A fragment from an older render (other roles, an old ssh host) is stale, not installed:
+    # the fleet keys must EQUAL what this spec renders, else the veto checks the wrong map.
+    want_roles, want_hosts = _managed_fleet_maps(spec)
+    managed_installed = (fleet_settings.get("profile_roles") == want_roles
+                         and fleet_settings.get("expected_ssh_host") == want_hosts
                          and approvals_present
                          and scan_guarded)
     backup_present = (home / ("config.yaml" + _BACKUP_SUFFIX)).exists()
@@ -733,6 +812,7 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
         "profiles": present_profiles,
         "managed_config": managed_config,
         "managed_installed": managed_installed,
+        "legacy_snapshots": legacy_snapshots,
         "backup_present": backup_present,
         "wires": _collect_wires(default_config),
         "rooms": None,  # existence checked at execution via groups.state (idempotent)
@@ -829,18 +909,176 @@ def _compute_profile_digests(spec_path: Any, ref: str, state: Dict[str, Any]) ->
     return digests
 
 
+_CAPTURE_TIMEOUT_S = 60
+_STATUS_POLLS = 3
+_STATUS_POLL_INTERVAL_S = 2.0
+
+
+def _run_capture(cmd: List[str]) -> str:
+    import subprocess
+    proc = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
+    return proc.stdout or ""
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    # Text twin of _atomic_write_yaml (symlink target kept, mode kept); a new file is 0600
+    # because OpenSSH refuses a config file other users can write.
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    tmp = target.with_name(target.name + ".osh-f64.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, (target.stat().st_mode & 0o777) if target.exists() else 0o600)
+    os.replace(tmp, target)
+
+
+def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
+    """Persist one sandbox's ``openshell sandbox ssh-config`` output into the gateway user's
+    managed include ``~/.ssh/config.d/openshell-<project>.conf`` (one marker-delimited block per
+    alias, replaced in place on a rerun), and make ``~/.ssh/config`` include it exactly once as
+    its FIRST line — OpenSSH applies the first value it reads, so a later operator Host entry
+    cannot shadow the alias. Every other line of the operator's config is kept."""
+    ssh_dir = Path(os.path.expanduser("~")) / ".ssh"
+    inc_rel = f"config.d/openshell-{project}.conf"
+    inc_path = ssh_dir / inc_rel
+    inc_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    alias = f"openshell-{sandbox}"
+    begin, end = f"# >>> {alias}", f"# <<< {alias}"
+    new_block = f"{begin}\n{block.rstrip()}\n{end}\n"
+    text = inc_path.read_text(encoding="utf-8") if inc_path.exists() else ""
+    pattern = re.compile(rf"(?ms)^{re.escape(begin)}\n.*?^{re.escape(end)}\n?")
+    if pattern.search(text):
+        text = pattern.sub(lambda _m: new_block, text, count=1)
+    else:
+        text = text + ("\n" if text and not text.endswith("\n") else "") + new_block
+    _atomic_write_text(inc_path, text)
+    main = ssh_dir / "config"
+    lines = main.read_text(encoding="utf-8").splitlines(keepends=True) if main.exists() else []
+    include = f"Include {inc_rel}\n"
+
+    def _is_ours(line: str) -> bool:
+        # OpenSSH keywords are case-insensitive and may be separated from the value by `=`.
+        parts = line.strip().replace("=", " ", 1).split()
+        return len(parts) == 2 and parts[0].lower() == "include" and parts[1] == inc_rel
+
+    kept = [ln for ln in lines if not _is_ours(ln)]
+    if [include, *kept] != lines:
+        _atomic_write_text(main, include + "".join(kept))
+
+
+def _record_policy_digest(home: Path, sandbox: str) -> Path:
+    return home / ".osh-f64" / "sandbox-policy" / f"{sandbox}.sha256"
+
+
+def _provision_create(cmd: List[str], step: Step, ctx: Dict[str, Any]) -> None:
+    """Create a worker sandbox, or re-create it when the policy it was created with differs from
+    the current render. The rendered policy's digest is recorded after each create; a sandbox
+    with no record (an older install) counts as drifted. A ``--policy-root`` mirror must match
+    the render byte for byte, else the install halts before any delete or create."""
+    name = cmd[cmd.index("--name") + 1]
+    exists = _sandbox_exists(name)
+    rendered = Path((step.data or {}).get("rendered_policy") or cmd[cmd.index("--policy") + 1])
+    bound = Path(cmd[cmd.index("--policy") + 1])
+    if not rendered.is_file():
+        raise ValueError(f"{name}: rendered policy {rendered} is missing; run the compose step first")
+    want = rendered.read_bytes()
+    if bound != rendered and (not bound.is_file() or bound.read_bytes() != want):
+        raise ValueError(
+            f"{name}: --policy {bound} does not match the rendered policy {rendered}; refresh the "
+            "host mirror before installing (a stale mirror would bind an old policy)")
+    import hashlib
+    digest = hashlib.sha256(want).hexdigest()
+    record = _record_policy_digest(Path(ctx["home"]), name)
+    if exists:
+        recorded = record.read_text(encoding="utf-8").strip() if record.is_file() else None
+        if recorded == digest:
+            return
+        _run(["openshell", "sandbox", "delete", name])
+    _run(cmd)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(record, digest + "\n")
+
+
+def _gateway_answered(status_stdout: str) -> bool:
+    text = (status_stdout or "").lower()
+    return "gateway is running" in text or "active (running)" in text
+
+
+def _restart_gateway_detached(cmd: List[str], home: Path) -> None:
+    """Run ``hermes gateway restart`` so the installer returns. Without a service manager the
+    release restart runs the new gateway in the foreground of its own process, so the child is
+    started in its own session (``setsid -f``, else ``start_new_session``) with stdin closed and
+    output to a log; it outlives the installer as the gateway. Under a service manager the child
+    restarts the service and exits. Either way the wait is bounded and the installer returns,
+    reporting what it saw."""
+    import shutil
+    import subprocess
+    import time
+    env = _gateway_restart_env()
+    log_path = home / "logs" / "osh-f64-restart.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as log:
+        if shutil.which("setsid", path=env.get("PATH")):
+            subprocess.run(["setsid", "-f", *cmd], check=True, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=subprocess.STDOUT, env=env)
+        else:
+            subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             env=env, start_new_session=True)
+    # The first poll waits one interval so a status answer is less likely to come from the
+    # gateway being replaced; an answer is reported, not treated as proof of the new one.
+    answered = False
+    for _attempt in range(_STATUS_POLLS):
+        time.sleep(_STATUS_POLL_INTERVAL_S)
+        try:
+            probe = subprocess.run(["hermes", "gateway", "status"], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   stdin=subprocess.DEVNULL, env=env, timeout=_CAPTURE_TIMEOUT_S)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+            continue
+        if _gateway_answered(getattr(probe, "stdout", "")):
+            answered = True
+            break
+    status = "a gateway answered" if answered else "no gateway answered within the poll budget"
+    sys.stderr.write(f"[osh-f64] gateway restart launched detached (log {log_path}); {status}\n")
+
+
+def _migrate_legacy_snapshots(snapshots: List[str]) -> None:
+    """Move every legacy ``<plugins>/<name>.osh-f64.bak`` snapshot (and its plugins dir's
+    ``.install-metadata.json.osh-f64.bak``) to that plugins dir's ``_snapshot_dir``. All
+    destinations are checked before anything moves, and an existing destination refuses."""
+    import shutil
+    moves: List[Tuple[Path, Path]] = []
+    for raw in snapshots:
+        src = Path(raw)
+        if not src.is_dir():
+            continue
+        dest_dir = Path(_snapshot_dir(str(src.parent)))
+        moves.append((src, dest_dir / src.name[: -len(_BACKUP_SUFFIX)]))
+        side = src.parent / (_SIDECAR + _BACKUP_SUFFIX)
+        if side.is_file() and (side, dest_dir / _SIDECAR) not in moves:
+            moves.append((side, dest_dir / _SIDECAR))
+    clashes = [str(dest) for _src, dest in moves if dest.exists()]
+    if clashes:
+        raise ValueError(f"refusing to migrate legacy plugin snapshots over existing {clashes}; "
+                         "move or remove them by hand, then re-run")
+    for src, dest in moves:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+
+
 def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
     tag = step.tag
     if isinstance(step.command, (list, tuple)):
         cmd = list(step.command)
         if tag == "provision_create":
-            name = cmd[cmd.index("--name") + 1]
-            if _sandbox_exists(name):
-                return
-            _run(cmd)
+            _provision_create(cmd, step, ctx)
+            return
+        if tag == "provision_sshconfig":
+            sandbox = cmd[-1]
+            project = (ctx.get("spec") or {}).get("project") or "fleet"
+            _persist_ssh_config(sandbox, project, _run_capture(cmd))
             return
         if tag == "restart":
-            _run(cmd, env=_gateway_restart_env())
+            _restart_gateway_detached(cmd, Path(ctx["home"]))
             return
         _run(cmd)
         return
@@ -868,16 +1106,21 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
                     # creates it next, so without the marker Phase B would snapshot that new file.
                     mabsent.parent.mkdir(parents=True, exist_ok=True)
                     mabsent.write_text("", encoding="utf-8")
+    elif tag == "legacy_snapshot_migrate":
+        _migrate_legacy_snapshots(list((step.data or {}).get("snapshots") or []))
     elif tag == "plugin_snapshot":
         import shutil
         payload = step.data or {}
         pdir = Path(payload.get("plugin_dir", ""))
-        pbak = pdir.with_name(pdir.name + _BACKUP_SUFFIX)
+        snap_dir = Path(payload.get("snapshot_dir") or _snapshot_dir(str(pdir.parent)))
+        pbak = snap_dir / pdir.name
         if pdir.name and pdir.exists() and not pbak.exists():
+            snap_dir.mkdir(parents=True, exist_ok=True)
             shutil.copytree(pdir, pbak)
         side = Path(payload.get("sidecar", ""))
-        sbak = side.with_suffix(side.suffix + _BACKUP_SUFFIX)
+        sbak = snap_dir / side.name
         if payload.get("sidecar") and side.exists() and not sbak.exists():
+            snap_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(side, sbak)
     elif tag == "default_edit":
         cfg_path = home / "config.yaml"
@@ -957,13 +1200,15 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, poli
 
 
 def phase_a(spec_path: Any, ref: str) -> None:
-    """Bootstrap phase: back up the ORIGINAL config FIRST (a ``plugins install --enable``
+    """Bootstrap phase: move any legacy in-scan plugin snapshot out of the plugins dir (it
+    would shadow the bootstrap install), then back up the ORIGINAL config (a ``plugins install --enable``
     rewrites config.yaml, so a later backup would capture a mutated file), THEN write the
     §D6 scan guard (``plugins.scan_on_install: false``) into the managed config so the
     first-party fleet plugins install offline without the scanner's DANGEROUS verdict
     (which ``--force`` cannot override), THEN install the port's plugins into the default
     home so ``hermes coworker`` exists for Phase B. Idempotent — a re-run skips all three.
-    Order is fixed by ``build_plan`` (backup -> scan_guard_write -> plugin installs)."""
+    Order is fixed by ``build_plan`` (legacy_snapshot_migrate -> backup -> scan_guard_write ->
+    plugin installs)."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
     state = collect_home_state(spec, spec_path)
@@ -983,7 +1228,8 @@ def phase_a(spec_path: Any, ref: str) -> None:
             step.tag == "plugin_snapshot"
             and Path((step.data or {}).get("plugin_dir", "")).parent == default_plugins_dir
         )
-        if step.tag in ("backup", "scan_guard_write") or is_bootstrap_plugin or is_bootstrap_snapshot:
+        if (step.tag in ("legacy_snapshot_migrate", "backup", "scan_guard_write")
+                or is_bootstrap_plugin or is_bootstrap_snapshot):
             _execute_step(step, ctx)
 
 
