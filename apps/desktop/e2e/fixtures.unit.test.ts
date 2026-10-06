@@ -10,7 +10,7 @@ const appClose = vi.fn(async () => undefined)
 vi.mock('@playwright/test', () => ({ _electron: { launch } }))
 vi.mock('./electron-binary', () => ({ resolveElectronBinary: () => '/fake/electron' }))
 vi.mock('./test', () => ({ installErrorBannerGuard: vi.fn() }))
-vi.mock('./mock-server', () => ({ startMockServer: vi.fn() }))
+vi.mock('../../../tests-js/scripts/mock-server', () => ({ startMockServer: vi.fn() }))
 vi.mock('node:fs', () => ({
   existsSync: () => true,
   mkdirSync: vi.fn(),
