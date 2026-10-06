@@ -24,10 +24,10 @@ turns, one retry headroom each). This is not agent-to-agent: one profile, `triag
 
 ## Gating
 
-- **Restart lane (operator-relayed).** Step 2 needs a restart of `fleet-f62d-e13gw` that KEEPS
-  its home. Ask the Orchestrator for it on `hermes-FLEET-F62.e`. Use the broker's restart verb if
-  the lane exposes one; otherwise the operator restarts it. Delete-and-recreate is not a restart.
-  An unavailable restart is `ESCALATE(infra)`, uncounted, never a skipped step.
+- **Restart verb.** Step 2 runs `openshell sandbox restart fleet-f62d-e13gw` (lane verb, allowed for
+  `fleet-f62d-*` only). It is a docker restart of that one sandbox container: it keeps the
+  filesystem and the home, re-mints the CA, and returns once the restart completes.
+  Delete-and-recreate is not a restart. The scenario still requires an observed re-mint (step 3).
 - **Lane pre-flight first** (`/workspace/shared/wiki/concepts/hermes-runtime-openshell-lane-preflight-and-stacked-rows.md`):
   the image's fork mirror holds the PR head (`git -C /opt/hermes/fork cat-file -e <sha>^{commit}`
   rc 0, probed in a throwaway sandbox that is deleted on exit) and at most 17 live sandboxes exist
@@ -87,40 +87,48 @@ print("bridge" if "172.17.0.1" in np or "host.docker.internal" in np.lower() els
 1. Run one model turn as the triager: `timeout 300 hermes -p triager chat -q "reply with the word ok"`.
    Then run `probe $GW/profiles/triager` and `probe $GW` → expect: the turn exits 0 with a reply,
    and both probes print `/etc/openshell-tls/ca-bundle.pem` then `no-bridge`.
-2. **Restart the sandbox (operator-relayed, see § Gating).** Ask the Orchestrator for a restart of
-   `fleet-f62d-e13gw` that keeps its home → expect: the sandbox is Ready again, and
-   `sha256sum -c /tmp/e13-cfg.sha` passes (the triager `config.yaml` is unchanged).
+2. **Restart the sandbox:** `openshell sandbox restart fleet-f62d-e13gw` → expect: exit 0, the
+   sandbox is Ready again, and `sha256sum -c /tmp/e13-cfg.sha` passes (the triager `config.yaml`
+   is unchanged).
 3. Record `H2`: `sha256sum /etc/openshell-tls/ca-bundle.pem | cut -c1-64` → expect: `H2 != $(cat /tmp/e13-H1)`
    (a re-mint was observed). If `H2 == H1`, the premise was not exercised: report `ESCALATE`,
    never PASS.
 4. With no file edited, repeat step 1's model turn and both probes → expect: exit 0 with a reply,
    and both probes again print the live path and `no-bridge`.
-5. Stale-copy control, through the proxy tunnel:
+5. Stale-copy control, through the proxy tunnel. First record the stale copy's digest:
+   `sha256sum /tmp/e13-stale-ca.pem | cut -c1-64` → expect: it equals `H1` (the copy is the
+   pre-restart bundle). If it differs, the control does not test a stale copy: report `ESCALATE`,
+   never PASS. Then run both verify attempts through one function, so only the CA file differs:
 
    ```bash
    "$HPY" - <<'PY'
    import socket, ssl
+   PROXY, TARGET, SNI = ("10.200.0.1", 3128), "inference-api.nvidia.com:443", "inference-api.nvidia.com"
    def tunnel():
-       s = socket.create_connection(("10.200.0.1", 3128), timeout=30)
-       s.sendall(b"CONNECT inference-api.nvidia.com:443 HTTP/1.1\r\nHost: inference-api.nvidia.com:443\r\n\r\n")
+       s = socket.create_connection(PROXY, timeout=30)
+       s.sendall(f"CONNECT {TARGET} HTTP/1.1\r\nHost: {TARGET}\r\n\r\n".encode())
        head = b""
        while b"\r\n\r\n" not in head:
            head += s.recv(1)
        print("proxy:", head.split(b"\r\n", 1)[0].decode())
        return s
-   for label, cafile in (("stale", "/tmp/e13-stale-ca.pem"), ("live", "/etc/openshell-tls/ca-bundle.pem")):
+   def verify(label, cafile):
        ctx = ssl.create_default_context(cafile=cafile)
        try:
-           ctx.wrap_socket(tunnel(), server_hostname="inference-api.nvidia.com").close()
+           ctx.wrap_socket(tunnel(), server_hostname=SNI).close()
            print(label, "handshake-ok")
        except ssl.SSLCertVerificationError as exc:
-           print(label, type(exc).__name__)
+           print(label, type(exc).__name__, "reason:", exc.verify_message or exc.reason)
+   print(f"settings: proxy={PROXY[0]}:{PROXY[1]} target={TARGET} sni={SNI} "
+         f"client=ssl.create_default_context(cafile=<varies>) timeout=30 (identical for both attempts)")
+   verify("stale", "/tmp/e13-stale-ca.pem")
+   verify("live", "/etc/openshell-tls/ca-bundle.pem")
    PY
    ```
 
-   → expect: both proxy status lines are `200` (otherwise the control is `FAIL(env)`), `stale`
-   prints `SSLCertVerificationError`, and `live` prints `handshake-ok`. The positive control proves
-   that the tunnel, not a direct dial, was exercised.
+   → expect: the `settings:` line once, both proxy status lines are `200` (otherwise the control is
+   `FAIL(env)`), `stale` prints `SSLCertVerificationError` with its reason string, and `live` prints
+   `handshake-ok`. The positive control proves that the tunnel, not a direct dial, was exercised.
 6. Teardown (always, also after a failure): delete `fleet-f62d-e13gw` → expect: not listed by
    `openshell sandbox list`.
 
@@ -133,8 +141,11 @@ through the same proxy tunnel the stale copy fails verification while the live b
 ## Evidence
 
 - `scenario-AC-FLEET-F62.e-13/evidence.txt`: `H1`, `H2`, each step's exit code, each probe's two
-  printed lines, the two proxy status lines and the control's two result lines. No env value other
-  than the probe's path.
+  printed lines, and for the step-5 control: the `sha256` of `/tmp/e13-stale-ca.pem` (must equal
+  `H1`), the `settings:` line (same proxy, target host:port, SNI, tunnel and client settings for
+  both attempts; only the CA file differs), the two proxy status lines, and the two result lines
+  (the stale attempt's error class and its reason string). No env value other than the probe's
+  path. This is a shell-only live outcome (P5): no screenshot.
 - `scenario-AC-FLEET-F62.e-13/openshell.log`: the restart, and the allow lines for the two
   inference calls.
 - Model-call count for the bound, from the triager home:
