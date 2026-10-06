@@ -238,6 +238,7 @@ def test_ac_a2a_f20_5(tmp_path, monkeypatch):
     dependency-gated (promoted todo->ready only when ALL children finish), and
     a terminal child event is delivered to the originating destination."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_graph import decompose_triage_task
     from gateway.config import Platform
     from gateway.run import GatewayRunner
 
@@ -255,7 +256,7 @@ def test_ac_a2a_f20_5(tmp_path, monkeypatch):
         )
     # two INDEPENDENT children so the root is gated on BOTH completing.
     with kb.connect() as conn:
-        child_ids = kb.decompose_triage_task(
+        child_ids = decompose_triage_task(
             conn, root, root_assignee="orchestrator",
             children=[
                 {"title": "work A", "assignee": "engineer", "parents": []},
