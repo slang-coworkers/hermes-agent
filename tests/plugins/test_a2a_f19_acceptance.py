@@ -21,7 +21,7 @@ import yaml
 
 import hermes_cli.plugins as plugins_mod
 from hermes_cli.plugins import PluginManager
-from tools import approval
+from tools import approval, approval_context
 
 PLUGIN_KEY = "nv-fleet-gates"
 _REPO = Path(__file__).resolve().parents[2]
@@ -131,7 +131,7 @@ def native_gate(monkeypatch):
     monkeypatch.setattr(approval, "get_current_session_key", lambda default="default": SESSION)
     monkeypatch.setattr(approval, "is_current_session_yolo_enabled", lambda: False)
     monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", False, raising=False)
-    monkeypatch.setattr(approval, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr("tools.terminal_tool._get_approval_callback", lambda: None, raising=False)
     monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
     monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
@@ -232,6 +232,6 @@ def test_ac_a2a_f19_6(tmp_path, monkeypatch, native_gate, ctx_pred, mode_getter)
     denied = plugins_mod.resolve_pre_tool_block("message_agent", args, session_id=SESSION)
     assert denied is not None
 
-    monkeypatch.setattr(approval, mode_getter, lambda: "approve")
+    monkeypatch.setattr(approval_context, mode_getter, lambda: "approve")
     released = plugins_mod.resolve_pre_tool_block("message_agent", args, session_id=SESSION)
     assert released is None
