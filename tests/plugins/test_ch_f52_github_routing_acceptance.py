@@ -308,19 +308,23 @@ async def test_ac_ch_f52_6(tmp_path, monkeypatch, name, event, action):
     ("gh-check-suite", "check_suite", "completed", "failure", "fixer", True),
 ])
 async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, action, conclusion, profile, expect_dispatch):
-    """The two CI-gated routes run their rendered route script (installed at $HERMES_HOME/scripts)
-    end-to-end through the adapter subprocess: a pull_request delivery parks a card and stays silent
+    """The two CI-gated routes run their rendered route script (installed with the bound profile at
+    its $HERMES_HOME/scripts, where the resolver looks under /p/<profile>/) end-to-end through the
+    adapter subprocess: a pull_request delivery parks a blocked reviewer card and stays silent
     (200 ignored, no dispatch); a failed check_suite delivery returns the payload and dispatches the
     fixer (202, one run). This exercises the __main__ shim; the park/promote gate state transitions
     are proven directly in test_loop_f40_acceptance."""
-    import os
-    import shutil as _sh
+    import sqlite3
+
+    from hermes_cli.kanban_db import kanban_db_path
+    from hermes_cli.profile_distribution import install_distribution
 
     rendered, routes = _rendered_default_routes(tmp_path, monkeypatch)
     route = routes[name]
     assert route.get("script")  # the CI-gate script is what makes this route gated
-    # Install the rendered scripts where the webhook resolver looks them up.
-    _sh.copytree(Path(rendered[DEFAULT_PROFILE]) / "scripts", Path(os.environ["HERMES_HOME"]) / "scripts")
+    # Install the bound profile from its rendered distribution, as onboarding does; the adapter
+    # runs the script inside that profile's scope, so the resolver looks in ITS scripts/.
+    install_distribution(rendered[profile], name=profile, force=True)
     sentinel = CANONICAL_ROUTES[name]["sentinel"]
     app, captured = _multiplex_app(monkeypatch, tmp_path, routes)
     payload = {"action": action, "repository": {"full_name": sentinel},
@@ -340,6 +344,20 @@ async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, action, con
             assert (await resp.json()).get("status") == "ignored"
             await asyncio.sleep(0.05)
             assert captured == []
+    if not expect_dispatch:
+        # "ignored" is also what a missing script yields, so prove the script ran: it parked the
+        # per-head review card, blocked and assigned to the reviewer, on the shared board.
+        board = kanban_db_path()
+        assert board.is_file(), f"the reviewer route script never ran: no kanban board at {board}"
+        con = sqlite3.connect(str(board))
+        try:
+            card = con.execute(
+                "SELECT status, assignee FROM tasks WHERE idempotency_key = ?",
+                (f"loop-f40-review:{sentinel}#4242:{'a' * 40}",),
+            ).fetchone()
+        finally:
+            con.close()
+        assert card == ("blocked", "reviewer")
 
 
 # ─────────────────────────── AC-CH-F52-7 ───────────────────────────
