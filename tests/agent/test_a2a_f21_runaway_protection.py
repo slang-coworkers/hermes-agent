@@ -59,9 +59,9 @@ def test_ac_a2a_f21_2():
     ctrl = ToolCallGuardrailController()
     args = {"target": "peer-b", "message": "ack"}
     result = '{"status": "sent"}'
-    assert ctrl.observe_identical_call("message_agent", args, result) is None
-    assert ctrl.observe_identical_call("message_agent", args, result) is None
-    notice = ctrl.observe_identical_call("message_agent", args, result)
+    assert ctrl.observe_call("message_agent", args, result).notice is None
+    assert ctrl.observe_call("message_agent", args, result).notice is None
+    notice = ctrl.observe_call("message_agent", args, result).notice
     assert notice is not None and isinstance(notice, str) and notice.strip(), (
         "identical-call breaker did not fire on the 3rd consecutive identical call"
     )
@@ -71,12 +71,12 @@ def test_ac_a2a_f21_2():
     assert is_stall_guard_repeatable("process") is True
     poller = ToolCallGuardrailController()
     for _ in range(5):
-        assert poller.observe_identical_call("process", {"pid": 42}, '{"running": true}') is None
+        assert poller.observe_call("process", {"pid": 42}, '{"running": true}').notice is None
 
     # Negative control B: a call whose result changes each time is not an identical repeat.
     changing = ToolCallGuardrailController()
     for i in range(5):
-        assert changing.observe_identical_call("web_search", {"q": "x"}, f'{{"n": {i}}}') is None
+        assert changing.observe_call("web_search", {"q": "x"}, f'{{"n": {i}}}').notice is None
 
 
 def test_ac_a2a_f21_3(tmp_path, monkeypatch):
