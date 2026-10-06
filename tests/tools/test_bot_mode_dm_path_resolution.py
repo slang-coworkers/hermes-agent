@@ -8,7 +8,6 @@ bare "hermes" that raises FileNotFoundError in the background runner.
 
 import json
 import os
-import shlex
 import shutil
 import sys
 import textwrap
@@ -17,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tools import bot_mode_dm, bot_mode_probe
+from tests.tools.test_bot_mode_dm import _runner_parts
 
 
 @pytest.fixture(autouse=True)
@@ -83,12 +83,6 @@ def _capture_spawn(monkeypatch):
 
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", fake_terminal_tool)
     return calls
-
-
-def _runner_parts(command):
-    parts = shlex.split(command)
-    marker = parts.index("--run-delivery")
-    return parts[marker + 1], parts[marker + 2], parts[marker + 3:]
 
 
 def _service_context_cli(tmp_path, monkeypatch):
