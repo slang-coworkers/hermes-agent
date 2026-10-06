@@ -197,8 +197,9 @@ legitimate event can carry:
 The reviewer and the approver read check runs, never the legacy commit-status
 endpoint, which can be empty while a check run is red. The reviewer reads
 through its attached GitHub provider. The approver has no provider: it reads
-credential-free through curl, with a GET-only egress rule to the API host, so
-its repository must be public.
+credential-free through curl, with a GET-only egress rule to the API host (the
+spec's `egress.anonymous_reads` for the approver, see
+[the fleet port notes](./fleet-nanoclaw-base-port.md)), so its repository must be public.
 
 ## Operator lane
 
@@ -319,7 +320,6 @@ The `ingress:` block of a fleet spec (all optional except where noted):
 | `per_pr_hourly_budget` | `30` | deliveries per PR and hour before the runaway flag |
 | `gateway_sandbox` | required | the gateway sandbox name |
 | `gateway_start` | required | the operator-approved gateway start argv |
-| `anonymous_reads` | `{}` | per role, credential-free GET-only egress targets (`host:port`) |
 | `scope` | none | `repo`, `ref_prefix` and `label_prefix` for the edge scope (see [Edge scope](#edge-scope)); copied into `host/edge.yaml` |
 | `host_checkout`, `host_python`, `host_dir`, `openshell_bin`, `edge_listen`, `edge_state_dir` | see the plugin | host paths the units use |
 

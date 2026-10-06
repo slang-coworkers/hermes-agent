@@ -282,7 +282,7 @@ def _cli_render_host(args) -> int:
 
         with open(args.spec, encoding="utf-8") as handle:
             spec = yaml.safe_load(handle) or {}
-        params = hostrender.validate(spec.get("ingress"), list((spec.get("types") or {}).keys()))
+        params = hostrender.validate(spec.get("ingress"))
         hostrender.render_host(params, args.out)
     except (OSError, ValueError) as exc:
         return _emit({"status": "error", "reason": str(exc)}, args, ok=False)
