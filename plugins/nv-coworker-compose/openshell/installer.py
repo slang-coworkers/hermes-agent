@@ -54,6 +54,19 @@ _ABSENT_SUFFIX = ".osh-f64.absent"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
+def _load_trust():
+    # By path, not a relative import: install-into-sandbox.sh runs this file as a script.
+    import importlib.util
+    path = Path(__file__).resolve().parent / "trust.py"
+    spec = importlib.util.spec_from_file_location("_osh_trust_installer", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_trust = _load_trust()
+
+
 class Step:
     """One ordered install step. ``command`` is a hermes/openshell argv vector (executed
     via subprocess) or a ``#``-prefixed action line (backup / managed write / default
@@ -359,7 +372,56 @@ def _desired_default(
             grants[role] = [s.strip() for s in secret_ids]
         settings["profile_secret_sets"] = grants
         desired[key] = settings
+    if spec.get("substrate") == "openshell":
+        # The default home is edited in place, not rendered, so it lacks the rendered fleet
+        # selector the keyless NO_PROXY strip keys on; this marker stands in for it.
+        own = f"plugins.entries.{_trust.PLUGIN_KEY}.settings"
+        if isinstance(desired.get(own), dict):
+            desired[own] = {**desired[own], _trust.FLEET_MARKER: True}
+        else:
+            desired[f"{own}.{_trust.FLEET_MARKER}"] = True
+        desired.update(_trust_keys(existing, spec))
     return desired
+
+
+def _trust_keys(existing: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+    """The two ``secrets.*`` keys a spec declaring ``egress.openshell_trust`` adds to a home."""
+    trust = _trust.trust_from_spec(spec)
+    if trust is None:
+        return {}
+    _, sources = _get_dotted(existing, "secrets.sources")
+    return {
+        f"secrets.{_trust.SOURCE_NAME}": _trust.trust_block(trust),
+        "secrets.sources": _trust.with_trust_source(sources),
+    }
+
+
+def _preflight_trust_inputs(spec: Dict[str, Any], existing: Dict[str, Any]) -> None:
+    """Refuse an input that outranks the start-time trust/NO_PROXY guards before any step."""
+    if spec.get("substrate") != "openshell":
+        return
+    managed = _managed_dir()
+    _trust.preflight_install(existing, _require_home(), Path(managed) if managed else None,
+                             keyed=_trust.trust_from_spec(spec) is not None)
+
+
+def install_trust(spec_path: Any) -> Dict[str, Any]:
+    """``hermes coworker install-trust``: merge only the rendered trust keys into the active
+    gateway home of an openshell spec that ``install-openshell`` does not install."""
+    spec = load_spec(spec_path)
+    if spec.get("substrate") != "openshell":
+        raise ValueError(f"install-trust requires substrate: openshell (spec has {spec.get('substrate')!r})")
+    if _trust.trust_from_spec(spec) is None:
+        raise ValueError(
+            f"install-trust requires {_trust.SPEC_KEY} (the live OpenShell bundle) in the spec")
+    home = _require_home()
+    cfg_path = home / "config.yaml"
+    existing = (yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}) if cfg_path.exists() else {}
+    _preflight_trust_inputs(spec, existing)
+    diff = {k: v for k, v in _trust_keys(existing, spec).items() if _get_dotted(existing, k) != (True, v)}
+    if diff:
+        _atomic_write_yaml(cfg_path, apply_config_diff(existing, diff))
+    return {"ok": True, "home": str(home), "changed": sorted(diff)}
 
 
 def default_config_diff(
@@ -500,6 +562,7 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
     out = _render_out_dir()
 
     default_config = home_state.get("default_config") or {}
+    _preflight_trust_inputs(spec, default_config)
     installed = home_state.get("plugins") or {}
     profile_plugins = home_state.get("profile_plugins") or {}
     installed_profiles = list(home_state.get("profiles") or [])
@@ -853,7 +916,11 @@ def _gateway_restart_env() -> Dict[str, str]:
     # names, so the wrapper guard does not refuse it. Scoping the child's inherited names does
     # NOT waive the core api_server API_SERVER_KEY guard — a gateway that actually enables
     # api_server still needs a strong key of its own.
-    return {k: v for k, v in os.environ.items() if not _is_refused_secret_env(k)}
+    env = {k: v for k, v in os.environ.items() if not _is_refused_secret_env(k)}
+    for name in _trust.NO_PROXY_NAMES:
+        if env.get(name):
+            env[name] = _trust.strip_bridge_no_proxy(env[name])
+    return env
 
 
 def _sandbox_exists(name: str) -> bool:

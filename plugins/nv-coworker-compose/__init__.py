@@ -965,8 +965,22 @@ def _cli_coworker(args, **_kwargs) -> int:
                 return 2
             _apply_openshell(installer, args.spec, args.ref, gateway_url, policy_root=getattr(args, "policy_root", None))
         return 0
+    if getattr(args, "coworker_command", None) == "install-trust":
+        import importlib.util
+        installer_path = Path(__file__).resolve().parent / "openshell" / "installer.py"
+        ispec = importlib.util.spec_from_file_location("_osh_f64_installer", installer_path)
+        installer = importlib.util.module_from_spec(ispec)
+        ispec.loader.exec_module(installer)
+        try:
+            result = installer.install_trust(args.spec)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result))
+        return 0
     print("usage: hermes coworker {compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]"
-          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--policy-root <dir>] [--dry-run]}")
+          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--policy-root <dir>] [--dry-run]"
+          " | install-trust <coworker-types.yaml>}")
     return 2
 
 
@@ -990,8 +1004,25 @@ def _cli_onboard(args, **_kwargs) -> int:
 # Registration
 # ---------------------------------------------------------------------------
 
+def _strip_fleet_no_proxy() -> None:
+    # Plugin discovery runs before any provider client exists, so this is the keyless fleet's
+    # start-time NO_PROXY guard (FLEET-F62.e D10); a keyed fleet's source also claims it.
+    from .openshell import trust
+
+    try:
+        from hermes_cli.config import load_config
+
+        trust.strip_inherited_no_proxy(os.environ, load_config())
+    except Exception:
+        logger.warning("nv-coworker-compose: inherited NO_PROXY strip skipped", exc_info=True)
+
+
 def register(ctx) -> None:
     from .cli import setup_coworker, setup_onboard
+    from .openshell.trust_source import OpenShellTrustSource
+
+    ctx.register_secret_source(OpenShellTrustSource())
+    _strip_fleet_no_proxy()
 
     # Plugin-relative key: get_config reads plugins.entries.nv-coworker-compose.settings.<key>.
     orchestrator_profile = ctx.get_config("orchestrator_profile", "orchestrator")
