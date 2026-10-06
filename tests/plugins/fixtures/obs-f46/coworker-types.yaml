@@ -54,7 +54,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
   sessions: {auto_prune: true, auto_archive: false}
   compression: {in_place: false}
   checkpoints: {auto_prune: true}

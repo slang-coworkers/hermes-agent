@@ -50,7 +50,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
   # All four retention keys unsafe on the DEFAULT (multiplexer) tier too — the
   # render must override every one to the fleet-safe value on this profile.
   sessions: {auto_prune: true, auto_archive: false}

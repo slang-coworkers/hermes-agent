@@ -234,7 +234,8 @@ def test_ac_fleet_f62_1(substrate, tmp_path, monkeypatch):
 
     default_cfg = _read_yaml(render_dir / "default" / "config.yaml")
     assert _dig(default_cfg, "gateway.multiplex_profiles") is True
-    assert sorted(_dig(default_cfg, "gateway.multiplex_profile_allowlist") or []) == sorted(ROLES)
+    assert "multiplex_profile_allowlist" not in default_cfg
+    assert _dig(default_cfg, "gateway.multiplex_profile_allowlist") is None
     assert _dig(default_cfg, "sessions.auto_prune") is False
     assert _dig(default_cfg, "checkpoints.auto_prune") is False
 
@@ -252,7 +253,7 @@ def test_ac_fleet_f62_1(substrate, tmp_path, monkeypatch):
         enabled = set(_dig(_read_yaml(render_dir / name / "config.yaml"), "plugins.enabled") or [])
         assert required <= enabled, f"{name} config must enable {sorted(required)}, got {sorted(enabled)}"
 
-    served = {name for name, _dir in profiles_to_serve(multiplex=True, profile_allowlist=list(ROLES))}
+    served = {name for name, _dir in profiles_to_serve(multiplex=True)}
     assert served == {"default"} | set(ROLES)
 
     from gateway.config import platform_binds_port  # production listener-ownership predicate

@@ -37,7 +37,6 @@ coworker_config:
 # DEFAULT (multiplexer) profile only.
 default_config:
   gateway.multiplex_profiles: true
-  gateway.multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
   sessions.auto_prune: false
 
 # Webhook routes live at platforms.webhook.extra.routes as a MAPPING keyed by route name

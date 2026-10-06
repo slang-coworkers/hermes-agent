@@ -62,7 +62,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, reviewer, fixer, poweruser, bigcontext]
   # DEFAULT (multiplexer) tier is also unattended — write_approval:true here must
   # be overridden to false, and the caps inserted at the floor.
   memory: {write_approval: true}

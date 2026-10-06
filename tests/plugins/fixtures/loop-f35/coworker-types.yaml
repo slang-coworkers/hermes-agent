@@ -50,7 +50,6 @@ rooms:
 default_config:
   gateway:
     multiplex_profiles: true
-    multiplex_profile_allowlist: [orchestrator, reviewer, fixer]
   sessions:
     auto_prune: false
   platforms:
