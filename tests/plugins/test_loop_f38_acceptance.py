@@ -388,7 +388,7 @@ def test_ac_loop_f38_7() -> None:
     assert snapshot and all(m["role"] in ("user", "assistant") for m in snapshot)
 
     goal, context = build_review_task(snapshot, "focus on security")
-    assert "reviewer" in goal.lower()
+    assert goal.lower().startswith("review")
     assert "loop-f38-sentinel" in context
     assert "PR #99 opened" in context
     assert "focus on security" in context
