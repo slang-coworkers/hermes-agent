@@ -25,3 +25,4 @@ plugins:
           fixer: openshell-ing-f66-fixer
           reviewer: openshell-ing-f66-reviewer
           approver: openshell-ing-f66-approver
+  scan_on_install: false
