@@ -84,7 +84,17 @@ lane installer builds it. No fixture is re-installed here.
 1. **Fleet up in `ing-f66-gw`.** Use the OpenShell lane installer pattern from
    `website/docs/user-guide/fleet-openshell.md`:
    - stage the PR head;
-   - run `install-into-sandbox.sh tests/e2e-scenarios/ING-F66/spec/openshell/coworker-types.yaml --ref <head sha> --gateway-url "$GW_URL" --policy-root <lane root>`;
+   - mirror the five rendered policies under the host policy root;
+   - **rooted-install verification (E9, D15).** First make ONE role's host mirror
+     deliberately stale (one appended comment line) and run the install below →
+     expect: the install refuses before any sandbox operation (no `ing-f66-<role>`
+     exists afterwards; the plan's `policy digest` preflight names that role).
+     Record the broker's or installer's refusal line. Then restore that mirror
+     byte-identical to the render;
+   - run `install-into-sandbox.sh tests/e2e-scenarios/ING-F66/spec/openshell/coworker-types.yaml --ref <head sha> --gateway-url "$GW_URL" --policy-root <lane root>`
+     → expect: the five creates each carry `--policy-sha256` and succeed, and five
+     `sandbox-policy/<sandbox>.sha256` records exist. A fresh fleet needs only
+     `create`; `sandbox replace` is exercised by the release reinstall;
    - start fleet processes from the in-sandbox watchdog, never via
      `sandbox exec`. The gateway start in step 2 is the one exception: it is a
      detached `sandbox exec` background start, the base's documented start path
