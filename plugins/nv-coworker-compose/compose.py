@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 import yaml
@@ -1146,6 +1146,25 @@ _OSH_F64B_ONECLI_HOP = ("172.17.0.1", 18255)
 # to render as a raw tls:skip passthrough under the single-authority posture. Any other broker
 # value would render a raw hop AC-1 forbids, so the gated path pins the broker to exactly this.
 _OSH_F64B_BROKER_HOP = ("172.17.0.1", 18777)
+# OSH-F64.e: `egress.inference_provider.mode`. `managed` (the default when absent) is the OSH-F64.b
+# render; `direct` targets the upstream as an ordinary protocol:rest endpoint, because OpenShell
+# intercepts the managed host before the policy engine (proxy.rs:614 vs :651), so no rendered rule
+# can decide a path there.
+_OSH_F64E_MODES = frozenset({"managed", "direct"})
+_OSH_F64E_MANAGED_HOST = "inference.local"
+# The lane's existing OpenShell providers. Reusing either as the direct credential provider would
+# re-attach the managed route (compatible-endpoint) or a GitHub credential to the gateway sandbox.
+_OSH_F64E_RESERVED_PROVIDERS = frozenset({"compatible-endpoint", "github"})
+_OSH_F64E_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# `sandbox create --env` refuses this prefix (openshell-cli run.rs:4001).
+_OSH_F64E_RESERVED_ENV_PREFIX = "OPENSHELL_"
+# OpenShell's canonical resolve placeholder (openshell-core secrets.rs:9, :489-491). The relay
+# resolves it for an attached provider's key, falling back from the per-revision form to this
+# canonical alias (secrets.rs:212-219), and rejects an unresolvable one rather than forwarding it.
+_OSH_F64E_PLACEHOLDER_PREFIX = "openshell:resolve:env:"
+# The delegation.request_overrides keys that carry a route, a credential or request headers.
+_OSH_F64E_OVERRIDE_ROUTE_KEYS = ("api_key", "base_url", "provider", "api_mode",
+                                 "default_headers", "extra_headers", "headers")
 
 
 def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
@@ -1158,7 +1177,14 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
     the policy-allowed ``/v1/chat/completions``), ``api_mode``, ``model_id``,
     ``rewrite_placeholder`` (the FIXED routing api_key literal, identical across profiles —
     not an identity), and ``attribution_tag_prefix`` (the per-profile tag is
-    ``<prefix>-<role>``)."""
+    ``<prefix>-<role>``).
+
+    OSH-F64.e: the optional ``mode`` selects the route — ``managed`` (absent) is the above;
+    ``direct`` instead requires ``upstream_base_url`` (== ``base_url``, never the managed host),
+    ``credential_provider`` (the OpenShell provider attached to the gateway sandbox),
+    ``credential_env`` (the credential key NAME) and ``gateway_image``, and refuses
+    ``rewrite_placeholder``. Both modes return the rendered ``api_key``: the managed trigger
+    literal, or OpenShell's resolve placeholder for ``credential_env``."""
     if not isinstance(block, dict):
         raise CompositionError(
             f"egress.inference_provider must be a mapping, got {type(block).__name__}")
@@ -1173,6 +1199,11 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
                 f"egress.inference_provider.{key} must not contain control characters, got {val!r}")
         return val.strip()
 
+    mode = block.get("mode", "managed")
+    if not isinstance(mode, str) or mode not in _OSH_F64E_MODES:
+        raise CompositionError(
+            f"egress.inference_provider.mode must be one of {sorted(_OSH_F64E_MODES)} "
+            f"(absent = managed), got {mode!r}")
     provider = _req("provider")
     base_url = _req("base_url")
     parts = urlsplit(base_url)
@@ -1204,6 +1235,8 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
             f"({', '.join(sorted(_OSH_F64B_INFERENCE_API_MODES))}) — other modes either strip the "
             f"X-Hermes-Profile attribution header (run_agent.py:6437) or run off the policy-allowed "
             f"REST route (codex_app_server, run_agent.py:3391)")
+    if mode == "direct":
+        return _validate_direct_inference_fields(block, _req, provider, base_url, api_mode)
     rewrite_placeholder = _req("rewrite_placeholder")
     if _OSH_F64B_REAL_CRED_KEY in rewrite_placeholder:
         raise CompositionError(
@@ -1217,12 +1250,72 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
             f"{_OSH_F64B_ROUTING_PLACEHOLDER!r} (the literal the OpenShell L7 credential rewrite "
             f"fires on, identical across profiles), got {rewrite_placeholder!r}")
     return {
+        "mode": "managed",
         "provider": provider,
         "base_url": base_url,
         "api_mode": api_mode,
         "model_id": _req("model_id"),
         "rewrite_placeholder": rewrite_placeholder,
+        "api_key": rewrite_placeholder,
         "attribution_tag_prefix": _req("attribution_tag_prefix"),
+    }
+
+
+def _is_managed_inference_host(host: str) -> bool:
+    return _canon_host(host) == _OSH_F64E_MANAGED_HOST
+
+
+def _validate_direct_inference_fields(block: Dict[str, Any], req: Callable[[str], str],
+                                      provider: str, base_url: str,
+                                      api_mode: str) -> Dict[str, Any]:
+    """The ``mode: direct`` half of ``_validate_openshell_inference_provider`` (OSH-F64.e §D1).
+    ``base_url`` has already passed the shared https + ``/v1`` grammar; ``upstream_base_url``
+    must equal it, so the policy endpoint, the provider config and the attached credential all
+    name one upstream."""
+    upstream_base_url = req("upstream_base_url")
+    if upstream_base_url != base_url:
+        raise CompositionError(
+            f"egress.inference_provider.upstream_base_url {upstream_base_url!r} must equal "
+            f"base_url {base_url!r} in direct mode (one upstream for the policy endpoint and the "
+            f"provider config)")
+    if _is_managed_inference_host(urlsplit(upstream_base_url).hostname or ""):
+        raise CompositionError(
+            f"egress.inference_provider.upstream_base_url must not name the managed host "
+            f"{_OSH_F64E_MANAGED_HOST} in direct mode: OpenShell intercepts it before the policy "
+            f"engine, so the rendered path rules would not govern it")
+    if "rewrite_placeholder" in block:
+        raise CompositionError(
+            "egress.inference_provider.rewrite_placeholder is refused in direct mode: the managed "
+            "trigger literal carries no OpenShell resolve marker, so the relay would forward it "
+            "unresolved")
+    credential_provider = _safe_name("egress.inference_provider.credential_provider",
+                                     req("credential_provider"))
+    if credential_provider in _OSH_F64E_RESERVED_PROVIDERS:
+        raise CompositionError(
+            f"egress.inference_provider.credential_provider {credential_provider!r} is reserved "
+            f"({', '.join(sorted(_OSH_F64E_RESERVED_PROVIDERS))} are the lane's existing "
+            f"providers); declare a dedicated generic provider for the direct route")
+    credential_env = req("credential_env")
+    if not _OSH_F64E_ENV_KEY_RE.match(credential_env):
+        raise CompositionError(
+            f"egress.inference_provider.credential_env must be a credential key NAME matching "
+            f"[A-Za-z_][A-Za-z0-9_]*, got {credential_env!r}")
+    if credential_env.startswith(_OSH_F64E_RESERVED_ENV_PREFIX):
+        raise CompositionError(
+            f"egress.inference_provider.credential_env {credential_env!r} uses the reserved "
+            f"OpenShell env prefix {_OSH_F64E_RESERVED_ENV_PREFIX}")
+    return {
+        "mode": "direct",
+        "provider": provider,
+        "base_url": base_url,
+        "upstream_base_url": upstream_base_url,
+        "api_mode": api_mode,
+        "model_id": req("model_id"),
+        "credential_provider": credential_provider,
+        "credential_env": credential_env,
+        "gateway_image": req("gateway_image"),
+        "api_key": f"{_OSH_F64E_PLACEHOLDER_PREFIX}{credential_env}",
+        "attribution_tag_prefix": req("attribution_tag_prefix"),
     }
 
 
@@ -1299,6 +1392,11 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
             return _canon_host(h), p
         route_hp = _canon_hp(inference_route)
         broker_hp = _canon_hp(broker_addr)
+        if inference_provider["mode"] == "direct" and _is_managed_inference_host(route_hp[0]):
+            raise CompositionError(
+                f"egress.inference_route {inference_route!r} must not be the managed host "
+                f"{_OSH_F64E_MANAGED_HOST} in direct mode: the route is the upstream host:port, "
+                f"decided per request by its rendered rules")
         # AC-OSH-F64.b-1: the broker is the ONLY host:port permitted to render as a raw tls:skip
         # passthrough, so pin it to exactly 172.17.0.1:18777 — any other value (the dropped 18255
         # OneCLI hop, or any other port like 18256) would render a raw hop AC-1 forbids. The base
@@ -1341,6 +1439,16 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
                   if "filesystem_read_write" in egress else None)
     anonymous_reads = (_validate_openshell_anonymous_reads(egress["anonymous_reads"])
                        if "anonymous_reads" in egress else {})
+    # A worker's anonymous GET endpoint must not re-open what single authority took from workers:
+    # the gateway-only inference route, or the dropped OneCLI hop.
+    if inference_provider is not None:
+        for role, targets in anonymous_reads.items():
+            for target in targets:
+                if _canon_hp(target) in (route_hp, _OSH_F64B_ONECLI_HOP):
+                    raise CompositionError(
+                        f"egress.anonymous_reads.{role} target {target!r} is the inference route "
+                        f"or the dropped OneCLI 18255 hop; under single-authority inference "
+                        f"neither is a worker endpoint")
     binaries = (_validate_openshell_binaries(egress["binaries"])
                 if "binaries" in egress else None)
     # tls:skip toggle (OpenShell 0.0.72). The raw hops are the OneCLI proxy hops a worker
@@ -1692,6 +1800,36 @@ def _type_providers(
     return resolved
 
 
+def _refuse_worker_credential_provider(
+    providers_by_type: Dict[str, List[Tuple[str, Dict[str, Any]]]],
+    inference_provider: Optional[Dict[str, Any]],
+) -> None:
+    """OSH-F64.e §D1/§D4: in direct mode only the gateway sandbox may hold the inference
+    credential, so a worker type opting into ``credential_provider`` fails closed — the plan would
+    otherwise give that worker the attached credential."""
+    if not inference_provider or inference_provider.get("mode") != "direct":
+        return
+    cred = inference_provider["credential_provider"]
+    for tname, provs in providers_by_type.items():
+        if any(pname == cred for pname, _spec in provs):
+            raise CompositionError(
+                f"{tname}: provider {cred!r} is the direct-mode inference credential provider; "
+                f"it attaches to the gateway sandbox only, never to a worker")
+
+
+def _refuse_gateway_type_collision(type_names: Iterable[str],
+                                   inference_provider: Optional[Dict[str, Any]],
+                                   fleet_name: str) -> None:
+    """OSH-F64.e §D4: direct mode provisions the gateway sandbox as ``<fleet>-gw``, so a coworker
+    type named ``gw`` would share its sandbox name. Managed mode creates no gateway sandbox."""
+    if not inference_provider or inference_provider.get("mode") != "direct":
+        return
+    if "gw" in type_names:
+        raise CompositionError(
+            f"type name 'gw' collides with the direct-mode gateway sandbox "
+            f"{_openshell_sandbox_name(fleet_name, 'gw')}")
+
+
 def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: str,
                                           inference_provider: Dict[str, Any]) -> None:
     """Render a served coworker's single-authority inference model-provider config
@@ -1720,7 +1858,7 @@ def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: 
         provider: {
             "base_url": inference_provider["base_url"],
             "api_mode": inference_provider["api_mode"],
-            "api_key": inference_provider["rewrite_placeholder"],
+            "api_key": inference_provider["api_key"],
             "default_model": inference_provider["model_id"],
             # X-Hermes-Profile is the per-profile attribution carrier: both profile children share
             # the one gateway sandbox, so a per-request header distinguishes them; it survives
@@ -1745,8 +1883,22 @@ def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: 
     # single-authority route (delegate_tool.py:4705-4707); keep delegation.model and the limits.
     delegation = config.get("delegation")
     if isinstance(delegation, dict):
-        for field in ("provider", "base_url", "api_key", "api_mode", "request_overrides"):
+        for field in ("provider", "base_url", "api_key", "api_mode"):
             delegation.pop(field, None)
+        # The explicit overrides merge OVER the inherited route (_merge_request_overrides,
+        # delegate_tool.py:4654-4666), so only their route/auth/header keys and the
+        # extra_body.provider routing hint can leave single authority; the rest stays.
+        overrides = delegation.get("request_overrides")
+        if isinstance(overrides, dict):
+            for field in _OSH_F64E_OVERRIDE_ROUTE_KEYS:
+                overrides.pop(field, None)
+            extra_body = overrides.get("extra_body")
+            if isinstance(extra_body, dict):
+                extra_body.pop("provider", None)
+                if not extra_body:
+                    overrides.pop("extra_body")
+        if not isinstance(overrides, dict) or not overrides:
+            delegation.pop("request_overrides", None)
     # A fallback chain activates on a primary failure (run_agent.py:7126) and each entry may name
     # its OWN provider and carry an inline credential — a second provider off the single-authority
     # endpoint, and a key the placeholder-only invariant forbids. Drop both; the single-authority
@@ -1761,12 +1913,14 @@ def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: 
     # kept — under `auto` it just names the model on the single-authority endpoint.
     aux = config.get("auxiliary")
     if isinstance(aux, dict):
-        for task_cfg in aux.values():
+        for task_name, task_cfg in list(aux.items()):
             if not isinstance(task_cfg, dict):
                 continue
             for field in ("provider", "base_url", "api_mode", "api_key", "key_env",
                           "api_key_env", "fallback_chain"):
                 task_cfg.pop(field, None)
+            if not task_cfg:
+                del aux[task_name]
     # The single-authority posture also neutralizes any inherited §D7 OneCLI chain-dial state a
     # spine may carry (AC-3): podman-onecli is inert here, so drop its enablement and settings and
     # the secrets.onecli block, else a spine that kept them would re-arm the superseded tunnel on a
@@ -1975,10 +2129,23 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     # shlex-quote the spec-supplied image so a metachar cannot alter the plan (the
     # egress validator already refuses control chars). fleet/role names are
     # _safe_name-validated, so they carry no shell metachars.
-    image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
+    openshell_params = _validate_openshell_egress(data.get("egress") or {})
+    image = shlex.quote(openshell_params["sandbox_image"])
     roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
     catalog = _validate_provider_catalog(data)
+    inference_provider = openshell_params["inference_provider"]
+    _refuse_worker_credential_provider(
+        {role: _type_providers(data, role, catalog) for role in roster}, inference_provider)
     lines: List[str] = []
+    # OSH-F64.e §D4: a direct-mode gateway sandbox gets the inference credential provider at
+    # CREATE — legacy attachment is fixed at creation, and runtime attach needs providers-v2,
+    # which the lane keeps off. Managed mode emits no gateway line (that sandbox is hand-made).
+    _refuse_gateway_type_collision(roster, inference_provider, fleet_name)
+    if inference_provider is not None and inference_provider["mode"] == "direct":
+        lines.append(
+            f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, 'gw')} "
+            f"--from {shlex.quote(inference_provider['gateway_image'])} "
+            f"--policy policy-gateway.yaml --provider {inference_provider['credential_provider']}")
     # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
     # that file; the operator materialises it at that name before running the plan). The
     # create `--name` is the BARE sandbox name `<fleet>-<role>`; the profile's rendered
@@ -4098,6 +4265,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 "substrate 'openshell' requires an egress block (the per-profile "
                 "openshell policy allow-set: proxy_addr, inference_route)")
         openshell_params = _validate_openshell_egress(egress_block)
+        _refuse_gateway_type_collision(resolved_by_type, openshell_params["inference_provider"],
+                                       _safe_name("project", data.get("project", "fleet")))
         unknown_anon = sorted(set(openshell_params["anonymous_reads"]) - set(resolved_by_type))
         if unknown_anon:
             raise CompositionError(
@@ -4110,6 +4279,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
             name: _type_providers(data, name, provider_catalog)
             for name in resolved_by_type
         }
+        _refuse_worker_credential_provider(providers_by_type,
+                                           openshell_params.get("inference_provider"))
         # AC-OSH-F64.b-1 / §D1: under the single-authority posture a FLEET-F62.c type-opted
         # provider must not re-add the dropped OneCLI 18255 hop or the inference route to a worker
         # policy (inference is gateway-only; the base host-guard forbids neither). Fail closed here
@@ -4284,8 +4455,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     _validate_webhook_routes(default_config, served)
     if egress_params is not None:
         _enforce_egress(default_config, egress_params, default_profile, descriptor)
-    # §D7.1 grants are spec-gated (§D4): only the legacy path populates profile_secret_sets; the
-    # single-authority path (inference_provider present) leaves it the spine [].
+    # The §D7.1 OneCLI grant map is legacy-only: OneCLI is inert under single authority.
     if (is_remote and osh_f64b_provider is None
             and openshell_params.get("onecli_secret_ids") is not None):
         _enforce_openshell_secret_sets(default_config, roster, openshell_params["onecli_secret_ids"])
