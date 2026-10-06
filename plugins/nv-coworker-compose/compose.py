@@ -2312,14 +2312,12 @@ def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
 def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
     """Force the DEFAULT/multiplexer profile's top-level ``command_allowlist`` to
     ``[]`` — the in-gateway LAUNCH BASELINE, not steady-state isolation. The gateway
-    process loads its process-global permanent allowlist ONCE at import from the
-    launch (DEFAULT) profile (tools/approval.py:5970-5971), so an empty list means at
-    launch in-gateway multiplex cron/webhook/api find nothing to bypass at the
-    allowlist short-circuit (tools/approval.py:4784) and fall through to the deny
-    resolvers. It does NOT close the cross-profile allowlist union leak:
-    load_permanent_allowlist UNIONs each profile's allowlist into the one shared set
-    (tools/approval.py:3056-3065), so a later in-gateway session init widens the
-    bypass — a core gap owned by GOV-ENF/P8 (AC-4b), no isolation credit. Written
+    process loads its permanent allowlist once at import from the launch (DEFAULT)
+    profile (tools/approval.py:1304), so an empty list means unscoped in-gateway
+    cron/webhook/api turns find nothing to bypass at the allowlist short-circuit
+    (tools/approval.py:1181) and fall through to the deny resolvers. A routed
+    profile's turn is governed by that profile's own allowlist
+    (tools/approval.py:328-347, upstream 9c9e7ab6e5), not this one. Written
     explicitly and never by assumption: a declared non-empty allowlist is overwritten
     rather than trusted."""
     config["command_allowlist"] = []
