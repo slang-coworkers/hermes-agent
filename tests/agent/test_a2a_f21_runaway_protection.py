@@ -68,10 +68,10 @@ def test_ac_a2a_f21_2():
     assert STALL_GUARD_IDENTICAL_CALL_THRESHOLD == 3
 
     # Negative control A: a poller-exempt tool never gets the loop-breaker notice.
-    assert is_stall_guard_repeatable("process") is True
+    assert is_stall_guard_repeatable("process_manage") is True
     poller = ToolCallGuardrailController()
     for _ in range(5):
-        assert poller.observe_call("process", {"pid": 42}, '{"running": true}').notice is None
+        assert poller.observe_call("process_manage", {"pid": 42}, '{"running": true}').notice is None
 
     # Negative control B: a call whose result changes each time is not an identical repeat.
     changing = ToolCallGuardrailController()
