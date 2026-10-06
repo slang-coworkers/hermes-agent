@@ -69,8 +69,8 @@ def test_ac_iso_f17_1(tmp_path, monkeypatch):
 
 def test_ac_iso_f17_2(tmp_path, monkeypatch):
     """container_boot reconciles per-profile s6 slots by desired state: only the
-    default slot auto-starts under the multiplex env flag (a running coworker is
-    registered DOWN); with it unset the same profile auto-starts; legacy transient
+    default slot auto-starts (a running coworker is registered DOWN); the root
+    multiplexer auto-starts and serves the running coworker; legacy transient
     states normalize to running while startup_failed does not."""
     from hermes_cli import container_boot
 
@@ -101,20 +101,23 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
         == "startup_failed"
     )
 
-    def _reconcile(multiplex: bool):
-        home = tmp_path / ("mux" if multiplex else "solo")
-        scandir = tmp_path / ("scan_mux" if multiplex else "scan_solo")
+    def _reconcile(multiplex: bool, *, root_running: bool = True, coder: bool = True):
+        tag = ("mux" if multiplex else "solo") + ("" if coder else "_nocoder")
+        home = tmp_path / tag
+        scandir = tmp_path / f"scan_{tag}"
         scandir.mkdir(parents=True)
         # The criterion names a coworker at desired_state="running" — exercise the
         # explicit desired_state path (not the legacy gateway_state fallback).
-        _write_profile(home, "coder", desired_state="running")
+        if coder:
+            _write_profile(home, "coder", desired_state="running")
         # A startup_failed coworker must never be autostart-eligible.
         _write_profile(home, "failed", desired_state="startup_failed")
         # default owns inbound: give the root/default a running prior state.
-        (home / "gateway_state.json").write_text(
-            json.dumps({"gateway_state": "running", "timestamp": 1234567890}),
-            encoding="utf-8",
-        )
+        if root_running:
+            (home / "gateway_state.json").write_text(
+                json.dumps({"gateway_state": "running", "timestamp": 1234567890}),
+                encoding="utf-8",
+            )
         if multiplex:
             monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "1")
         else:
@@ -126,7 +129,7 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
 
     mux_actions, mux_scan = _reconcile(multiplex=True)
     coder = mux_scan / "gateway-coder"
-    # Registered (run script written by _register_service, container_boot.py:488) AND held
+    # Registered (run script written by _register_service, container_boot.py:301) AND held
     # down under the multiplexer — a skip-registration mutant writes no run file.
     assert (coder / "run").exists() and (coder / "down").exists(), (
         "coworker slot registered (run script) but DOWN under the multiplexer"
@@ -141,33 +144,37 @@ def test_ac_iso_f17_2(tmp_path, monkeypatch):
     assert default_started, (
         "the default slot auto-starts (owns inbound) under the multiplexer"
     )
-    # Outside multiplex mode the running coworker starts. The `started` action alone is
-    # decoupled from the fs write (container_boot.py:205 derives it from should_start
-    # regardless of whether _register_service ran), so assert the POSITIVE artifact:
-    # _register_service writes gateway-coder/run unconditionally (container_boot.py:488),
-    # and its presence proves the slot was actually registered — a skip-registration mutant
-    # leaves no run file. down is absent only in the started (not held-down) case.
-    _solo_actions, solo_scan = _reconcile(multiplex=False)
-    coder_started = [
-        a
-        for a in _solo_actions
-        if getattr(a, "profile", None) == "coder"
-        and getattr(a, "action", None) == "started"
-    ]
-    assert coder_started, "solo mode auto-starts the running coworker"
-    assert (solo_scan / "gateway-coder" / "run").exists(), (
-        "the started coworker's s6 run script is written (slot actually registered)"
+    # With no root intent of its own, the root multiplexer auto-starts because it serves the
+    # running coworker (container_boot.py:116-137): the coworker's intent folds into the root
+    # slot and the coworker slot stays down. The `started` action alone is decoupled from the
+    # fs write (container_boot.py:61-66 derives it from `start`), so assert the POSITIVE
+    # artifacts too: _register_service writes the run script unconditionally
+    # (container_boot.py:301), and down is absent only on a started slot.
+    root_actions, root_scan = _reconcile(multiplex=False, root_running=False)
+    by_profile = {getattr(a, "profile", None): a for a in root_actions}
+    assert by_profile["default"].action == "started", (
+        "the root multiplexer auto-starts to serve the running coworker"
     )
-    assert not (solo_scan / "gateway-coder" / "down").exists()
-    # A startup_failed coworker stays registered-but-down even in solo mode, with no
-    # `started` action (it is not in _AUTOSTART_STATES).
-    assert (solo_scan / "gateway-failed" / "down").exists()
-    assert not [
-        a
-        for a in _solo_actions
-        if getattr(a, "profile", None) == "failed"
-        and getattr(a, "action", None) == "started"
-    ]
+    assert by_profile["default"].folded_into_root is True
+    assert (root_scan / "gateway-default" / "run").exists()
+    assert not (root_scan / "gateway-default" / "down").exists()
+    assert by_profile["coder"].folded_into_root is True, (
+        "the running coworker is served by the root multiplexer"
+    )
+    assert by_profile["coder"].action == "registered"
+    assert (root_scan / "gateway-coder" / "run").exists()
+    assert (root_scan / "gateway-coder" / "down").exists()
+    # A startup_failed coworker is neither started nor folded into the root (it is not in
+    # _AUTOSTART_STATES), and stays registered-but-down.
+    assert by_profile["failed"].action != "started"
+    assert by_profile["failed"].folded_into_root is False
+    assert (root_scan / "gateway-failed" / "down").exists()
+    # Differential: without the running coworker nothing folds, so the root stays down — a
+    # mutant that always starts the root slot would pass the assertions above but not this.
+    idle_actions, idle_scan = _reconcile(multiplex=False, root_running=False, coder=False)
+    idle_default = next(a for a in idle_actions if getattr(a, "profile", None) == "default")
+    assert idle_default.action == "registered" and idle_default.folded_into_root is False
+    assert (idle_scan / "gateway-default" / "down").exists()
 
 
 @pytest.mark.asyncio
