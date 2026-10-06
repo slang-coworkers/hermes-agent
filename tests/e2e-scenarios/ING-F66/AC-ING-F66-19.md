@@ -2,9 +2,9 @@
 ac: AC-ING-F66-19
 kind: live
 model: live
-base_url: https://inference-api.nvidia.com
-api_mode: anthropic_messages
-model_id: aws/anthropic/bedrock-claude-opus-4-8
+base_url: https://inference.local/v1
+api_mode: chat_completions
+model_id: aws/anthropic/bedrock-claude-opus-5-5
 fixtures:
   - fixtures/ing-f66-fleet/ing-f66-default
   - fixtures/ing-f66-fleet/ing-f66-orchestrator
@@ -32,10 +32,8 @@ scope on, against the shared public repo `slang-coworkers/nanoclaw`:
 5. The forwarded port answers on host loopback only.
 
 nanoclaw's unrelated traffic is counted and logged at the edge, never delivered
-(ADR D2 Scope). The model is live: a real model answers behind the OneCLI proxy.
-The provider block is the FLEET-F62.c spine's `coworkers-live` provider
-(`base_url` and `api_mode` above), with the spine's dummy placeholder
-credential, used unchanged.
+(ADR D2 Scope). The live model uses the OpenShell-managed `https://inference.local/v1`
+provider and its fixed rewrite placeholder, not the OneCLI proxy or `coworkers-live`.
 
 ## Gating — do not start before these hold
 
@@ -140,10 +138,7 @@ lane installer builds it. No fixture is re-installed here.
 3. **Host units and the scoped edge.**
    - On the host, run `hermes ingress render-host <spec> --out <host dir>`. This
      writes `host/` and `hooks/`; they match `fixtures/ing-f66-fleet/host/`, with
-     `@LOOPBACK@` standing for the loopback address in the reference copy. The
-     same token stands for it in the five worker configs
-     (`fixtures/ing-f66-fleet/ing-f66-<role>/config.yaml`, the chain-dial
-     `proxy_rewrite`).
+     `@LOOPBACK@` standing for the loopback address in the reference copy.
    - Confirm the operator evidence for L-EDGE and L-FWD: the three
      `nv-ingress-*.service` units are `active` with linger.
    - With `python3 -c` over the INSTALLED edge config (`<host_dir>/edge.yaml`),

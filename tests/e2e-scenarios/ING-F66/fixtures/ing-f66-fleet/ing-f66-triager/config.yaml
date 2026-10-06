@@ -1,17 +1,15 @@
 model:
-  provider: coworkers-live
-  default: aws/anthropic/bedrock-claude-opus-4-8
+  provider: compatible-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
 providers:
-  coworkers-live:
-    base_url: https://inference-api.nvidia.com
-    api_mode: anthropic_messages
-    api_key: dummy-nanoclaw-base-not-a-real-key
-    default_model: aws/anthropic/bedrock-claude-opus-4-8
+  compatible-endpoint:
+    base_url: https://inference.local/v1
+    api_mode: chat_completions
+    api_key: sk-OPENSHELL-PROXY-REWRITE
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    extra_headers:
+      X-Hermes-Profile: ing-f66-triager
 timezone: Asia/Kolkata
-secrets:
-  onecli:
-    enabled: true
-    override_existing: true
 plugins:
   enabled:
   - nv-coworker-compose
@@ -40,10 +38,6 @@ plugins:
     nv-ingress:
       settings:
         orchestrator_profile: orchestrator
-    podman-onecli:
-      settings:
-        proxy_rewrite: @LOOPBACK@:18255
-        ca_bundle: /etc/osh-lane/ca-bundle.pem
   disabled:
   - web-firecrawl
   - browser-firecrawl
@@ -83,3 +77,4 @@ approvals:
   - git -* tag *
   - gh release *
   - gh -* release *
+attribution_tag: ing-f66-triager
