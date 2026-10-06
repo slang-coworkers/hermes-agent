@@ -273,10 +273,11 @@ _AGENT_SHARED_MODE = "agent-shared"
 
 # distribution.yaml distribution_owned: the stock DEFAULT_DIST_OWNED
 # (hermes_cli/profile_distribution.py:88-95) plus the extras this render adds.
-# "scripts" carries the DEFAULT profile's rendered webhook route scripts to
-# $HERMES_HOME/scripts/ on install (webhook_filters resolves scripts there); the
-# installer skips a declared owned path that a profile does not have, so coworker
-# profiles without a scripts/ dir are unaffected (profile_distribution.py:613-614).
+# "scripts" carries the rendered webhook route scripts to $HERMES_HOME/scripts/ on
+# install (webhook_filters resolves scripts there) for the DEFAULT profile and for
+# each profile a CI-gated route binds; the installer skips a declared owned path
+# that a profile does not have, so coworker profiles without a scripts/ dir are
+# unaffected (hermes_cli/profile_distribution.py:372-374).
 _DIST_OWNED: List[str] = [
     "SOUL.md", "config.yaml", "mcp.json", "skills", "cron",
     "distribution.yaml", "skill-bundles", ".env.template", "scripts",
@@ -3552,6 +3553,31 @@ def _render_route_scripts(pdir: Path) -> None:
         )
 
 
+def _render_bound_route_scripts(out_root: Path, default_config: Dict[str, Any],
+                                default_profile: str) -> None:
+    """Also materialize each CI-gated route's script into its BOUND profile's scripts/.
+
+    The webhook adapter runs a route script inside the bound profile's scope
+    (gateway/platforms/webhook.py ``_handle_webhook`` -> ``_profile_scope``), so the
+    resolver looks under that profile's $HERMES_HOME/scripts/, not the DEFAULT's.
+    """
+    extra = _get_dotted(default_config, "platforms.webhook.extra")
+    routes = extra.get("routes") if isinstance(extra, dict) else None
+    if not isinstance(routes, dict):
+        return
+    src_dir = Path(__file__).resolve().parent / "route_scripts"
+    for route in routes.values():
+        script = route.get("script") if isinstance(route, dict) else None
+        profile = route.get("profile") if isinstance(route, dict) else None
+        if script not in _ROUTE_SCRIPTS or not isinstance(profile, str) or profile == default_profile:
+            continue
+        scripts_dir = out_root / profile / "scripts"
+        scripts_dir.mkdir(exist_ok=True)
+        (scripts_dir / script).write_text(
+            (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
 def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", name, "Multiplexer profile for the Bot-Mode gateway.", [], [])
@@ -4182,6 +4208,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         _disable_firecrawl_providers(default_config)
     ddir = out_root / default_profile
     _render_default(ddir, default_profile, default_config)
+    _render_bound_route_scripts(out_root, default_config, default_profile)
     # OSH-F64.b (D2): render the gateway APF policy for the model-call sandbox (the default
     # profile) — the inference REST provider endpoint (exactly 4 method+paths, no on-endpoint
     # credential field) + the broker 18777 raw hop; the 18255 proxy hop is dropped. The legacy
