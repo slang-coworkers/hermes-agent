@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tools import terminal_tool
+from tools import terminal_tool, terminal_tool_backends, terminal_tool_lifecycle
 from tools.environments import docker as docker_mod
 
 
@@ -85,16 +85,16 @@ def _fake_env():
 def test_ac_iso_f10_3(monkeypatch):
     """On the docker backend, terminal.container_persistent: false selects one-container-per-session isolation, and the default (true/unset) selects the one-shared-container-per-profile mode."""
     _enable_isolation(monkeypatch)
-    assert terminal_tool._session_isolation_enabled() is True
-    assert terminal_tool._docker_persistent_profile_scoped() is False
+    assert terminal_tool._session_scope().session_isolated is True
+    assert terminal_tool._session_scope().docker_profile_scoped is False
     _disable_isolation(monkeypatch)
-    assert terminal_tool._session_isolation_enabled() is False
-    assert terminal_tool._docker_persistent_profile_scoped() is True
+    assert terminal_tool._session_scope().session_isolated is False
+    assert terminal_tool._session_scope().docker_profile_scoped is True
     # The unset default is the persistent (profile-shared) mode too.
     monkeypatch.setenv("TERMINAL_ENV", "docker")
     monkeypatch.delenv("TERMINAL_CONTAINER_PERSISTENT", raising=False)
-    assert terminal_tool._session_isolation_enabled() is False
-    assert terminal_tool._docker_persistent_profile_scoped() is True
+    assert terminal_tool._session_scope().session_isolated is False
+    assert terminal_tool._session_scope().docker_profile_scoped is True
 
 
 def test_ac_iso_f10_4(monkeypatch):
@@ -119,7 +119,7 @@ def test_ac_iso_f10_5(monkeypatch):
 
     _enable_isolation(monkeypatch)
     fake_a, fake_b = _fake_env(), _fake_env()
-    with patch.object(terminal_tool, "_create_environment",
+    with patch.object(terminal_tool_backends, "_create_environment",
                       side_effect=[fake_a, fake_b]) as create:
         assert terminal_tool.ensure_task_env("iso-f10-sess-a") is fake_a
         assert terminal_tool.ensure_task_env("iso-f10-sess-a") is fake_a
@@ -128,9 +128,9 @@ def test_ac_iso_f10_5(monkeypatch):
         assert create.call_count == 2
         assert [c.kwargs["task_id"] for c in create.call_args_list] == [
             "iso-f10-sess-a", "iso-f10-sess-b"]
-        terminal_tool.cleanup_vm("iso-f10-sess-a")
-        assert terminal_tool.get_active_env("iso-f10-sess-a") is None
-        assert terminal_tool.get_active_env("iso-f10-sess-b") is fake_b
+        terminal_tool_lifecycle.cleanup_vm("iso-f10-sess-a")
+        assert terminal_tool_lifecycle.get_active_env("iso-f10-sess-a") is None
+        assert terminal_tool_lifecycle.get_active_env("iso-f10-sess-b") is fake_b
 
     with terminal_tool._env_lock:
         terminal_tool._active_environments.clear()
@@ -140,7 +140,7 @@ def test_ac_iso_f10_5(monkeypatch):
 
     _disable_isolation(monkeypatch)
     fake_shared = _fake_env()
-    with patch.object(terminal_tool, "_create_environment",
+    with patch.object(terminal_tool_backends, "_create_environment",
                       side_effect=[fake_shared]) as create:
         env_a = terminal_tool.ensure_task_env("iso-f10-sess-a")
         env_b = terminal_tool.ensure_task_env("iso-f10-sess-b")
