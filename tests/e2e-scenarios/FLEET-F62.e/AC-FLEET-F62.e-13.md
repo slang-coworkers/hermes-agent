@@ -50,14 +50,23 @@ sandbox's gateway home (`$HERMES_HOME` of the gateway process).
 1. Resolve the Hermes interpreter once:
    `for p in /opt/hermes/.venv/bin/python /opt/hermes/venv/bin/python python3; do "$p" -c 'import hermes_cli' 2>/dev/null && HPY=$p && break; done; echo "HPY=$HPY"`
    → expect: a non-empty `HPY`.
-2. Install `nv-coworker-compose` (and `nv-fleet-gates`) at the PR head into `$GW`:
-   `HERMES_HOME=$GW hermes plugins install slang-coworkers/hermes-agent/plugins/nv-coworker-compose --ref $SHA --enable`
-   (the same for `nv-fleet-gates`) → expect: exit 0 for each.
+2. `nv-coworker-compose` and `nv-fleet-gates` at the PR head in `$GW`. A lane image built for this
+   head ships both pre-installed, and a second install exits 1 ("already exists"). So read the
+   recorded revisions first:
+   `$HPY -c 'import json,sys;m=json.load(open(sys.argv[1]));print(*(m.get(k,{}).get("revision","absent") for k in ("nv-coworker-compose","nv-fleet-gates")))' $GW/plugins/.install-metadata.json`
+   → expect: `$SHA $SHA`. Install only a plugin that prints `absent`:
+   `HERMES_HOME=$GW hermes plugins install slang-coworkers/hermes-agent/plugins/<name> --ref $SHA --enable`
+   → expect: exit 0. Any other revision is `FAIL(env)` (the image does not carry this head).
 3. Render and install the triager:
    `HERMES_HOME=$GW hermes coworker compose $SPEC --out /tmp/e13-render` then
-   `HERMES_HOME=$GW hermes profile install /tmp/e13-render/triager --name triager -y`, and the two
-   plugins into the triager home (`hermes -p triager plugins install … --ref $SHA --enable`)
-   → expect: exit 0 for each.
+   `HERMES_HOME=$GW hermes profile install /tmp/e13-render/triager --name triager -y` → expect: exit 0.
+   Give the triager home the same two trees step 2 verified, by copy and not by a second
+   `plugins install`. The rendered triager home keeps the install scan on, and that scan blocks
+   both plugins as DANGEROUS whatever `--force` says. Turning the scan off here would weaken the
+   profile under test:
+   `mkdir -p $GW/profiles/triager/plugins && cp -a $GW/plugins/nv-coworker-compose $GW/plugins/nv-fleet-gates $GW/profiles/triager/plugins/`
+   then `HERMES_PLUGINS_DEBUG=1 hermes -p triager plugins list` → expect: both keys listed as enabled
+   and loaded, with no error.
 4. Carry the trust block into the gateway home: `HERMES_HOME=$GW hermes coworker install-trust $SPEC`
    → expect: exit 0 and a JSON line with `"ok": true`.
 5. Both homes carry the block:
