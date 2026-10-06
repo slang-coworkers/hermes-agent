@@ -910,3 +910,73 @@ def test_ac_fleet_f62_e_19(tmp_path, monkeypatch, kind, var, value):
     cfg_path.write_text(yaml.safe_dump(clean), encoding="utf-8")
     ok = _cli(home, "install-trust", str(F62C_SPEC))
     assert ok.returncode == 0, f"a loopback-only scalar and an unrelated preserved name must pass: {ok.stderr[-600:]}"
+
+
+def test_ac_fleet_f62_e_20(tmp_path, monkeypatch, request):
+    """(derived) On a keyless openshell fleet home that enables another secret source, no source can set `NO_PROXY` or `no_proxy` after discovery: OneCLI plain mode returning a bridge-listing NO_PROXY (with `override_existing` on or off, the inherited value absent or clean) leaves both spellings without a docker-bridge entry, and OneCLI's other names still apply. A non-fleet home is unaffected."""
+    lane_off = _spec_copy(tmp_path, OSH_F64_SPEC, lambda d: d["egress"].pop("pinned_offline_lane", None), tag="lane-off")
+    out = tmp_path / "lane-off-out"
+    proc = _compose(lane_off, out, _isolated_home(tmp_path / "h-render"))
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rendered = _profile_configs(out)["orchestrator"]
+    assert SOURCE_NAME not in yaml.safe_dump(rendered), "precondition: a keyless render carries no trust block"
+    assert ((rendered.get("secrets") or {}).get("onecli") or {}).get("enabled") is True, "precondition: OneCLI plain mode"
+    assert "proxy_rewrite" not in yaml.safe_dump(rendered), "precondition: no chain-dial off the lane"
+    bridge_env = {"HTTPS_PROXY": "http://onecli.invalid:10255", "NO_PROXY": "localhost,172.17.0.1",
+                  "no_proxy": "localhost,host.docker.internal"}
+
+    def _discover_with_onecli(tag, cfg, inherited):
+        os.environ.clear()
+        os.environ.update(saved)
+        for name in (*NO_PROXY_NAMES, "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            os.environ.pop(name, None)
+        for name, value in inherited.items():
+            monkeypatch.setenv(name, value)
+        home = tmp_path / tag / "orchestrator"
+        (home / "plugins").mkdir(parents=True)
+        for key in (COMPOSE_KEY, ONECLI_KEY):
+            shutil.copytree(PLUGINS_SRC / key, home / "plugins" / key)
+        cfg = copy.deepcopy(cfg)
+        settings = (((cfg.get("plugins") or {}).get("entries") or {}).get(ONECLI_KEY) or {}).get("settings") or {}
+        settings.pop("gateway_api_base_url", None)
+        enabled = cfg.setdefault("plugins", {}).setdefault("enabled", [])
+        for key in (COMPOSE_KEY, ONECLI_KEY):
+            if key not in enabled:
+                enabled.append(key)
+        (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        (tmp_path / tag / "bundled").mkdir(exist_ok=True)
+        monkeypatch.setenv("HOME", str(tmp_path / tag))
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / tag / "bundled"))
+        monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+        from hermes_cli.plugins import PluginManager
+
+        manager = PluginManager()
+        manager.discover_and_load()
+        oneclient = manager._plugins[ONECLI_KEY].module.secret_source.oneclient
+        monkeypatch.setattr(oneclient, "get_container_config", lambda *, agent: {"env": dict(bridge_env)})
+        from hermes_cli.env_loader import get_secret_source, load_hermes_dotenv, reset_secret_source_cache
+
+        reset_secret_source_cache()
+        load_hermes_dotenv(hermes_home=home)
+        return get_secret_source
+
+    saved = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved)))
+    override_on = copy.deepcopy(rendered)
+    override_on["secrets"]["onecli"]["override_existing"] = True
+    for tag, cfg, inherited in (("absent", rendered, {}), ("override", override_on, {}),
+                                ("clean", override_on, {"NO_PROXY": "127.0.0.1,localhost,::1"})):
+        provenance = _discover_with_onecli(tag, cfg, inherited)
+        assert os.environ.get("HTTPS_PROXY") == bridge_env["HTTPS_PROXY"] and provenance("HTTPS_PROXY") == "onecli", \
+            f"{tag}: OneCLI's proxy name must still apply through the refresh path"
+        for name in NO_PROXY_NAMES:
+            value = os.environ.get(name, "")
+            assert "172.17.0.1" not in value and "host.docker.internal" not in value, \
+                f"{tag}: a later source re-planted a docker-bridge {name}: {value!r}"
+            assert provenance(name) != "onecli", f"{tag}: {name} must not be set by the onecli source"
+
+    plain = {"terminal": {"backend": "ssh"}, "secrets": {"onecli": {"enabled": True}}}
+    provenance = _discover_with_onecli("non-fleet", plain, {})
+    assert os.environ.get("NO_PROXY") == bridge_env["NO_PROXY"] and provenance("NO_PROXY") == "onecli", \
+        "a non-fleet home must keep OneCLI's NO_PROXY: the guard is fleet-only"
