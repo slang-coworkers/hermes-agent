@@ -170,6 +170,8 @@ async def test_ac_iso_f12_5(hermes_home):
 
         async def handle_message(self, event):
             self.handled.append(event)
+            # deliver_wake requires the adapter's admission receipt (gateway/wake.py admit_internal_event).
+            event._gateway_accepted = True
 
     adapter = _RecordingAdapter()
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1", chat_type="group")
