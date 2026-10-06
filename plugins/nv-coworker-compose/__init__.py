@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -39,6 +40,7 @@ from utils import is_truthy_value
 
 from .compose import (
     WIKI_MOUNT,
+    _SELF_PLUGIN,
     CompositionError,
     _resolve_substrate,
     _safe_name,
@@ -693,6 +695,88 @@ def _install(rendered_dir: str, name: str) -> str:
     return str(installed_home)
 
 
+def _profile_cron_jobs(home: Path) -> Dict[str, str]:
+    """Job id -> name in *home*'s cron store, paused ones included."""
+    if not home.is_dir():
+        return {}
+    from cron.jobs import list_jobs, use_cron_store
+
+    with use_cron_store(home):
+        return {str(j["id"]): str(j.get("name") or "") for j in list_jobs(include_disabled=True) if j.get("id")}
+
+
+def _shipped_cron_jobs(rendered_dir: str) -> Dict[str, str]:
+    """Job id -> name for the jobs the rendered distribution ships in ``cron/jobs.json``."""
+    store = Path(rendered_dir) / "cron" / "jobs.json"
+    if not store.is_file():
+        return {}
+    data = json.loads(store.read_text(encoding="utf-8"))
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    return {str(j["id"]): str(j.get("name") or "") for j in jobs if isinstance(j, dict) and j.get("id")}
+
+
+_RESUME_CRON_DEFAULT = ["orchestrator/supervise-issues"]
+
+
+def _resume_cron_allowlist() -> List[str]:
+    """``plugins.entries.nv-coworker-compose.settings.onboard_resume_cron_jobs``:
+    ``<profile>/<job-name>`` entries the onboard may resume. A malformed value resumes nothing."""
+    from hermes_cli.config import load_config_readonly
+
+    entry = (((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {}).get(_SELF_PLUGIN) or {}
+    value = (entry.get("settings") or {}).get("onboard_resume_cron_jobs", _RESUME_CRON_DEFAULT)
+    def _valid(entry: Any) -> bool:
+        if not isinstance(entry, str):
+            return False
+        profile, sep, name = entry.partition("/")
+        try:
+            _safe_name("profile", profile)
+        except CompositionError:
+            return False
+        return bool(sep) and bool(name.strip())
+
+    if not isinstance(value, list) or not all(_valid(v) for v in value):
+        logger.warning("nv-coworker-compose: onboard_resume_cron_jobs is not a list of "
+                       "'<profile>/<job-name>' strings; resuming no cron job")
+        return []
+    return list(value)
+
+
+def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+    """Resume the allowlisted jobs this onboard installed (profile home -> {job id: name}).
+
+    The tag imports distribution cron jobs paused for operator review; the allowlist is
+    that review, made ahead of time. A job that existed before the onboard is never in
+    *new_jobs*, so an operator's pause survives a re-onboard. All-or-nothing: if one
+    resume fails, the ones already resumed are paused again before the error propagates."""
+    from cron.jobs import pause_job, resume_job, use_cron_store
+
+    allow = set(_resume_cron_allowlist())
+    resume: List[Dict[str, str]] = []
+    kept: List[Dict[str, str]] = []
+    for home, jobs in new_jobs.items():
+        profile = Path(home).name
+        for job_id, name in sorted(jobs.items()):
+            entry = {"profile": profile, "name": name, "id": job_id, "home": home}
+            (resume if f"{profile}/{name}" in allow else kept).append(entry)
+    print(f"nv-coworker-compose: onboard_resume_cron_jobs = {sorted(allow)}; "
+          f"resuming {[e['profile'] + '/' + e['name'] for e in resume]}", file=sys.stderr)
+    done: List[Dict[str, str]] = []
+    try:
+        for e in resume:
+            with use_cron_store(e["home"]):
+                if resume_job(e["id"]) is None:
+                    raise RuntimeError(f"cron job {e['profile']}/{e['name']} ({e['id']}) not found")
+            done.append(e)
+    except Exception:
+        for e in reversed(done):
+            with use_cron_store(e["home"]):
+                pause_job(e["id"], reason="onboard could not resume every allowlisted job")
+        raise
+    strip = lambda rows: [{k: r[k] for k in ("profile", "name", "id")} for r in rows]  # noqa: E731
+    return {"resumed_cron_jobs": strip(resume), "kept_paused_cron_jobs": strip(kept)}
+
+
 def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
     """Write ui_meta['hermes-bots'] via per-key CAS, retrying once on a stale
     revision. profiles.configure signals a CAS conflict as a *successful*
@@ -742,9 +826,19 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
         # Install only the coworker TYPE profiles. The rendered DEFAULT artifact
         # is not installed here: install_distribution rejects the reserved name
         # "default"; the DEFAULT profile is the gateway root itself.
+        new_cron: Dict[str, Dict[str, str]] = {}
         for tname in types:
             try:
+                home = get_profile_dir(tname)
+                before = set(_profile_cron_jobs(home))
                 _install(rendered[tname], tname)
+                shipped = _shipped_cron_jobs(rendered[tname])
+                # New and rendered are separate checks: another writer's job added during
+                # the install is new but not this render's, and must not be resumed.
+                new_cron[str(home)] = {
+                    jid: name for jid, name in _profile_cron_jobs(home).items()
+                    if jid not in before and shipped.get(jid) == name
+                }
             except Exception as exc:
                 failures.append(f"install {tname}: {exc}")
 
@@ -803,9 +897,16 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
             park_non_fleet_profiles(list(types))
         except Exception as exc:
             failures.append(f"park non-fleet profiles: {exc}")
+    cron_outcome: Dict[str, List[Dict[str, str]]] = {}
+    if not failures:
+        try:
+            cron_outcome = _resume_onboarded_cron(new_cron)
+        except Exception as exc:
+            failures.append(f"resume onboarded cron jobs: {exc}")
+    outcome = {"resumed_cron_jobs": [], "kept_paused_cron_jobs": [], **cron_outcome}
     if failures:
-        return {"ok": False, "error": "; ".join(failures), "warnings": failures}
-    return {"ok": True}
+        return {"ok": False, "error": "; ".join(failures), "warnings": failures, **outcome}
+    return {"ok": True, **outcome}
 
 
 def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

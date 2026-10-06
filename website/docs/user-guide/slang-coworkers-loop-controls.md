@@ -121,6 +121,18 @@ touches the main conversation or the prompt cache, because per-conversation prom
 caching is a sacred invariant. Automatic next-turn `<buddy-note>` injection is
 therefore **out of scope**, not claimed here.
 
+### Onboarded cron jobs start paused
+
+The tag imports every cron job a profile distribution ships **paused**, for operator review
+(`hermes_cli/profile_distribution.py:406-427`). `hermes onboard coworker` resumes only the
+jobs named in `plugins.entries.nv-coworker-compose.settings.onboard_resume_cron_jobs`, a list
+of `<profile>/<job-name>` entries defaulting to `["orchestrator/supervise-issues"]`. It
+resumes a job only when that job is new in this onboard and shipped by its render, as the
+last step and only if every other onboard step succeeded. It prints the list before resuming
+anything and reports `resumed_cron_jobs` and `kept_paused_cron_jobs` in its result. A job
+that already existed is never touched, so an operator's `hermes cron pause` survives a
+re-onboard; `[]` keeps every onboarded job paused.
+
 ## Acceptance criteria
 
 All criteria are `pytest:` — agent-loop internals exercised through public Python

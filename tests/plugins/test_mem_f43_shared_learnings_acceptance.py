@@ -392,7 +392,7 @@ def test_ac_mem_f43_8(tmp_path, monkeypatch):
     monkeypatch.setattr(loaded.module, "activate_shared_learnings", _record_activation, raising=False)
     result = loaded.module._run_onboard(str(FIXTURE_DIR / "coworker-types.yaml"))
 
-    assert result == {"ok": True}, f"_run_onboard reported failures: {result}"
+    assert result == {"ok": True, "resumed_cron_jobs": [], "kept_paused_cron_jobs": []}, f"_run_onboard reported failures: {result}"
     assert len(calls) == 1, "_run_onboard did not invoke activate_shared_learnings exactly once"
     got_homes, got_orch, got_clone = calls[0]
     assert got_orch == orchestrator and got_clone == CLONE

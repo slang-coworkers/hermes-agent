@@ -171,7 +171,7 @@ def test_onboard_parks_non_fleet_profiles(module, tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda *a, **k: True)
     result = module._run_onboard(str(_write_spec(tmp_path / "spec_onboard", _spec())))
 
-    assert result == {"ok": True}, result
+    assert result == {"ok": True, "resumed_cron_jobs": [], "kept_paused_cron_jobs": []}, result
     assert [name for name, _ in profiles_to_serve(True)] == ["default", "orchestrator", "worker"]
     assert profile_is_parked(profiles_root / "stray")
     assert not profile_is_parked(profiles_root / "orchestrator") and not profile_is_parked(profiles_root / "worker")
@@ -222,3 +222,157 @@ def test_onboard_later_failure_parks_nothing(module, tmp_path, monkeypatch):
     assert result["ok"] is False
     assert not profile_is_parked(profiles_root / "stray")
     assert "stray" in {name for name, _ in profiles_to_serve(True)}
+
+
+def _cron_spec() -> dict:
+    spec = _spec()
+    spec["types"]["orchestrator"]["cron_jobs"] = [
+        {"name": "supervise-issues", "schedule": "every 720m", "prompt": "Supervise the board."}]
+    spec["types"]["worker"]["cron_jobs"] = [
+        {"name": "extra", "schedule": "every 60m", "prompt": "An unapproved job."}]
+    return spec
+
+
+def _set_resume_allowlist(value):
+    import os
+    cfg_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("plugins", {}).setdefault("entries", {}).setdefault(PLUGIN_KEY, {}) \
+        .setdefault("settings", {})["onboard_resume_cron_jobs"] = value
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+
+def _job(profile, name):
+    import os
+    from cron.jobs import list_jobs, use_cron_store
+
+    with use_cron_store(Path(os.environ["HERMES_HOME"]) / "profiles" / profile):
+        return next(j for j in list_jobs(include_disabled=True) if j["name"] == name)
+
+
+def _all_kept():
+    return [{"profile": p, "name": n, "id": _job(p, n)["id"]}
+            for p, n in (("orchestrator", "supervise-issues"), ("worker", "extra"))]
+
+
+def _real_onboard(module, tmp_path, monkeypatch, tag, *, bot_chat_ok=True):
+    """Drive _run_onboard through the real install_distribution; only the gateway RPC
+    helpers are stubbed."""
+    monkeypatch.setattr(module, "_profile_revisions", lambda *a, **k: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda *a, **k: True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda *a, **k: bot_chat_ok)
+    return module._run_onboard(str(_write_spec(tmp_path / f"spec_{tag}", _cron_spec())))
+
+
+def test_onboard_resumes_only_allowlisted_new_cron_jobs(module, tmp_path, monkeypatch):
+    """A fresh onboard resumes only the default-allowlisted orchestrator/supervise-issues; a
+    second rendered job outside the allowlist stays paused and is reported as kept paused."""
+    result = _real_onboard(module, tmp_path, monkeypatch, "fresh")
+    sup, extra = _job("orchestrator", "supervise-issues"), _job("worker", "extra")
+    assert result == {
+        "ok": True,
+        "resumed_cron_jobs": [{"profile": "orchestrator", "name": "supervise-issues", "id": sup["id"]}],
+        "kept_paused_cron_jobs": [{"profile": "worker", "name": "extra", "id": extra["id"]}],
+    }, result
+    assert sup["enabled"] is True and sup["state"] == "scheduled", sup
+    assert extra["enabled"] is False and extra["state"] == "paused", extra
+
+
+def test_reonboard_keeps_an_operator_pause(module, tmp_path, monkeypatch):
+    """A job that existed before the onboard keeps its state: an operator's pause survives a
+    re-onboard, and nothing is resumed."""
+    from cron.jobs import pause_job, use_cron_store
+
+    _real_onboard(module, tmp_path, monkeypatch, "first")
+    sup = _job("orchestrator", "supervise-issues")
+    import os
+    with use_cron_store(Path(os.environ["HERMES_HOME"]) / "profiles" / "orchestrator"):
+        pause_job(sup["id"], reason="operator hold")
+    result = _real_onboard(module, tmp_path, monkeypatch, "second")
+    sup = _job("orchestrator", "supervise-issues")
+    assert result == {"ok": True, "resumed_cron_jobs": [], "kept_paused_cron_jobs": []}, result
+    assert sup["enabled"] is False and sup["state"] == "paused", sup
+
+
+def test_onboard_does_not_resume_a_job_another_writer_added(module, tmp_path, monkeypatch):
+    """A job another writer adds to the store during the onboard is new and allowlisted by
+    name, but this render did not ship it, so it stays paused and only the rendered job
+    resumes."""
+    import os
+    from cron.jobs import create_job, list_jobs, use_cron_store
+
+    real_install = module._install
+    orch_home = Path(os.environ["HERMES_HOME"]) / "profiles" / "orchestrator"
+    intruder = {}
+
+    def _install(src, name):
+        out = real_install(src, name)
+        if name == "orchestrator":
+            with use_cron_store(orch_home):
+                intruder.update(create_job("Not from the render.", "every 30m",
+                                           name="supervise-issues", paused=True))
+        return out
+
+    monkeypatch.setattr(module, "_install", _install)
+    result = _real_onboard(module, tmp_path, monkeypatch, "intruder")
+    with use_cron_store(orch_home):
+        jobs = {j["id"]: j for j in list_jobs(include_disabled=True)}
+    sup = next(j for j in jobs.values() if j["name"] == "supervise-issues" and j["id"] != intruder["id"])
+    assert result == {
+        "ok": True,
+        "resumed_cron_jobs": [{"profile": "orchestrator", "name": "supervise-issues", "id": sup["id"]}],
+        "kept_paused_cron_jobs": [{"profile": "worker", "name": "extra", "id": _job("worker", "extra")["id"]}],
+    }, result
+    assert jobs[intruder["id"]]["state"] == "paused", jobs[intruder["id"]]
+    assert [j["id"] for j in jobs.values() if j["state"] == "scheduled"] == [sup["id"]]
+
+
+def test_failed_onboard_resumes_no_cron_job(module, tmp_path, monkeypatch):
+    """An onboard that fails resumes nothing: the rendered jobs stay paused for review."""
+    result = _real_onboard(module, tmp_path, monkeypatch, "fail", bot_chat_ok=False)
+    sup = _job("orchestrator", "supervise-issues")
+    assert result["ok"] is False
+    assert sup["enabled"] is False and sup["state"] == "paused", sup
+    assert result["resumed_cron_jobs"] == [] and result["kept_paused_cron_jobs"] == []
+
+
+def test_empty_resume_allowlist_resumes_nothing(module, tmp_path, monkeypatch):
+    """`onboard_resume_cron_jobs: []` keeps the upstream posture: every new job stays paused."""
+    _set_resume_allowlist([])
+    result = _real_onboard(module, tmp_path, monkeypatch, "empty")
+    assert result == {"ok": True, "resumed_cron_jobs": [], "kept_paused_cron_jobs": _all_kept()}, result
+    assert _job("orchestrator", "supervise-issues")["state"] == "paused"
+
+
+def test_failed_resume_repauses_jobs_already_resumed(module, tmp_path, monkeypatch):
+    """Resume is all-or-nothing: when a later allowlisted resume fails, an earlier one is paused
+    again and the onboard fails."""
+    import cron.jobs as cj
+
+    _set_resume_allowlist(["orchestrator/supervise-issues", "worker/extra"])
+    real_resume = cj.resume_job
+
+    def _resume(job_id):
+        if _job("worker", "extra")["id"] == job_id:
+            raise RuntimeError("resume refused")
+        return real_resume(job_id)
+
+    monkeypatch.setattr(cj, "resume_job", _resume)
+    result = _real_onboard(module, tmp_path, monkeypatch, "rollback")
+    assert result["ok"] is False and "resume onboarded cron jobs" in result["error"]
+    assert result["resumed_cron_jobs"] == []
+    assert _job("orchestrator", "supervise-issues")["state"] == "paused"
+    assert _job("worker", "extra")["state"] == "paused"
+
+
+def test_malformed_resume_allowlist_resumes_nothing(module, tmp_path, monkeypatch, caplog):
+    """One malformed entry invalidates the whole setting: it is treated as [] with a warning,
+    so even the valid orchestrator/supervise-issues entry is not honoured."""
+    import logging
+
+    _set_resume_allowlist(["orchestrator/supervise-issues", "/"])
+    with caplog.at_level(logging.WARNING):
+        result = _real_onboard(module, tmp_path, monkeypatch, "malformed")
+    assert result == {"ok": True, "resumed_cron_jobs": [], "kept_paused_cron_jobs": _all_kept()}, result
+    assert _job("orchestrator", "supervise-issues")["state"] == "paused"
+    assert any("onboard_resume_cron_jobs" in r.getMessage() for r in caplog.records)
