@@ -170,8 +170,10 @@ def test_ac_self_f57_3(tmp_path, hermes_home):
     profile = install_distribution(str(dist), name="testdist").target_dir
 
     assert not (profile / "README.md").exists()
-    # A stale owned entry in the profile must vanish when the dir is replaced.
-    _write_skill(profile / "skills", "stale-skill")
+    # skills/ is merged per authored root: a skill the user added beside the
+    # distribution's own skill is not the distribution's to remove.
+    user_skill = _write_skill(profile / "skills", "user-skill", description="user-added")
+    user_skill_before = (user_skill / "SKILL.md").read_bytes()
 
     _write_dist(dist, version="2.0.0", soul="soul-v2", mcp='{"m": 2}',
                 config="model: dist-v2", skill_desc="skill-v2", cron='{"c": 2}')
@@ -180,7 +182,7 @@ def test_ac_self_f57_3(tmp_path, hermes_home):
     assert (profile / "SOUL.md").read_text(encoding="utf-8") == "soul-v2"
     assert (profile / "mcp.json").read_text(encoding="utf-8") == '{"m": 2}'
     assert "skill-v2" in (profile / "skills" / "dist-skill" / "SKILL.md").read_text(encoding="utf-8")
-    assert not (profile / "skills" / "stale-skill").exists()
+    assert (user_skill / "SKILL.md").read_bytes() == user_skill_before
     assert (profile / "cron" / "job.json").read_text(encoding="utf-8") == '{"c": 2}'
     assert not (profile / "README.md").exists()
     # The version is recorded by rewriting distribution.yaml — always written,
