@@ -1330,9 +1330,13 @@ hermes -p <profile> doctor     # one profile
 
 A Hermes fleet is supervised as **one gateway** in Bot Mode, not as a bank of
 per-bot daemons and not by a periodic host "sweep" loop. The default profile's
-gateway runs with `gateway.multiplex_profiles: true` and a
-`multiplex_profile_allowlist` naming the roster, so that single multiplexing
-process serves every allowlisted coworker. Each responsibility a NanoClaw-style
+gateway runs with `gateway.multiplex_profiles: true`, and that single
+multiplexing process serves default plus every live, unparked profile under
+`profiles/`. The fleet is scoped by parking non-fleet profiles: the former
+`multiplex_profile_allowlist` key is retired (config migration 43 removes it),
+and `nv-coworker-compose`'s `park_non_fleet_profiles(roster)` parks every named
+profile outside the roster, so the served set is exactly default + the roster.
+Each responsibility a NanoClaw-style
 host `sweep()` used to carry — inbound `processing_ack` reconciliation, outbound
 at-least-once delivery, stale-claim detection, due-message wake, recurrence, and
 crash-loop backoff — is owned by a first-class Hermes mechanism (mapped in the
@@ -1411,9 +1415,10 @@ state it precisely (`AC-ISO-F17-11`):
   returns before its spawned child is stopped; do not expect a non-zero status
   from `gateway start` itself in the s6 path.
 
-To actually move inbound to a different profile, change which profile the one
-multiplexer serves (its `multiplex_profile_allowlist`), rather than starting a
-second gateway.
+To actually move inbound to a different profile, change which profiles the one
+multiplexer serves by parking or unparking them (see
+[Stopping one profile without stopping the host](#stopping-one-profile-without-stopping-the-host)),
+rather than starting a second gateway.
 
 #### Interrupted-session and lease recovery
 

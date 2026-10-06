@@ -25,7 +25,7 @@ mapping is thin.
 | `users` | A `SessionSource` identity — `(platform, user_id)` resolved per inbound message (`gateway/session.py`). | One principal per platform id; no `users` table. |
 | `messaging_groups` | The conversations a fleet exposes: Bot Chats, hosted rooms, and the DEFAULT profile's webhook routes. | A group is a surface, not a row. |
 | `wirings` | Each profile's own `config.yaml` — engagement rules plus `profile_routes` routing (which profile answers which surface). | Wiring lives in per-profile config, not a join table. |
-| `agent_groups` | Coworker **profiles** under one gateway in multiplex mode, named by `gateway.multiplex_profile_allowlist`. | The roster is the allowlist; the render enforces it. |
+| `agent_groups` | Coworker **profiles** under one gateway in multiplex mode; the multiplexer serves default plus every live, unparked profile under `profiles/`. | The roster is the served set: the fleet is scoped by parking non-fleet profiles (`nv-coworker-compose`'s `park_non_fleet_profiles(roster)` parks every other named profile). |
 | `user_roles` | For humans: the `PairingStore` plus the per-platform allowlist (`allow_from`) plus the `slash_access` admin/user command tier. For agents: the elevated-orchestrator / GOV-F26 predicate. | Privilege is resolved live, not stored as a role table. |
 | `agent_group_members` | Room membership held in the authoritative `hosted_rooms` store, projected to the desktop `ui_meta`. | Membership is gateway state, not a render artifact. |
 

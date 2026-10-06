@@ -29,8 +29,15 @@ is recognised but deferred (fails closed) pending its provider.
 
 The render enforces the fleet invariants regardless of what the spec declares:
 
-- **DEFAULT is the multiplexer**: `gateway.multiplex_profiles: true`,
-  `gateway.multiplex_profile_allowlist` = exactly the five coworkers.
+- **DEFAULT is the multiplexer**: `gateway.multiplex_profiles: true`. The multiplexer
+  serves default plus every live, unparked profile under `profiles/`, so the fleet is
+  scoped by parking non-fleet profiles: `nv-coworker-compose`'s
+  `park_non_fleet_profiles(roster)` writes a `gateway.parked` marker in every named
+  profile outside the five coworkers (never in a roster profile; a re-run changes
+  nothing), and the served set is exactly default + the five. On a manual install,
+  pre-create `profiles/<name>/gateway.parked` for each non-fleet profile. The former
+  `gateway.multiplex_profile_allowlist` key is retired at `v2026.9.24` (config
+  migration 43 removes it), and the render writes no allowlist.
 - **Supervision floor**: `gateway.systemd_watchdog_seconds` is floored to **≥ 30 s** on
   the DEFAULT profile (so `hermes gateway install` emits `Type=notify` + `WatchdogSec`,
   not `Type=simple`). A below-floor or absent spec value is raised to 30; a higher value

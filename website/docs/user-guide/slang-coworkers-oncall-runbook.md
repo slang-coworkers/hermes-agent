@@ -27,11 +27,15 @@ the tag path is authoritative here.
 ## 1. Fleet topology (read this first)
 
 - **One gateway per fleet.** The container runs the **default profile's**
-  gateway with `gateway.multiplex_profiles: true` and a
-  `multiplex_profile_allowlist` naming the coworker roster. Those keys are
-  rendered onto the default profile by the `nv-coworker-compose` plugin
-  (LOOP-F35) and read natively at `gateway/config.py:1283` and consumed at
-  `gateway/run.py:2470`. OPS-F58.a does **not** re-render them.
+  gateway with `gateway.multiplex_profiles: true`, rendered onto the default
+  profile by the `nv-coworker-compose` plugin (LOOP-F35). The multiplexer
+  serves default plus every live, unparked profile under `profiles/`
+  (`profiles_to_serve`, `hermes_cli/profiles.py:1050` at `v2026.9.24`), so the
+  fleet is scoped by parking non-fleet profiles: the plugin's
+  `park_non_fleet_profiles(roster)` writes a `gateway.parked` marker in every
+  named profile outside the coworker roster. The former
+  `multiplex_profile_allowlist` key is retired at `v2026.9.24` (config
+  migration 43 removes it). OPS-F58.a does **not** re-render any of this.
 - **Coworker s6 slots are left down by design.** `container_boot`
   (`hermes_cli/container_boot.py:95` `reconcile_profile_gateways`) autostarts
   **only** a slot whose per-profile `gateway_state.json`
