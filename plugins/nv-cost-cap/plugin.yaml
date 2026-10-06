@@ -12,3 +12,5 @@ provides_hooks:
   - on_session_start
   - pre_gateway_dispatch
   - on_session_finalize
+provides_middleware:
+  - llm_execution
