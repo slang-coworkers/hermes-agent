@@ -201,3 +201,24 @@ def test_onboard_failed_install_parks_nothing(module, tmp_path, monkeypatch):
     assert result["ok"] is False and "install worker" in result["error"]
     assert not profile_is_parked(profiles_root / "stray")
     assert "stray" in {name for name, _ in profiles_to_serve(True)}
+
+
+def test_onboard_later_failure_parks_nothing(module, tmp_path, monkeypatch):
+    """Installs succeed but a later onboard step fails: the onboard fails and the non-fleet
+    profile stays served."""
+    import os
+    from hermes_cli.profiles import profile_is_parked, profiles_to_serve
+
+    profiles_root = Path(os.environ["HERMES_HOME"]) / "profiles"
+    (profiles_root / "stray").mkdir(parents=True)
+    (profiles_root / "stray" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "_install", lambda src, name: shutil.copytree(src, profiles_root / name))
+    monkeypatch.setattr(module, "_profile_revisions", lambda *a, **k: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda *a, **k: False)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda *a, **k: True)
+    result = module._run_onboard(str(_write_spec(tmp_path / "spec_onboard_meta", _spec())))
+
+    assert result["ok"] is False
+    assert not profile_is_parked(profiles_root / "stray")
+    assert "stray" in {name for name, _ in profiles_to_serve(True)}
