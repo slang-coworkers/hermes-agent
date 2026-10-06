@@ -35,8 +35,10 @@ calls (two turns, one retry headroom each). This is not agent-to-agent: one prof
   `fleet-f62d-*` only). It is a docker restart of that one sandbox container: it keeps the
   filesystem and the home, re-mints the CA, and returns once the restart completes.
   Delete-and-recreate is not a restart. The scenario still requires an observed re-mint (step 3).
-- **Image.** `fleet-f62d-e13gw` is created from the per-head lane image named in the
-  Orchestrator's LANE READY, with the gateway policy that allows `inference.local:443`.
+- **Image and policy.** `fleet-f62d-e13gw` is created from the per-head lane image named in the
+  Orchestrator's LANE READY, with the gateway policy `nanoclaw-base/render/default/policy-gateway.yaml`
+  (sha256 `9e7a2c85…`, the F62 fleet's own render), which allows `inference.local:443`. Record
+  `sha256sum` of that policy file in `$EV` when the sandbox is created.
 
 ## Fixtures
 
@@ -194,6 +196,8 @@ cget() { HERMES_HOME="$GW" hermes "$@"; }
 ## Steps
 
 1. Run one model turn as the triager on the route: `timeout 300 env HERMES_HOME=$GW hermes -p triager chat -q "reply with the word ok"`.
+   Record the model id the response reports. If the route serves a different model than
+   `model_id`, record the served id; that does not fail the run.
    Then run `probe $GW/profiles/triager` and `probe $GW` → expect: the turn exits 0 with a reply,
    and both probes print `/etc/openshell-tls/ca-bundle.pem` then `no-bridge`.
 2. **Restart the sandbox:** `openshell sandbox restart fleet-f62d-e13gw` → expect: exit 0 and the
@@ -258,11 +262,11 @@ through the same proxy tunnel the stale copy fails verification while the live b
 
 ## Evidence
 
-- `scenario-AC-FLEET-F62.e-13/evidence.txt`: the image check, the two lane assertions (mirror HEAD,
+- `scenario-AC-FLEET-F62.e-13/evidence.txt`: the gateway policy's `sha256`, the image check, the two lane assertions (mirror HEAD,
   the GitHub CONNECT status line) and the `insteadof` rewrite, the resolved managed scope and the
   scanner config before and after, each plugin's `<home> <name> <rev> <action> rc=<exit>` line, the
   effective triager route (the five `config get` values) and the `inference.local:443` policy
-  check, `H1`, `H2`, each step's exit code, each probe's two printed lines, and for the step-5
+  check, `H1`, `H2`, each step's exit code, the served model id of each turn, each probe's two printed lines, and for the step-5
   control: the `sha256` of `/tmp/e13-stale-ca.pem` (must equal `H1`), the `settings:` line (same
   proxy, target `inference.local:443`, SNI `inference.local`, tunnel and client settings for both
   attempts; only the CA file differs), the two proxy status lines, and the two result lines (the
