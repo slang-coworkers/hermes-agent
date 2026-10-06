@@ -393,8 +393,12 @@ def test_ac_loop_f38_7() -> None:
     assert "PR #99 opened" in context
     assert "focus on security" in context
 
+    # The async note tells the user the review's results come back to this conversation;
+    # the synchronous fallback is a different, results-carrying note (agent/review_engine.py:184-195).
     note = format_dispatch_note({"status": "dispatched", "review_model": "opus"}, "security")
-    assert "re-enter" in note
+    assert note.startswith("Review started") and "results will return here" in note.lower()
+    sync = format_dispatch_note({"status": "completed", "results": {"ok": 1}}, "security")
+    assert sync != note and "results" in sync.lower()
 
 
 def test_ac_loop_f38_8() -> None:
