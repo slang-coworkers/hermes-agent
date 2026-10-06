@@ -468,6 +468,8 @@ To back the change out and leave the existing default exactly as before:
   later operator-created managed config look originally-absent (which would skip its backup).
 - **Remove the five coworker profiles** (`hermes profile remove <role>` per role) — the
   profiles the install added, never the default profile.
+- **Unpark the profiles this install parked**, listed one per line in `gateway.osh-f64.parked` at the
+  home root (`hermes -p <name> gateway start`), then delete that file.
 - **Uninstall the fleet plugins** that were newly installed (default + per-profile); a
   plugin that pre-existed at the pinned ref is left as the operator had it.
 - **Restart the gateway** so it re-reads the restored default.

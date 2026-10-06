@@ -168,8 +168,8 @@ Lifecycle and behaviour:
 - **Skills are namespaced.** The package's skill is registered under a deterministic
   `agent-plugin-<slug>-<hash>` namespace, so two types can ship skills with the same short
   name without collision.
-- **MCP servers are merged, namespaced, and path-expanded.** Each enabled package's `mcp.json`
-  server is merged into runtime MCP discovery under `<namespace>__<server>`. In the server's
+- **MCP servers are merged and path-expanded.** Each enabled package's `mcp.json` server is
+  merged into runtime MCP discovery under its own `mcp.json` name. In the server's
   `args`, `env`, and `cwd`, `${PLUGIN_ROOT}` expands to the installed package root and
   `${PLUGIN_DATA}` to a profile-scoped data directory (`<HERMES_HOME>/plugin-data/<namespace>`),
   and both are injected into the server's environment. `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` are
