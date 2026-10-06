@@ -45,7 +45,7 @@ vi.mock('./test', () => ({
 
 import { createSandbox, launchDesktop, waitForAppReady } from './fixtures'
 import { bootFleetDesktop } from './fleet-f62-ac10.helpers'
-import { startMockServer } from './mock-server'
+import { startMockServer } from '../../../tests-js/scripts/mock-server'
 
 beforeEach(() => {
   vi.clearAllMocks()
