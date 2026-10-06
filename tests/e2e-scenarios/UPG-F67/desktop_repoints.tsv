@@ -1,0 +1,3 @@
+# path	import_before	import_after	reason
+apps/desktop/e2e/fleet-f62-ac10.helpers.ts	import { startMockServer } from './mock-server'	import { startMockServer } from '../../../tests-js/scripts/mock-server'	apps/desktop/e2e/mock-server.ts is absent at v2026.9.24: upstream fd02bd8621 moved it to tests-js/scripts/mock-server.ts (startMockServer at :533)
+apps/desktop/e2e/fleet-f62-ac10.helpers.unit.test.ts	import { startMockServer } from './mock-server'	import { startMockServer } from '../../../tests-js/scripts/mock-server'	apps/desktop/e2e/mock-server.ts is absent at v2026.9.24: upstream fd02bd8621 moved it to tests-js/scripts/mock-server.ts (startMockServer at :533)
