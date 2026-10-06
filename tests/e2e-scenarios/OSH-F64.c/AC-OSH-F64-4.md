@@ -457,7 +457,7 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
      the window (the chat host mounts only after the first /chat visit, `App.tsx:407-409`), else `FAIL(env)`.
    - **Connect:** `EXP=$(expect_id orchestrator $ORCH_SID)`, the route's own `_session_latest_descendant(canonical_id,
      db)[0] or canonical_id` over the profile's read-only `state.db` (`hermes_cli/web_server.py:16623-16634`). Then
-     `reread s1 base`; `ab_open "${URL}chat?profile=orchestrator&resume=$ORCH_SID"` → expect the `orchestrator »`
+     `reread s1 base`; `ab_open "${URL}chat?profile=orchestrator&resume=$ORCH_SID"` → expect the `orchestrator ❯`
      prompt. `?profile=` stays in the URL because the SPA scope starts from it (`web/src/contexts/ProfileProvider.tsx:43-45`);
      the SPA forwards both to `/api/pty?profile=orchestrator&resume=…` (`ChatPage.tsx:1165-1174`), and may rewrite
      `resume` to the latest descendant itself (`:402-426`).
@@ -508,11 +508,12 @@ OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … me
    transport (`tools/bot_mode_dm.py:31-33`), so the attempt lands in that Bot Chat. It is a model turn, so it starts
    on the Setup-5 background start with the guard env (operator msg 508), never as a foreground `sx`. Writing the
    query file makes no network call and stays a plain `sx`:
-   `sx 'printf "%s\n" "Use the cronjob_manage tool to create an hourly cron job named osh-f64c-probe that says hello." > /tmp/osh-f64c-q5.txt'`;
+   `sx 'printf "%s\n" "Use the cronjob tool to create an hourly cron job named osh-f64c-probe that says hello." > /tmp/osh-f64c-q5.txt'`;
    then `bgrun s5 'hermes -p builder chat --in ~ -c "Bot Chat" -Q --query-file /tmp/osh-f64c-q5.txt' | tee $ART/scenario-$AC/step-5-cli.txt`.
    Then `reread s5t base`; `ab_open ${URL}bot-chat`, click `builder` → expect: a `tool` row carrying the
-   `cronjob_manage` denial that names
-   `orchestrator-only` → `step-5.png`. Evidence: `echo step-5 >> evidence.txt; row builder <tip> tool cronjob_manage orchestrator-only`;
+   fleet-admin denial `cronjob_manage is orchestrator-only` → `step-5.png`. The release registers the tool as
+   `cronjob` (`tools/cronjob_tools.py:2106`), so that is the row's `tool_name`; the veto names its canonical
+   `cronjob_manage` in the content. Evidence: `echo step-5 >> evidence.txt; row builder <tip> tool cronjob 'cronjob_manage is orchestrator-only'`;
    `reread s5t send`; `g2_gate away orchestrator $EXP $ORCH_SID s5t`.
 6. **Teardown.** Before anything is deleted (CR3; D3a after-close rule):
    - `reread close base`; `reread close send`; `g2_gate close orchestrator $EXP $ORCH_SID close`: nothing is live
@@ -550,7 +551,7 @@ All files are under `$ART/scenario-AC-OSH-F64-4/`:
   - step 1: an `assistant` row;
   - steps 2 and 3: `tool` rows with `tool_name` `message_agent`, step 3's newer and containing `"status": "sent"`;
   - step 4: an `assistant` row containing `P7-BUILT:<nonce>`;
-  - step 5: a `tool` row with `tool_name` `cronjob_manage` whose content names `orchestrator-only`.
+  - step 5: a `tool` row with `tool_name` `cronjob` whose content names `cronjob_manage is orchestrator-only`.
   A `row none` on any step is a FAIL for that step.
 - **One forward:** `forwards.txt` holds exactly one `openshell forward start $P osh-f64c-gw -d`.
 - **One gateway:** append `sx '"$PY" "$HERMES_HOME/.osh-f64c/helpers/gateway_count.py"'`
