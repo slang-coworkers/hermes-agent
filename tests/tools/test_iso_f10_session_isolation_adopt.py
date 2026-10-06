@@ -152,7 +152,7 @@ def test_ac_iso_f10_5(monkeypatch):
 def test_ac_iso_f10_6(monkeypatch, tmp_path):
     """Podman is honored as a drop-in container runtime for the per-session sandbox: an explicit HERMES_DOCKER_BINARY override is used, and podman on PATH is accepted when docker is absent."""
     podman = tmp_path / "podman"
-    podman.write_text("#!/bin/sh\n")
+    podman.write_text("#!/bin/sh\n", encoding="utf-8")
     podman.chmod(0o755)
     monkeypatch.setenv("HERMES_DOCKER_BINARY", str(podman))
     assert docker_mod.find_docker() == str(podman)
