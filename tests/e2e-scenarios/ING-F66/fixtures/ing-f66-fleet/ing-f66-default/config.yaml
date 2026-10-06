@@ -42,6 +42,9 @@ plugins:
         - slang-coworkers-bot
         per_pr_hourly_budget: 30
         webhook_guard: true
+  disabled:
+  - web-firecrawl
+  - browser-firecrawl
 gateway:
   multiplex_profiles: true
   multiplex_profile_allowlist:

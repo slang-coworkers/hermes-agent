@@ -11,6 +11,7 @@ timezone: Asia/Kolkata
 secrets:
   onecli:
     enabled: true
+    override_existing: true
 plugins:
   enabled:
   - nv-coworker-compose
@@ -39,6 +40,13 @@ plugins:
     nv-ingress:
       settings:
         orchestrator_profile: orchestrator
+    podman-onecli:
+      settings:
+        proxy_rewrite: @LOOPBACK@:18255
+        ca_bundle: /etc/osh-lane/ca-bundle.pem
+  disabled:
+  - web-firecrawl
+  - browser-firecrawl
 terminal:
   backend: ssh
   ssh_host: openshell-ing-f66-triager
