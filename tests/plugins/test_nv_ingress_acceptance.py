@@ -1724,3 +1724,284 @@ def test_ac_ing_f66_26(ingress, edge_path, tmp_path, caplog):
             "without a scope block every listed event is forwarded"
     finally:
         _stop_edge(open_edge)
+
+
+INSTALLER = REPO_ROOT / "plugins" / "nv-coworker-compose" / "openshell" / "installer.py"
+
+
+def _load_installer():
+    spec = importlib.util.spec_from_file_location(f"ing_f66_ac27_installer_{secrets.token_hex(4)}", INSTALLER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _render_bytes(role: str) -> bytes:
+    return f"version: 1\n# {role} render\n".encode("utf-8")
+
+
+class _NoPopen:
+    def __init__(self, *_a, **_k):
+        self.pid, self.returncode = 4242, None
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class _LaneBroker:
+    """Stands in for every subprocess the installer starts, modelling the lane broker. A `--policy` path under
+    `root` resolves to `view`, the broker's host-side policy root, which the installer cannot read unless `root` is
+    `view`. `policy digest --policy F` prints a sha256sum line for the resolved file, or fails as `digest_fault` says;
+    `sandbox create|replace` reads the resolved file at bind time and, given `--policy-sha256`, denies on a mismatch
+    (a replace denies before it deletes); without it, it binds whatever the file holds. `bound` maps each sandbox the
+    broker created or replaced to the digest of the bytes it bound."""
+
+    DIGEST_FAULTS = {"missing-verb": (2, "flag not allowed: policy digest\n"),
+                     "deny": (1, "denied: policy digest outside the policy root\n"),
+                     "unparsable": (0, "")}
+
+    def __init__(self, root: Path, view: Path, roles, *, existing=(), digest_fault=None, on_bind=None):
+        assert digest_fault in (None, *self.DIGEST_FAULTS), digest_fault
+        self.root, self.view, self.roles = str(root), view, list(roles)
+        self.existing, self.digest_fault, self.on_bind = set(existing), digest_fault, on_bind
+        self.calls: list[list[str]] = []
+        self.bound: dict[str, str] = {}
+
+    def resolve(self, path: str) -> Path:
+        return self.view / os.path.relpath(path, self.root) if path.startswith(self.root + os.sep) else Path(path)
+
+    @staticmethod
+    def _done(cmd, kwargs, rc=0, out="", err=""):
+        if not (kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines")):
+            out, err = out.encode("utf-8"), err.encode("utf-8")
+        if rc and kwargs.get("check"):
+            raise subprocess.CalledProcessError(rc, cmd, out, err)
+        return subprocess.CompletedProcess(cmd, rc, out, err)
+
+    def run(self, cmd, *_args, **kwargs):
+        cmd = [str(c) for c in cmd]
+        self.calls.append(cmd)
+        head = cmd[:3]
+        if head == ["hermes", "coworker", "compose"]:
+            out = Path(cmd[cmd.index("--out") + 1])
+            for role in self.roles:
+                (out / role).mkdir(parents=True, exist_ok=True)
+                (out / role / f"policy-{role}.yaml").write_bytes(_render_bytes(role))
+            return self._done(cmd, kwargs)
+        if head == ["hermes", "gateway", "status"]:
+            return self._done(cmd, kwargs, out="Gateway is running\n")
+        if head == ["openshell", "sandbox", "list"]:
+            return self._done(cmd, kwargs, out="NAME\n" + "".join(f"{n}\n" for n in sorted(self.existing)))
+        if head == ["openshell", "policy", "digest"]:
+            if self.digest_fault in ("missing-verb", "deny"):
+                rc, err = self.DIGEST_FAULTS[self.digest_fault]
+                return self._done(cmd, kwargs, rc=rc, err=err)
+            if self.digest_fault == "unparsable":
+                return self._done(cmd, kwargs, out="policy digest: ok\n")
+            path = cmd[cmd.index("--policy") + 1]
+            f = self.resolve(path)
+            if not f.is_file():
+                return self._done(cmd, kwargs, rc=1, err=f"policy unreadable: {path}\n")
+            return self._done(cmd, kwargs, out=f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {path}\n")
+        if head in (["openshell", "sandbox", "create"], ["openshell", "sandbox", "replace"]):
+            if head[2] == "replace" and not all(f in cmd for f in ("--name", "--from", "--policy", "--policy-sha256")):
+                return self._done(cmd, kwargs, rc=2, err="replace needs --name, --from, --policy and --policy-sha256\n")
+            name = cmd[cmd.index("--name") + 1]
+            if self.on_bind:
+                self.on_bind(self, name)
+            f = self.resolve(cmd[cmd.index("--policy") + 1])
+            got = hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else None
+            if got is None or ("--policy-sha256" in cmd and cmd[cmd.index("--policy-sha256") + 1] != got):
+                return self._done(cmd, kwargs, rc=1, err=f"policy mirror stale: sha256 {got} != expected\n")
+            if head[2] == "create" and name in self.existing:
+                return self._done(cmd, kwargs, rc=1, err=f"sandbox exists: {name}\n")
+            self.existing.add(name)
+            self.bound[name] = got
+            return self._done(cmd, kwargs)
+        if head == ["openshell", "sandbox", "delete"]:
+            self.existing.discard(cmd[3])
+            return self._done(cmd, kwargs)
+        if head == ["openshell", "sandbox", "ssh-config"]:
+            return self._done(cmd, kwargs, out=f"Host openshell-{cmd[3]}\n    User sandbox\n")
+        return self._done(cmd, kwargs)
+
+    def sandbox_ops(self):
+        return [c for c in self.calls if c[:2] == ["openshell", "sandbox"] and len(c) > 2
+                and c[2] in ("create", "replace", "delete")]
+
+    def preflighted(self):
+        """Roles whose broker digest was asked before the first sandbox create, replace or delete."""
+        ops = self.sandbox_ops()
+        stop = self.calls.index(ops[0]) if ops else len(self.calls)
+        return {Path(c[c.index("--policy") + 1]).parent.name for c in self.calls[:stop]
+                if c[:3] == ["openshell", "policy", "digest"] and "--policy" in c}
+
+
+def _sandbox_digests(home: Path) -> dict:
+    return {p.name: p.read_text(encoding="utf-8").strip() for p in sorted(home.rglob("*.sha256"))}
+
+
+_HARNESS_ERRORS = (AssertionError, AttributeError, IndexError, KeyError, NameError, TypeError)
+
+
+def _ac27_install(tmp_path, monkeypatch, inst, case: str, broker: _LaneBroker, policy_root):
+    """One `apply()` of the ING-F66 lane spec in the home `<tmp>/<case>`, every subprocess answered by `broker`.
+    Returns the refusal, or None when the install completed."""
+    base = tmp_path / case
+    for d in ("user", "home", "managed"):
+        (base / d).mkdir(parents=True, exist_ok=True)
+    # A private context, so the conftest sandbox's own patches on `monkeypatch` stay in force afterwards.
+    with monkeypatch.context() as mp:
+        mp.setenv("HOME", str(base / "user"))
+        mp.setenv("HERMES_HOME", str(base / "home"))
+        mp.setenv("HERMES_MANAGED_DIR", str(base / "managed"))
+        mp.setattr(subprocess, "run", broker.run)
+        mp.setattr(subprocess, "Popen", _NoPopen)
+        mp.setattr(time, "sleep", lambda _s: None)
+        try:
+            inst.apply(str(ING_SPEC), "a" * 40, room_creator=lambda *_a: None, room_exists=lambda _rid: False,
+                       policy_root=None if policy_root is None else str(policy_root))
+        except _HARNESS_ERRORS:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any installer refusal; programming errors re-raise above
+            return exc
+    assert any(c[:3] == ["hermes", "coworker", "compose"] for c in broker.calls), "the install never composed"
+    return None
+
+
+def test_ac_ing_f66_27(tmp_path, monkeypatch):
+    """(scope addition, operator ruling D14) A rooted openshell install (`--policy-root`) verifies every worker's host policy before any sandbox operation and binds only verified bytes: after compose it compares each readable mirror byte for byte with the render and asks the broker for every rooted role's host-file digest, refusing the whole install with no sandbox delete or create and no recorded digest changed on any mismatch, broker deny, unreadable mirror or missing broker verb; each create or replace carries the render digest for the broker's compare-at-bind, a drifted sandbox is replaced in one broker call rather than deleted first, a mirror that changes after the preflight refuses that role before its delete or create, and a digest is recorded only after a successful create or replace (derived; repairs FLEET-F62.d's `--policy-root` guard, which cannot read a host mirror from inside the gateway sandbox)
+
+    The installer is given a policy root that does not exist in its own filesystem (the host path the broker reads);
+    `_LaneBroker` resolves it to a host root under tmp_path. Ruling D14's cases: (i) match, (ii) deny / unreadable /
+    missing verb, (iii) stale at preflight (a later role, and the readable #77 path), (iii-b) changed after the
+    preflight, (iv) the readable #77 compare, (v) no refusal changes a recorded digest.
+    Red on 1fb4d74 / f9c4d92: the guard reads the host path in-process and refuses every rooted create."""
+    inst = _load_installer()
+    spec = yaml.safe_load(ING_SPEC.read_text(encoding="utf-8"))
+    project = spec.get("project")
+    roles = inst._coworker_roles(spec)
+    assert len(roles) >= 4, roles
+    names = [f"{project}-{r}" for r in roles]
+    want = {f"{project}-{r}": hashlib.sha256(_render_bytes(r)).hexdigest() for r in roles}
+    gw_root = tmp_path / "host-only" / "policy-root"   # what the installer is told; absent in its filesystem
+
+    def host_view(case: str, stale=(), missing=()) -> Path:
+        view = tmp_path / f"{case}-host-root"
+        for r in roles:
+            f = view / "render" / r / f"policy-{r}.yaml"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if r not in missing:
+                f.write_bytes(_render_bytes(r) + (b"# stale host mirror\n" if r in stale else b""))
+        return view
+
+    def seed_drifted(case: str) -> dict:
+        """Every sandbox exists and its recorded digest is not the render's, so each one is due a replace."""
+        rec = tmp_path / case / "home" / ".osh-f64" / "sandbox-policy"
+        rec.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (rec / f"{n}.sha256").write_text("0" * 64 + "\n", encoding="utf-8")
+        return _sandbox_digests(tmp_path / case / "home")
+
+    def opt(cmd, flag):
+        return cmd[cmd.index(flag) + 1] if flag in cmd else None
+
+    view = host_view("i")
+    broker = _LaneBroker(gw_root, view, roles)
+    assert _ac27_install(tmp_path, monkeypatch, inst, "i", broker, gw_root) is None, "a verified rooted install must complete"
+    ops = broker.sandbox_ops()
+    assert [c[2] for c in ops] == ["create"] * len(roles), f"a fresh fleet needs one create per role, got {ops}"
+    assert {opt(c, "--name"): opt(c, "--policy-sha256") for c in ops} == want, "each create carries its render digest"
+    assert all(opt(c, "--policy").startswith(str(gw_root) + os.sep) for c in ops), "creates bind the host mirror path"
+    assert broker.preflighted() == set(roles), "every rooted role's host digest is asked before any sandbox operation"
+    assert broker.bound == want
+    assert _sandbox_digests(tmp_path / "i" / "home") == {f"{n}.sha256": want[n] for n in names}
+    rerun = _LaneBroker(gw_root, view, roles, existing=names)
+    assert _ac27_install(tmp_path, monkeypatch, inst, "i", rerun, gw_root) is None
+    assert rerun.sandbox_ops() == [], f"matching records are skipped, got {rerun.sandbox_ops()}"
+    assert rerun.preflighted() == set(roles), "a rerun with matching records still preflights every role"
+
+    # A drifted sandbox is one whose record differs or is missing (an older install).
+    for case in ("drift", "drift-unrecorded"):
+        if case == "drift":
+            seed_drifted(case)
+        broker = _LaneBroker(gw_root, host_view(case), roles, existing=names)
+        assert _ac27_install(tmp_path, monkeypatch, inst, case, broker, gw_root) is None
+        ops = broker.sandbox_ops()
+        assert [c[2] for c in ops] == ["replace"] * len(roles), f"{case}: replaced, never deleted first, got {ops}"
+        assert {opt(c, "--name"): opt(c, "--policy-sha256") for c in ops} == want
+        assert broker.preflighted() == set(roles)
+        assert broker.bound == want
+        assert _sandbox_digests(tmp_path / case / "home") == {f"{n}.sha256": want[n] for n in names}
+
+    def refused(case: str, broker: _LaneBroker, policy_root, why: str) -> None:
+        """(v) A refusal performs no sandbox create, replace or delete and leaves every recorded digest as it was."""
+        before = _sandbox_digests(tmp_path / case / "home")
+        exc = _ac27_install(tmp_path, monkeypatch, inst, case, broker, policy_root)
+        assert exc is not None, f"{why}: the rooted install must refuse"
+        assert broker.sandbox_ops() == [], f"{why}: no sandbox operation may run, got {broker.sandbox_ops()}"
+        assert broker.bound == {}, f"{why}: nothing may be bound"
+        assert _sandbox_digests(tmp_path / case / "home") == before, f"{why}: recorded digests must not change"
+
+    for fault in _LaneBroker.DIGEST_FAULTS:
+        seed_drifted(f"ii-{fault}")
+        refused(f"ii-{fault}", _LaneBroker(gw_root, host_view(f"ii-{fault}"), roles, existing=names, digest_fault=fault),
+                gw_root, f"(ii) policy digest {fault}")
+    seed_drifted("ii-unreadable")
+    refused("ii-unreadable", _LaneBroker(gw_root, host_view("ii-unreadable", missing=[roles[-1]]), roles, existing=names),
+            gw_root, "(ii) an unreadable host mirror")
+
+    for stale in (roles[-1], roles[0]):
+        refused(f"iii-fresh-{stale}", _LaneBroker(gw_root, host_view(f"iii-fresh-{stale}", stale=[stale]), roles),
+                gw_root, f"(iii) {stale} stale on a fresh fleet")
+        seed_drifted(f"iii-drift-{stale}")
+        refused(f"iii-drift-{stale}",
+                _LaneBroker(gw_root, host_view(f"iii-drift-{stale}", stale=[stale]), roles, existing=names),
+                gw_root, f"(iii) {stale} stale on a drifted fleet")
+
+    # (iii) and (iv) on #77's readable path: a policy root the installer CAN read, stale for one role, refuses. It
+    # refuses even when the broker reports every host digest as matching, so #77's in-process compare still runs.
+    readable = host_view("iv-readable", stale=[roles[-1]])
+    seed_drifted("iv-readable")
+    refused("iv-readable", _LaneBroker(readable, readable, roles, existing=names), readable,
+            "(iii) a readable stale mirror")
+    seed_drifted("iv-compare")
+    refused("iv-compare", _LaneBroker(readable, host_view("iv-compare-broker"), roles, existing=names), readable,
+            "(iv) #77's byte compare of a readable stale mirror")
+    ok_root = host_view("iv-match")
+    broker = _LaneBroker(ok_root, ok_root, roles)
+    assert _ac27_install(tmp_path, monkeypatch, inst, "iv-match", broker, ok_root) is None
+    assert {opt(c, "--name"): opt(c, "--policy-sha256") for c in broker.sandbox_ops()} == want
+
+    # Model a later mirror changing only after all roles pass preflight.
+    def go_stale(broker: _LaneBroker, name: str) -> None:
+        if name == names[0]:
+            f = broker.view / "render" / roles[-1] / f"policy-{roles[-1]}.yaml"
+            f.write_bytes(_render_bytes(roles[-1]) + b"# written after the preflight\n")
+
+    for case, existing in (("iiib-fresh", ()), ("iiib-drift", names)):
+        before = seed_drifted(case) if existing else {}
+        broker = _LaneBroker(gw_root, host_view(case), roles, existing=existing, on_bind=go_stale)
+        assert _ac27_install(tmp_path, monkeypatch, inst, case, broker, gw_root) is not None, \
+            f"{case}: a mirror changed after the preflight must refuse that role"
+        ops = broker.sandbox_ops()
+        assert broker.preflighted() == set(roles), f"{case}: the preflight passed for every role before the change"
+        assert not [c for c in ops if c[2] == "delete"], f"{case}: no bare sandbox delete, got {ops}"
+        assert all(opt(c, "--policy-sha256") == want[opt(c, "--name")] for c in ops), \
+            f"{case}: every bind carries the render digest"
+        assert broker.bound and all(broker.bound[n] == want[n] for n in broker.bound), f"{case}: nothing stale bound"
+        assert names[-1] not in broker.bound, f"{case}: the changed role is never bound"
+        if existing:
+            assert names[-1] in broker.existing, f"{case}: the changed role's sandbox is not deleted"
+        after = _sandbox_digests(tmp_path / case / "home")
+        assert after.get(f"{names[-1]}.sha256") == before.get(f"{names[-1]}.sha256"), \
+            f"{case}: the refused role's record must not change"
+        assert all(after[f"{n}.sha256"] == want[n] for n in broker.bound), f"{case}: a bound role records its digest"
+
+    broker = _LaneBroker(gw_root, host_view("unrooted"), roles)
+    assert _ac27_install(tmp_path, monkeypatch, inst, "unrooted", broker, None) is None
+    assert not [c for c in broker.calls if c[:3] == ["openshell", "policy", "digest"]], "an unrooted install asks no digest"
+    assert [c[2] for c in broker.sandbox_ops()] == ["create"] * len(roles)
