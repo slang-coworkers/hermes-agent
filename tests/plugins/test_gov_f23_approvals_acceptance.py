@@ -434,8 +434,7 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
     allowlist is its own set, tools/approval.py:328-347, and load_permanent replaces
     rather than unions, :372-376): the builder's own entry governs under its
     override, and after the switch to the reviewer the builder's entry is neither
-    matched nor approved while the reviewer's own entry is matched. At v2026.8.31
-    this block recorded the opposite, the union leak then owned by GOV-ENF/P8."""
+    matched nor approved while the reviewer's own entry is matched."""
     import tools.approval as ta
     import tools.approval_context as tac
     from hermes_cli import managed_scope
@@ -539,8 +538,7 @@ def test_ac_gov_f23_4(tmp_path, monkeypatch):
         # allowlist is its own set (tools/approval.py:328-347) and load_permanent replaces rather
         # than unions (:372-376). Load the builder's allowlist, then SWITCH the override to the
         # reviewer profile (whose own allowlist does NOT contain ALLOW_PROBE): the builder's entry
-        # must be neither matched nor approved there, and the reviewer's own entry must match. At
-        # v2026.8.31 this block recorded the opposite (the union leak, then owned by GOV-ENF/P8).
+        # must be neither matched nor approved there, and the reviewer's own entry must match.
         ta.load_permanent_allowlist()  # builder home active -> the builder's own set
         reviewer_home, _reviewer_mgd = _materialize(rendered["reviewer"], "reviewer")
         reset_hermes_home_override(override_token)
