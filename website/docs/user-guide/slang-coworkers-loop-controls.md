@@ -111,8 +111,7 @@ for this row.
 of the recent user/assistant messages (`snapshot_recent_messages`) and re-enters
 the session with its result. The automatic post-turn fork is a memory/skill-
 maintenance fork whose spawn path reads `auxiliary.background_review.enabled`
-through `load_background_review_settings`; `is_background_review_enabled` exposes
-the same switch as a predicate. The switch is **necessary but not sufficient**: a
+through `load_background_review_settings`, the one reader of that switch. The switch is **necessary but not sufficient**: a
 memory/skill nudge must also trip, and delegation subagents never auto-review.
 
 **Caveat:** two deliberate differences. (1) `background_review` is a memory/skill-
@@ -148,8 +147,8 @@ surfaces against a sandboxed `HERMES_HOME`; one `test_ac_loop_f38_<n>` per id in
   user/assistant messages, builds an independent reviewer task carrying that
   content, and its dispatch note says the result re-enters the session.
 - **AC-LOOP-F38-8** — Buddy monitor, post-turn gate:
-  `auxiliary.background_review.enabled` is exposed through
-  `is_background_review_enabled`, and the master switch is present in the config
+  `auxiliary.background_review.enabled` is read through
+  `load_background_review_settings`, and the master switch is present in the config
   schema.
 - **AC-LOOP-F38-9** — (derived) This page exists under `website/docs/`, maps the
   four controls onto their native surfaces, enumerates `AC-LOOP-F38-1` …
@@ -175,7 +174,7 @@ the test pins.
 | `TODO_INJECTION_HEADER` | tag: `tools/todo_tool.py:42` | main: `tools/todo_tool.py:21` | Workflow-state reset |
 | `complete_structured` | tag: `agent/plugin_llm.py:811` | main: `agent/plugin_llm.py:460` | Intent router |
 | `snapshot_recent_messages` | tag: `agent/review_engine.py:63` | main: `agent/review_engine.py:1` | Buddy monitor |
-| `is_background_review_enabled` | tag: `agent/background_review.py:291` | main: `agent/background_review.py:1` | Buddy monitor |
+| `load_background_review_settings` | tag: `agent/background_review.py:205` | main: `agent/background_review.py:1` | Buddy monitor |
 | `auxiliary.background_review.enabled` | tag: `hermes_cli/config_defaults.py:1356` | main: `hermes_cli/config_defaults.py:741` | Buddy monitor |
 | `decompose_task` | tag: `hermes_cli/kanban_decompose.py:271` | main: `hermes_cli/kanban_decompose.py:298` | Intent router |
 

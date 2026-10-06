@@ -39,7 +39,7 @@ _DUAL_CITES = [
     ("TODO_INJECTION_HEADER", "tools/todo_tool.py:42", "tools/todo_tool.py:21"),
     ("complete_structured", "agent/plugin_llm.py:811", "agent/plugin_llm.py:460"),
     ("snapshot_recent_messages", "agent/review_engine.py:63", "agent/review_engine.py:1"),
-    ("is_background_review_enabled", "agent/background_review.py:291", "agent/background_review.py:1"),
+    ("load_background_review_settings", "agent/background_review.py:205", "agent/background_review.py:1"),
     ("auxiliary.background_review.enabled", "hermes_cli/config_defaults.py:1356", "hermes_cli/config_defaults.py:741"),
     ("decompose_task", "hermes_cli/kanban_decompose.py:271", "hermes_cli/kanban_decompose.py:298"),
 ]
@@ -402,16 +402,29 @@ def test_ac_loop_f38_7() -> None:
     assert sync != note and "results" in sync.lower()
 
 
-def test_ac_loop_f38_8() -> None:
+def test_ac_loop_f38_8(tmp_path, monkeypatch) -> None:
     """Buddy monitor: the automatic post-turn background_review fork consults its config master switch."""
     import run_agent
-    from agent.background_review import is_background_review_enabled
+    import yaml
+    from agent.background_review import load_background_review_settings
     from hermes_cli.config import DEFAULT_CONFIG
 
-    # is_background_review_enabled is the documented public predicate; assert it directly, then
-    # drive the real spawn gate below (both surfaces are cited in the loop-controls doc page).
-    assert is_background_review_enabled({"enabled": True}) is True
-    assert is_background_review_enabled({"enabled": False}) is False
+    def _home(name, review):
+        # A distinct home per case so the read-only config cache cannot mask a change.
+        home = tmp_path / name
+        home.mkdir()
+        cfg = {} if review is None else {"auxiliary": {"background_review": {"enabled": review}}}
+        (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+    # The documented reader of the switch, end to end through the real config load; unset is
+    # the tag's fail-open default (agent/background_review.py:205-219).
+    _home("on", True)
+    assert load_background_review_settings()[0] is True
+    _home("off", False)
+    assert load_background_review_settings()[0] is False
+    _home("unset", None)
+    assert load_background_review_settings()[0] is True
 
     agent = object.__new__(run_agent.AIAgent)
     agent._delegate_depth = 0
