@@ -56,7 +56,10 @@ class _FakeEvent:
 def kanban_conn(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
-    (home / "profiles" / "w").mkdir(parents=True)  # dispatch_once skips unknown profiles
+    worker = home / "profiles" / "w"
+    worker.mkdir(parents=True)
+    # dispatch_once skips unknown profiles, and a profile dir needs an identity file to be one
+    (worker / "SOUL.md").write_text("w\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
