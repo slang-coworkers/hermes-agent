@@ -204,29 +204,43 @@ def test_deliver_wake_require_persist_ack_default_route_sends_key_and_opt_in():
 
 
 def test_deliver_wake_require_persist_ack_served_profile_fails_closed_before_any_turn():
-    """Without a persistence receipt on the in-process route, a durable wake to a
-    served profile raises before any turn runs; a non-durable wake still runs."""
+    """A durable wake to a served profile counts as delivered only on an in-process
+    ``turn_persisted is True`` receipt: ``False``/``None``/``"false"`` raise after the
+    turn ran, a non-durable wake ignores the receipt, and an adapter with no
+    in-process route fails closed before any turn."""
 
     class ServedApiServerAdapter(ApiServerLikeAdapter):
-        def __init__(self):
+        def __init__(self, receipt):
             super().__init__(key="sekrit")
+            self.receipt = receipt
             self.turns = []
 
         async def run_internal_session_turn(self, *, session_id, text, profile,
                                             notification_category="result"):
             self.turns.append(session_id)
-
-    adapter = ServedApiServerAdapter()
+            return self.receipt
 
     async def run():
-        with pytest.raises(RuntimeError, match="persist"):
-            await deliver_wake(adapter, text="x", session_id="owner-sid",
+        for receipt in (False, None, "false"):
+            adapter = ServedApiServerAdapter(receipt)
+            with pytest.raises(RuntimeError, match="did not confirm persistence"):
+                await deliver_wake(adapter, text="x", session_id="owner-sid",
+                                   profile="gov-f25-owner", require_persist_ack=True)
+            assert adapter.turns == ["owner-sid"]
+            await deliver_wake(adapter, text="x", session_id="owner-sid", profile="gov-f25-owner")
+            assert adapter.turns == ["owner-sid", "owner-sid"]
+
+        adapter = ServedApiServerAdapter(True)
+        await deliver_wake(adapter, text="x", session_id="owner-sid",
+                           profile="gov-f25-owner", require_persist_ack=True)
+        assert adapter.turns == ["owner-sid"]
+
+        routeless = ApiServerLikeAdapter(key="sekrit")
+        with pytest.raises(RuntimeError, match="requires in-process session delivery"):
+            await deliver_wake(routeless, text="x", session_id="owner-sid",
                                profile="gov-f25-owner", require_persist_ack=True)
-        assert adapter.turns == []
-        await deliver_wake(adapter, text="x", session_id="owner-sid", profile="gov-f25-owner")
 
     asyncio.run(run())
-    assert adapter.turns == ["owner-sid"]
 
 
 def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
