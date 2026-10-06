@@ -236,10 +236,10 @@ def test_ac_self_f54_4(tmp_path, protected_name):
     """AC-SELF-F54-4: A write via the file-write tool to a protected instruction file basename (SOUL.md, AGENTS.md, CLAUDE.md, .cursorrules) in a project-local directory is held closed by default with the file never written when no approver is present, while a write to a non-protected file in the same directory succeeds"""
     import json
 
-    import tools.file_tools as ft
+    import tools.file_tools_write_guards as wg
     from tools.file_tools import write_file_tool
 
-    enabled, _ = ft._protected_instruction_config()
+    enabled, _ = wg._protected_instruction_config()
     assert enabled is True, "protected-instruction gate not default-on"
 
     protected = tmp_path / protected_name
