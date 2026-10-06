@@ -2896,10 +2896,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return []
 
     async def run_internal_session_turn(self, *, session_id: str, text: str, profile: str,
-                                        notification_category: str = "result") -> None:
+                                        notification_category: str = "result") -> bool:
         """Run one background wake turn against a raw session id IN-PROCESS (no HTTP, no API key);
         see ``api_server_runs.run_internal_session_turn``."""
-        await _api_runs.run_internal_session_turn(
+        return await _api_runs.run_internal_session_turn(
             self, session_id=session_id, text=text, profile=profile,
             notification_category=notification_category, _api_server=sys.modules[__name__])
 

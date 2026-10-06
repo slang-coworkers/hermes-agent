@@ -220,20 +220,17 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     2xx is success as before.
     """
     if profile and str(profile) != "default":
-        if require_persist_ack:
-            # The in-process route returns no persistence receipt, so nothing could gate the
-            # caller's cursor advance. Fail closed before any turn runs rather than claim
-            # durability that was never confirmed.
-            raise RuntimeError(
-                f"wake for served profile {profile!r} runs in-process and cannot confirm "
-                "persistence; require_persist_ack is unsupported on this route")
         in_process: Any = getattr(adapter, "run_internal_session_turn", None)
         if not callable(in_process):
             raise RuntimeError(
                 f"wake self-post for served profile {profile!r} requires in-process session "
                 "delivery; refusing to self-post as the default profile")
-        await in_process(session_id=session_id, text=text, profile=str(profile),
-                         notification_category=notification_category)
+        persisted = await in_process(session_id=session_id, text=text, profile=str(profile),
+                                     notification_category=notification_category)
+        if require_persist_ack and persisted is not True:
+            raise RuntimeError(
+                f"wake for served profile {profile!r} did not confirm persistence "
+                f"(turn_persisted={persisted!r}); treating as undelivered")
         return
     import aiohttp
     host = str(getattr(adapter, "_host", "") or "127.0.0.1")

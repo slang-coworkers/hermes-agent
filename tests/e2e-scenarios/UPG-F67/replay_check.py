@@ -9,8 +9,10 @@ history: C1 (replay, parent = tag commit), C2 (authorized core re-home, parent =
   RELOC  core code the tag moved: fork-added lines found in the path or its relocation targets at C2, or ledgered
   U-del  the tag deleted it and it is on the ruled list
 Fails (exit 1) on DROPPED, DIVERGED, U-UNRULED, any fork-added line neither present nor ledgered, EXTRA paths in C1,
-core edits in C1, unauthorized core in C2, and any core edit after C2 except WP-D1's two files with --wp-d1-approved.
+core edits in C1, unauthorized core in C2, any core edit after C2 other than the approved WP-D1 patch (exact bytes, with
+--wp-d1-approved), and any old-gated desktop line after C2 that is not a recorded import re-point.
 Ledger TSV columns: path, stripped fork-added line, tag-site replacement as file:line.
+Inventory TSV (--inventory): every delta path's status, surface, class and segment must equal this check's result.
 """
 import argparse
 import csv
@@ -28,7 +30,16 @@ RELOCATED = {
     "gateway/platforms/api_server.py": ("gateway/platforms/api_server_openai_routes.py",),
 }
 C2_CORE = set(RELOCATED) | {t for ts in RELOCATED.values() for t in ts} | {"gateway/wake.py", "agent/turn_finalizer.py"}
-WP_D1 = {"gateway/wake.py", "gateway/platforms/api_server_runs.py"}
+WP_D1 = ("gateway/platforms/api_server.py", "gateway/platforms/api_server_runs.py", "gateway/wake.py")
+WP_D1_PATCH_SHA256 = "5d7db2e0ea188b991d1e16d2138748230059a4b5d0ae25303929136ec76f7354"
+# Pinned options: the diff must not depend on the caller's git config (algorithm, prefixes, inter-hunk merging).
+DIFF_ARGS = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--no-relative", "--full-index",
+             "-U0", "--inter-hunk-context=0", "--diff-algorithm=myers", "--indent-heuristic", "-O/dev/null",
+             "--src-prefix=a/", "--dst-prefix=b/")
+WP_D1_DIFF_CONFIG = ("-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.algorithm=myers",
+                     "-c", "diff.indentHeuristic=true", "-c", "diff.relative=false", "-c", "diff.interHunkContext=0",
+                     "-c", "core.quotePath=true", "-c", "color.diff=false", "-c", "core.abbrev=10")
+IMPORT_LINE = re.compile(r"^(import\b|export\s.*\sfrom\s|\}\s*from\s|.*\brequire\()")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
 
 
@@ -61,6 +72,60 @@ def fork_added(repo, a, b, path):
             if ln.startswith("+") and not ln.startswith("+++") and ln[1:].strip()]
 
 
+def wp_d1_diff(repo, a, b):
+    """``git diff --no-ext-diff --no-renames -U0 a b -- <WP-D1 files>``, raw, with the user's diff config neutralised."""
+    return git(repo, *WP_D1_DIFF_CONFIG, "diff", "--no-ext-diff", "--no-renames", "-U0", a, b, "--", *WP_D1)
+
+
+def check_wp_d1(repo, core, head, patch_path):
+    import hashlib
+    with open(patch_path, "rb") as fh:
+        approved = fh.read()
+    if hashlib.sha256(approved).hexdigest() != WP_D1_PATCH_SHA256:
+        return [f"UNAUTHORIZED-CORE: {patch_path} is not the approved WP-D1 patch (sha256 mismatch)"]
+    got = wp_d1_diff(repo, core, head).encode("utf-8")
+    if got == approved:
+        return []
+    first = next((i for i, (x, y) in enumerate(zip(got.splitlines(), approved.splitlines())) if x != y),
+                 min(len(got.splitlines()), len(approved.splitlines())))
+    return [f"UNAUTHORIZED-CORE after C2: WP-D1 diff differs from the approved patch at line {first + 1}"]
+
+
+def load_repoints(path):
+    """Old-gated desktop re-point record: path, import line before, import line after, reason."""
+    rec, bad = {}, []
+    if not path:
+        return rec, bad
+    with open(path, encoding="utf-8", newline="") as fh:
+        for n, row in enumerate(csv.reader(fh, delimiter="\t"), 1):
+            if not row or not row[0] or row[0].startswith("#"):
+                continue
+            p, before, after, reason = (row + [""] * 4)[:4]
+            for ln in (before.strip(), after.strip()):
+                if ln and not IMPORT_LINE.match(ln):
+                    bad.append(f"REPOINT row {n}: {ln!r} is not an import line")
+            if not reason.strip():
+                bad.append(f"REPOINT row {n}: no reason for {p}")
+            r = rec.setdefault(p, (set(), set()))
+            r[0].add(before.strip())
+            r[1].add(after.strip())
+    return rec, bad
+
+
+def check_old_gated(repo, core, head, paths, rec):
+    """Every line an old-gated desktop file changes after C2 is a recorded import re-point."""
+    fails = []
+    for p in paths:
+        before, after = rec.get(p, (set(), set()))
+        for ln in git(repo, *DIFF_ARGS, core, head, "--", p).splitlines():
+            if ln.startswith(("---", "+++")) or not ln[:1] in "+-":
+                continue
+            body = ln[1:].strip()
+            if body not in (before if ln[0] == "-" else after):
+                fails.append(f"UNRECORDED-OLD-GATED: {p}: {ln[:120]!r}")
+    return fails
+
+
 def is_core(path, old_delta):
     """Outside the allowed diff surface. A fork-modified non-ac desktop spec in the old delta is old-gated, not core."""
     if SURFACE.match(path):
@@ -87,6 +152,40 @@ def load_ledger(path, repo, tag):
     return led, bad
 
 
+def check_inventory(path, observed):
+    """Every delta row (status, path, surface, class, segment) equals the checker's own result, one row per path;
+    ``(new)`` rows name only relocation targets or WP-D1 sites."""
+    fails, seen, new_seen = [], {}, set()
+    reloc_targets = {t for ts in RELOCATED.values() for t in ts}
+    required_new = reloc_targets | {"gateway/platforms/api_server_runs.py", "gateway/platforms/api_server.py#run_internal_session_turn"}
+    allowed_new = required_new | set(WP_D1)
+    with open(path, encoding="utf-8", newline="") as fh:
+        for n, row in enumerate(csv.reader(fh, delimiter="\t"), 1):
+            if n == 1 or not row or not row[0]:
+                continue
+            st, p, surf, cls, seg = (row + [""] * 5)[:5]
+            if st == "(new)":
+                want = "RELOC-target" if p in reloc_targets else "WP-D1"
+                if p not in allowed_new:
+                    fails.append(f"INVENTORY row {n}: (new) path {p!r} is neither a relocation target nor a WP-D1 site")
+                elif cls != want or surf != "core":
+                    fails.append(f"INVENTORY row {n}: (new) {p} must be core/{want}, says {surf}/{cls}")
+                new_seen.add(p)
+                continue
+            if p in seen:
+                fails.append(f"INVENTORY row {n}: duplicate path {p}")
+            seen[p] = (st, surf, cls, seg)
+    for p, want in sorted(observed.items()):
+        got = seen.pop(p, None)
+        if got is None:
+            fails.append(f"INVENTORY: missing row for {p}")
+        elif got != want:
+            fails.append(f"INVENTORY: {p} says {got}, checker found {want}")
+    fails.extend(f"INVENTORY: row for a path outside the delta: {p}" for p in sorted(seen))
+    fails.extend(f"INVENTORY: missing (new) row for {p}" for p in sorted(required_new - new_seen))
+    return fails
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=".")
@@ -98,7 +197,12 @@ def main():
     ap.add_argument("--core", required=True, help="C2, the authorized core re-home commit")
     ap.add_argument("--head", required=True, help="the PR head")
     ap.add_argument("--ledger", default="", help="translation ledger TSV (path, stripped line, tag file:line)")
-    ap.add_argument("--wp-d1-approved", action="store_true", help="operator approved WP-D1 (decision-msg170)")
+    ap.add_argument("--inventory", required=True, help="path inventory TSV: status, path, surface, class, segment, evidence")
+    ap.add_argument("--wp-d1-approved", action="store_true",
+                    help="WP-D1 is integrated: the WP-D1 files' diff C2..head must equal --wp-d1-patch byte for byte")
+    ap.add_argument("--wp-d1-patch", default="tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch")
+    ap.add_argument("--repoints", default="tests/e2e-scenarios/UPG-F67/desktop_repoints.tsv",
+                    help="old-gated desktop import re-point record: path, import before, import after, reason")
     a = ap.parse_args()
     repo, fails, flagged = a.repo, [], []
     led, bad = load_ledger(a.ledger, repo, a.tag)
@@ -116,7 +220,7 @@ def main():
     delta = name_status(repo, a.old_base, a.old_head)
     delta_paths = {p for _s, p in delta}
     late = {p for _s, p in name_status(repo, a.late_from, a.old_head)}
-    counts = {}
+    counts, observed = {}, {}
     for st, path in delta:
         old, new, tag = (blob(repo, r, path) for r in (a.old_base, a.old_head, a.tag))
         core = is_core(path, delta_paths)
@@ -141,7 +245,7 @@ def main():
             if path in EQUIVALENT:
                 missing = []
         elif tag == old:
-            cls = "DIVERGED"  # upstream left it alone, yet the candidate differs from the old head
+            cls = "DIVERGED"
         else:
             cls = "M"
         if missing:
@@ -153,6 +257,7 @@ def main():
         surf = "core" if core else ("old-gated" if path.startswith("apps/desktop/e2e/") and not SURFACE.match(path)
                                     else "in-surface")
         counts[(cls, surf, seg)] = counts.get((cls, surf, seg), 0) + 1
+        observed[path] = (st, surf, cls, seg)
         print(f"{cls}\t{surf}\t{seg}\t{st}\t{path}")
 
     for _st, path in name_status(repo, a.tag, a.replay):
@@ -162,9 +267,22 @@ def main():
         if is_core(path, delta_paths) and path not in C2_CORE:
             fails.append(f"UNAUTHORIZED-CORE in C2: {path}")
     post = sorted({p for _s, p in name_status(repo, a.core, a.head)})
+    old_gated = []
     for path in post:
-        if is_core(path, delta_paths) and not (a.wp_d1_approved and path in WP_D1):
+        if not is_core(path, delta_paths):
+            if path.startswith("apps/desktop/e2e/") and not SURFACE.match(path):
+                old_gated.append(path)
+            continue
+        if not (a.wp_d1_approved and path in WP_D1):
             fails.append(f"UNAUTHORIZED-CORE after C2: {path}" + (" (WP-D1 needs --wp-d1-approved)" if path in WP_D1 else ""))
+    if a.wp_d1_approved:
+        fails.extend(check_wp_d1(repo, a.core, a.head, a.wp_d1_patch))
+    rec, rec_bad = load_repoints(a.repoints if old_gated else "")
+    fails.extend(rec_bad)
+    fails.extend(check_old_gated(repo, a.core, a.head, old_gated, rec))
+
+    inv_fails = check_inventory(a.inventory, observed)
+    fails.extend(inv_fails)
 
     print("\n## summary (class, surface, segment) -> count")
     for k in sorted(counts):
@@ -174,6 +292,8 @@ def main():
     print(f"\n## unaccounted fork-added lines: {len(flagged)} path(s)")
     for path, n, first in flagged:
         print(f"  {path}: {n}, first: {first!r}")
+    print(f"\n## inventory: {len(observed) - sum(1 for f in inv_fails if f.startswith('INVENTORY: ') and 'outside' not in f)}"
+          f"/{len(observed)} delta paths matched, {len(inv_fails)} mismatch(es)")
     print(f"\n## commits after C2 touch {len(post)} paths (P4 judges each)")
     for p in post:
         print(f"  {'core' if is_core(p, delta_paths) else 'in-surface/old-gated'}\t{p}")
