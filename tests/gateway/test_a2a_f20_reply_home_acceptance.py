@@ -15,7 +15,6 @@ originating session/edge through three native correlations.
 
 import asyncio
 import json
-import shlex
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools import bot_mode_dm, bot_mode_probe
+from tests.tools.test_bot_mode_dm import _runner_parts
 
 
 @pytest.fixture(autouse=True)
@@ -86,12 +86,6 @@ def _capture_spawn(monkeypatch, tmp_path):
     # shared /tmp/hermes-dm dir — the faked terminal_tool never consumes them.
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
     return calls
-
-
-def _runner_parts(command):
-    parts = shlex.split(command)
-    marker = parts.index("--run-delivery")
-    return parts[marker + 1], parts[marker + 2], parts[marker + 3:]
 
 
 def test_ac_a2a_f20_1(tmp_path, monkeypatch):
