@@ -20,10 +20,13 @@ Behaviour contracts cited (tag v2026.8.31 @29112bef):
     install_distribution, :705 update_distribution, :101 USER_OWNED_EXCLUDE
 """
 
+import json
+
 import pytest
 
 import agent.skill_utils as su
 import tools.skills_tool as st
+from cron.jobs import list_jobs, use_cron_store
 
 
 def _write_skill(base, name, description="a skill"):
@@ -157,7 +160,12 @@ def _write_dist(root, *, name="testdist", version, soul, mcp, config, skill_desc
         f"---\nname: dist-skill\ndescription: {skill_desc}\n---\n# dist-skill\n",
         encoding="utf-8",
     )
-    (root / "cron" / "job.json").write_text(cron, encoding="utf-8")
+    # The tag's one distribution-owned cron file is the multi-record store cron/jobs.json, merged
+    # by job id (hermes_cli/profile_distribution.py:58-68, :406-431); `cron` is that job's prompt.
+    (root / "cron" / "jobs.json").write_text(
+        json.dumps({"jobs": [{"id": "dist-job", "name": "dist-job", "prompt": cron,
+                              "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"}}]}),
+        encoding="utf-8")
     (root / "README.md").write_text("readme\n", encoding="utf-8")
 
 
@@ -170,6 +178,8 @@ def test_ac_self_f57_3(tmp_path, hermes_home):
     profile = install_distribution(str(dist), name="testdist").target_dir
 
     assert not (profile / "README.md").exists()
+    with use_cron_store(profile):
+        assert [job["prompt"] for job in list_jobs(include_disabled=True)] == ['{"c": 1}']
     # skills/ is merged per authored root: a skill the user added beside the
     # distribution's own skill is not the distribution's to remove.
     user_skill = _write_skill(profile / "skills", "user-skill", description="user-added")
@@ -183,7 +193,9 @@ def test_ac_self_f57_3(tmp_path, hermes_home):
     assert (profile / "mcp.json").read_text(encoding="utf-8") == '{"m": 2}'
     assert "skill-v2" in (profile / "skills" / "dist-skill" / "SKILL.md").read_text(encoding="utf-8")
     assert (user_skill / "SKILL.md").read_bytes() == user_skill_before
-    assert (profile / "cron" / "job.json").read_text(encoding="utf-8") == '{"c": 2}'
+    with use_cron_store(profile):
+        jobs = {job["id"]: job for job in list_jobs(include_disabled=True)}
+    assert list(jobs) == ["dist-job"] and jobs["dist-job"]["prompt"] == '{"c": 2}'
     assert not (profile / "README.md").exists()
     # The version is recorded by rewriting distribution.yaml — always written,
     # outside the allowlist by design.
