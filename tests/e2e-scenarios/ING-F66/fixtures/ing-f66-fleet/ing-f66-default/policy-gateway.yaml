@@ -6,11 +6,14 @@ filesystem_policy:
   - /bin
   - /lib
   - /etc
+  - /opt/hermes
+  - /proc
+  - /dev/urandom
   read_write:
   - /tmp
+  - /sandbox
   - /dev/null
-  - /home/sandbox
-  - /workspace
+  - /dev/pts
 landlock:
   compatibility: best_effort
 process:
@@ -21,15 +24,25 @@ network_policies:
     name: worker-egress
     binaries:
     - path: /usr/bin/curl
+    - path: /opt/hermes/.venv/bin/python
     endpoints:
-    - host: 172.17.0.1
-      port: 18777
-      tls: skip
-    - host: api.github.com
+    - host: inference.local
       port: 443
       protocol: rest
       enforcement: enforce
       rules:
       - allow:
+          method: POST
+          path: /v1/chat/completions
+      - allow:
+          method: POST
+          path: /v1/messages
+      - allow:
+          method: POST
+          path: /v1/responses
+      - allow:
           method: GET
-          path: /**
+          path: /v1/models
+    - host: 172.17.0.1
+      port: 18777
+      tls: skip

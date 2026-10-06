@@ -25,21 +25,8 @@ network_policies:
     - path: /usr/bin/git
     endpoints:
     - host: 172.17.0.1
-      port: 18255
-      protocol: rest
-      enforcement: enforce
-      rules:
-      - allow:
-          method: POST
-          path: /**
-    - host: inference-api.nvidia.com
-      port: 443
-      protocol: rest
-      enforcement: enforce
-      rules:
-      - allow:
-          method: POST
-          path: /**
+      port: 18777
+      tls: skip
     - host: api.github.com
       port: 443
       protocol: rest

@@ -2,9 +2,9 @@
 ac: AC-ING-F66-24
 kind: live
 model: live
-base_url: https://inference-api.nvidia.com
-api_mode: anthropic_messages
-model_id: aws/anthropic/bedrock-claude-opus-4-8
+base_url: https://inference.local/v1
+api_mode: chat_completions
+model_id: aws/anthropic/bedrock-claude-opus-5-5
 fixtures:
   - fixtures/ing-f66-fleet/ing-f66-default
   - fixtures/ing-f66-fleet/ing-f66-orchestrator

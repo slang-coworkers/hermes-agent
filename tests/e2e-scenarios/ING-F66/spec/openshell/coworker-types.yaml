@@ -19,12 +19,14 @@ skills_root: skills
 workflows_root: workflows
 overlays_root: overlays
 
-# OpenShell egress: the two BASE egress targets every per-profile policy allows —
-# the OneCLI data-plane hop (172.17.0.1:18255) and the inference route. A worker that
-# opts into a provider (below) adds that provider's role-scoped endpoints on top.
+# OpenShell egress:
+# Workers allow the broker hop; inference is a gateway-only REST endpoint. The
+# legacy `proxy_addr` is accepted but dropped.
+# A worker that opts into a provider (below) adds that provider's role-scoped endpoints on top.
 egress:
   proxy_addr: "172.17.0.1:18255"
-  inference_route: "inference-api.nvidia.com:443"
+  inference_route: "inference.local:443"
+  broker_addr: "172.17.0.1:18777"
   sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
   # git opens the null device read-write for discarded stdio, and the image user's home holds
   # the login shell's startup files and the ~/.hermes tree the ssh terminal backend syncs into.
@@ -37,6 +39,16 @@ egress:
   # API without any credential.
   anonymous_reads:
     approver: ["api.github.com:443"]
+  # The OpenShell-managed inference route (the OSH-F64.b posture): served model turns post to
+  # inference.local, where OpenShell supplies the credential; profiles carry only the fixed
+  # routing placeholder.
+  inference_provider:
+    provider: compatible-endpoint
+    base_url: "https://inference.local/v1"
+    api_mode: chat_completions
+    model_id: aws/anthropic/bedrock-claude-opus-5-5
+    rewrite_placeholder: "sk-OPENSHELL-PROXY-REWRITE"
+    attribution_tag_prefix: ing-f66
 
 # Optional OpenShell egress providers (generic default-off widening). A worker opts in
 # via its own `providers: [<name>]`; the renderer then (1) emits an
