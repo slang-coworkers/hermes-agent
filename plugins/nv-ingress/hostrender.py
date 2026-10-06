@@ -21,10 +21,9 @@ ROUTE_SCRIPT = "ingress_stage.py"
 UNITS = ("nv-ingress-edge.service", "nv-ingress-forward.service", "nv-ingress-gateway-boot.service")
 
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-_HOSTPORT = re.compile(r"^[A-Za-z0-9.-]+:[0-9]{1,5}$")
 _KEYS = {
     "route", "port", "platforms", "replace_routes", "issue_labels", "self_logins",
-    "per_pr_hourly_budget", "gateway_sandbox", "gateway_start", "anonymous_reads",
+    "per_pr_hourly_budget", "gateway_sandbox", "gateway_start",
     "host_checkout", "host_python", "host_dir", "openshell_bin", "edge_listen", "edge_state_dir",
     "scope",
 }
@@ -62,7 +61,7 @@ def _no_newline(value: str, key: str) -> str:
     return value
 
 
-def validate(block: Any, roster: List[str]) -> Dict[str, Any]:
+def validate(block: Any) -> Dict[str, Any]:
     """Validate the spec's ``ingress:`` block and return the resolved parameters."""
     if not isinstance(block, dict):
         raise ValueError("ingress must be a mapping")
@@ -98,15 +97,6 @@ def validate(block: Any, roster: List[str]) -> Dict[str, Any]:
     budget = block.get("per_pr_hourly_budget", 30)
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
         raise ValueError("ingress.per_pr_hourly_budget must be a positive integer")
-    anonymous: Dict[str, List[str]] = {}
-    for role, targets in (block.get("anonymous_reads") or {}).items():
-        if role not in roster:
-            raise ValueError(f"ingress.anonymous_reads: {role!r} is not a coworker type")
-        hosts = _str_list(targets, f"anonymous_reads.{role}", nonempty=True)
-        for hp in hosts:
-            if not _HOSTPORT.match(hp):
-                raise ValueError(f"ingress.anonymous_reads.{role}: {hp!r} is not host:port")
-        anonymous[role] = hosts
     try:
         # The edge parses the same block at start-up; one parser keeps the two from drifting.
         scope = _sibling("edge/scope.py", "_nv_ingress_scope_render").parse(block.get("scope"))
@@ -121,7 +111,6 @@ def validate(block: Any, roster: List[str]) -> Dict[str, Any]:
         "per_pr_hourly_budget": budget,
         "gateway_sandbox": gateway_sandbox,
         "gateway_start": gateway_start,
-        "anonymous_reads": anonymous,
         "scope": scope,
     }
     for key, default in (("host_checkout", "%h/hermes-agent"), ("host_python", "/usr/bin/python3"),

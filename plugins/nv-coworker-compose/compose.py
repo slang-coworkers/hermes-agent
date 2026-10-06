@@ -3157,15 +3157,13 @@ def _ingress_module():
     return module
 
 
-def _validate_ingress(data: Dict[str, Any], roster: List[str], is_remote: bool) -> Optional[Dict[str, Any]]:
+def _validate_ingress(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if "ingress" not in data:
         return None
     try:
-        params = _ingress_module().validate(data["ingress"], roster)
+        params = _ingress_module().validate(data["ingress"])
     except ValueError as exc:
         raise CompositionError(str(exc)) from exc
-    if params["anonymous_reads"] and not is_remote:
-        raise CompositionError("ingress.anonymous_reads requires substrate: openshell")
     return params
 
 
@@ -4138,7 +4136,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     roster = list(types)
     served: Set[str] = {"default", *roster}
     # ING-F66: validated before any profile is written, so a bad block leaves no fleet on disk.
-    ingress_params = _validate_ingress(data, roster, is_remote)
+    ingress_params = _validate_ingress(data)
 
     # Phase A: resolve every coworker type and the DEFAULT config, then resolve
     # the single fleet-wide session mode ONCE — before rendering any profile.
@@ -4282,7 +4280,6 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
     rendered: Dict[str, str] = {}
-    anonymous_reads: Dict[str, List[str]] = (ingress_params or {}).get("anonymous_reads") or {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         if ingress_params is not None:
