@@ -359,7 +359,7 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     try:
         with patch("agent.auxiliary_client.call_llm", return_value=_aux(payload2)), \
                 patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value={}), \
-                patch("hermes_cli.kanban_decompose._load_config",
+                patch("hermes_cli.config.load_config_readonly",
                       return_value={"kanban": {"default_assignee": "fallback"}}):
             outcome2 = decomp.decompose_task(tid2, author="me")
     finally:
