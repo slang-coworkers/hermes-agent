@@ -4,6 +4,8 @@ Nothing here writes anything: ``reconcile_session`` and
 ``completed_session_totals`` open ``state.db`` read-only and never raise —
 a missing DB, a missing table, or a locked read degrades to ``0.0`` / ``[]``,
 because these feed enforcement decisions that must not crash the agent loop.
+``strict=True`` (the resume card's Approve) propagates those failures instead:
+there a degraded "no new spend" would wrongly read as runnable.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ def _ro_connect(db_path: str):
     return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
 
-def _node_spend(conn, session_id: str) -> float:
+def _node_spend(conn, session_id: str, strict: bool = False) -> float:
     """One session's OWN spend: max(sessions.est, SUM main task='') + SUM aux task<>''.
 
     The ``max`` reconciles the sessions-row aggregate against the summed
@@ -34,6 +36,8 @@ def _node_spend(conn, session_id: str) -> float:
         ).fetchone()
         sess_cost = float(row[0]) if row and row[0] is not None else 0.0
     except sqlite3.OperationalError:
+        if strict:
+            raise
         sess_cost = 0.0
     try:
         main = conn.execute(
@@ -47,11 +51,13 @@ def _node_spend(conn, session_id: str) -> float:
             (session_id,),
         ).fetchone()[0]
     except sqlite3.OperationalError:
+        if strict:
+            raise
         main, aux = 0.0, 0.0
     return max(sess_cost, float(main or 0.0)) + float(aux or 0.0)
 
 
-def _lineage(conn, session_id: str) -> set:
+def _lineage(conn, session_id: str, strict: bool = False) -> set:
     """The target session plus every descendant, via ``parent_session_id`` links."""
     seen: set = set()
     frontier = [session_id]
@@ -65,6 +71,8 @@ def _lineage(conn, session_id: str) -> set:
                 "SELECT id FROM sessions WHERE parent_session_id = ?", (node,)
             ).fetchall()
         except sqlite3.OperationalError:
+            if strict:
+                raise
             children = []
         for (child_id,) in children:
             if child_id is not None and child_id not in seen:
@@ -72,7 +80,7 @@ def _lineage(conn, session_id: str) -> set:
     return seen
 
 
-def reconcile_session(session_id: str, *, state_db_path: str) -> float:
+def reconcile_session(session_id: str, *, state_db_path: str, strict: bool = False) -> float:
     """Authoritative reconciled spend for a session: the recursive lineage sum.
 
     Subagent cost is rolled into the parent only in-memory, never persisted to
@@ -82,18 +90,22 @@ def reconcile_session(session_id: str, *, state_db_path: str) -> float:
     counted once) is subagent-, aux- and codex-inclusive.
     """
     if not session_id or not state_db_path or not os.path.exists(state_db_path):
+        if strict:
+            raise FileNotFoundError(f"state.db not found at {state_db_path!r}")
         return 0.0
     try:
         conn = _ro_connect(state_db_path)
     except sqlite3.OperationalError:
+        if strict:
+            raise
         return 0.0
     try:
-        return sum(_node_spend(conn, node) for node in _lineage(conn, session_id))
+        return sum(_node_spend(conn, node, strict) for node in _lineage(conn, session_id, strict))
     finally:
         conn.close()
 
 
-def _lineage_has_unknown(conn, nodes) -> bool:
+def _lineage_has_unknown(conn, nodes, strict: bool = False) -> bool:
     """Whether any lineage node carries a ``cost_status='unknown'`` row.
 
     Core stamps the status on EITHER core column (``sessions.cost_status`` or
@@ -114,13 +126,15 @@ def _lineage_has_unknown(conn, nodes) -> bool:
                 ids,
             ).fetchone()
         except sqlite3.OperationalError:
+            if strict:
+                raise
             continue
         if row is not None:
             return True
     return False
 
 
-def lineage_unknown(session_id: str, *, state_db_path: str) -> bool:
+def lineage_unknown(session_id: str, *, state_db_path: str, strict: bool = False) -> bool:
     """Whether the session's lineage contains an unknown-priced row.
 
     Core persists an unknown-priced call as ``estimated_cost_usd=0.0`` with
@@ -129,13 +143,17 @@ def lineage_unknown(session_id: str, *, state_db_path: str) -> bool:
     per-session marker. Read-only, never raises.
     """
     if not session_id or not state_db_path or not os.path.exists(state_db_path):
+        if strict:
+            raise FileNotFoundError(f"state.db not found at {state_db_path!r}")
         return False
     try:
         conn = _ro_connect(state_db_path)
     except sqlite3.OperationalError:
+        if strict:
+            raise
         return False
     try:
-        return _lineage_has_unknown(conn, _lineage(conn, session_id))
+        return _lineage_has_unknown(conn, _lineage(conn, session_id, strict), strict)
     finally:
         conn.close()
 
