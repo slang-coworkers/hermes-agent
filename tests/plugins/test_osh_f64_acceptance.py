@@ -488,7 +488,7 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
                          if v[1:3] in (["plugins", "install"], ["plugins", "enable"])
                          or (v[1] == "-p" and v[3:5] in (["plugins", "install"], ["plugins", "enable"])))
     assert backup_idx < first_mutation, "default-config backup must precede any plugins install/enable (DIAG-1)"
-    assert "gateway.multiplex_profiles" in joined and "multiplex_profile_allowlist" in joined
+    assert "gateway.multiplex_profiles" in joined and "multiplex_profile_allowlist" not in joined
     assert any("gateway restart" in ln for ln in lines), "no `hermes gateway restart` step"
     restart_idx = next(i for i, ln in enumerate(lines) if "gateway restart" in ln)
 
@@ -1361,3 +1361,50 @@ def test_ac_osh_f64_13(tmp_path, monkeypatch):
     for step in create_steps:
         planner._execute_step(step, ctx)
     assert not _created(), "a fully-provisioned fleet re-run creates no sandbox"
+
+
+def test_installer_parks_non_fleet_profiles(tmp_path, monkeypatch):
+    """The openshell install targets an EXISTING sandbox whose profiles/ need not be fleet-only:
+    the plan carries one park step naming every live non-fleet profile (never a roster, standalone,
+    tombstoned or marker-less one), executing it through the plugin's park_non_fleet_profiles leaves
+    the served set = default + the roster, and a re-run plans no park step."""
+    from hermes_cli.profiles import profile_is_parked, profiles_to_serve
+
+    root = _repo_root()
+    home, _managed = _setup_home(tmp_path, monkeypatch, with_plugin=True)
+    module = _load_manager()._plugins[PLUGIN_KEY].module
+    planner = _import_file(_openshell_dir(root) / "installer.py", "osh_f64_installer_park")
+    spec_path = str(_osh_spec(root))
+    spec = planner.load_spec(spec_path)
+    roles = list(planner._coworker_roles(spec))
+    assert set(roles) == set(COWORKERS)
+
+    profiles = home / "profiles"
+    for name in (*roles, "stray-a", "stray-b", "solo", "ghost", "gone"):
+        (profiles / name).mkdir(parents=True)
+        if name != "ghost":
+            (profiles / name / "config.yaml").write_text(
+                "gateway:\n  standalone: true\n" if name == "solo" else "model: {}\n", encoding="utf-8")
+    (profiles / ".deleted").mkdir()
+    (profiles / ".deleted" / "gone").write_text("deleted\n", encoding="utf-8")
+    assert {"stray-a", "stray-b"} <= {name for name, _ in profiles_to_serve(True)}
+
+    def _parks(state):
+        return [s for s in planner.build_plan(state, spec_path, "a" * 40) if s.tag == "park"]
+
+    state = planner.collect_home_state(spec, spec_path)
+    assert state["unparked_non_fleet"] == ["stray-a", "stray-b"]
+    parks = _parks(state)
+    assert len(parks) == 1 and parks[0].data == {"roster": roles, "profiles": ["stray-a", "stray-b"]}
+
+    ctx = planner._apply_ctx(spec, spec_path, parker=module.park_non_fleet_profiles)
+    planner._execute_step(parks[0], ctx)
+    assert [name for name, _ in profiles_to_serve(True)] == ["default", *sorted(roles)]
+    assert profile_is_parked(profiles / "stray-a") and profile_is_parked(profiles / "stray-b")
+    assert not any(profile_is_parked(profiles / name) for name in roles)
+    record = home / planner._PARKED_RECORD
+    assert record.read_text(encoding="utf-8").split() == ["stray-a", "stray-b"]
+
+    assert _parks(planner.collect_home_state(spec, spec_path)) == []
+    with pytest.raises(ValueError):
+        planner._execute_step(parks[0], planner._apply_ctx(spec, spec_path))

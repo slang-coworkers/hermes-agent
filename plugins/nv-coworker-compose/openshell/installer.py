@@ -47,6 +47,8 @@ _BACKUP_SUFFIX = ".osh-f64.bak"
 # rollback would "restore" plugins.scan_on_install: false instead of the original absence.
 # Rollback deletes the managed config when this marker is present rather than restoring a .bak.
 _ABSENT_SUFFIX = ".osh-f64.absent"
+# Names this install parked (one per line, at the home root): rollback unparks exactly these.
+_PARKED_RECORD = "gateway.osh-f64.parked"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -554,6 +556,14 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
                 steps.append(step)
                 mutated = True
 
+    # The multiplexer serves every live, unparked named profile (no allowlist since config v43),
+    # and this home is an EXISTING sandbox whose profiles/ need not be fleet-only: park the rest.
+    stray = list(home_state.get("unparked_non_fleet") or [])
+    if stray:
+        steps.append(Step(f"# park non-fleet profiles {', '.join(stray)} (gateway.parked; roster: {', '.join(roles)})",
+                          "park", data={"roster": list(roles), "profiles": stray}))
+        mutated = True
+
     # Managed fragment (profile_roles + expected_ssh_host) as a SEPARATE file.
     if not managed_installed:
         steps.append(Step(f"# write managed fragment (profile_roles, expected_ssh_host) -> {managed_dir}/config.yaml", "managed_write"))
@@ -662,6 +672,41 @@ def _profile_dir(home: Path, role: str) -> Path:
     return home / "profiles" / role
 
 
+# Mirrors hermes_constants._PROFILE_IDENTITY_MARKERS / PROFILE_ID_RE (plan mode never imports hermes).
+_PROFILE_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _unparked_non_fleet(home: Path, roles: List[str]) -> List[str]:
+    """Named profiles the multiplexer would serve that are not in the fleet roster: a live
+    profile dir (valid id, an identity file, no tombstone) that is neither parked nor
+    ``gateway.standalone`` — the same set ``hermes_cli.profiles.profiles_to_serve(True)``
+    returns, minus default and the roster. The executor parks through the tag's own chokepoint;
+    this only decides whether the plan carries the step."""
+    root = home / "profiles"
+    if not root.is_dir():
+        return []
+    out: List[str] = []
+    for entry in sorted(root.iterdir()):
+        name = entry.name
+        if (not entry.is_dir() or name == "default" or name in roles or not _PROFILE_ID_RE.match(name)
+                or (root / ".deleted" / name).exists() or (entry / "gateway.parked").exists()):
+            continue
+        if not any((entry / m).is_file() or (entry / m).is_symlink() for m in _PROFILE_IDENTITY_MARKERS):
+            continue
+        cfg = entry / "config.yaml"
+        try:
+            gw = ((yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("gateway") or {}) if cfg.is_file() else {}
+        except Exception:
+            gw = {}
+        standalone = gw.get("standalone") if isinstance(gw, dict) else None
+        if (standalone.strip().lower() in ("1", "true", "yes", "on") if isinstance(standalone, str)
+                else bool(standalone)):
+            continue
+        out.append(name)
+    return out
+
+
 def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     """Build the installer's view of an EXISTING home from the filesystem only — no
     render, no hermes import — so the dry-run transcript is producible in a fresh
@@ -735,6 +780,7 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
         "backup_present": backup_present,
         "wires": _collect_wires(default_config),
         "rooms": None,  # existence checked at execution via groups.state (idempotent)
+        "unparked_non_fleet": _unparked_non_fleet(home, roles),
     }
 
 
@@ -909,6 +955,16 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
         existing = yaml.safe_load(managed_path.read_text(encoding="utf-8")) or {} if managed_path.exists() else {}
         managed_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_yaml(managed_path, managed_config_diff(existing, rendered))
+    elif tag == "park":
+        parker = ctx.get("parker")
+        if parker is None:
+            raise ValueError("non-fleet profiles cannot be parked: apply() was given no park dispatcher")
+        parked = parker(list((step.data or {}).get("roster") or []))
+        record = home / _PARKED_RECORD
+        listed = record.read_text(encoding="utf-8").split() if record.exists() else []
+        new = [name for name in parked if name not in listed]
+        if new:
+            record.write_text("".join(f"{name}\n" for name in [*listed, *new]), encoding="utf-8")
     elif tag == "rooms":
         creator = ctx.get("room_creator")
         payload = step.data or {}
@@ -920,7 +976,7 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
         creator(payload.get("room_id"), payload.get("name"), list(payload.get("members") or []))
 
 
-def _apply_ctx(spec: Dict[str, Any], spec_path: Any, room_creator=None) -> Dict[str, Any]:
+def _apply_ctx(spec: Dict[str, Any], spec_path: Any, room_creator=None, parker=None) -> Dict[str, Any]:
     return {
         "home": str(_require_home()),
         "managed_dir": _managed_dir() or "",
@@ -928,10 +984,11 @@ def _apply_ctx(spec: Dict[str, Any], spec_path: Any, room_creator=None) -> Dict[
         "spec": spec,
         "spec_path": spec_path,
         "room_creator": room_creator,
+        "parker": parker,
     }
 
 
-def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, policy_root=None) -> None:
+def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None, policy_root=None) -> None:
     """Execute the full plan. ``room_creator(room_id, name, members)`` performs the
     onboarding ``groups.create`` against the live gateway and ``room_exists(room_id)``
     reports whether a room is already present; the caller (the CLI subaction) injects both
@@ -950,7 +1007,7 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, poli
         spec_rooms = list((spec.get("rooms") or {}).keys())
         present = [rid for rid in spec_rooms if room_exists(rid)]
         state["rooms"] = "all" if spec_rooms and len(present) == len(spec_rooms) else present
-    ctx = _apply_ctx(spec, spec_path, room_creator=room_creator)
+    ctx = _apply_ctx(spec, spec_path, room_creator=room_creator, parker=parker)
     for step in build_plan(state, spec_path, ref, policy_root=policy_root):
         _execute_step(step, ctx)
 

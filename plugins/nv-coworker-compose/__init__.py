@@ -926,7 +926,8 @@ def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_ro
     _pending_ws_requester.set(None)
     token = _standalone_ctx.set({"url": gateway_url, "requester": requester})
     try:
-        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present, policy_root=policy_root)
+        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present,
+                        parker=park_non_fleet_profiles, policy_root=policy_root)
     finally:
         _close_standalone(token)
 
