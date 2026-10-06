@@ -813,3 +813,95 @@ def test_ac_fleet_f62_e_17(tmp_path, monkeypatch):
         monkeypatch.setenv(name, dirty)
     _discover_home(tmp_path / "plain", monkeypatch, plain)
     assert all(os.environ.get(n) == dirty for n in NO_PROXY_NAMES), "a non-fleet home's NO_PROXY must be left verbatim"
+
+
+@pytest.mark.parametrize("line", ["SSL_CERT_FILE=/persisted/copied-ca.pem", "export REQUESTS_CA_BUNDLE=/persisted/copied-ca.pem",
+                                  "NO_PROXY=localhost,172.17.0.1", "no_proxy=localhost,host.docker.internal",
+                                  "NO_PROXY=localhost,172.17.0.1:10256"])
+def test_ac_fleet_f62_e_18(tmp_path, monkeypatch, line):
+    """(derived) `install-trust` and `install-openshell` refuse, before any edit, a target-home `$HERMES_HOME/.env` that sets a CA env name (spec declares the key) or a NO_PROXY spelling listing a docker-bridge entry (every openshell spec, keyless included), because that `.env` is reloaded with override on every `load_hermes_dotenv()` while the trust source applies once per home. They name the file and the variable, never the value."""
+    var = line.split("=", 1)[0].split()[-1]
+    value = line.partition("=")[2]
+    home = _isolated_home(tmp_path)
+    (home / ".env").write_text(line + "\n", encoding="utf-8")
+    monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
+    before = (home / "config.yaml").read_bytes()
+    proc = _cli(home, "install-trust", str(F62C_SPEC))
+    text = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"{var}: install-trust must refuse a home .env that a reload re-plants over the trust source"
+    assert ".env" in text and var in text, f"{var}: the refusal must name the home .env and the variable: {text[-600:]}"
+    assert value not in text, "the refusal must name the variable, never echo its value"
+    assert (home / "config.yaml").read_bytes() == before, "install-trust must edit nothing before refusing"
+
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    lane_spec = _spec_copy(tmp_path, F62C_SPEC, lambda d: d["egress"].update(pinned_offline_lane=True), tag="lane")
+    with pytest.raises(Exception) as exc:
+        _installer("fleet_f62e_inst_ac18").build_plan({}, str(lane_spec), SHA)
+    assert var in str(exc.value), f"build_plan must refuse a home .env naming {var}: {exc.value!r}"
+    assert ".env" in str(exc.value) and value not in str(exc.value), "build_plan must name the file, never the value"
+
+    if var.lower() == "no_proxy":
+        keyless_lane = _spec_copy(tmp_path, F62C_SPEC, lambda d: (d["egress"].pop("openshell_trust", None),
+                                                                  d["egress"].update(pinned_offline_lane=True)), tag="keyless-lane")
+        with pytest.raises(Exception) as kexc:
+            _installer("fleet_f62e_inst_ac18k").build_plan({}, str(keyless_lane), SHA)
+        assert var in str(kexc.value), f"a keyless openshell install must also refuse a home-.env bridge {var}: {kexc.value!r}"
+        assert ".env" in str(kexc.value) and value not in str(kexc.value), "the keyless refusal must name the file, never the value"
+
+    (home / ".env").write_text("UNRELATED_SETTING=1\nNO_PROXY=127.0.0.1,localhost,::1\n", encoding="utf-8")
+    ok = _cli(home, "install-trust", str(F62C_SPEC))
+    assert ok.returncode == 0, f"a home .env with neither must pass: {ok.stderr[-600:]}"
+
+
+
+@pytest.mark.parametrize("kind,var,value", [("preserve", " HERMES_CA_BUNDLE ", None), ("preserve", "SSL_CERT_FILE", None),
+                                             ("preserve", "no_proxy", None), ("scalar", "NO_PROXY", "localhost,172.17.0.1"),
+                                             ("scalar", "no_proxy", "localhost,*.docker.internal"),
+                                             ("scalar", "NO_PROXY", "localhost,host.docker.internal:10256")])
+def test_ac_fleet_f62_e_19(tmp_path, monkeypatch, kind, var, value):
+    """(derived) `install-trust` and `install-openshell` refuse, before any edit, a target-home `config.yaml` that would outrank the source after the merge: `secrets.preserve_existing` listing a CA env name or a NO_PROXY spelling (spec declares the key), or a top-level `NO_PROXY`/`no_proxy` scalar listing a docker-bridge entry (every openshell spec). They name the file and the variable."""
+    home = _isolated_home(tmp_path)
+    monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
+    cfg_path = home / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    if kind == "preserve":
+        cfg.setdefault("secrets", {})["preserve_existing"] = [var]
+    else:
+        cfg[var] = value
+    var = var.strip()
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    before = cfg_path.read_bytes()
+    proc = _cli(home, "install-trust", str(F62C_SPEC))
+    text = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"{var}: install-trust must refuse a home config input that outranks the trust source"
+    assert "config.yaml" in text and var in text, f"{var}: the refusal must name the home config and {var}: {text[-600:]}"
+    if kind == "scalar":
+        assert value not in text, "the refusal must name the variable, never echo its value"
+    assert cfg_path.read_bytes() == before, "install-trust must edit nothing before refusing"
+
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    lane_spec = _spec_copy(tmp_path, F62C_SPEC, lambda d: d["egress"].update(pinned_offline_lane=True), tag="lane")
+    with pytest.raises(Exception) as exc:
+        _installer("fleet_f62e_inst_ac19").build_plan({"default_config": copy.deepcopy(cfg)}, str(lane_spec), SHA)
+    assert var in str(exc.value) and "config.yaml" in str(exc.value), f"build_plan must name config.yaml and {var}: {exc.value!r}"
+    if kind == "scalar":
+        assert value not in str(exc.value), "build_plan must name the variable, never echo its value"
+
+    if kind == "scalar":
+        keyless_lane = _spec_copy(tmp_path, F62C_SPEC, lambda d: (d["egress"].pop("openshell_trust", None),
+                                                                  d["egress"].update(pinned_offline_lane=True)), tag="keyless-lane")
+        with pytest.raises(Exception) as kexc:
+            _installer("fleet_f62e_inst_ac19k").build_plan({"default_config": copy.deepcopy(cfg)}, str(keyless_lane), SHA)
+        assert var in str(kexc.value), f"a keyless openshell install must also refuse a bridge {var} scalar: {kexc.value!r}"
+        assert "config.yaml" in str(kexc.value) and value not in str(kexc.value), "the keyless refusal must name the file only"
+
+    clean = yaml.safe_load(before.decode("utf-8")) or {}
+    clean.pop("NO_PROXY", None)
+    clean.pop("no_proxy", None)
+    clean["NO_PROXY"] = "127.0.0.1,localhost,::1"
+    clean["secrets"] = {"preserve_existing": ["OPERATOR_KEEP"]}
+    cfg_path.write_text(yaml.safe_dump(clean), encoding="utf-8")
+    ok = _cli(home, "install-trust", str(F62C_SPEC))
+    assert ok.returncode == 0, f"a loopback-only scalar and an unrelated preserved name must pass: {ok.stderr[-600:]}"
