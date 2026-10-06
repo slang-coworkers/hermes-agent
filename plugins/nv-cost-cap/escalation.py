@@ -204,15 +204,15 @@ def _finish(status, decision, episode_id, session_id, **extra):
     runs now (``store.session_resumes`` = own-runnability AND not ``estop.is_engaged()``) — so a surface
     never claims a still-paused (foreign pause / engaged belt / unknown-pricing) session resumed. A Stop
     keeps the session blocked, so it never resumes. When a profile ESTOP belt is engaged the plugin
-    LEAVES it (manual-resume release — the plugin never removes the sentinel), so the reply also carries
+    LEAVES it (no resolution removes the sentinel; only the approval card's Approve does), so the reply also carries
     ``estop_disposition='left'`` + ``manual_resume_required=True``: a granted Continue/ceiling clears the
-    per-session money block, but the session becomes runnable only after an operator lifts the belt
-    (``hermes resume`` / UA-28); a Stop leaves the session blocked outright.
+    per-session money block, but the session becomes runnable only after the belt is lifted (the
+    resume card's Approve, ``hermes resume``, or UA-28); a Stop leaves the session blocked outright.
     """
     if status == store.APPLIED:
         result = {"granted": True, "decision": decision, "episode_id": episode_id, **extra}
         # Sample the ESTOP belt ONCE and derive both resumes and the disposition from it, so a
-        # concurrent pause/resume can never return contradictory fields. The plugin never lifts the
+        # concurrent pause/resume can never return contradictory fields. No resolution lifts the
         # belt: report its disposition on EVERY granted resolution — "left" (with
         # manual_resume_required) while a sentinel is engaged, else "absent".
         belt_engaged = store.estop_engaged()
@@ -413,10 +413,14 @@ def reconcile_once() -> int:
                 acted += store.finalise_closed_unresolved()
             except Exception:
                 logger.warning("nv-cost-cap reconcile finalise failed", exc_info=True)
-            # Manual-resume release: the plugin NEVER lifts a profile ESTOP belt, not even for an
-            # owned sentinel whose sole blocker closed unresolved. The belt is left for an operator
-            # (`hermes resume`) or the UA-28 upstream owner-scoped disengage; the reconciler only
-            # finalises the money-side episode state.
+            # Outside the approval card the plugin NEVER lifts a profile ESTOP belt, not even for an
+            # owned sentinel whose sole blocker closed unresolved. The belt is left for the card's
+            # Approve or an operator `hermes resume`; the reconciler only finalises episode state and
+            # expires / interrupts resume cards, never touching a sentinel.
+            try:
+                acted += store._resume_module().sweep_cards()
+            except Exception:
+                logger.warning("nv-cost-cap reconcile resume-card sweep failed", exc_info=True)
         finally:
             reset_hermes_home_override(token)
     return acted

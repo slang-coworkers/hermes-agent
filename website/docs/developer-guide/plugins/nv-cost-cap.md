@@ -130,14 +130,17 @@ durable exactly-once compare-and-set on the episode, so a double click (the port
 `escalation_increment_usd` and clears `blocked`; a mortal Stop blocks the session; an
 immortal (`daily`) session is **Continue-only** and a Stop is refused.
 
-**The plugin never lifts the ESTOP belt (manual-resume release).** When a breach also engaged
+**No escalation resolution lifts the ESTOP belt.** When a breach also engaged
 the profile **ESTOP** belt (the default `estop_on_breach: true`), resolving the money side does
-**not** disengage it: the plugin never unlinks or removes the ESTOP sentinel on any path —
-Continue, set-ceiling, Stop, or the reconciler all leave it in place. A granted Continue (or a
+**not** disengage it: outside the approval card the plugin never unlinks or removes the ESTOP
+sentinel — Continue, set-ceiling, Stop, or the reconciler all leave it in place. The only plugin
+release is an authorized Approve on the stop's [resume card](#resume-card--approval-gated-release-cost-f30b),
+which calls core's own `hermes resume` path. A granted Continue (or a
 runnable set-ceiling) clears the per-session `blocked` flag but leaves the belt engaged, so the
 outcome carries `estop_disposition: "left"` and `manual_resume_required: true` and surfaces a
 manual-resume notice; the session — and the profile's cron/kanban/new inbounds — stay gated until
-an operator runs `hermes resume` (or the UA-28 upstream owner-scoped disengage lands). When no
+the stop's resume card is approved, or an operator runs `hermes resume` (or the UA-28 upstream
+owner-scoped disengage lands). When no
 belt is engaged the outcome carries `estop_disposition: "absent"` and a granted Continue makes the
 session runnable immediately.
 
@@ -205,3 +208,107 @@ is finalised so a later resolution no-ops.
 | `escalation_reconcile_seconds` | interval for the periodic reconciler that re-applies crashed grants and finalises closed episodes. |
 | `loopback_operator` | opt-in namespaced principal a loopback dashboard's single shared token authorizes as (default off/`null`; fail-closed when unset). |
 | `profile_ceiling_usd` | also written by an operator **set-ceiling** resolution — the exact USD value scoped to the target profile. |
+
+## Resume card — approval-gated release (COST-F30.b)
+
+Every ESTOP stop the plugin publishes itself raises **one resume card** bound to that exact stop.
+This covers a Tier-2 breach with `estop_on_breach`, and a mortal Stop resolution. The card records
+the published sentinel bytes, the ownership receipt, the reason, `engaged_at`, and core's candidate
+sentinel paths at publish time. A stop the plugin did not publish raises no card: an operator
+`hermes pause`, or a sentinel that already existed when the plugin tried to engage.
+
+The card is posted to `resume_card_target` through core's send engine, the same transport as
+`hermes send`. It is one plain-text message carrying the session, spend, cap, ceiling, reason,
+card id, expiry and the two reply commands:
+
+```
+/cost resume approve <profile>:<12 hex>
+/cost resume deny <profile>:<12 hex>
+```
+
+The card id names the profile that owns the stop. The reply may come from any chat served by a
+gateway profile that has nv-cost-cap enabled; it needs no active session.
+
+- **Authorization:** the replying principal must be in the OWNING profile's `operators`.
+- **Approve** releases the stop only when all of these hold:
+  - the card is still pending and inside `resume_card_ttl_seconds`;
+  - every candidate sentinel, re-read just now, is still exactly the carded stop;
+  - no open session in that profile is still blocked, unpriced or over its ceiling. A session
+    held by an applied Stop counts as resolved.
+
+  It then calls core `agent.estop.disengage()` exactly once, the call behind `hermes resume`.
+- **Deny**, expiry, any change to the stop and an open money question all keep the stop.
+  Once the money question is settled (`/cost continue` or `/cost ceiling <usd>`), Approve the
+  same card again.
+- **Audit:** every answer is appended to the `resume_decisions` table in the profile's
+  plugin_db. Each row carries who, when, the decision, the stop identity and the exact bytes of
+  every candidate sentinel as read. The table is append-only: updates and deletes abort.
+- **Reconciler:** expires pending cards past their TTL, and closes a card that a crash left
+  `approving` as `interrupted`. Its `attempt` row is kept. The reconciler never touches a
+  sentinel.
+
+### Refusals
+
+| reason | meaning | card |
+|---|---|---|
+| `unauthorized` | the principal is not an operator of the owning profile | unchanged |
+| `unknown-card` | malformed id, unknown profile, or no such card | unchanged |
+| `already-resolved` | the card was already decided | unchanged |
+| `superseded` | a newer plugin stop replaced this one; the reply names the newer card | superseded |
+| `expired` | past `resume_card_ttl_seconds` | expired |
+| `core-api-unavailable` | core's candidate list or `disengage` is missing (fail closed) | stays pending |
+| `money-block-active` | a session in the profile still has an open money question; the reply names it and the next step | stays pending |
+| `already-resumed` | the stop is already gone | refused |
+| `fleet-pause-present` | a fleet-root pause is also engaged; a resume would lift it too | refused |
+| `unreadable-stop` | the sentinel body is empty or unreadable | refused |
+| `repaused` | an operator paused again (new body, receipt or `engaged_at`) | refused |
+| `reason-changed` | same receipt, different reason | refused |
+| `stop-changed` | same identity, different bytes (e.g. extra `expires_at` / `allow` fields) | refused |
+| `changed-during-approve` | the stop changed between the first and the final re-read | refused |
+| `resume-failed` | core `disengage()` raised; check the profile and use `hermes resume` if needed | resume-failed |
+
+### Residual window
+
+Core's ESTOP has no cross-process lock. An operator pause can land after Approve's final
+re-read and before `disengage()`, and then it is lifted together with the plugin's stop. That
+is the same window stock Hermes has between two humans running `hermes pause` and
+`hermes resume` at once. It is bounded in four ways:
+
+- exactly one `disengage()` per card, never retried;
+- no I/O between the final read and the call;
+- an `attempt` audit row committed before the call;
+- after a resume that really happened, a notice to `resume_card_target`:
+  `session <X> resumed by approval of <who> at <time>; if you had just paused, pause again`.
+
+A failed notice send is retried by later drains, at most 3 sends in total. A card is never
+re-sent: `hermes resume` stays available, and a missing card is visible. The Approve reply states
+the window too. Upstream UA-28, an owner-aware ESTOP lock in core, closes it.
+
+### Fleet rollout
+
+- Set `resume_card_target` on **every** profile that can produce a stop: any profile with
+  `estop_on_breach` (default true), and any profile where a mortal Stop can be resolved.
+  Without it the card is recorded `failed: no-target` and nothing is posted. The card id is then
+  only in the profile's plugin_db, so in practice the release is `hermes resume`.
+- Enable nv-cost-cap (`plugins.enabled`) on the profile that serves the approver channel.
+  Otherwise the `/cost resume …` reply never reaches the plugin.
+- A card is raised only when the stopping process's `HERMES_HOME` maps to a named profile
+  (`default`, or `profiles/<name>`). In any other home, no card is raised and the stop is
+  released with `hermes resume`.
+
+**Round-trip check** (non-mutating, per profile):
+
+1. Outbound: `hermes -p <profile> send --to <resume_card_target> "nv-cost-cap resume-card check"`
+   must arrive in the approver channel. It uses the same send engine as the card.
+2. Inbound: from the approver channel, an account listed in that profile's `operators` replies
+   `/cost resume approve <profile>:000000000000`. The answer must be the `unknown-card` refusal.
+   A non-operator gets `unauthorized` instead, because authorization runs before the card
+   lookup. Either way nothing changes.
+
+### Resume-card settings
+
+| setting | default | meaning |
+|---|---|---|
+| `resume_card_target` | unset | `send_message` target (`<platform>:<chat>[:<thread>]`) for cards and post-resume notices. Unset: nothing is posted, and the stop is kept. |
+| `resume_card_ttl_seconds` | `86400` | pending-card lifetime; an expired card keeps the stop. |
+| `resume_card_drain_seconds` | `5` | interval of the gateway's outbox drain (floor 1). Each new card or notice is also sent immediately. |
