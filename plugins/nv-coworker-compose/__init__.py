@@ -748,11 +748,13 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
             except Exception as exc:
                 failures.append(f"install {tname}: {exc}")
         # The multiplexer serves every live, unparked named profile; parking the
-        # rest is what scopes the gateway to this fleet.
-        try:
-            park_non_fleet_profiles(list(types))
-        except Exception as exc:
-            failures.append(f"park non-fleet profiles: {exc}")
+        # rest is what scopes the gateway to this fleet. A failed install leaves
+        # the fleet incomplete, so nothing else is taken offline in that case.
+        if not failures:
+            try:
+                park_non_fleet_profiles(list(types))
+            except Exception as exc:
+                failures.append(f"park non-fleet profiles: {exc}")
 
         revisions = _profile_revisions()
         for tname, tinfo in types.items():

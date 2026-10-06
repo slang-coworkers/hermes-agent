@@ -175,3 +175,29 @@ def test_onboard_parks_non_fleet_profiles(module, tmp_path, monkeypatch):
     assert [name for name, _ in profiles_to_serve(True)] == ["default", "orchestrator", "worker"]
     assert profile_is_parked(profiles_root / "stray")
     assert not profile_is_parked(profiles_root / "orchestrator") and not profile_is_parked(profiles_root / "worker")
+
+
+def test_onboard_failed_install_parks_nothing(module, tmp_path, monkeypatch):
+    """A failed coworker install fails the onboard and leaves every non-fleet profile served:
+    an incomplete fleet must not take working profiles offline."""
+    import os
+    from hermes_cli.profiles import profile_is_parked, profiles_to_serve
+
+    profiles_root = Path(os.environ["HERMES_HOME"]) / "profiles"
+    (profiles_root / "stray").mkdir(parents=True)
+    (profiles_root / "stray" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+
+    def _install(src, name):
+        if name == "worker":
+            raise RuntimeError("install refused")
+        shutil.copytree(src, profiles_root / name)
+
+    monkeypatch.setattr(module, "_install", _install)
+    monkeypatch.setattr(module, "_profile_revisions", lambda *a, **k: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda *a, **k: True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda *a, **k: True)
+    result = module._run_onboard(str(_write_spec(tmp_path / "spec_onboard_fail", _spec())))
+
+    assert result["ok"] is False and "install worker" in result["error"]
+    assert not profile_is_parked(profiles_root / "stray")
+    assert "stray" in {name for name, _ in profiles_to_serve(True)}
