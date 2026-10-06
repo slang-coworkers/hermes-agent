@@ -40,6 +40,9 @@ WP_D1_DIFF_CONFIG = ("-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=fal
                      "-c", "diff.indentHeuristic=true", "-c", "diff.relative=false", "-c", "diff.interHunkContext=0",
                      "-c", "core.quotePath=true", "-c", "color.diff=false", "-c", "core.abbrev=10")
 IMPORT_LINE = re.compile(r"^(import\b|export\s.*\sfrom\s|\}\s*from\s|.*\brequire\()")
+# E2: a vitest module mock re-points with its import. A vi.mock row is admitted only when before and after differ
+# in the module path alone; the rest of the line (factory included) must be byte-equal, so a factory edit is no row.
+VI_MOCK_PATH = re.compile(r"""^vi\.mock\(\s*(['"])([^'"]+)\1(.*)$""")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
 
 
@@ -101,9 +104,14 @@ def load_repoints(path):
             if not row or not row[0] or row[0].startswith("#"):
                 continue
             p, before, after, reason = (row + [""] * 4)[:4]
-            for ln in (before.strip(), after.strip()):
-                if ln and not IMPORT_LINE.match(ln):
-                    bad.append(f"REPOINT row {n}: {ln!r} is not an import line")
+            mocks = [VI_MOCK_PATH.match(ln.strip()) for ln in (before, after)]
+            if any(mocks):
+                if not (all(mocks) and mocks[0].group(3) == mocks[1].group(3) and mocks[0].group(2) != mocks[1].group(2)):
+                    bad.append(f"REPOINT row {n}: a vi.mock row may change only the module path")
+            else:
+                for ln in (before.strip(), after.strip()):
+                    if ln and not IMPORT_LINE.match(ln):
+                        bad.append(f"REPOINT row {n}: {ln!r} is not an import line")
             if not reason.strip():
                 bad.append(f"REPOINT row {n}: no reason for {p}")
             r = rec.setdefault(p, (set(), set()))

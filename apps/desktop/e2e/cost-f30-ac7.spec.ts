@@ -11,7 +11,7 @@ import {
   writeEnvFile,
   writeMockProviderConfig
 } from './fixtures'
-import { startMockServer } from './mock-server'
+import { startMockServer } from '../../../tests-js/scripts/mock-server'
 import { expect, test } from './test'
 
 // AC-COST-F30-7 (desktop): the merged nv-cost-cap plugin's desktop half renders the

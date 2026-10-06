@@ -8,7 +8,7 @@ const mockClose = vi.fn(async () => undefined)
 const sandboxCleanup = vi.fn()
 const appClose = vi.fn(async () => undefined)
 
-vi.mock('./mock-server', () => ({
+vi.mock('../../../tests-js/scripts/mock-server', () => ({
   startMockServer: vi.fn(async () => ({ url: 'http://127.0.0.1:0', close: mockClose }))
 }))
 
