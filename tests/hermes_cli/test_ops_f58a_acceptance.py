@@ -156,13 +156,16 @@ def test_ac_ops_f58_a_4(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     try:
-        # The suite has already initialized process-global logging; force a
-        # complete setup pass while requesting this test's HERMES_HOME.
+        # The conftest import already logs for the session home, and a second home
+        # is routed through that home's rotation settings, so this home must be the
+        # only one for its config.yaml to size the handler.
+        hermes_logging._reset_queued_handlers()
         log_dir = hermes_logging.setup_logging(hermes_home=home, force=True)
-        # Assert on THIS home's agent.log handler specifically: other HERMES_HOMEs
-        # legitimately keep their own agent.log handler (the conftest import binds
-        # one; multi-home routing is intended), so a process-wide count is wrong.
+        marker = "ops-f58-a-4 rotation probe"
+        logging.getLogger("agent.ops_f58_a_4").warning(marker)
+        hermes_logging.flush_log_queue()
         expected = Path(log_dir, "agent.log").resolve()
+        assert marker in expected.read_text(encoding="utf-8")
         agent_handlers = [
             h for h in hermes_logging.rotating_file_handlers()
             if isinstance(h, RotatingFileHandler)
