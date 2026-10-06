@@ -53,6 +53,15 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
              "(default: the gateway-internal render path)",
     )
 
+    # For an openshell fleet that install-openshell does not install (no pinned offline lane):
+    # carry the spec's egress.openshell_trust into the active gateway home, so the multiplexer
+    # re-derives sandbox trust at its own start (FLEET-F62.e D4b).
+    install_trust_p = subs.add_parser(
+        "install-trust",
+        help="Merge the spec's OpenShell trust settings into the active gateway home",
+    )
+    install_trust_p.add_argument("spec", help="Path to coworker-types.yaml (substrate: openshell)")
+
 
 def setup_onboard(parser: argparse.ArgumentParser) -> None:
     """Build ``hermes onboard <subcommand>``."""

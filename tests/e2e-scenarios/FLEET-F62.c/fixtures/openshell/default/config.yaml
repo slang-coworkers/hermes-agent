@@ -10,6 +10,12 @@ providers:
 secrets:
   onecli:
     enabled: false
+  openshell_trust:
+    enabled: true
+    override_existing: true
+    bundle: /etc/openshell-tls/ca-bundle.pem
+  sources:
+  - openshell_trust
 plugins:
   enabled:
   - nv-coworker-compose
