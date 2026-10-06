@@ -339,6 +339,9 @@ What the operator configures:
    refuses both.
 2. Create the gateway sandbox with the plan's gateway line, so the provider attaches at CREATE.
    Legacy attachment is fixed at creation, and `providers_v2_enabled` stays unset.
+   Then point the gateway default profile's `model` and `providers` at the rendered
+   `default/config.yaml`. The installer edits only the OSH-owned keys of an existing default
+   profile, so without this step that profile keeps serving its own provider.
 3. Check the effective policy with `openshell policy get <project>-gw --full`. The upstream
    endpoint must carry exactly the four rendered rules.
 
