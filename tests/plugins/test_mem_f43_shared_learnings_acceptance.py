@@ -353,7 +353,7 @@ def test_ac_mem_f43_8(tmp_path, monkeypatch):
         )
 
         import tools.env_passthrough as ep
-        ep._config_passthrough = None  # drop the cached config allowlist so this home is read
+        ep._config_passthrough.clear()  # drop the cached per-home config allowlists so this home is read
         from agent.secret_scope import set_secret_scope, build_profile_secret_scope
         set_secret_scope(build_profile_secret_scope(homes[orchestrator]))
         try:
@@ -363,7 +363,7 @@ def test_ac_mem_f43_8(tmp_path, monkeypatch):
             )
         finally:
             set_secret_scope(None)
-            ep._config_passthrough = None
+            ep._config_passthrough.clear()
     finally:
         reset_hermes_home_override(token)
 
