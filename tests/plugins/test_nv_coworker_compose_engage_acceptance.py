@@ -374,16 +374,23 @@ def test_ac_rt_f02_3(loaded, tmp_path):
         s = _render(module, tmp_path, _spec_with_engage(_engage_for("slack", "always-on")), "s_on")
         sa = SlackAdapter(PlatformConfig(extra=_extra(_worker_config(s), "slack")))
         assert sa._slack_free_response_channels() == {_CHAN}
-        # Discord/Telegram flag resolvers read only self.config.extra -> unbound on a stub
+        # Discord/Telegram flag resolvers read only self.config.extra -> unbound on a stub; they
+        # delegate to the adapter's own extra-parsing helpers, so the stub binds the real ones.
+        def _stub(adapter_cls, extra, *helpers):
+            stub = SimpleNamespace(config=PlatformConfig(extra=extra))
+            for name in helpers:
+                setattr(stub, name, getattr(adapter_cls, name).__get__(stub))
+            return stub
+
         d = _render(module, tmp_path, _spec_with_engage(_engage_for("discord", "mention")), "d_m")
-        dstub = SimpleNamespace(config=PlatformConfig(extra=_extra(_worker_config(d), "discord")))
+        dstub = _stub(DiscordAdapter, _extra(_worker_config(d), "discord"), "_extra_or_env_flag")
         assert DiscordAdapter._discord_require_mention(dstub) is True
         assert DiscordAdapter._discord_thread_require_mention(dstub) is True
         t = _render(module, tmp_path, _spec_with_engage(_engage_for("telegram", "mention")), "t_m")
-        tstub = SimpleNamespace(config=PlatformConfig(extra=_extra(_worker_config(t), "telegram")))
+        tstub = _stub(TelegramAdapter, _extra(_worker_config(t), "telegram"), "_extra_bool", "_extra_str_set")
         assert TelegramAdapter._telegram_require_mention(tstub) is True
         assert TelegramAdapter._telegram_free_response_topics(tstub) == set()
-        gstub = SimpleNamespace(config=PlatformConfig(extra=tge))
+        gstub = _stub(TelegramAdapter, tge, "_extra_bool")
         assert TelegramAdapter._telegram_guest_mode(gstub) is False
         assert SlackAdapter(PlatformConfig(extra=sre))._slack_reaction_trigger_target() == ("", "")
 
