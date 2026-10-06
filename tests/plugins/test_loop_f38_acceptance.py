@@ -64,7 +64,11 @@ def test_ac_loop_f38_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     from agent.verification_stop import build_verify_on_stop_nudge
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    # Verify-on-stop is opt-in, and its evidence ledger records nothing while it is off.
+    (home / "config.yaml").write_text("agent:\n  verify_on_stop: true\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
     project = tmp_path / "proj"
     project.mkdir()
     # A real on-disk project the verifier recognises: its scripts define the checks.
