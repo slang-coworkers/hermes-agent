@@ -120,7 +120,7 @@ def test_ac_obs_f48_4(monkeypatch, tmp_path):
     def _no_sdk(*args, **kwargs):
         raise RuntimeError("otlp sdk absent")
 
-    monkeypatch.setattr(ghe, "_require_metrics_sdk", _no_sdk)
+    monkeypatch.setattr(ghe.otlp_exporter, "_require_sdk", _no_sdk)
     runtime = ghe.start_gateway_health_export(_EXPORT_CFG)
     assert runtime.enabled is False
     assert runtime.reason == "otlp_unavailable"
