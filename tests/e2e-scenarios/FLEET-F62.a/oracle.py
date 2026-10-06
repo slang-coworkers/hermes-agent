@@ -155,7 +155,7 @@ def main():
         if len(res) == 1:
             try:
                 p = json.loads(res[0][0])
-                sent = 1 if isinstance(p, dict) and p.get("status") == "sent" else 0
+                sent = 1 if isinstance(p, dict) and p.get("status") in ("sent", "queued", "claimed") and p.get("delivery_id") else 0
             except (TypeError, ValueError):
                 sent = 0
     m["sent_results"] = sent

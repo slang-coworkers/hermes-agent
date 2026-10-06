@@ -131,7 +131,7 @@ source "$TB/fleet-f62a.env"
    preserved — a naive `cp` of the fixture config, which has no `toolsets`, would silently strip
    `kanban_list`/`kanban_comment` and the sweep would no-op). Also re-write the `worker` silent SOUL (onboard
    force-installs the spine SOUL). Do NOT touch the rendered `skills/supervise-issues/SKILL.md` or
-   `cron/jobs.json`. The cron delivery spawns `hermes -p orchestrator chat` as a fresh subprocess that reads
+   `cron/jobs.json`. The cron delivery spawns `hermes chat` (no `-p`; its `HERMES_HOME` is the orchestrator profile) as a fresh subprocess that reads
    the merged `orchestrator/config.yaml`, so the live provider takes effect for the fire.
    ```bash
    for p in orchestrator worker; do
