@@ -144,6 +144,8 @@ def test_ac_loop_f39_1(tmp_path, monkeypatch):
 def test_ac_loop_f39_2(tmp_path, monkeypatch):
     """Worker-liveness reaping is native: a running kanban task whose claim TTL expired and whose worker PID is dead is reclaimed to ready by both release_stale_claims (TTL rung) and detect_crashed_workers (crash rung), while a task whose TTL expired but whose worker PID is live with a fresh heartbeat is extended, not reclaimed.
     """
+    from hermes_cli import kanban_db_dispatch as kbd
+
     kb = _init_kanban(tmp_path, monkeypatch)
     host = kb._claimer_id().split(":", 1)[0]
     live_pid = os.getpid()
@@ -153,11 +155,11 @@ def test_ac_loop_f39_2(tmp_path, monkeypatch):
     with kb.connect() as conn:
         crashed = kb.create_task(conn, title="crashed worker", assignee="a")
         kb.claim_task(conn, crashed, claimer=f"{host}:worker")
-        kb._set_worker_pid(conn, crashed, dead_pid)
+        kbd._set_worker_pid(conn, crashed, dead_pid)
 
         healthy = kb.create_task(conn, title="live worker", assignee="a")
         kb.claim_task(conn, healthy, claimer=f"{host}:worker")
-        kb._set_worker_pid(conn, healthy, live_pid)
+        kbd._set_worker_pid(conn, healthy, live_pid)
 
         now = int(time.time())
         conn.execute("UPDATE tasks SET claim_expires=?, last_heartbeat_at=? WHERE id=?",
@@ -178,7 +180,7 @@ def test_ac_loop_f39_2(tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")   # disable the launch-window grace
         crashed2 = kb.create_task(conn, title="crashed worker 2", assignee="a")
         kb.claim_task(conn, crashed2, claimer=f"{host}:worker")
-        kb._set_worker_pid(conn, crashed2, dead_pid)
+        kbd._set_worker_pid(conn, crashed2, dead_pid)
         conn.commit()
         assert crashed2 in kb.detect_crashed_workers(conn)
         assert kb.get_task(conn, crashed2).status == "ready"

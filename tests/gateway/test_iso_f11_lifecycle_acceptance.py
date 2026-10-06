@@ -129,6 +129,7 @@ def test_ac_iso_f11_3(kanban_conn, monkeypatch):
     a host-local running task whose worker PID is not alive is reclaimed by
     detect_crashed_workers."""
     import hermes_cli.kanban_db as kb_mod
+    from hermes_cli import kanban_db_dispatch as kbd
     kb, conn = kanban_conn
 
     # differential control, asserted before any monkeypatch: a fresh claim is not reclaimed
@@ -152,10 +153,10 @@ def test_ac_iso_f11_3(kanban_conn, monkeypatch):
     live_pid, dead_pid = 11111, 98765
     alive = kb.create_task(conn, title="lifecycle-3-alive", assignee="w")
     assert kb.claim_task(conn, alive) is not None     # default claimer => host-local lock
-    kb._set_worker_pid(conn, alive, live_pid)
+    kbd._set_worker_pid(conn, alive, live_pid)
     crashed = kb.create_task(conn, title="lifecycle-3-crash", assignee="w")
     assert kb.claim_task(conn, crashed) is not None
-    kb._set_worker_pid(conn, crashed, dead_pid)
+    kbd._set_worker_pid(conn, crashed, dead_pid)
     monkeypatch.setattr(kb_mod, "_pid_alive", lambda pid: pid == live_pid)
     reclaimed = kb.detect_crashed_workers(conn)
     assert crashed in reclaimed
