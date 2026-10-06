@@ -14,10 +14,8 @@ native CLI.
 """
 from __future__ import annotations
 
-import io
 import re
 import sys
-from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,25 +44,18 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
 
 
 def _live_subcommand_names() -> set[str]:
-    """Top-level subcommands from `hermes --help` (source-free parity oracle).
+    """Top-level subcommands of the production `hermes` parser (source-free parity oracle).
 
-    Replicates tests/hermes_cli/test_startup_plugin_gating.py:43-67.
+    Reads the subparsers action that `hermes_cli.main` builds for `main()`; `--help`
+    renders the same choices, but its usage line no longer lists them (metavar).
     """
     from hermes_cli import main as _main
 
-    argv_backup = sys.argv[:]
-    sys.argv = ["hermes", "--help"]
-    buf = io.StringIO()
-    try:
-        with patch.object(_main, "_plugin_cli_discovery_needed", return_value=False):
-            with redirect_stdout(buf):
-                with pytest.raises(SystemExit):
-                    _main.main()
-    finally:
-        sys.argv = argv_backup
-    m = re.search(r"\{([a-zA-Z0-9_,\-]+)\}", buf.getvalue())
-    assert m, f"no subcommand group in --help:\n{buf.getvalue()[:500]}"
-    return set(m.group(1).split(","))
+    with patch.object(_main, "_plugin_cli_discovery_needed", return_value=False):
+        _parser, subparsers = _main._build_cli_parser()
+    names = set(getattr(subparsers, "choices", None) or {})
+    assert names, "production parser exposes no top-level subcommands"
+    return names
 
 
 def _parse_mapping_table(text: str) -> list[dict[str, str]]:
