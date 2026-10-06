@@ -80,9 +80,11 @@ def test_apply_openshell_routes_rooms_over_the_ws_requester(tmp_path, monkeypatc
     class _FakeInstaller:
         def __init__(self):
             self.policy_root = "UNSET"
+            self.parker = None
 
-        def apply(self, spec, ref, *, room_creator, room_exists, policy_root=None):
+        def apply(self, spec, ref, *, room_creator, room_exists, parker=None, policy_root=None):
             self.policy_root = policy_root
+            self.parker = parker
             assert room_exists("fleet-review") is False
             room_creator("fleet-review", "FLEET-F62 Review", ["orchestrator", "reviewer"])
 
@@ -94,6 +96,8 @@ def test_apply_openshell_routes_rooms_over_the_ws_requester(tmp_path, monkeypatc
     assert "groups.create" in recorder.methods, "room creation must be dispatched over the requester"
     assert fake.policy_root == "/host/policy/root", \
         "policy_root must forward through _apply_openshell to installer.apply"
+    assert fake.parker is mod.park_non_fleet_profiles, \
+        "_apply_openshell must hand the installer the fleet parker"
 
 
 def test_apply_openshell_refuses_when_preflight_fails(tmp_path, monkeypatch):
