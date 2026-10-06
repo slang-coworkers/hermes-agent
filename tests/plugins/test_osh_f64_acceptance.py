@@ -1350,6 +1350,17 @@ def test_ac_osh_f64_13(tmp_path, monkeypatch):
     def _created():
         return {c[c.index("--name") + 1] for c in ran if c[:3] == ["openshell", "sandbox", "create"]}
 
+    # Seed each role's rendered policy and the matching recorded digest, so an existing sandbox
+    # reads as created with the current policy and is skipped rather than re-created.
+    for step in create_steps:
+        cmd = list(step.command)
+        name, policy = cmd[cmd.index("--name") + 1], Path(cmd[cmd.index("--policy") + 1])
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text(f"version: 1\n# {name}\n", encoding="utf-8")
+        record = Path(ctx["home"]) / ".osh-f64" / "sandbox-policy" / f"{name}.sha256"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(hashlib.sha256(policy.read_bytes()).hexdigest() + "\n", encoding="utf-8")
+
     existing_one = {next(iter(plan_set))}
     monkeypatch.setattr(planner, "_sandbox_exists", lambda name: name in existing_one)
     for step in create_steps:

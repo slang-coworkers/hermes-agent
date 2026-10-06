@@ -19,6 +19,7 @@ invariants:
   - "Format messages in standard Markdown with Unicode emoji, not shortcode emoji."
   - "Durable package or MCP-server changes need admin approval; workspace installs are per-session only."
   - "Run date before stating the current day or time; temporal arithmetic is unreliable."
+  - "In an unattended flow never edit AGENTS.md, CLAUDE.md, SOUL.md or .cursorrules: those protected agent-instruction files always need a live human approval, so report such a change up as needing a human."
 context:
   - "Your working directory is /workspace/agent; recall cross-group facts from the shared tree through a sub-agent, never inline."
   - "Share a non-obvious discovery for future coworkers right after the task, with the rule and the reason."

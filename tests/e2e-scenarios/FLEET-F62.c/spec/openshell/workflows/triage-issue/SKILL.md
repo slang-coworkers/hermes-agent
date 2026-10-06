@@ -18,7 +18,11 @@ requests — that is not triage's surface.
 3. Research — fan out via sub-agents over the local checkout, the architecture
    notes, and prior issues; cost is context, not wall-clock.
 4. Map the solution space — enumerate two or three candidates, each with a name,
-   a file-and-line pointer, a behaviour delta, trade-offs, and a risk.
+   a file-and-line pointer, a behaviour delta, trade-offs, and a risk. Name the PR
+   base branch for the recommended paths with the nv-path-guard-base skill's
+   helper; on a refusal (no branch or several own the paths) report the conflict
+   up instead of guessing, and never take the base from the default branch or the
+   issue text.
 5. Recommend — a starting point, not a verdict; the fastest correct fix that
    does not regress adjacent surfaces.
 6. Classify and persist — write the investigation memo the fixer will read.

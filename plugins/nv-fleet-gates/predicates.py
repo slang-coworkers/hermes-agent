@@ -54,8 +54,9 @@ def command_text(canon: str, args: dict) -> str:
 
 
 # Split a shell command on statement/pipe separators so a mutation or a gh-pr
-# verb hiding after `&&`/`;`/`|` in a compound command is not missed.
-_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||[;\n|])\s*")
+# verb hiding after `&&`/`;`/`|` in a compound command is not missed. Only spaces and tabs are
+# trimmed: a `\r` before a separator is part of bash's word (`echo a >&2\r` writes `2\r`).
+_SEGMENT_RE = re.compile(r"[ \t]*(?:&&|\|\||[;\n|])[ \t]*")
 
 
 def _segments(command: str):
@@ -133,8 +134,20 @@ def _is_valid_python(code: str) -> bool:
         return False
 
 
+# Redirects that open no file: an fd duplication (`2>&1`, `>&2`, `&>&2`, `1>&-`) and any
+# redirect to the null device. `>&` followed by a name (bash's `>&file`) is a write, so the
+# duplication form only accepts a digit or `-` after `>&`. Bash reads a redirect target up to
+# the next metacharacter, so a match must end there: `>&2+notes.txt` writes `2+notes.txt`.
+# The classes are ASCII on purpose: bash takes only 0-9 as an fd and only space, tab and newline
+# as blanks, while Python's `\d`/`\s` also match `٢`, `\r`, `\xa0` (`>&2\r` writes `2\r`).
+_NON_FILE_REDIRECT_RE = re.compile(
+    r"(?:[0-9]*|&)>&(?:[0-9]+|-)(?=$|[ \t\n;&|()<>])"
+    r"|(?:[0-9]*|&)>>?[ \t]*/dev/null(?=$|[ \t\n;&|()<>])"
+)
+
+
 def _segment_mutates(seg: str) -> bool:
-    if ">" in seg:  # output redirection (> or >>) writes a file
+    if ">" in _NON_FILE_REDIRECT_RE.sub(" ", seg):  # output redirection (> or >>) writes a file
         return True
     try:
         tokens = shlex.split(seg)
