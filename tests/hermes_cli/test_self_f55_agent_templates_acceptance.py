@@ -168,7 +168,7 @@ def test_ac_self_f55_3(installed_disabled):
     namespace = entry.manifest.skill_namespace
     pkg_root = Path(entry.manifest.path).resolve()
     server_name = _first_mcp_server_name(PLUGIN_FIXTURE)
-    expected_key = f"{namespace}__{server_name}"
+    expected_key = server_name
     data_dir = str(home / "plugin-data" / namespace)
 
     servers = _load_mcp_config()  # reads config.yaml:mcp_servers + merges enabled portable plugins
