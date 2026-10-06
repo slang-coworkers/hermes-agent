@@ -238,6 +238,8 @@ def test_ac_a2a_f20_5(tmp_path, monkeypatch):
     dependency-gated (promoted todo->ready only when ALL children finish), and
     a terminal child event is delivered to the originating destination."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
     from hermes_cli.kanban_db_graph import decompose_triage_task
     from gateway.config import Platform
     from gateway.run import GatewayRunner
@@ -248,14 +250,14 @@ def test_ac_a2a_f20_5(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root = kb.create_task(conn, title="ship a feature", triage=True)
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=root, platform="telegram", chat_id="chat1",
             thread_id="topic1", user_id="user1", notifier_profile="default",
         )
     # two INDEPENDENT children so the root is gated on BOTH completing.
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         child_ids = decompose_triage_task(
             conn, root, root_assignee="orchestrator",
             children=[
@@ -266,21 +268,21 @@ def test_ac_a2a_f20_5(tmp_path, monkeypatch):
         )
     assert child_ids and len(child_ids) == 2
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         for cid in child_ids:
-            subs = kb.list_notify_subs(conn, cid)
+            subs = kbn.list_notify_subs(conn, cid)
             assert any(s["chat_id"] == "chat1" for s in subs)
         assert kb.get_task(conn, root).status == "todo"
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.complete_task(conn, child_ids[0], result="A done") is True
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         # one child done is not enough — an any-child promotion mutant flips here
         assert kb.get_task(conn, root).status == "todo"
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.complete_task(conn, child_ids[1], result="B done") is True
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.get_task(conn, root).status == "ready"
 
     runner = object.__new__(GatewayRunner)

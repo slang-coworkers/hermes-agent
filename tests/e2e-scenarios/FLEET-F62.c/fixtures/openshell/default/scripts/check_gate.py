@@ -101,6 +101,7 @@ def evaluate(payload, *, gate_db_path=None, kanban_db_path):
         return (not success), (None if success else payload)
 
     from hermes_cli import kanban_db
+    from hermes_cli import kanban_db_connect
 
     gate = _open_gate(gate_db_path)
     to_unblock: list[str] = []
@@ -139,7 +140,7 @@ def evaluate(payload, *, gate_db_path=None, kanban_db_path):
                 if latest == head_sha and task_id:
                     to_demote.append(task_id)
         if to_unblock or to_demote:
-            with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
+            with kanban_db_connect.connect_closing(db_path=Path(kanban_db_path)) as kconn:
                 for task_id in to_unblock:
                     kanban_db.unblock_task(kconn, task_id)
                 for task_id in to_demote:

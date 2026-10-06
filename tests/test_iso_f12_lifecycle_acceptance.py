@@ -23,6 +23,7 @@ import pytest
 
 from agent import estop
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 
 DOC_PATH = "website/docs/user-guide/slang-coworkers-pause-restart-wake.md"
@@ -66,7 +67,7 @@ def kanban_conn(tmp_path, monkeypatch):
     db_path = kb.kanban_db_path(board="default")
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
     kb.init_db()
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         yield conn
 
 
@@ -399,7 +400,7 @@ def test_ac_iso_f12_9(kanban_conn, monkeypatch):
     # Keep the memory-pressure guard from skipping the spawn on a loaded host.
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda *a, **k: "unknown")
 
-    result = kb.dispatch_once(conn, dry_run=False)
+    result = kbd.dispatch_once(conn, dry_run=False)
     assert task_id in result.reconciled_orphans
     assert task_id in [s[0] for s in result.spawned]
 

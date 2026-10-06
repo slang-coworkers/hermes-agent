@@ -126,8 +126,8 @@ def test_ac_loop_f36_6():
     from hermes_cli.commands import (
         GATEWAY_KNOWN_COMMANDS,
         resolve_command,
-        telegram_bot_commands,
     )
+    from hermes_cli.commands_platforms import telegram_bot_commands
 
     cmd = resolve_command("plan")
     assert cmd is not None

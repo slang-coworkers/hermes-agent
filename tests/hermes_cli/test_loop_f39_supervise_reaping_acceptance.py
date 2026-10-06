@@ -145,6 +145,7 @@ def test_ac_loop_f39_2(tmp_path, monkeypatch):
     """Worker-liveness reaping is native: a running kanban task whose claim TTL expired and whose worker PID is dead is reclaimed to ready by both release_stale_claims (TTL rung) and detect_crashed_workers (crash rung), while a task whose TTL expired but whose worker PID is live with a fresh heartbeat is extended, not reclaimed.
     """
     from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import kanban_db_connect as kbc
 
     kb = _init_kanban(tmp_path, monkeypatch)
     host = kb._claimer_id().split(":", 1)[0]
@@ -152,7 +153,7 @@ def test_ac_loop_f39_2(tmp_path, monkeypatch):
     dead_pid = 2_147_480_000
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid == live_pid)
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         crashed = kb.create_task(conn, title="crashed worker", assignee="a")
         kb.claim_task(conn, crashed, claimer=f"{host}:worker")
         kbd._set_worker_pid(conn, crashed, dead_pid)
@@ -182,7 +183,7 @@ def test_ac_loop_f39_2(tmp_path, monkeypatch):
         kb.claim_task(conn, crashed2, claimer=f"{host}:worker")
         kbd._set_worker_pid(conn, crashed2, dead_pid)
         conn.commit()
-        assert crashed2 in kb.detect_crashed_workers(conn)
+        assert crashed2 in kbd.detect_crashed_workers(conn)
         assert kb.get_task(conn, crashed2).status == "ready"
         assert kb.get_task(conn, healthy).status == "running"
 
@@ -248,9 +249,10 @@ def test_ac_loop_f39_4(tmp_path, monkeypatch):
     """
     kb = _init_kanban(tmp_path, monkeypatch)
     import tools.kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
 
     monkeypatch.setenv("HERMES_PROFILE", "orchestrator")   # handler derives author from this
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         target = kb.create_task(conn, title="silent chain", assignee="a")
         quiet = kb.create_task(conn, title="untouched", assignee="a")
         conn.commit()
@@ -258,7 +260,7 @@ def test_ac_loop_f39_4(tmp_path, monkeypatch):
     result = kt._handle_comment({"task_id": target, "body": "rebase master — CI stale 2 days"})
     assert "comment_id" in json.loads(result), f"kanban_comment tool did not record a comment: {result}"
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         bodies = [c.body for c in kb.list_comments(conn, target)]
         assert any("rebase master" in b for b in bodies)
         assert kb.list_comments(conn, quiet) == []   # negative control

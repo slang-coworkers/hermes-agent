@@ -50,12 +50,13 @@ def test_ac_iso_f11_1(tmp_path):
 @pytest.fixture
 def kanban_conn(tmp_path, monkeypatch):
     import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     home = tmp_path / "hermes_home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     kb.init_db()
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         yield kb, conn
     finally:
@@ -70,6 +71,7 @@ def test_ac_iso_f11_2(kanban_conn):
     """AC-ISO-F11-2: Under a real two-connection race exactly one claim wins (atomic CAS, not
     check-then-update); heartbeat_claim extends the live claim only for the winning
     claimer."""
+    from hermes_cli import kanban_db_connect as kbc
     kb, conn = kanban_conn
     tid = kb.create_task(conn, title="lifecycle-2", assignee="w")
 
@@ -95,7 +97,7 @@ def test_ac_iso_f11_2(kanban_conn):
     results = {}
 
     def worker(i):
-        c = _BeginBarrierConn(kb.connect())
+        c = _BeginBarrierConn(kbc.connect())
         try:
             results[i] = kb.claim_task(c, tid, claimer=f"worker-{i}", ttl_seconds=30)
         finally:
@@ -158,7 +160,7 @@ def test_ac_iso_f11_3(kanban_conn, monkeypatch):
     assert kb.claim_task(conn, crashed) is not None
     kbd._set_worker_pid(conn, crashed, dead_pid)
     monkeypatch.setattr(kb_mod, "_pid_alive", lambda pid: pid == live_pid)
-    reclaimed = kb.detect_crashed_workers(conn)
+    reclaimed = kbd.detect_crashed_workers(conn)
     assert crashed in reclaimed
     assert alive not in reclaimed
     assert _status(conn, crashed) == "ready"
@@ -356,15 +358,16 @@ def test_ac_iso_f11_8(kanban_conn):
     last failure is an auth blocker, and permits it (None) for a clean task;
     _retry_status_for_run resolves a normal run to 'ready' and a review-lane run to
     'review'."""
+    from hermes_cli import kanban_db_dispatch as kbd
     kb, conn = kanban_conn
 
     clean = kb.create_task(conn, title="guard-clean", assignee="w")
-    assert kb.check_respawn_guard(conn, clean) is None
+    assert kbd.check_respawn_guard(conn, clean) is None
 
     blocked = kb.create_task(conn, title="guard-blocked", assignee="w")
     conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", ("401 unauthorized", blocked))
     conn.commit()
-    assert kb.check_respawn_guard(conn, blocked) == "blocker_auth"
+    assert kbd.check_respawn_guard(conn, blocked) == "blocker_auth"
 
     claimed = kb.create_task(conn, title="guard-retry", assignee="w")
     assert kb.claim_task(conn, claimed, claimer="w") is not None

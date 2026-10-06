@@ -167,7 +167,7 @@ def test_ac_ops_f58_a_4(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         expected = Path(log_dir, "agent.log").resolve()
         assert marker in expected.read_text(encoding="utf-8")
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in hermes_logging._queued_file_handlers
             if isinstance(h, RotatingFileHandler)
             and Path(getattr(h, "baseFilename", "")).resolve() == expected
         ]

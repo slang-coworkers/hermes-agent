@@ -304,8 +304,9 @@ def test_ac_loop_f40_2(tmp_path, monkeypatch):
     # it blocked (a card blocked WITHOUT a sticky event would be auto-promoted to
     # ready, defeating the CI gate).
     from hermes_cli import kanban_db as _kdb
+    from hermes_cli import kanban_db_connect as _kdbc
 
-    with _kdb.connect_closing(db_path=Path(kanban_db)) as _kconn:
+    with _kdbc.connect_closing(db_path=Path(kanban_db)) as _kconn:
         _kdb.recompute_ready(_kconn)
     assert _card_by_key(kanban_db, _key(SHA_A)) == ("blocked", REVIEWER)
 
@@ -425,8 +426,9 @@ def test_ac_loop_f40_3(tmp_path, monkeypatch):
     # event, so a dispatcher promotion sweep leaves it blocked (without it the card would be
     # auto-re-promoted, silently re-queuing the reviewer on the red head).
     from hermes_cli import kanban_db as _kdb
+    from hermes_cli import kanban_db_connect as _kdbc
 
-    with _kdb.connect_closing(db_path=Path(kanban_db)) as _kconn:
+    with _kdbc.connect_closing(db_path=Path(kanban_db)) as _kconn:
         _kdb.recompute_ready(_kconn)
     assert _card_by_key(kanban_db, f"loop-f40-review:{REPO}#120:{sha_k}") == ("blocked", REVIEWER)
 

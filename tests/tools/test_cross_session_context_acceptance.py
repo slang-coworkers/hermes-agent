@@ -22,6 +22,7 @@ import json
 
 from gateway import hosted_rooms
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_state import SessionDB
 from tools.session_search_tool import session_search
 from tui_gateway.hosted_room_driver import room_session_title
@@ -78,7 +79,7 @@ def test_ac_rt_f08_2(tmp_path):
     db = tmp_path / "kanban.db"
     handoff = f"{A_TOKEN} hand off to reviewer: PR head ready for round-1 review"
 
-    with kb.connect_closing(db) as writer:
+    with kbc.connect_closing(db) as writer:
         task_id = kb.create_task(
             writer,
             title="RT-F08 review hand-off",
@@ -90,7 +91,7 @@ def test_ac_rt_f08_2(tmp_path):
     # A fresh, independent connection — writer above is truly closed
     # (connect_closing, unlike sqlite3's transaction CM, closes the FD), so this
     # is a genuine close/reopen boundary: the shared board another profile reads.
-    with kb.connect_closing(db) as reader:
+    with kbc.connect_closing(db) as reader:
         task = kb.get_task(reader, task_id)
         missing = kb.get_task(reader, "does-not-exist")
 

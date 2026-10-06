@@ -82,6 +82,7 @@ def test_ac_a2a_f21_2():
 def test_ac_a2a_f21_3(tmp_path, monkeypatch):
     """The kanban.failure_limit circuit-breaker auto-blocks a task once its consecutive-failure count reaches the configured limit, and leaves it un-blocked below the limit."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -89,7 +90,7 @@ def test_ac_a2a_f21_3(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="a2a-f21 runaway reproducer")
         kb.claim_task(conn, tid)
 

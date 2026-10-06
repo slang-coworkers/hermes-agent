@@ -102,6 +102,7 @@ def evaluate(payload, *, gate_db_path=None, kanban_db_path):
         return False, None
 
     from hermes_cli import kanban_db
+    from hermes_cli import kanban_db_connect
 
     gate = _open_gate(gate_db_path)
     try:
@@ -127,7 +128,7 @@ def evaluate(payload, *, gate_db_path=None, kanban_db_path):
             gate.execute("COMMIT")
             return False, None
 
-        with kanban_db.connect_closing(db_path=Path(kanban_db_path)) as kconn:
+        with kanban_db_connect.connect_closing(db_path=Path(kanban_db_path)) as kconn:
             # A re-sync to a new head retires the superseded head's still-open
             # card, because the ordinary dispatcher spawns EVERY ready card with
             # no head predicate — a stale ready card would review the wrong head.

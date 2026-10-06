@@ -303,6 +303,7 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_decompose as decomp
 
     home = tmp_path / ".hermes"
@@ -328,7 +329,7 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0]),
         ]
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="ship a feature", triage=True)
     payload = jsonlib.dumps({"fanout": True, "rationale": "split", "tasks": [
         {"title": "research", "body": "look it up", "assignee": "researcher", "parents": []},
@@ -345,11 +346,11 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             p.stop()
     assert outcome.ok, outcome.reason
     assert outcome.child_ids and len(outcome.child_ids) == 2
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.get_task(conn, outcome.child_ids[0]).assignee == "researcher"
         assert kb.get_task(conn, outcome.child_ids[1]).assignee == "engineer"
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid2 = kb.create_task(conn, title="route me", triage=True)
     payload2 = jsonlib.dumps({"fanout": False, "rationale": "single",
                               "title": "T", "body": "b", "assignee": "made_up"})
@@ -366,7 +367,7 @@ def test_ac_loop_f38_6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         for p in started2:
             p.stop()
     assert outcome2.ok, outcome2.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.get_task(conn, tid2).assignee == "fallback"
 
 

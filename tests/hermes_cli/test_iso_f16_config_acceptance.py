@@ -20,6 +20,7 @@ from hermes_cli.config import load_config
 from hermes_cli.profile_distribution import install_distribution, update_distribution
 from hermes_cli.profiles import get_profile_dir
 from hermes_cli import kanban_db
+from hermes_cli import kanban_db_connect
 from hermes_state import SessionDB
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "iso_f16"
@@ -147,7 +148,7 @@ def test_ac_iso_f16_4(tmp_path):
 def test_ac_iso_f16_5(tmp_path):
     """Kanban overrides model, provider and reasoning effort per card; a bare provider is
     rejected; clearing model+effort resets the card to the profile default."""
-    conn = kanban_db.connect(db_path=tmp_path / "kanban.db")
+    conn = kanban_db_connect.connect(db_path=tmp_path / "kanban.db")
     try:
         tid = kanban_db.create_task(conn, title="t", assignee="worker")
 

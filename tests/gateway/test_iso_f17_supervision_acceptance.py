@@ -600,6 +600,7 @@ def test_ac_iso_f17_7(tmp_path, monkeypatch):
 @pytest.fixture
 def _kanban_conn(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
 
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -609,7 +610,7 @@ def _kanban_conn(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.discard(str(kb.kanban_db_path(board="default").resolve()))
     kb.init_db()
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         yield kb, conn
 
 
@@ -704,7 +705,7 @@ def test_ac_iso_f17_8(_kanban_conn, monkeypatch):
     kbd._record_worker_exit(4242432, 1 << 8)  # WIFEXITED, WEXITSTATUS=1 -> nonzero exit
     conn.commit()
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
-    result = kb.dispatch_once(conn, dry_run=True)
+    result = kbd.dispatch_once(conn, dry_run=True)
     assert result.reclaimed >= 1
     assert cr2 in result.crashed
 
@@ -729,10 +730,10 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
     )
     conn.commit()
     monkeypatch.setattr(kb.time, "time", lambda: now + 100)
-    assert kb.check_respawn_guard(conn, rl) == "rate_limit_cooldown"
+    assert kbd.check_respawn_guard(conn, rl) == "rate_limit_cooldown"
     # Differential: after the cooldown window elapses the guard clears.
     monkeypatch.setattr(kb.time, "time", lambda: now + 400)
-    assert kb.check_respawn_guard(conn, rl) is None
+    assert kbd.check_respawn_guard(conn, rl) is None
 
     # Auth blocker: a quota/auth last_failure_error yields blocker_auth.
     au = kb.create_task(conn, title="auth", assignee="a")
@@ -741,7 +742,7 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
         ("401 unauthorized: invalid api key", au),
     )
     conn.commit()
-    assert kb.check_respawn_guard(conn, au) == "blocker_auth"
+    assert kbd.check_respawn_guard(conn, au) == "blocker_auth"
 
     # A quota-only failure (no 429/rate/auth token) isolates the `quota` alternative of
     # _RESPAWN_BLOCKER_RE (kanban_db.py:7997) — dropping `quota|` makes this stop matching.
@@ -751,11 +752,11 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
         ("insufficient_quota: exceeded your current quota", quota),
     )
     conn.commit()
-    assert kb.check_respawn_guard(conn, quota) == "blocker_auth"
+    assert kbd.check_respawn_guard(conn, quota) == "blocker_auth"
 
     # Differential: a clean task is respawnable (no guard).
     clean = kb.create_task(conn, title="clean", assignee="a")
-    assert kb.check_respawn_guard(conn, clean) is None
+    assert kbd.check_respawn_guard(conn, clean) is None
 
     # Protocol-violation guard: a worker exits rc=0 with the task still running -> a
     # bounded streak. Below the limit the task stays respawnable; at the limit it trips.
@@ -768,7 +769,7 @@ def test_ac_iso_f17_9(_kanban_conn, monkeypatch):
         kbd._set_worker_pid(conn, task_id, pid)
         # raw POSIX wait status for a clean exit code 0 (os.WIFEXITED -> True, WEXITSTATUS -> 0)
         kbd._record_worker_exit(pid, 0)
-        kb.detect_crashed_workers(conn)
+        kbd.detect_crashed_workers(conn)
 
     pv = kb.create_task(conn, title="pv", assignee="a")
     _one_violation(pv, 5555551)
