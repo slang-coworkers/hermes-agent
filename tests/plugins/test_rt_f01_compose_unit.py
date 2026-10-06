@@ -132,11 +132,46 @@ def test_layout_refuses_non_mapping_extra_on_default(module, tmp_path, bad_extra
 
 def test_enforce_multiplex_sets_roster_when_spec_is_silent(module, tmp_path):
     """A spec that never mentions multiplexing still renders a DEFAULT config
-    whose gateway.multiplex_profiles is True and whose allowlist is the
-    declaration-order roster — enforcement is explicit, never by assumption."""
+    whose gateway.multiplex_profiles is True, carries no retired allowlist, and,
+    once the roster is installed and the rest parked, the multiplexer serves
+    exactly default + the declaration-order roster — enforcement is explicit,
+    never by assumption."""
+    import os
+    from hermes_cli.profiles import profiles_to_serve
+
     out = tmp_path / "out_silent"
     module.compose(str(_write_spec(tmp_path / "spec_silent", _spec())), str(out))
     default_cfg = yaml.safe_load((out / "default" / "config.yaml").read_text(encoding="utf-8"))
     gateway = default_cfg["gateway"]
     assert gateway["multiplex_profiles"] is True
-    assert gateway["multiplex_profile_allowlist"] == ["orchestrator", "worker"]
+    assert "multiplex_profile_allowlist" not in gateway and "multiplex_profile_allowlist" not in default_cfg
+    profiles_root = Path(os.environ["HERMES_HOME"]) / "profiles"
+    for name in ("orchestrator", "worker"):
+        shutil.copytree(out / name, profiles_root / name)
+    (profiles_root / "stray").mkdir()
+    (profiles_root / "stray" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    module.park_non_fleet_profiles(["orchestrator", "worker"])
+    assert [name for name, _ in profiles_to_serve(True)] == ["default", "orchestrator", "worker"]
+
+
+def test_onboard_parks_non_fleet_profiles(module, tmp_path, monkeypatch):
+    """The onboard path scopes the multiplexer to the fleet: after `_run_onboard`, a live
+    non-fleet profile is parked and the served set is exactly default + the roster."""
+    import os
+    from hermes_cli.profiles import profile_is_parked, profiles_to_serve
+
+    profiles_root = Path(os.environ["HERMES_HOME"]) / "profiles"
+    (profiles_root / "stray").mkdir(parents=True)
+    (profiles_root / "stray" / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    assert "stray" in {name for name, _ in profiles_to_serve(True)}
+
+    monkeypatch.setattr(module, "_install", lambda src, name: shutil.copytree(src, profiles_root / name))
+    monkeypatch.setattr(module, "_profile_revisions", lambda *a, **k: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda *a, **k: True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda *a, **k: True)
+    result = module._run_onboard(str(_write_spec(tmp_path / "spec_onboard", _spec())))
+
+    assert result == {"ok": True}, result
+    assert [name for name, _ in profiles_to_serve(True)] == ["default", "orchestrator", "worker"]
+    assert profile_is_parked(profiles_root / "stray")
+    assert not profile_is_parked(profiles_root / "orchestrator") and not profile_is_parked(profiles_root / "worker")
