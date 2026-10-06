@@ -22,7 +22,7 @@ import yaml
 from hermes_cli.plugins import PluginManager
 from hermes_cli.plugins_cmd import cmd_install
 from hermes_cli.profile_distribution import install_distribution, update_distribution
-from tools.mcp_tool import _load_mcp_config
+from tools.mcp_tool_config import _load_mcp_config
 from cron.jobs import is_job_runnable
 
 # The six paths the requirement fixes as distribution-owned (asserted as the contract, not
