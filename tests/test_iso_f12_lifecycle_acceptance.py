@@ -358,6 +358,7 @@ def test_ac_iso_f12_8():
 def test_ac_iso_f12_9(kanban_conn, monkeypatch):
     """on_wake respawn: a stale kanban card is reclaimed and the real _default_spawn re-dispatches the same task id."""
     from agent.prompt_builder import KANBAN_GUIDANCE
+    from hermes_cli import kanban_db_dispatch as kbd
 
     conn = kanban_conn
     task_id = kb.create_task(
@@ -391,9 +392,9 @@ def test_ac_iso_f12_9(kanban_conn, monkeypatch):
 
     # Drive the REAL _default_spawn but record its subprocess instead of running it.
     monkeypatch.setattr("subprocess.Popen", _record_popen)
-    monkeypatch.setattr(kb, "_retag_legacy_worker_sessions", lambda _root: None)
+    monkeypatch.setattr(kbd, "_retag_legacy_worker_sessions", lambda _root: None)
     # Keep the memory-pressure guard from skipping the spawn on a loaded host.
-    monkeypatch.setattr(kb, "_memory_pressure_level", lambda *a, **k: "unknown")
+    monkeypatch.setattr(kbd, "_memory_pressure_level", lambda *a, **k: "unknown")
 
     result = kb.dispatch_once(conn, dry_run=False)
     assert task_id in result.reconciled_orphans
