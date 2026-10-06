@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 import yaml
@@ -1439,6 +1439,16 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
                   if "filesystem_read_write" in egress else None)
     anonymous_reads = (_validate_openshell_anonymous_reads(egress["anonymous_reads"])
                        if "anonymous_reads" in egress else {})
+    # A worker's anonymous GET endpoint must not re-open what single authority took from workers:
+    # the gateway-only inference route, or the dropped OneCLI hop.
+    if inference_provider is not None:
+        for role, targets in anonymous_reads.items():
+            for target in targets:
+                if _canon_hp(target) in (route_hp, _OSH_F64B_ONECLI_HOP):
+                    raise CompositionError(
+                        f"egress.anonymous_reads.{role} target {target!r} is the inference route "
+                        f"or the dropped OneCLI 18255 hop; under single-authority inference "
+                        f"neither is a worker endpoint")
     binaries = (_validate_openshell_binaries(egress["binaries"])
                 if "binaries" in egress else None)
     # tls:skip toggle (OpenShell 0.0.72). The raw hops are the OneCLI proxy hops a worker
@@ -1807,6 +1817,19 @@ def _refuse_worker_credential_provider(
                 f"it attaches to the gateway sandbox only, never to a worker")
 
 
+def _refuse_gateway_type_collision(type_names: Iterable[str],
+                                   inference_provider: Optional[Dict[str, Any]],
+                                   fleet_name: str) -> None:
+    """OSH-F64.e §D4: direct mode provisions the gateway sandbox as ``<fleet>-gw``, so a coworker
+    type named ``gw`` would share its sandbox name. Managed mode creates no gateway sandbox."""
+    if not inference_provider or inference_provider.get("mode") != "direct":
+        return
+    if "gw" in type_names:
+        raise CompositionError(
+            f"type name 'gw' collides with the direct-mode gateway sandbox "
+            f"{_openshell_sandbox_name(fleet_name, 'gw')}")
+
+
 def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: str,
                                           inference_provider: Dict[str, Any]) -> None:
     """Render a served coworker's single-authority inference model-provider config
@@ -2117,11 +2140,8 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     # OSH-F64.e §D4: a direct-mode gateway sandbox gets the inference credential provider at
     # CREATE — legacy attachment is fixed at creation, and runtime attach needs providers-v2,
     # which the lane keeps off. Managed mode emits no gateway line (that sandbox is hand-made).
+    _refuse_gateway_type_collision(roster, inference_provider, fleet_name)
     if inference_provider is not None and inference_provider["mode"] == "direct":
-        if "gw" in roster:
-            raise CompositionError(
-                f"type name 'gw' collides with the direct-mode gateway sandbox "
-                f"{_openshell_sandbox_name(fleet_name, 'gw')}")
         lines.append(
             f"openshell sandbox create --name {_openshell_sandbox_name(fleet_name, 'gw')} "
             f"--from {shlex.quote(inference_provider['gateway_image'])} "
@@ -4245,6 +4265,8 @@ def compose(spec: str, out: str) -> Dict[str, str]:
                 "substrate 'openshell' requires an egress block (the per-profile "
                 "openshell policy allow-set: proxy_addr, inference_route)")
         openshell_params = _validate_openshell_egress(egress_block)
+        _refuse_gateway_type_collision(resolved_by_type, openshell_params["inference_provider"],
+                                       _safe_name("project", data.get("project", "fleet")))
         unknown_anon = sorted(set(openshell_params["anonymous_reads"]) - set(resolved_by_type))
         if unknown_anon:
             raise CompositionError(
