@@ -14,7 +14,11 @@ but do not assert directly:
 - the edge scope is rendered only from a spec block, and a malformed block is refused;
 - an edge that cannot record its scope state refuses the delivery instead of
   spooling an unregistered PR or losing a count, and an edge never reuses scope
-  state written under other scope rules.
+  state written under other scope rules;
+- the coalesced owner drain (E13): one turn per (profile, tip, repo, PR) group per
+  pass with every row's marker, capped by rows and bytes, never combining PRs or
+  batching Bot Chat rows, reconciling each row before and after a turn, and
+  counting each committed row once toward its PR's hourly budget.
 """
 from __future__ import annotations
 

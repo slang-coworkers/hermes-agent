@@ -65,7 +65,8 @@ provider and its fixed rewrite placeholder, not the OneCLI proxy or `coworkers-l
     one job, `ing-f66-red`, fails while `RED` exists and writes check runs only,
     never a legacy commit status.
   - `pr-guard.yml` and `verify-agent-image.yml` have no branch filter, so they
-    also run on the scratch PR. Their events are in scope and are owner turns.
+    also run on the scratch PR. Their events are in scope and are owner
+    deliveries; those due in one drain pass for the PR share one owner turn (E13).
 - **Call cap: ≤ 40 model calls** for this scenario, summed over all six profiles.
   Reaching it stops the scenario with `FAIL(env): call cap`, reporting the call
   count and the in-scope delivery count. No event is ever dropped or filtered
