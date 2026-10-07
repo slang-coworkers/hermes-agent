@@ -556,3 +556,304 @@ def test_scope_state_written_under_other_rules_is_refused_at_start(tmp_path):
     state_file.write_bytes(json.dumps(unbound).encode())
     with pytest.raises(ValueError, match="different scope"):
         edge_mod.Edge(cfg)
+
+
+# --------------------------------------------------------------------------- coalesced owner drain (E13)
+
+E13_REPO, E13_OWNER, E13_ORCH = "o/r", "fixer", "orchestrator"
+
+
+def _seed(root: Path, session_id: str, *, parent=None, markers=(), compacted=False) -> None:
+    """Seed a fixer session with the release SessionDB, as the acceptance file does."""
+    import sqlite3
+
+    from hermes_state import SessionDB
+
+    home = root / "profiles" / E13_OWNER
+    home.mkdir(parents=True, exist_ok=True)
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        if db.get_session(session_id) is None:
+            db.create_session(session_id, "cli", parent_session_id=parent)
+        for text in markers:
+            db.append_message(session_id, "user", text)
+        if compacted:
+            conn = sqlite3.connect(home / "state.db")
+            try:
+                conn.execute("UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ?", (session_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        if parent:
+            db.end_session(parent, "compression")
+    finally:
+        db.close()
+
+
+def _fleet(tmp_path: Path, monkeypatch, **settings) -> SimpleNamespace:
+    root, module = _loaded_plugin(tmp_path, monkeypatch, {
+        "orchestrator_profile": E13_ORCH, "issue_labels": ["fleet"], "per_pr_hourly_budget": 30, **settings})
+    (root / "profiles" / E13_ORCH).mkdir(parents=True, exist_ok=True)
+    fleet = SimpleNamespace(root=root, module=module, turns=[])
+    _record_turns(fleet, monkeypatch)
+    return fleet
+
+
+def _record_turns(fleet, monkeypatch, rc: int = 0, side_effect=None) -> None:
+    def _run_cli(argv, prompt_path, **_kw):
+        fleet.turns.append({"argv": list(argv), "prompt": Path(prompt_path).read_text(encoding="utf-8")})
+        if side_effect is not None:
+            side_effect()
+        return rc
+
+    monkeypatch.setattr(fleet.module.deliver, "run_cli", _run_cli)
+
+
+def _own(fleet, pr: int, session: str) -> None:
+    conn = fleet.module.ledger.connect()
+    try:
+        conn.execute("INSERT INTO pr_owner (repo, pr, owner_profile, session_id, thread_id, claimed_at)"
+                     " VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(repo, pr) DO UPDATE SET session_id = excluded.session_id",
+                     (E13_REPO, pr, E13_OWNER, session, session))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _event(fleet, delivery: str, *, pr: int = 7, event: str = "check_run", body: str = "please look") -> None:
+    envelope = fleet.module.envelope
+    base = {"repository": {"full_name": E13_REPO}, "sender": {"login": "octo"}}
+    if event == "issue_comment":
+        payload = {**base, "action": "created", "issue": {"number": pr, "pull_request": {"url": "u"}},
+                   "comment": {"body": body}}
+    elif event == "issues":
+        payload = {**base, "action": "opened", "issue": {"number": pr, "title": "t", "labels": [{"name": "fleet"}]}}
+    else:
+        payload = {**base, "action": "completed", "check_run": {
+            "head_sha": "a" * 40, "status": "completed", "conclusion": "failure", "name": "check",
+            "pull_requests": [{"number": pr}], "check_suite": {"head_branch": "feat"}}}
+    headers = {envelope.GITHUB_EVENT_HEADER: event, envelope.GITHUB_DELIVERY_HEADER: delivery}
+    out = fleet.module.ledger.stage(envelope.normalize("github", event, headers, payload), {"issue_labels": ["fleet"]})
+    assert out["stage"] == "new"
+
+
+def _mark(delivery: str, pr: int | None = 7) -> str:
+    return f"ingress-delivery: github/{delivery}" + (f"/{pr}" if pr is not None else "")
+
+
+def _markers(turn: dict) -> list[str]:
+    return [ln for ln in turn["prompt"].splitlines() if ln.startswith("ingress-delivery: ")]
+
+
+def _ledger_rows(fleet, sql: str, args=()) -> list:
+    conn = fleet.module.ledger.connect()
+    try:
+        return list(conn.execute(sql, args))
+    finally:
+        conn.close()
+
+
+def _state(fleet, delivery: str) -> str:
+    return _ledger_rows(fleet, "SELECT state FROM deliveries WHERE outbox_delivery = ?", (delivery,))[0][0]
+
+
+def _budget(fleet, pr: int = 7) -> int:
+    return _ledger_rows(fleet, "SELECT COALESCE(SUM(count), 0) FROM budget WHERE repo = ? AND pr = ?",
+                        (E13_REPO, pr))[0][0]
+
+
+def _resumed(turn: dict) -> str | None:
+    argv = turn["argv"]
+    return argv[argv.index("--resume") + 1] if "--resume" in argv else None
+
+
+def test_a_burst_for_one_pr_and_session_is_one_turn_with_every_marker(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    ids = [f"d-burst-{i:02d}" for i in range(25)]
+    for d in ids:
+        _event(fleet, d)
+    fleet.module.drain_once()
+    assert len(fleet.turns) == 1, "a 25-event burst for one PR and session must be one resumed turn"
+    assert _resumed(fleet.turns[0]) == "S"
+    assert _markers(fleet.turns[0]) == [_mark(d) for d in ids], "every row's marker, alone on its line, in id order"
+    assert {_state(fleet, d) for d in ids} == {"done"}
+
+
+def test_group_caps_split_by_rows_and_by_prompt_bytes(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch, max_group_rows=4)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    rows = [f"d-cap-{i}" for i in range(7)]
+    for d in rows:
+        _event(fleet, d)
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [[_mark(d) for d in rows[:4]]]
+    assert [_state(fleet, d) for d in rows[4:]] == ["pending"] * 3, "rows past the row cap wait for the next pass"
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns[1:]] == [[_mark(d) for d in rows[4:]]]
+
+    fleet.turns.clear()
+    bridge, deliver = fleet.module.bridge, fleet.module.deliver
+    big = [f"d-big-{i}" for i in range(4)]
+    for d in big[:3]:
+        _event(fleet, d, event="issue_comment", body="x" * 1900)
+    envs = [json.loads(raw) for (raw,) in _ledger_rows(
+        fleet, "SELECT envelope FROM outbox WHERE delivery_id LIKE 'd-big-%' ORDER BY id")]
+    sizes = {len(deliver.prompt(env, 7, to_orchestrator=False).encode("utf-8")) for env in envs}
+    assert len(sizes) == 1
+    one = sizes.pop()
+    settings = {"orchestrator_profile": E13_ORCH, "per_pr_hourly_budget": 30, "max_group_rows": 25,
+                "max_group_prompt_bytes": one + 20}
+    for n in range(3):
+        bridge.drain_once(settings, "e13-byte-cap")
+        assert [_markers(t) for t in fleet.turns] == [[_mark(d)] for d in big[:n + 1]], \
+            "the byte cap, not the row cap, splits these rows into one per pass"
+    _event(fleet, big[3], event="issue_comment", body="x" * 1900)
+    bridge.drain_once({**settings, "max_group_prompt_bytes": one - 1}, "e13-byte-cap")
+    (raw,) = _ledger_rows(fleet, "SELECT envelope FROM outbox WHERE delivery_id = ?", (big[3],))[0]
+    assert fleet.turns[-1]["prompt"] == deliver.prompt(json.loads(raw), 7, to_orchestrator=False), \
+        "a single row over the byte cap is delivered alone, unchanged"
+    assert _state(fleet, big[3]) == "done"
+
+
+def test_groups_never_combine_prs_and_bot_chat_rows_go_alone(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    _own(fleet, 8, "S")
+    for d, pr in (("d-p7a", 7), ("d-p8a", 8), ("d-p7b", 7), ("d-p8b", 8)):
+        _event(fleet, d, pr=pr)
+    _event(fleet, "d-issue", pr=55, event="issues")
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [
+        [_mark("d-p7a"), _mark("d-p7b")], [_mark("d-p8a", 8), _mark("d-p8b", 8)], [_mark("d-issue", None)]]
+    assert [_resumed(t) for t in fleet.turns[:2]] == ["S", "S"]
+    issue = fleet.turns[2]["argv"]
+    assert "--resume" not in issue and issue[issue.index("-p") + 1] == E13_ORCH, "a Bot Chat row is its own turn"
+
+
+def test_rows_stored_against_a_root_and_its_tip_share_one_turn(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S-root")
+    _seed(fleet.root, "S-tip", parent="S-root")
+    _own(fleet, 7, "S-root")
+    _event(fleet, "d-on-root")
+    fleet.module.bridge.plan_and_resolve(E13_ORCH)
+    _own(fleet, 7, "S-tip")
+    _event(fleet, "d-on-tip")
+    fleet.module.drain_once()
+    assert len(fleet.turns) == 1 and _resumed(fleet.turns[0]) == "S-tip"
+    assert _markers(fleet.turns[0]) == [_mark("d-on-root"), _mark("d-on-tip")]
+    assert _ledger_rows(fleet, "SELECT outbox_delivery, target_session FROM deliveries ORDER BY id") == [
+        ("d-on-root", "S-root"), ("d-on-tip", "S-tip")], "a stored target session is never rewritten"
+
+
+def test_rows_already_committed_are_reconciled_before_the_turn(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S-root", markers=[_mark("d-done")], compacted=True)
+    _seed(fleet.root, "S-tip", parent="S-root")
+    _own(fleet, 7, "S-root")
+    _event(fleet, "d-done")
+    _event(fleet, "d-new")
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [[_mark("d-new")]], "a committed row never rides the group turn"
+    assert (_state(fleet, "d-done"), _state(fleet, "d-new")) == ("done", "done")
+    assert _budget(fleet) == 2, "a row reconciled by its marker still counts once toward its PR's hour"
+
+    fleet.turns.clear()
+    _seed(fleet.root, "S-tip", markers=[_mark("d-all-1"), _mark("d-all-2")])
+    _event(fleet, "d-all-1")
+    _event(fleet, "d-all-2")
+    fleet.module.drain_once()
+    assert fleet.turns == [], "a unit whose rows are all committed runs no turn"
+    assert (_state(fleet, "d-all-1"), _state(fleet, "d-all-2")) == ("done", "done")
+    assert _budget(fleet) == 4
+
+
+def test_a_failed_group_turn_keeps_only_the_uncommitted_rows_pending(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    for d in ("d-a", "d-b", "d-c"):
+        _event(fleet, d)
+    _record_turns(fleet, monkeypatch, rc=1,
+                  side_effect=lambda: _seed(fleet.root, "S", markers=[_mark("d-a"), _mark("d-b")]))
+    before = time.time()
+    fleet.module.drain_once()
+    assert len(fleet.turns) == 1
+    assert (_state(fleet, "d-a"), _state(fleet, "d-b")) == ("done", "done"), "rows whose markers landed are done"
+    assert _budget(fleet) == 2, "each reconciled row counts once"
+    (row,) = _ledger_rows(fleet, "SELECT state, attempts, next_attempt_at, target_profile, target_session"
+                                 " FROM deliveries WHERE outbox_delivery = 'd-c'")
+    assert row[:2] == ("pending", 1) and row[2] > before and row[3:] == (E13_OWNER, "S")
+
+    conn = fleet.module.ledger.connect()
+    try:
+        conn.execute("UPDATE deliveries SET next_attempt_at = 0 WHERE outbox_delivery = 'd-c'")
+        conn.commit()
+    finally:
+        conn.close()
+    fleet.turns.clear()
+    _record_turns(fleet, monkeypatch)
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [[_mark("d-c")]], "the next pass carries only the rest"
+    assert _budget(fleet) == 3
+
+
+def test_a_group_staged_before_a_crash_is_one_turn_after_the_next_load(tmp_path, monkeypatch):
+    from hermes_cli.plugins import PluginManager
+
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    _event(fleet, "d-pre-1")
+    _event(fleet, "d-pre-2")
+    assert fleet.turns == []
+    name = fleet.module.__name__
+    for manager in list(_MANAGERS):
+        manager.unload()
+    _MANAGERS.clear()
+    for mod in [m for m in sys.modules if m == name or m.startswith(name + ".")]:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    manager = PluginManager()
+    manager.discover_and_load()
+    _MANAGERS.append(manager)
+    fleet.module = manager._plugins["nv-ingress"].module
+    _record_turns(fleet, monkeypatch)
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [[_mark("d-pre-1"), _mark("d-pre-2")]]
+
+
+def test_a_group_turn_counts_every_row_and_flags_the_hour_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    fleet = _fleet(tmp_path, monkeypatch, per_pr_hourly_budget=3)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    with caplog.at_level(logging.WARNING):
+        for i in range(5):
+            _event(fleet, f"d-over-{i}")
+        fleet.module.drain_once()
+        assert len(fleet.turns) == 1 and len(_markers(fleet.turns[0])) == 5
+        assert _budget(fleet) == 5
+        for i in range(2):
+            _event(fleet, f"d-more-{i}")
+        fleet.module.drain_once()
+    assert _budget(fleet) == 7, "a budget never holds back owner delivery"
+    assert _ledger_rows(fleet, "SELECT repo, pr FROM runaway") == [(E13_REPO, 7)]
+    warned = [r for r in caplog.records if "runaway" in r.getMessage().lower() and f"{E13_REPO}#7" in r.getMessage()]
+    assert len(warned) == 1, "the breach is logged once per PR and hour"
+    assert all("--resume" in t["argv"] for t in fleet.turns), "the orchestrator receives nothing for a budget breach"
+
+
+def test_a_group_of_one_is_the_single_row_prompt(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    _event(fleet, "d-solo")
+    fleet.module.drain_once()
+    (raw,) = _ledger_rows(fleet, "SELECT envelope FROM outbox WHERE delivery_id = 'd-solo'")[0]
+    assert [t["prompt"] for t in fleet.turns] == [fleet.module.deliver.prompt(json.loads(raw), 7,
+                                                                             to_orchestrator=False)]
