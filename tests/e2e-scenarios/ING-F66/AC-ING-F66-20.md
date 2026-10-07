@@ -63,6 +63,11 @@ The model is live; the provider block is the same as AC-ING-F66-19's.
   | post-restart delivery | ≤ 180 s |
   | teardown | ≤ 30 s |
 
+  E11 adds the two concurrent transport preflights to Setup (≤ 60 s), which
+  count inside the same unchanged 600 s cap (D18). The ceilings now sum to
+  660 s, so the 600 s cap binds before every per-step ceiling can be reached;
+  no step's own deadline changes.
+
 ## Setup (after the fixtures are installed)
 
 No fixture is re-installed here.
@@ -72,14 +77,16 @@ No fixture is re-installed here.
 2. **The round's one scratch PR** on `slang-coworkers/nanoclaw` (AC-ING-F66-19
    step 3, `ing-f66-scratch-<ts>-fix` into `ing-f66-scratch-<ts>-base`). When
    this scenario runs alone, perform AC-19's Gating scratch setup and its
-   Setup steps 4–5 and step 3 first.
+   Setup steps 4–5, its Setup step 7 (the fixer transport preflight, E11) and
+   step 3 first.
    - Its head carries `RED`, so the scratch check run `ing-f66-red` concludes
      `failure`. It has NO legacy commit status: the scratch workflow writes check
      runs only, and the PR body carries no v2 template marker, so `label-pr`
      writes none. The operator confirms the PR head's combined commit status is
      empty.
    - `select owner_profile, session_id from pr_owner where repo = 'slang-coworkers/nanoclaw' and pr = <PR>`
-     gives (`fixer`, `FIX_S`).
+     gives (`fixer`, `FIX_S` or a verified compression continuation of
+     `FIX_S` with the same thread id, as AC-ING-F66-19 step 3 allows).
    - Record `HEAD` = the PR head SHA.
 3. **Captured ids,** with `python3 -c` over the in-sandbox state DBs:
    - `REV_S` and `APR_S`: the `title='Bot Chat'` session ids in
@@ -91,9 +98,26 @@ No fixture is re-installed here.
    instead), then the count minus `CALLS0` beside the in-scope delivery count
    before every step and after the last, and stop when it reaches the 40-call
    cap (Gating).
+5. **Transport preflight (E11), before step 2.** One CLI drive each on `REV_S`
+   and `APR_S` (AC-ING-F66-19's **Tool-bearing drives** rules), run
+   concurrently, each under its own profile's turn lock. Each asks for exactly
+   one harmless terminal call, `echo ing-f66-preflight-<profile>`, with no
+   GitHub call and no write. The expectations, per profile:
+   - the echo appears in a `tool` row of that turn;
+   - the turn has no `sandbox:` refusal;
+   - the CLI exits 0.
+
+   Any `sandbox:` refusal stops the scenario as
+   `FAIL(env): transport preflight refused (<reason>)` before any further
+   scratch write. Then `REV_M0` and `APR_M0` are re-recorded. The session ids,
+   `T0` and `CALLS0` are unchanged, and the preflight calls count toward the
+   40-call cap. Their elapsed time counts inside the scenario's 600 s timeout,
+   which does not change.
 
 Drives resume the stored `Bot Chat` session over the gateway WS, as in AC-19;
-a dashboard drive selects the profile in the profile combobox first.
+a dashboard drive selects the profile in the profile combobox first. A drive
+that needs a tool is a CLI drive under AC-ING-F66-19's **Tool-bearing drives**
+rules (E11).
 
 ## Steps
 
@@ -136,7 +160,10 @@ a dashboard drive selects the profile in the profile combobox first.
 
    → expect `unset`. `set` fails this step and the scenario (fail closed).
 2. **Both readers refuse (one shared 180 s deadline).** Send both requests
-   together:
+   together, each as a CLI drive (E11, AC-ING-F66-19's **Tool-bearing drives**
+   rules), so each worker runs its own `checks_gate.py` through `terminal` in
+   its own profile process. The rows below are read on each session's
+   compression lineage (AC-ING-F66-19's after-turn id check):
    - resume `REV_S` and ask the reviewer to review `PR` at head `HEAD`;
    - resume `APR_S` and ask the approver for the final approval of `PR` at the
      same head.
