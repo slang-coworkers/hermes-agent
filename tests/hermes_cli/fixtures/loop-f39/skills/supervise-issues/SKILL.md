@@ -25,6 +25,11 @@ escalate to the human only after two unanswered nudges — never a third.
 5. **Deliver.** `deliver: bot-chat` turns that final response into a fresh inbound in your OWN canonical
    Bot Chat; that Bot Chat turn (which is Bot-Chat-gated-in, so `message_agent` is allowed) sends each
    per-assignee message with `message_agent`, landing the nudge in the assignee bot's canonical Bot Chat.
+   **When your inbound begins `[Cronjob "supervise-issues" output`, you are that Bot Chat turn:** the sweep
+   is already done, so do not repeat steps 1–4 and ignore step 4's `message_agent` prohibition. Call
+   `message_agent` once per per-assignee action in the output, with its target and message verbatim, and
+   make those calls first. Only your final response may begin with `F39-ESC:<card-token>`: if the output
+   escalates a card, start the final response with that line (step 6) and put any summary after it.
 6. **Escalate — a card already nudged twice.** If a blocked card's assignee is still unresponsive and the
    card **already has two** `[supervise-issues nudge]` comments, do **not** send a third nudge. Instead
    escalate to the human in your room: emit a message whose **very first characters are** `F39-ESC:` followed
