@@ -246,7 +246,7 @@ async function createRoom(page: Page, groupName: string, memberTitles: readonly 
 async function openOrchestratorChat(page: Page): Promise<void> {
   await page.getByRole('button', { name: rowNameRegex('Fleet Orchestrator', 'orchestrator') }).click()
   await expect(
-    page.getByRole('tab', { name: /Bot Chat/ }).filter({ visible: true }).first()
+    page.getByRole('tab', { name: new RegExp(`^${escapeRegex('Fleet Orchestrator')}\\b`) }).filter({ visible: true }).first()
   ).toBeVisible({ timeout: 30_000 })
 }
 

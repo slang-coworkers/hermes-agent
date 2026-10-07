@@ -43,6 +43,9 @@ IMPORT_LINE = re.compile(r"^(import\b|export\s.*\sfrom\s|\}\s*from\s|.*\brequire
 # E2: a vitest module mock re-points with its import. A vi.mock row is admitted only when before and after differ
 # in the module path alone; the rest of the line (factory included) must be byte-equal, so a factory edit is no row.
 VI_MOCK_PATH = re.compile(r"""^vi\.mock\(\s*(['"])([^'"]+)\1(.*)$""")
+# A tab-locator row may differ only in a lone `name:` option; the rest of the line (other options included) is byte-equal.
+TAB_NAME = re.compile(r"""^(.*\bgetByRole\('tab', \{ name: )([^,]+?)( \}\).*)$""")
+TAB_NAME_PATHS = ("apps/desktop/e2e/fleet-f62-ac10.helpers.ts",)
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
 
 
@@ -108,6 +111,10 @@ def load_repoints(path):
             if any(mocks):
                 if not (all(mocks) and mocks[0].group(3) == mocks[1].group(3) and mocks[0].group(2) != mocks[1].group(2)):
                     bad.append(f"REPOINT row {n}: a vi.mock row may change only the module path")
+            elif any(tabs := [TAB_NAME.match(ln.strip()) for ln in (before, after)]):
+                if not (p in TAB_NAME_PATHS and all(tabs) and tabs[0].group(1) == tabs[1].group(1)
+                        and tabs[0].group(3) == tabs[1].group(3) and tabs[0].group(2) != tabs[1].group(2)):
+                    bad.append(f"REPOINT row {n}: a tab-caption row may change only the locator's name")
             else:
                 for ln in (before.strip(), after.strip()):
                     if ln and not IMPORT_LINE.match(ln):
