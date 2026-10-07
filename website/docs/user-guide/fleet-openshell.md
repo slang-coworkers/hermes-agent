@@ -134,6 +134,7 @@ OpenShell substrate (0.0.72) hard-blocks `10255` as a control-plane port, so the
 ```yaml
 # policy-builder.yaml
 version: 1
+# no-tmp: ok — read_write /tmp below is the OpenShell sandbox's own lane, not Hermes scratch space
 filesystem_policy: {include_workdir: true, read_only: [/usr, /bin, /lib, /etc], read_write: [/tmp]}
 landlock: {compatibility: best_effort}
 process: {run_as_user: sandbox, run_as_group: sandbox}
@@ -203,7 +204,7 @@ The gateway policy's `binaries` allow-list adds the in-process Hermes model-call
 shell-out) on top of the base `/usr/bin/curl`. The gateway policy also grants the Hermes runtime
 paths its `filesystem_policy` needs to run the model-call process — read-only `/opt/hermes`,
 `/proc`, `/dev/urandom` and read-write `/sandbox`, `/dev/null`, `/dev/pts` — on top of the base
-read-only (`/usr /bin /lib /etc`) + read-write (`/tmp`) lanes; **these grants are gateway-only, and
+read-only (`/usr /bin /lib /etc`) + read-write (`/tmp`) lanes; **these grants are gateway-only, and <!-- no-tmp: ok — the sandbox's own read-write lane -->
 worker policies keep the minimal base set**. Nothing is inferred: the `tls: skip` shape is used only
 for the broker hop, and only the inference endpoint is ever `protocol: rest`. The render writes each
 file as `policy-<profile>.yaml` / `policy-gateway.yaml` beside the profile's config (carried into

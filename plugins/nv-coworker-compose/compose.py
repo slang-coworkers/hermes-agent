@@ -1464,7 +1464,7 @@ def _validate_openshell_secret_ids(value: Any) -> List[str]:
 _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
-_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)
+_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)  # no-tmp: ok — the OpenShell sandbox's own read-write lane, not Hermes scratch space
 # OSH-F64.b (AC-2 "reachable by the model-call process"): the GATEWAY (model-call) sandbox runs
 # Hermes itself to issue the inference request, so its filesystem_policy must grant the Hermes
 # runtime paths the worker minimal set omits — else the venv interpreter cannot exec and /dev/null

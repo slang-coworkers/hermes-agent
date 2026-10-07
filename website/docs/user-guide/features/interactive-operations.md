@@ -108,7 +108,7 @@ renders on three surfaces.
 ````text
 ⚠️ **Dangerous command requires approval:**
 ```
-rm -rf /tmp/x
+rm -rf ./build
 ```
 Reason: deletes files
 

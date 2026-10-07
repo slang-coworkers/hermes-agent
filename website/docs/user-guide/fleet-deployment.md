@@ -204,7 +204,7 @@ work still runs sandboxed as each profile's own subprocess.
 The render pins an absolute `edges_db_path` outside every profile home so the
 process-shared edges DB has one owner. For a persistent production deployment set it to
 an operator-owned durable path (e.g. `/var/lib/hermes/fleet/edges.db`) rather than an
-ephemeral `/tmp` location, which is cleared on reboot. The committed test fixtures use a
+ephemeral `/tmp` location, which is cleared on reboot. The committed test fixtures use a <!-- no-tmp: ok — names /tmp to warn against it; the next line explains the test-only use -->
 `/tmp` path because the hermetic tests and the sandbox scenarios need it writable and
 outside `$HERMES_HOME`; that is a test/scenario choice, not a production recommendation.
 
