@@ -1,0 +1,11 @@
+manifest_version: 1
+name: nv-bot-chat
+version: 0.1.0
+kind: standalone
+description: >-
+  Read-only viewer for each served profile's hidden canonical "Bot Chat".
+  Resolves the profiles the multiplex gateway serves (default plus the
+  gateway.multiplex_profile_allowlist), finds each one's exact-title, hidden,
+  unarchived "Bot Chat" session and its live compression tip, and exposes them
+  through the `hermes bot-chats` CLI verb and a "Bot Chat" web-dashboard tab
+  that lists them and opens a transcript (compaction-preserved history included).

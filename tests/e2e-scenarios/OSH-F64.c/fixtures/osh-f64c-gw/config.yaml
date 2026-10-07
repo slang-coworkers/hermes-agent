@@ -1,0 +1,29 @@
+# OSH-F64.c scenario fixture (osh-f64c-gw) — staged as the ROOT config.yaml of the
+# throwaway osh-f64c-gw sandbox (AC-OSH-F64-5 ## Setup), i.e. the default profile the
+# one multiplex gateway and the dashboard both run as.
+#
+# model: stub — no model call is made in this scenario (the canonical Bot Chats are seeded
+# through SessionDB). The provider block has the testbed stub's shape but points at a dead
+# loopback port, so a stray turn fails closed and can never reach a live endpoint.
+model:
+  provider: mock
+  default: mock-model
+providers:
+  mock:
+    api: http://127.0.0.1:9/v1
+    api_mode: chat_completions
+    key_env: MOCK_API_KEY
+    models:
+      mock-model: {}
+# One gateway serves default (always) plus exactly these named profiles; nv-bot-chat lists
+# the same set (gateway.config.load_gateway_config -> hermes_cli.profiles.profiles_to_serve).
+gateway:
+  multiplex_profiles: true
+  multiplex_profile_allowlist:
+    - orchestrator
+    - builder
+plugins:
+  enabled:
+    - nv-bot-chat
+approvals:
+  mode: "off"

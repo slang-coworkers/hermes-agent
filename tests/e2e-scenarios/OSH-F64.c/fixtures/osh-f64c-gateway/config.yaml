@@ -1,0 +1,27 @@
+# OSH-F64.c live-scenario gateway/default seed, in the OSH-F64.b fixture shape (single-authority
+# inference). The provider holds ONLY the fixed rewrite-trigger placeholder; the real credential
+# lives OpenShell-side and is never committed here. No OneCLI, no 18255 hop — the OpenShell
+# provider credential-rewrites the placeholder at the boundary, APF the sole authority.
+model:
+  provider: compatible-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
+providers:
+  compatible-endpoint:
+    base_url: https://inference.local/v1
+    api_mode: chat_completions
+    api_key: sk-OPENSHELL-PROXY-REWRITE
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    # The installer edits the default config in place and never writes this provider block, so the
+    # seed carries the default render's attribution header itself (G1 checks it).
+    extra_headers:
+      X-Hermes-Profile: osh-f64c-default
+attribution_tag: osh-f64c-default
+secrets:
+  onecli:
+    enabled: false
+# The installer UNIONs plugins.enabled with the spine set, so nv-bot-chat survives the install.
+plugins:
+  enabled:
+    - nv-coworker-compose
+    - nv-fleet-gates
+    - nv-bot-chat
