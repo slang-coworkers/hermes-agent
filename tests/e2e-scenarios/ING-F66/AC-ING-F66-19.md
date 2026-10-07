@@ -223,6 +223,19 @@ lane installer builds it. No fixture is re-installed here.
    current summed call count minus `CALLS0` beside the in-scope delivery count
    (`select count(*) from deliveries where created_at >= T0` in the ledger), and
    stop when the difference reaches the 40-call cap (Gating).
+7. **Transport preflight (E11), before step 1.** One fixer CLI drive on `FIX_S`
+   (see **Tool-bearing drives** below) asks for exactly one harmless terminal
+   call, `echo ing-f66-preflight-fixer`, with no GitHub call and no write. The
+   expectations:
+   - the echo appears in a `tool` row of that turn;
+   - the turn has no `sandbox:` refusal;
+   - the CLI exits 0.
+
+   Any `sandbox:` refusal (cross-profile, backend, ssh host or readiness) stops
+   the scenario as `FAIL(env): transport preflight refused (<reason>)` before
+   any further scratch write (for AC-19, before the step-1 issue). Then
+   `FIX_M0` is re-recorded. The session ids, `FIX_N0`, `T0` and `CALLS0` are
+   unchanged, and the preflight's calls count toward the 40-call cap.
 
 **Drive vs observe.** A drive into a coworker's Bot Chat resumes that stored
 `title='Bot Chat'` session over the gateway WS (`$GW_URL`, the FLEET-F62 AC-7
@@ -231,6 +244,54 @@ expecting the `<profile> »` prompt, because the SPA opens the DEFAULT profile's
 chat otherwise. A drive never uses `hermes -z`, `session.create` or the dashboard
 new-chat button: each of those mints a fresh session and would break the
 "captured session" assertions below.
+
+**Tool-bearing drives (E11, D18).** A drive that needs a served profile to call
+a tool resumes the captured session in that profile's own process, not over the
+gateway WS. A gateway turn for a non-launch profile has every
+non-`message_agent` tool refused
+(`plugins/nv-fleet-gates/__init__.py:296-303`). The drive rules:
+
+- **The turn:** exactly ONE turn of
+  `<cli> -p <profile> chat -Q --resume <S> --query-file <f>`, the argv
+  `deliver.resume_argv` builds (`plugins/nv-ingress/deliver.py:36-39`). `<cli>`
+  is the path `tools.bot_relay._hermes_cli()` resolves for the gateway's
+  interpreter (release `tools/bot_relay.py:538`), the one owner delivery uses,
+  and the tester records it.
+- **The lock:** the turn runs under the release per-profile turn lock on the
+  DEFAULT root (`acquire_turn_lock`, release `tools/bot_relay.py:632`), as
+  `deliver.run_cli` does (`plugins/nv-ingress/deliver.py:42-62`). A drive and an
+  ingress delivery therefore never run into one session at once.
+- **The environment:** it is launched in the gateway sandbox from the same
+  `sh -lc` environment as the instrumented start, never with the private-URL
+  override set.
+- **The record:** the argv, the resolved CLI path, the exit code, the stdout
+  reply, the session id the CLI reports (`session_id:` on stderr at the end of
+  the turn, release `cli.py:22204`) and the UTC start and end.
+- **The id check, before launch:** a resume can redirect an already-compressed
+  session to its compression tip (release
+  `hermes_cli/cli_agent_setup_mixin.py:431-440`). The check runs while the
+  tester holds that profile's turn lock and before launching the drive, with
+  `python3 -c` over the profile's state DB through the release `SessionDB`:
+  - `get_session(S)` must return a row (release `hermes_state.py:9976`);
+  - compute `R = resolve_resume_session_id(S)` (release
+    `hermes_state.py:12742`);
+  - if `R != S`, `R` must be a verified compression continuation of S
+    (`plugins/nv-ingress/sessions.py:83-104` `continues(profile, R, S)`).
+
+  Anything else stops the scenario before launch as
+  `FAIL(env): drive would resume <R>, not <S>`. The unchanged argv then runs
+  under that same lock.
+- **The id check, after the turn:** let `C` be the session id the CLI reports.
+  A compression during the turn moves the agent to a new session id before it is
+  printed (release `cli.py:22166`, `:22204`), so the rule is
+  `C == R or sessions.continues(profile, C, R)`. Anything else stops the
+  scenario before any subsequent scratch write as
+  `FAIL(env): drive resumed <C>, not <S>`. A verified `C` is recorded, and the
+  expectations are read on the `S` lineage, as step 4 already does.
+
+An unknown id exits non-zero and creates nothing, so a drive still never mints a
+fresh session. Drives that need no tool (the fixer instruction) may stay on the
+gateway WS.
 
 ## Steps
 
@@ -253,16 +314,22 @@ new-chat button: each of those mints a fresh session and would break the
    - the edge journal since `T2` shows
      `forward of delivery <that id> acknowledged as duplicate`;
    - the outbox row count for the issue is unchanged.
-3. **The fixer opens and claims the round's one scratch PR.** Resume the fixer's
-   `FIX_S` session and ask it to open a draft PR on `slang-coworkers/nanoclaw`
-   from `ing-f66-scratch-<ts>-fix` into `ing-f66-scratch-<ts>-base`, using its
-   provider-backed `gh` in its worker sandbox, with a one-line body that carries
-   no v2 template marker (so `label-pr` writes no legacy commit status). Record
-   `T3`.
+3. **The fixer opens and claims the round's one scratch PR.** As a CLI drive on
+   `FIX_S` (E11, **Tool-bearing drives**), ask the fixer to open a draft PR on
+   `slang-coworkers/nanoclaw` from `ing-f66-scratch-<ts>-fix` into
+   `ing-f66-scratch-<ts>-base`, using its provider-backed `gh` in its worker
+   sandbox, with a one-line body that carries no v2 template marker (so
+   `label-pr` writes no legacy commit status). Record `T3`.
    → expect, for the new PR number `PR`:
    - `select owner_profile, session_id, thread_id from pr_owner where repo = 'slang-coworkers/nanoclaw' and pr = <PR>`
-     gives one row (`fixer`, `FIX_S`, the thread id of `FIX_S` from
-     `profiles/fixer/state.db`);
+     gives one row (`fixer`, the captured session id, the thread id of `FIX_S`
+     from `profiles/fixer/state.db`), claimed by the `post_tool_call` claim feed in
+     the fixer process with the drive's session
+     (`plugins/nv-ingress/__init__.py:165-181`). `pr_owner.session_id` must be
+     `FIX_S` or a verified compression continuation `C` of `FIX_S` with the
+     same thread id; `FIX_S` stays the captured root, and an unrelated id fails
+     the step. The ledger is the DEFAULT home's from any profile
+     (`plugins/nv-ingress/ledger.py:71-75`);
    - `hermes ingress status --json` lists no claim refusal for it.
 
    This PR is reused by AC-ING-F66-20 and AC-ING-F66-24 in this round. Record
