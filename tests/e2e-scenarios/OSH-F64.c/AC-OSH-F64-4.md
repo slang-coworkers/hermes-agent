@@ -411,22 +411,67 @@ g2_gate() {  # g2_gate <mode> <profile> <expected-id> <canonical-id> <window>: a
   sx "echo $b64 | base64 -d > $OBS/dashboard/g2/$5/console.txt && \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/pty_select.py\" gate $1 $OBS/dashboard \"\$HERMES_HOME/.osh-f64c/guard\" $2 $3 $4 $OBS/dashboard/g2/$5 $OBS/dashboard/g2/selected.json" | tee $ART/scenario-$AC/pty-select-$5.txt \
     && grep -qx 'g2_ok yes' $ART/scenario-$AC/pty-select-$5.txt || { echo "G2 $5 ($1): FAIL(env)" >&2; exit 1; }
 }
-usage_snap() { sx "\"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/route_record.py\" $T0 $ROUTE" > $ART/scenario-$AC/usage-$1.txt || true; }
-win_open() { eval "W0_$1=$(sx 'date +%s.%N')"; usage_snap $1-before; }
-win_close() {  # G4 for window $1: stop at the first unmatched record
-  local w0; eval "w0=\$W0_$1"; W1=$(sx 'date +%s.%N'); usage_snap $1-after
-  sx 'tar -C "$HERMES_HOME/.osh-f64c" -czf - guard | base64 -w0' | base64 -d | tar -C $ART/scenario-$AC -xzf -
-  # openshell.log: the tester's `openshell logs` capture for osh-f64c-gw covering [w0, W1] (OSH-F64.b Part B format)
-  python3 $SCN/helpers/route_reconcile.py $ART/scenario-$AC/guard $ART/scenario-$AC/openshell.log \
-    $ART/scenario-$AC/usage-$1-before.txt $ART/scenario-$AC/usage-$1-after.txt "$w0" "$W1" | tee $ART/scenario-$AC/route-reconcile-$1.txt \
-    || { echo "G4 $1: route reconcile: FAIL" >&2; exit 1; }
+usage_snap() {  # usage_snap <name>: a sandbox-clock `t` line, then the route record (E9: the 120 s bound reads `t`)
+  sx "printf 't %s\n' \"\$(date +%s.%N)\"; \"\$PY\" \"\$HERMES_HOME/.osh-f64c/helpers/route_record.py\" $T0 $ROUTE" > $ART/scenario-$AC/usage-$1.txt || true
+}
+gexport() {  # gexport <dir> <manifest.json>: one export of the in-sandbox guard/ dir into <dir>/guard (erratum E9 Terms)
+  local b=$2.b64 t
+  mkdir -p "$1"
+  if sx 'd=$(date +%s.%N) && t=$(mktemp) && tar -C "$HERMES_HOME/.osh-f64c" -czf "$t" guard && printf "%s\n" "$d" && base64 -w0 "$t" && echo && rm -f "$t"' > "$b" \
+      && [ -s "$b" ] && [ -z "$(tail -c1 "$b")" ] && t=$(head -n1 "$b") && tail -n +2 "$b" | base64 -d | tar -C "$1" -xzf -; then
+    python3 $SCN/helpers/route_window.py manifest "$1/guard" "$t" > "$2"
+  else
+    echo '{"failed": "export stage"}' > "$2"
+  fi
+}
+router_log() { <the tester's openshell logs capture for osh-f64c-gw, in the OSH-F64.b Part B format> > "$1"; }
+win_open() {  # G4 baseline parity for window $1 (erratum E9.4); the window opens only when it holds
+  local w=$1 d=$ART/scenario-$AC k=0 rc
+  gexport $d/guard-live/$w/marker $d/guard-marker-$w.json
+  usage_snap $w-before.0
+  while :; do
+    gexport $d/guard-live/$w/p$k $d/guard-live/$w/p$k/manifest.json
+    python3 $SCN/helpers/route_window.py parity $d $w $k > /dev/null; rc=$?
+    [ $rc = 10 ] || break
+    sleep 5; k=$((k + 1)); usage_snap $w-before.$k
+  done
+  if [ $rc = 11 ]; then
+    gexport $d/guard-live/$w/pfinal $d/guard-live/$w/pfinal/manifest.json
+    python3 $SCN/helpers/route_window.py parity $d $w $k final > /dev/null; rc=$?
+  fi
+  cat $d/parity-$w.txt
+  [ $rc = 0 ] || { echo "G4 $w: baseline parity: FAIL(env) $(tail -n1 $d/parity-$w.txt)" >&2; exit 1; }
+  eval "W0_$w=$(sx 'date +%s.%N')"
+}
+win_close() {  # G4 for window $1 (erratum E9.1-E9.5): sets fixed at W1, then the direction-aware usage re-read
+  local w=$1 d=$ART/scenario-$AC k=0 rc w0 rep=
+  eval "w0=\$W0_$w"; [ $w = s3 ] && rep="--reported-store builder"
+  W1=$(sx 'date +%s.%N'); usage_snap $w-after.0
+  gexport $d $d/guard-frozen-$w.json
+  router_log $d/openshell.log || { echo "G4 $w: router capture: FAIL(env)" >&2; exit 1; }
+  while :; do
+    gexport $d/guard-live/$w/c$k $d/guard-live/$w/c$k/manifest.json
+    python3 $SCN/helpers/route_window.py close $d $w "$w0" "$W1" $k $rep > /dev/null; rc=$?
+    [ $rc = 10 ] || break
+    sleep 5; k=$((k + 1)); usage_snap $w-after.$k
+  done
+  if [ $rc = 11 ]; then
+    gexport $d/guard-live/$w/cfinal $d/guard-live/$w/cfinal/manifest.json
+    python3 $SCN/helpers/route_window.py close $d $w "$w0" "$W1" $k final $rep > /dev/null; rc=$?
+  fi
+  cat $d/route-reconcile-$w.txt
+  case $rc in
+    0) ;;
+    3) echo "G4 $w: route reconcile: FAIL(env) $(tail -n1 $d/route-reconcile-$w.txt)" >&2; exit 1 ;;
+    *) echo "G4 $w: route reconcile: FAIL" >&2; exit 1 ;;
+  esac
 }
 ```
 
 **Route gates on every turn (ADR eeb30a42 G2–G4).** Run `win_open setup` before Setup 5's G2 probe, and `win_close setup`
 after the G3 self-test: the probes' `GET`s are recorded, and the self-test's rejected `POST` must have no router
 record. Then for each step `n` in 1–5, `win_open s<n>` before driving it and `win_close s<n>` after its evidence
-row (except `s4`, which opens inside step 3 and overlaps `s3`; see step 3); at the end, `W0_all=$W0_setup`, `cp $ART/scenario-$AC/usage-setup-before.txt $ART/scenario-$AC/usage-all-before.txt`
+row (except `s4`, which opens inside step 3 and overlaps `s3`; see step 3); at the end, `W0_all=$W0_setup`; `for f in usage-%s-before.txt guard-marker-%s.json parity-%s.txt; do cp $ART/scenario-$AC/$(printf $f setup) $ART/scenario-$AC/$(printf $f all); done`
 and `win_close all` reconciles the whole run. `route_reconcile.py` matches by
 time order plus method+path within ±2 s (router lines carry no PID). It records the first probe pair's skew and
 fails on: a probe that is not 200 or has no router `GET /v1/models`; an allowed `POST` with no router record, or one
@@ -438,7 +483,28 @@ out of its birth count only an exited direct descendant of a recorded child that
 a `fork_descendant` line in `pty-select-<w>.txt` (erratum E7), and every `win_close` (`all` included) fails `excluded`
 on any `allowed` POST from a PID listed in any of those files. Before each
 `win_close`, save the `openshell logs` capture for `osh-f64c-gw` covering the window as `openshell.log` (the format
-OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … method=<M> path=<P>`).
+OSH-F64.b Part B recorded: `[<epoch>] … routing proxy inference request … method=<M> path=<P>`). `win_close`
+takes it through `router_log`, after the frozen export and never again in that window.
+
+**Usage under the async token writer (erratum E9).** The release only *queues* a call's `api_call_count` `+1` once
+its response is in (`agent/conversation_loop.py:4233`, `:4484-4492`). A background writer applies it
+(`hermes_state.py:9086`, `:9190`), so a store may lag its guard records at `W1`. `helpers/route_window.py` decides
+each window from the files the two functions above leave, all on the sandbox clock:
+- `win_open <w>` holds baseline parity first. Per store, the summed `api_call_count` of `usage-<w>-before.<k>.txt`
+  must equal the allowed 2xx guard `POST`s in the marker export (`guard-marker-<w>.json`). A short store is
+  re-read every ~5 s for up to 120 s. An over-count, a stable shortfall, an appended `probe`/`post` or a failed
+  export is `FAIL(env)` and the window never opens. `W0_<w>` is stamped only after parity holds.
+- `win_close <w>` fixes `W1`, the frozen guard set (`guard/`, `guard-frozen-<w>.json`) and the router capture.
+  Per store, `delta > guard_2xx` is `FAIL` at once. `delta < guard_2xx` re-reads only the after-snapshot every ~5 s,
+  and a store still short at 120 s is `FAIL`. Accepted stores are locked.
+- Each re-read is followed by a live export (`guard-live/<w>/c<k>/`). Any same-store `probe`/`post` with `ts > W1`,
+  any newly appended one, a failed export, or a `POST` appended after the marker with `sent < W0` is `FAIL(env)`.
+- A final live export checks every store again, and only then does the graded pass above run, once. Rule 5 stays
+  exact.
+- In `win_close s3` only, the builder store's usage and quiet lines are `reported`, not graded
+  (`--reported-store builder`, D17a OPEN-3). Its rules 1–4 and 6 stay graded, and `s4` and `all` grade it in full.
+- Every snapshot, export and verdict line is kept in `route-reconcile-<w>.txt`. `G4 <w>: route reconcile: FAIL`
+  or `FAIL(env) <reason>` stops the run, and nothing is sent after it.
 
 0. **The canonical ids.** Run `listing`; `ORCH_SID=$(field orchestrator session_id)`; `BUILD_SID=$(field builder session_id)`.
    Then `echo step-0 >> evidence.txt; row orchestrator $ORCH_SID assistant` → expect: the first line reads
@@ -582,7 +648,9 @@ All files are under `$ART/scenario-AC-OSH-F64-4/`:
   page paths, `/api/pty` URLs with `token`/`attach` set to `REDACTED`, the page `resume` value), `oshws-console.txt`,
   `dashboard-final.json`, and the `observer/` dir (per start: `root.json`, `selftest.json`, `events.jsonl`,
   `exit.json`, `final.json`; copied at teardown),
-  `route-reconcile-{setup,s1..s5,all}.txt` (each must end `reconcile_ok yes`), `usage-*-{before,after}.txt`,
+  `route-reconcile-{setup,s1..s5,all}.txt` (each must end `reconcile_ok yes`), `parity-<w>.txt` (each ending
+  `parity_ok yes`), `usage-*-{before,after}.txt` with the numbered `usage-<w>-{before,after}.<k>.txt` re-reads,
+  `guard-marker-<w>.json`, `guard-frozen-<w>.json`, the `guard-live/` exports,
   the copied `guard/` dir (`<pid>.armed` + `<pid>.jsonl`) and `openshell.log`. Every model-emitting PID in
   `route-reconcile-all.txt` must have an `.armed` marker and a `probe` 200 matched to a router `GET /v1/models`
   before its first counted `POST`; a PID without them is `FAIL(env)`.

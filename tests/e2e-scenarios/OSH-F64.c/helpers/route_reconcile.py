@@ -1,6 +1,7 @@
 """AC-OSH-F64-4 G4: reconcile the route guard, the OpenShell router and session_model_usage for one window.
 
 Usage: python3 route_reconcile.py <guard-dir> <openshell.log> <usage-before.txt> <usage-after.txt> <t0> <t1>
+                                  [--reported-store <store>]
 
 <guard-dir> holds the G3 guard's <pid>.jsonl files; <openshell.log> is `openshell logs` for osh-f64c-gw
 covering the window; the usage files are route_record.py output taken at the window's start and end.
@@ -13,7 +14,9 @@ within TOL seconds of the guard's dispatch time ("sent"), in time order. Rules, 
   2. each guard POST that was allowed consumes one router `POST /v1/chat/completions`;
   3. a rejected guard POST has no router record (nothing unconsumed within TOL of it);
   4. every router POST in the window is consumed;
-  5. per HERMES_HOME basename, the 2xx guard POSTs equal the api_call_count increment;
+  5. per HERMES_HOME basename, the 2xx guard POSTs equal the api_call_count increment. A --reported-store store's
+     line is printed with "reported (s3 overlap)" and sets no verdict (erratum E9.5, `win_close s3` only); rules 1-4
+     and 6 still grade its records;
   6. no allowed POST comes from a PID a G2 gate left out of its birth count (erratum E7.4): the
      `fork_descendant` lines of every pty-select-*.txt next to <guard-dir>, i.e. every gate run so far.
 
@@ -87,9 +90,8 @@ def home_name(home):
     return "default" if home == ".hermes" else home
 
 
-def main():
-    guard_dir, log_path, before_path, after_path = sys.argv[1:5]
-    t0, t1 = float(sys.argv[5]), float(sys.argv[6])
+def reconcile(guard_dir, log_path, before_path, after_path, t0, t1, reported_store=None):
+    """The graded pass: (ok, output lines). route_window.py calls it once per window, after E9's checks."""
     router = router_records(log_path, t0, t1)
     guards = guard_records(guard_dir, t0, t1)
     table, miss, skew = [], None, None
@@ -150,14 +152,29 @@ def main():
     before, after = usage(before_path), usage(after_path)
     for home in sorted(set(before) | set(after) | set(ok_posts)):
         delta = after.get(home, 0) - before.get(home, 0)
+        if home == reported_store:
+            table.append("usage home %s guard_2xx %d api_call_count_delta %d reported (s3 overlap)" % (
+                home, ok_posts.get(home, 0), delta))
+            continue
         table.append("usage home %s guard_2xx %d api_call_count_delta %d" % (home, ok_posts.get(home, 0), delta))
         if delta != ok_posts.get(home, 0):
             fail("usage", "home %s guard_2xx %d != delta %d" % (home, ok_posts.get(home, 0), delta))
-    print("\n".join(table))
-    print("excluded_pids", ",".join(str(p) for p in sorted(excluded)) or "-")
-    print("first_probe_skew_s", skew if skew is not None else "-")
-    print("reconcile_ok", "yes" if miss is None else "no %s %s" % miss)
-    sys.exit(0 if miss is None else 1)
+    table.append("excluded_pids %s" % (",".join(str(p) for p in sorted(excluded)) or "-"))
+    table.append("first_probe_skew_s %s" % (skew if skew is not None else "-"))
+    table.append("reconcile_ok %s" % ("yes" if miss is None else "no %s %s" % miss))
+    return miss is None, table
+
+
+def main():
+    args = sys.argv[1:]
+    reported = None
+    if "--reported-store" in args:
+        i = args.index("--reported-store")
+        reported = args[i + 1]
+        del args[i:i + 2]
+    ok, lines = reconcile(args[0], args[1], args[2], args[3], float(args[4]), float(args[5]), reported)
+    print("\n".join(lines))
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
