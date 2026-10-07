@@ -116,3 +116,14 @@ def prompt(env: Dict[str, Any], pr: Optional[int], *, to_orchestrator: bool) -> 
         parts.append("Titles, comment and review text and check names are left out of this prompt;"
                      " the coworker you dispatch reads them at the link.")
     return "\n".join(parts) + "\n\n" + marker(env, pr) + "\n"
+
+
+def group_prompt(repo: str, pr: int, blocks: List[str]) -> str:
+    """One owner turn for several due rows of one PR (D5, E13): a preamble, then each
+    row's own ``prompt`` text unchanged, so every marker stays alone on its own line.
+    A group of one is exactly that row's prompt."""
+    if len(blocks) == 1:
+        return blocks[0]
+    preamble = (f"{len(blocks)} inbound events for {repo}#{pr}, oldest first; read the checks API"
+                " through the ci-gate skill before acting on a CI event, and answer them together.")
+    return preamble + "\n\n" + "\n".join(blocks)

@@ -59,7 +59,12 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
    the gateway runtime lock, so `hermes ingress`, the dashboard and other
    short-lived processes in the DEFAULT home never run a delivery. Loading the
    plugin never waits on a delivery. The drain resolves each staged event and
-   delivers it exactly once:
+   delivers it exactly once. Owner events of one PR that are due in the same pass
+   share ONE resumed turn: the prompt carries each event's own block and its own
+   marker line, oldest first. Different PRs are never combined, and Bot Chat
+   events always get a turn each. A group holds at most `max_group_rows` events
+   (default 25) and `max_group_prompt_bytes` of prompt text (default 65536); the
+   rest wait for the next pass, in order. The routing:
    - a new issue carrying a routing label → the orchestrator's canonical Bot Chat
      (deduped on the issue, since `opened` and `labeled` fire together);
    - a PR, review, comment or CI event of a **claimed** PR → the owner's
@@ -85,9 +90,12 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
    remap` and the `ingress_remap` tool are orchestrator-only and always go to the
    human-approval gate first.
 
-Every staged event carries a delivery marker line. Before running a turn, the
-drain looks for that marker in the target session's whole compression lineage,
-so a delivery whose turn already committed is never run twice.
+Every staged event carries a delivery marker line. Before every attempt, the
+drain looks for each event's marker in the target session's whole compression
+lineage, so an event whose turn already committed is never run twice, and never
+rides along in another event's turn. After a failed turn it checks again: events
+whose markers landed are done, and the rest stay pending for the same owner and
+session. Each event counts once toward its PR's hourly delivery budget.
 
 `hermes ingress status --json` prints the operational view: `pending`, `stuck`
 (an owned delivery after three failed resumes, still pending for the same owner),

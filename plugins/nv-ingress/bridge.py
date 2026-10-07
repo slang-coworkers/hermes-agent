@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import deliver, ledger, sessions
 
@@ -160,51 +160,119 @@ def _count_budget(conn, repo: str, pr: int, budget: int) -> None:
                            " still delivered to its owner", repo, pr, budget)
 
 
-def _deliver_one(row: Tuple, settings: Dict[str, Any]) -> None:
-    d_id, pr, profile, session, kind, attempts, raw = row
-    env = json.loads(raw)
-    pr_or_none = int(pr) if pr else None
-    mark = deliver.marker(env, pr_or_none)
-    if kind == "owner":
-        target = sessions.tip(profile, session)
-    else:
-        target = sessions.bot_chat(profile)
-    if target and sessions.marker_present(profile, target, mark):
-        _finish(d_id, "done")
-        return
-    text = deliver.prompt(env, pr_or_none, to_orchestrator=(kind == "bot_chat"))
-    path = deliver.write_prompt(text)
+def _group_limit(settings: Dict[str, Any], key: str, default: int) -> int:
     try:
-        argv = (deliver.resume_argv(profile, target, path) if kind == "owner"
-                else deliver.bot_chat_argv(profile, path))
-        rc = deliver.run_cli(argv, path)
-    finally:
-        Path(path).unlink(missing_ok=True)
-    if rc == 0:
-        _finish(d_id, "done")
-        if pr_or_none is not None and env.get("repo"):
-            conn = ledger.connect()
-            try:
-                _count_budget(conn, env["repo"], pr_or_none, int(settings.get("per_pr_hourly_budget") or 30))
-                conn.commit()
-            finally:
-                conn.close()
-        return
-    # A failed delivery stays pending for the SAME target, never retargeted (AC-7).
+        return max(1, int(settings.get(key) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+class _Unit:
+    """One delivery turn: a single Bot Chat row, or one coalesced owner group (D5, E13)."""
+
+    def __init__(self, kind: str, profile: str, target: Optional[str], repo: Optional[str], pr: int):
+        self.kind, self.profile, self.target, self.repo, self.pr = kind, profile, target, repo, pr
+        self.rows: List[Tuple[int, str, Optional[int]]] = []  # (delivery id, marker, pr or None)
+        self.blocks: List[str] = []
+
+    def prompt(self) -> str:
+        if self.kind == "owner":
+            return deliver.group_prompt(self.repo or "?", self.pr, self.blocks)
+        return self.blocks[0]
+
+
+def _commit_done(rows: List[Tuple[int, str, Optional[int]]], repo: Optional[str], settings: Dict[str, Any]) -> None:
+    """Mark rows done; a row's FIRST pending -> done counts once toward its PR's hour,
+    in the same transaction, whether a turn or a marker reconcile committed it (AC-23)."""
+    budget = int(settings.get("per_pr_hourly_budget") or 30)
     conn = ledger.connect()
     try:
-        backoff = min(RESUME_BACKOFF_CAP_SECONDS, 5.0 * (2 ** attempts))
-        conn.execute("UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ?",
-                     (time.time() + backoff, d_id))
+        conn.execute("BEGIN IMMEDIATE")
+        for d_id, _mark, pr in rows:
+            cur = conn.execute("UPDATE deliveries SET state = 'done' WHERE id = ? AND state = 'pending'", (d_id,))
+            if cur.rowcount == 1 and pr is not None and repo:
+                _count_budget(conn, repo, pr, budget)
         conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
-def _finish(d_id: int, state: str) -> None:
+def _units(due: List[Tuple], settings: Dict[str, Any]) -> List[_Unit]:
+    """Partition the due rows into delivery units, in order of each unit's smallest id.
+
+    A row whose marker already sits in its target's lineage is committed here, before
+    any attempt, so it never rides a turn. Owner rows group by (profile, session tip,
+    repo, PR) up to the row and byte caps; once a group is full, the rest of its rows
+    wait for the next pass so id order holds. Bot Chat rows are never batched."""
+    max_rows = _group_limit(settings, "max_group_rows", 25)
+    max_bytes = _group_limit(settings, "max_group_prompt_bytes", 65536)
+    units: List[_Unit] = []
+    groups: Dict[Tuple, _Unit] = {}
+    full: set = set()
+    for d_id, pr, profile, session, kind, _attempts, raw in due:
+        try:
+            env = json.loads(raw)
+            pr_or_none = int(pr) if pr else None
+            mark = deliver.marker(env, pr_or_none)
+            target = sessions.tip(profile, session) if kind == "owner" else sessions.bot_chat(profile)
+            if target and sessions.marker_present(profile, target, mark):
+                _commit_done([(d_id, mark, pr_or_none)], env.get("repo"), settings)
+                continue
+            block = deliver.prompt(env, pr_or_none, to_orchestrator=(kind == "bot_chat"))
+            if kind != "owner":
+                unit = _Unit(kind, profile, target, env.get("repo"), int(pr or 0))
+                unit.rows.append((d_id, mark, pr_or_none))
+                unit.blocks.append(block)
+                units.append(unit)
+                continue
+            key = (profile, target, env.get("repo"), int(pr or 0))
+            if key in full:
+                continue
+            unit = groups.get(key)
+            if unit is None:
+                unit = groups[key] = _Unit("owner", profile, target, env.get("repo"), int(pr or 0))
+                units.append(unit)
+            elif (len(unit.rows) >= max_rows
+                  or len(deliver.group_prompt(unit.repo or "?", unit.pr, unit.blocks + [block]).encode("utf-8"))
+                  > max_bytes):
+                full.add(key)
+                continue
+            unit.rows.append((d_id, mark, pr_or_none))
+            unit.blocks.append(block)
+        except Exception:
+            logger.warning("nv-ingress delivery %s could not be prepared; kept pending", d_id, exc_info=True)
+    return units
+
+
+def _run_unit(unit: _Unit, settings: Dict[str, Any]) -> None:
+    path = deliver.write_prompt(unit.prompt())
+    try:
+        argv = (deliver.resume_argv(unit.profile, unit.target, path) if unit.kind == "owner"
+                else deliver.bot_chat_argv(unit.profile, path))
+        rc = deliver.run_cli(argv, path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+    if rc == 0:
+        _commit_done(unit.rows, unit.repo, settings)
+        return
+    # A turn can commit its user message and still exit non-zero: rows whose marker
+    # landed are done; the rest stay pending for the SAME target, never retargeted (AC-7).
+    landed = [r for r in unit.rows if unit.target and sessions.marker_present(unit.profile, unit.target, r[1])]
+    if landed:
+        _commit_done(landed, unit.repo, settings)
+    rest = [r for r in unit.rows if r not in landed]
+    if not rest:
+        return
     conn = ledger.connect()
     try:
-        conn.execute("UPDATE deliveries SET state = ? WHERE id = ?", (state, d_id))
+        for d_id, _mark, _pr in rest:
+            attempts = conn.execute("SELECT attempts FROM deliveries WHERE id = ?", (d_id,)).fetchone()[0]
+            backoff = min(RESUME_BACKOFF_CAP_SECONDS, 5.0 * (2 ** attempts))
+            conn.execute("UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ?",
+                         (time.time() + backoff, d_id))
         conn.commit()
     finally:
         conn.close()
@@ -212,8 +280,9 @@ def _finish(d_id: int, state: str) -> None:
 
 def drain_once(settings: Dict[str, Any], load_id: str,
                stop: Optional[threading.Event] = None) -> int:
-    """One drain pass: plan, resolve, deliver every due row. Returns rows delivered.
-    ``stop`` (the unloading driver's) ends the pass before its next row."""
+    """One drain pass: plan, resolve, deliver every due row, coalesced into units (E13).
+    Returns rows delivered.
+    ``stop`` (the unloading driver's) ends the pass before its next unit."""
     if not is_ledger_home() or not ledger.exists():
         return 0
     orch = str(settings.get("orchestrator_profile") or "orchestrator")
@@ -233,15 +302,16 @@ def drain_once(settings: Dict[str, Any], load_id: str,
                     " ORDER BY d.id", (time.time(),)))
             finally:
                 conn.close()
-            for row in due:
+            for unit in _units(due, settings):
                 # Renewed before every turn; a live holder is never displaced, whatever its expiry.
                 if (stop is not None and stop.is_set()) or not ledger.acquire_lease(holder, _LEASE_TTL_SECONDS):
                     break
                 try:
-                    _deliver_one(row, settings)
-                    delivered += 1
+                    _run_unit(unit, settings)
+                    delivered += len(unit.rows)
                 except Exception:
-                    logger.warning("nv-ingress delivery %s failed; kept pending", row[0], exc_info=True)
+                    logger.warning("nv-ingress delivery %s failed; kept pending",
+                                   [r[0] for r in unit.rows], exc_info=True)
         finally:
             ledger.release_lease(holder)
         return delivered

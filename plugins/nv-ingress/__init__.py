@@ -43,7 +43,7 @@ def _settings() -> Dict[str, Any]:
     if ctx is None:
         return {}
     keys = ("route", "orchestrator_profile", "issue_labels", "per_pr_hourly_budget", "self_logins",
-            "drain_interval_seconds", "webhook_guard")
+            "drain_interval_seconds", "max_group_rows", "max_group_prompt_bytes", "webhook_guard")
     return {k: ctx.get_config(k) for k in keys}
 
 
