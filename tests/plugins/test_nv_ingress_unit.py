@@ -730,12 +730,50 @@ def test_groups_never_combine_prs_and_bot_chat_rows_go_alone(tmp_path, monkeypat
     for d, pr in (("d-p7a", 7), ("d-p8a", 8), ("d-p7b", 7), ("d-p8b", 8)):
         _event(fleet, d, pr=pr)
     _event(fleet, "d-issue", pr=55, event="issues")
+    _event(fleet, "d-issue-2", pr=56, event="issues")
     fleet.module.drain_once()
     assert [_markers(t) for t in fleet.turns] == [
-        [_mark("d-p7a"), _mark("d-p7b")], [_mark("d-p8a", 8), _mark("d-p8b", 8)], [_mark("d-issue", None)]]
+        [_mark("d-p7a"), _mark("d-p7b")], [_mark("d-p8a", 8), _mark("d-p8b", 8)],
+        [_mark("d-issue", None)], [_mark("d-issue-2", None)]]
     assert [_resumed(t) for t in fleet.turns[:2]] == ["S", "S"]
-    issue = fleet.turns[2]["argv"]
-    assert "--resume" not in issue and issue[issue.index("-p") + 1] == E13_ORCH, "a Bot Chat row is its own turn"
+    for issue in (t["argv"] for t in fleet.turns[2:]):
+        assert "--resume" not in issue and issue[issue.index("-p") + 1] == E13_ORCH, "a Bot Chat row is its own turn"
+
+
+def test_a_row_committed_by_an_earlier_turn_of_the_pass_never_rides_a_later_one(tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, monkeypatch)
+    _seed(fleet.root, "S")
+    _own(fleet, 7, "S")
+    _own(fleet, 8, "S")
+    _event(fleet, "d-x7")
+    _event(fleet, "d-x8", pr=8)
+    _record_turns(fleet, monkeypatch, side_effect=lambda: _seed(fleet.root, "S", markers=[_mark("d-x8", 8)]))
+    fleet.module.drain_once()
+    assert [_markers(t) for t in fleet.turns] == [[_mark("d-x7")]], "the marker check runs again before each unit"
+    assert (_state(fleet, "d-x7"), _state(fleet, "d-x8")) == ("done", "done")
+    assert (_budget(fleet, 7), _budget(fleet, 8)) == (1, 1)
+
+
+def test_a_first_bot_chat_turn_that_commits_and_exits_non_zero_is_not_retried(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+
+    fleet = _fleet(tmp_path, monkeypatch)
+    _event(fleet, "d-first", pr=57, event="issues")
+
+    def _create_bot_chat():
+        db = SessionDB(db_path=fleet.root / "profiles" / E13_ORCH / "state.db")
+        try:
+            db.create_session("BC", "cli")
+            db.set_session_title("BC", "Bot Chat")
+            db.append_message("BC", "user", _mark("d-first", None))
+        finally:
+            db.close()
+
+    _record_turns(fleet, monkeypatch, rc=1, side_effect=_create_bot_chat)
+    fleet.module.drain_once()
+    assert len(fleet.turns) == 1
+    assert _ledger_rows(fleet, "SELECT state, attempts FROM deliveries WHERE outbox_delivery = 'd-first'") == [
+        ("done", 0)], "a turn that created its Bot Chat and committed the marker is done, not retried"
 
 
 def test_rows_stored_against_a_root_and_its_tip_share_one_turn(tmp_path, monkeypatch):
