@@ -59,8 +59,9 @@ platform ──signed POST──▶ host edge (verifies, normalizes, spools)
    the gateway runtime lock, so `hermes ingress`, the dashboard and other
    short-lived processes in the DEFAULT home never run a delivery. Loading the
    plugin never waits on a delivery. The drain resolves each staged event and
-   delivers it exactly once. Owner events of one PR that are due in the same pass
-   share ONE resumed turn: the prompt carries each event's own block and its own
+   delivers it exactly once. Owner events of one PR and one owner session tip
+   that are due in the same pass share ONE resumed turn: the prompt carries each
+   event's own block and its own
    marker line, oldest first. Different PRs are never combined, and Bot Chat
    events always get a turn each. A group holds at most `max_group_rows` events
    (default 25) and `max_group_prompt_bytes` of prompt text (default 65536); the

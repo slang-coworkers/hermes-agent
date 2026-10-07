@@ -247,7 +247,28 @@ def _units(due: List[Tuple], settings: Dict[str, Any]) -> List[_Unit]:
     return units
 
 
+def _current_target(unit: _Unit) -> Optional[str]:
+    if unit.kind == "owner":
+        return sessions.tip(unit.profile, unit.target) if unit.target else None
+    return sessions.bot_chat(unit.profile)
+
+
+def _landed(unit: _Unit, target: Optional[str]) -> List[Tuple[int, str, Optional[int]]]:
+    return [r for r in unit.rows if target and sessions.marker_present(unit.profile, target, r[1])]
+
+
 def _run_unit(unit: _Unit, settings: Dict[str, Any]) -> None:
+    # An earlier unit's turn in this pass may already have committed some of these
+    # rows, so the per-row check runs again right before this attempt.
+    target = _current_target(unit)
+    landed = _landed(unit, target)
+    if landed:
+        _commit_done(landed, unit.repo, settings)
+        kept = [(r, b) for r, b in zip(unit.rows, unit.blocks) if r not in landed]
+        unit.rows, unit.blocks = [r for r, _b in kept], [b for _r, b in kept]
+        if not unit.rows:
+            return
+    unit.target = target if unit.kind == "owner" else unit.target
     path = deliver.write_prompt(unit.prompt())
     try:
         argv = (deliver.resume_argv(unit.profile, unit.target, path) if unit.kind == "owner"
@@ -258,9 +279,10 @@ def _run_unit(unit: _Unit, settings: Dict[str, Any]) -> None:
     if rc == 0:
         _commit_done(unit.rows, unit.repo, settings)
         return
-    # A turn can commit its user message and still exit non-zero: rows whose marker
-    # landed are done; the rest stay pending for the SAME target, never retargeted (AC-7).
-    landed = [r for r in unit.rows if unit.target and sessions.marker_present(unit.profile, unit.target, r[1])]
+    # A turn can commit its user message and still exit non-zero (a first Bot Chat
+    # turn creates the session it writes to): rows whose marker landed are done; the
+    # rest stay pending for the SAME target, never retargeted (AC-7).
+    landed = _landed(unit, _current_target(unit))
     if landed:
         _commit_done(landed, unit.repo, settings)
     rest = [r for r in unit.rows if r not in landed]
