@@ -290,8 +290,34 @@ non-`message_agent` tool refused
   expectations are read on the `S` lineage, as step 4 already does.
 
 An unknown id exits non-zero and creates nothing, so a drive still never mints a
-fresh session. Drives that need no tool (the fixer instruction) may stay on the
-gateway WS.
+fresh session.
+
+**Gated egress (E12, D19).** A drive whose command matches the fleet critique
+gate's egress pattern (the `gh pr create|review|comment` verbs,
+`plugins/nv-fleet-gates/predicates.py:70-72`) is refused before it runs unless
+the session holds a fresh critique. The gate is `_gates_block`
+(`plugins/nv-fleet-gates/__init__.py:406-429`) with `stores.critique_fresh`
+(`plugins/nv-fleet-gates/stores.py:67-87`), base code from LOOP-F37;
+`required_stages` defaults to OUTPUT_REVIEW (`__init__.py:230`). Such a drive
+therefore runs as follows:
+
+- It asks for exactly ONE `codex_critique` call with stage OUTPUT_REVIEW, in
+  that same turn and session, right before that command, with nothing in
+  between.
+- The verdict does not condition the command: the gate requires the critique
+  to have run, whatever its verdict (`__init__.py:545-549`). The `gh` command is
+  not a mutation (`predicates.py:120-123`), so it does not re-stale the
+  critique.
+- The critique's tool result must read `ok: true`, `stage: OUTPUT_REVIEW`, and
+  a `session_id` equal to the drive's session (S or its verified continuation,
+  as reported for the PR command's turn). On a mismatch or `ok: false`, the
+  step holds and goes back to the Orchestrator.
+- If the model declines the PR command after the critique (for example on a
+  `must-fix` verdict), the step holds. It is not a PASS, nothing forces the
+  GitHub write, and the critique alone never counts as a pass.
+- The critique's model call counts toward the 40-call cap.
+
+Drives that need no tool (the fixer instruction) may stay on the gateway WS.
 
 ## Steps
 
@@ -314,8 +340,10 @@ gateway WS.
    - the edge journal since `T2` shows
      `forward of delivery <that id> acknowledged as duplicate`;
    - the outbox row count for the issue is unchanged.
-3. **The fixer opens and claims the round's one scratch PR.** As a CLI drive on
-   `FIX_S` (E11, **Tool-bearing drives**), ask the fixer to open a draft PR on
+3. **The fixer opens and claims the round's one scratch PR.** As one CLI drive
+   on `FIX_S` (E11, **Tool-bearing drives**) that first asks for the one
+   `codex_critique` (OUTPUT_REVIEW) and then the single PR command (E12,
+   **Gated egress**), ask the fixer to open a draft PR on
    `slang-coworkers/nanoclaw` from `ing-f66-scratch-<ts>-fix` into
    `ing-f66-scratch-<ts>-base`, using its provider-backed `gh` in its worker
    sandbox, with a one-line body that carries no v2 template marker (so
@@ -407,6 +435,8 @@ All of it goes under `$ART/scenario-AC-ING-F66-19/`:
   in-scope delivery count, before and after each step.
 - `lanes/` holds the operator evidence for L-HOOK, L-EDGE and L-FWD.
 - The stop-step and post-start records (E10) from Setup step 2.
+- The step-3 critique tool row (its stage and the session id it reports)
+  beside the PR command's tool row (E12).
 - `teardown.txt`: kept or torn down, with the commands' exit statuses.
 - No step's evidence contains a header value, a signature, or any secret
   material (D13).
