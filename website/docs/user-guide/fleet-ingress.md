@@ -304,6 +304,14 @@ inbound path at all. It is documented here only, not built.
   anything. When the check fails it runs the operator-approved start command
   from `ingress.gateway_start`, serialized by a lock and a 120 s in-flight
   window.
+- Before that start it lists the sandbox's processes. A live Hermes
+  `gateway run` or `gateway restart` blocks the start, even when it is not
+  answering `/health`: the unit logs its pids for the operator and never stops
+  or restarts it. An inspection that fails or cannot be read also starts
+  nothing. A start runs only when no gateway process is alive, for example
+  after a sandbox restart.
+- The unit loads its code once, at start. After installing a new plugin
+  version, restart `nv-ingress-gateway-boot.service` so it runs the new code.
 - Events are durable on both sides of the forward. The edge spool keeps
   everything not yet acknowledged and re-forwards it after a restart. The fleet
   ledger keeps everything staged, and a restarted gateway drains it within one

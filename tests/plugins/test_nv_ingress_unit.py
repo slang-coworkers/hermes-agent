@@ -19,7 +19,8 @@ but do not assert directly:
   pass with every row's marker, capped by rows and bytes, never combining PRs or
   batching Bot Chat rows, reconciling each row before and after a turn, and
   counting each committed row once toward its PR's hourly budget;
-- the gateway-boot health probe names the gateway sandbox with `-n` (D22);
+- the gateway-boot health probe names the gateway sandbox with `-n` (D22), and the
+  supervisor never starts beside a live gateway or on an inspection it cannot trust (E15);
 - the rendered ci-gate steps name the worker-side path the ssh skill sync writes,
   never the gateway's copy (E14).
 """
@@ -956,3 +957,160 @@ def test_rendered_ci_gate_steps_name_the_path_the_ssh_skill_sync_writes(tmp_path
             synced = {e["container_path"]: Path(e["host_path"]).resolve() for e in iter_skills_files(container_base=base)}
             for path in set(paths):
                 assert synced.get(base + path[len("~/.hermes"):]) == script.resolve(), (role, base, path)
+
+
+_SEP = "\x1f"
+_INIT = f"1\tS\topenshell-sandb\topenshell-sandbox{_SEP}--policy{_SEP}/etc/policy.yaml{_SEP}"
+
+
+def _row(pid: int, state: str, name: str, *argv: str) -> str:
+    return f"{pid}\t{state}\t{name}\t" + "".join(a + _SEP for a in argv)
+
+
+def _ps(*rows: str) -> str:
+    return "\n".join(rows + ("#end",)) + "\n"
+
+
+_LIVE_GATEWAY = _row(9025, "S", "hermes.real", "/opt/hermes/bin/hermes.real", "gateway", "run")
+
+
+def _supervisor(tmp_path, monkeypatch, *, healthy, inspections):
+    """gateway_boot with recorders for ``subprocess.run``/``Popen``; each tick takes the next inspection answer."""
+    boot = _boot_module()
+    rec = SimpleNamespace(launches=[], inspections=0, kills=[])
+    gw = {"openshell_bin": "/usr/local/bin/openshell", "sandbox": "ing-f66-gw", "port": 18644,
+          "lock_file": str(tmp_path / "boot.lock"), "start": ["/home/ubuntu/.config/nv-ingress/gateway-start.sh"]}
+    answers = list(inspections)
+
+    def run(argv, **kw):
+        if argv[1:] == ["sandbox", "list"]:
+            return SimpleNamespace(returncode=0, stdout="NAME PHASE\ning-f66-gw Ready\n", stderr="")
+        assert argv[:7] == [gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty", "--"], argv
+        if "/health" in argv[-1]:
+            return SimpleNamespace(returncode=0 if healthy else 7, stdout="", stderr="")
+        rec.inspections += 1
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, BaseException):
+            raise answer
+        rc, out = answer if isinstance(answer, tuple) else (0, answer)
+        return SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    monkeypatch.setattr(boot.subprocess, "run", run)
+    monkeypatch.setattr(boot.subprocess, "Popen", lambda argv, **kw: rec.launches.append(list(argv)))
+    monkeypatch.setattr(boot.os, "kill", lambda *a: rec.kills.append(a))
+    t0 = time.time()
+    rec.ticks = lambda *offsets: [boot.tick(gw, t0 + o) for o in offsets]
+    rec.gw = gw
+    return rec
+
+
+def _boot_log(caplog) -> list:
+    return [r.getMessage() for r in caplog.records if r.name == "nv_ingress.gateway_boot"]
+
+
+def test_gateway_boot_never_starts_beside_a_live_unhealthy_gateway(tmp_path, monkeypatch, caplog):
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[_ps(_INIT, _LIVE_GATEWAY)])
+    with caplog.at_level("INFO", logger="nv_ingress.gateway_boot"):
+        assert sup.ticks(0, 60, 130, 250) == ["held"] * 4
+    assert sup.launches == [] and sup.kills == []
+    warned = [m for m in _boot_log(caplog) if "9025" in m]
+    assert len(warned) == 1 and "ing-f66-gw" in warned[0], "the pid is named once, not on every check"
+
+
+@pytest.mark.parametrize("answer, cause", [
+    ((1, ""), "exit 1"),
+    (subprocess.TimeoutExpired(cmd="openshell", timeout=60), "timed out"),
+    ((0, "garbage\n#end\n"), "unparsable"),
+], ids=["nonzero-exit", "timeout", "unparsable"])
+def test_gateway_boot_never_starts_on_a_failed_inspection(tmp_path, monkeypatch, caplog, answer, cause):
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[answer])
+    with caplog.at_level("INFO", logger="nv_ingress.gateway_boot"):
+        assert sup.ticks(0, 60, 130, 250) == ["unknown"] * 4
+    assert sup.launches == []
+    assert [m for m in _boot_log(caplog) if cause in m and "ing-f66-gw" in m], _boot_log(caplog)
+
+
+def test_gateway_boot_counts_a_zombie_gateway_as_absent(tmp_path, monkeypatch):
+    zombie = _row(9025, "Z", "hermes.real", "/opt/hermes/bin/hermes.real", "gateway", "run")
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[_ps(_INIT, zombie)])
+    assert sup.ticks(0, 60) == ["start", "wait"]
+    assert sup.launches == [sup.gw["start"]]
+
+
+def test_gateway_boot_starts_exactly_once_after_a_sandbox_restart(tmp_path, monkeypatch, caplog):
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[_ps(_INIT)])
+    with caplog.at_level("INFO", logger="nv_ingress.gateway_boot"):
+        assert sup.ticks(0, 60) == ["start", "wait"]
+    assert sup.launches == [sup.gw["start"]]
+    started = [m for m in _boot_log(caplog) if "running the approved start" in m]
+    assert started == ["gateway-boot: inspection found zero live gateway PIDs in ing-f66-gw "
+                       "(inspected 1 processes); running the approved start"]
+
+
+def test_gateway_boot_leaves_a_healthy_gateway_uninspected(tmp_path, monkeypatch):
+    sup = _supervisor(tmp_path, monkeypatch, healthy=True, inspections=[_ps(_INIT, _LIVE_GATEWAY)])
+    assert sup.ticks(0, 130) == ["idle", "idle"]
+    assert sup.launches == [] and sup.inspections == 0
+
+
+def test_gateway_boot_never_matches_its_own_inspection(tmp_path, monkeypatch):
+    own = _row(4242, "R", "sh", "sh", "-c", "for d in /proc/[0-9]*; do … hermes gateway run … done")
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[_ps(own)])
+    assert sup.ticks(0, 60) == ["start", "wait"]
+    assert sup.launches == [sup.gw["start"]]
+
+
+@pytest.mark.parametrize("answer, pid", [
+    (_ps(_INIT, _row(9025, "S", "hermes.real")), "9025"),
+    ((3, f"{_INIT}\nERR 9025 stat\n"), "9025"),
+], ids=["empty-argv", "unreadable-stat"])
+def test_gateway_boot_never_starts_on_an_ambiguous_process(tmp_path, monkeypatch, caplog, answer, pid):
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[answer])
+    with caplog.at_level("INFO", logger="nv_ingress.gateway_boot"):
+        assert sup.ticks(0, 130) == ["unknown", "unknown"]
+    assert sup.launches == []
+    assert [m for m in _boot_log(caplog) if f"pid {pid}" in m and "ing-f66-gw" in m], _boot_log(caplog)
+
+
+@pytest.mark.parametrize("argv, live", [
+    (["hermes.real", "gateway", "run"], True),
+    (["/usr/bin/python3", "/opt/hermes/bin/hermes", "gateway", "run"], True),
+    (["python3", "-m", "hermes_cli.main", "gateway", "restart"], True),
+    (["python3", "-u", "-m", "hermes_cli.main", "gateway", "run"], True),
+    (["hermes", "-p", "gateway", "gateway", "run"], True),
+    (["hermes", "gateway"], True),
+    (["hermes", "gateway", "status"], False),
+    (["sh", "-c", "hermes gateway run"], False),
+    (["python", "-m", "tui_gateway"], False),
+    (["grep", "gateway", "run"], False),
+])
+def test_gateway_boot_matches_gateways_by_argv_tokens(argv, live):
+    assert _boot_module().is_gateway_argv(argv) is live
+
+
+def test_gateway_boot_starts_past_an_unrelated_non_utf8_argv(tmp_path, monkeypatch):
+    odd = _row(311, "S", "tool", "/usr/bin/tool", "caf\udce9")
+    sup = _supervisor(tmp_path, monkeypatch, healthy=False, inspections=[_ps(_INIT, odd)])
+    assert sup.ticks(0) == ["start"]
+    held = _supervisor(tmp_path / "held", monkeypatch, healthy=False,
+                       inspections=[_ps(odd, _row(9025, "S", "hermes.real", "/opt/h\udcff/hermes.real", "gateway"))])
+    assert held.ticks(0) == ["held"]
+
+
+@pytest.mark.linux_only
+def test_gateway_boot_run_survives_non_utf8_output():
+    proc = _boot_module()._run(["sh", "-c", "printf 'x\\377y\\n'"])
+    assert proc.returncode == 0 and proc.stdout.startswith("x") and proc.stdout.rstrip("\n").endswith("y")
+
+
+@pytest.mark.linux_only
+def test_gateway_boot_inspection_reads_a_real_proc():
+    boot = _boot_module()
+    proc = subprocess.run(["sh", "-c", boot._INSPECT_SCRIPT], capture_output=True, text=True, encoding="utf-8",
+                          timeout=60)
+    lines = proc.stdout.rstrip("\n").split("\n")
+    assert proc.returncode == 0 and lines[-1] == "#end", proc.stdout[-300:]
+    rows = {ln.split("\t", 1)[0]: ln.split("\t", 3) for ln in lines[:-1]}
+    assert all(len(r) == 4 and len(r[1]) == 1 for r in rows.values())
+    mine = rows[str(os.getpid())]
+    assert mine[3].split("\x1f")[0] == sys.argv[0] or os.path.basename(sys.executable) in mine[3]
