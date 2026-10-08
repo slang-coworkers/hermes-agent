@@ -194,6 +194,15 @@ rules (E11).
      - `curl -fsS --max-time 5 "http://localhost:$FWD_PORT/health"` answering 200.
 
      → expect: all three within 120 s of `T3`.
+   - If the first post-restart inspection finds zero live gateway PIDs, expect
+     exactly one approved start launch (one `running the approved start` line in
+     the gateway-boot journal, H5; the same-tick start log is the
+     empty-inspection evidence) and, once ready, exactly one live gateway pid in
+     the sandbox by the §D9 Alive-guard match, from a read-only pid/argv scan.
+     If a gateway is already live, the healthy probe skips the inspection, so
+     expect zero start lines and one live gateway pid from that same scan.
+     Record the journal lines and the scan; any other count FAILs the step
+     (E15).
    - The operator re-runs only the scratch workflow's failed job on the PR
      (no push) and records `T3b` (its `completed_at`). → expect, within 180 s
      of `T3b`:

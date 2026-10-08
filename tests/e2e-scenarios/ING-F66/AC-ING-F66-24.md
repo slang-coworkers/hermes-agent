@@ -95,6 +95,14 @@ No fixture is re-installed here.
    `active`, and `curl -fsS --max-time 5 "http://localhost:$FWD_PORT/health"`
    answers 200, within 120 s of the last restart command. Record `T_fwd`, the
    time the forward returned (the first passing health probe).
+   If the first post-restart inspection finds zero live gateway PIDs, expect
+   exactly one approved start launch (one `running the approved start` line in
+   the gateway-boot journal, H5; the same-tick start log is the empty-inspection
+   evidence) and, once ready, exactly one live gateway pid in the sandbox by the
+   §D9 Alive-guard match, from a read-only pid/argv scan. If a gateway is
+   already live, the healthy probe skips the inspection, so expect zero start
+   lines and one live gateway pid from that same scan. Record the journal lines
+   and the scan; any other count FAILs the step (E15).
 3. **`D1` lands exactly once, with no manual delivery action.**
    → expect, within 180 s of `T_fwd`:
    - exactly one message in `FIX_S` (or its compression tip) carrying
