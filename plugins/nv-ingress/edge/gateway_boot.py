@@ -42,7 +42,10 @@ def _run(argv: List[str]) -> subprocess.CompletedProcess:
 def gateway_healthy(gw: Dict[str, Any]) -> bool:
     probe = f"curl -fsS --max-time 5 http://127.0.0.1:{int(gw['port'])}/health"
     try:
-        return _run([gw["openshell_bin"], "sandbox", "exec", gw["sandbox"], "--", "sh", "-c", probe]).returncode == 0
+        # openshell takes the sandbox only as `-n <name>`: a positional name falls back to the
+        # last-used sandbox and is run as the command (exit 127), so the probe could never pass.
+        return _run([gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty", "--",
+                     "sh", "-c", probe]).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 

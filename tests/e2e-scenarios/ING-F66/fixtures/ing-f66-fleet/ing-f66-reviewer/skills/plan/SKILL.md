@@ -29,7 +29,11 @@ workflow when code or docs must change.
 Before you recommend approving a pull request, run the ci-gate skill at the
 exact head SHA you reviewed, in provider-read mode:
 
-    python3 <ci-gate skill dir>/scripts/checks_gate.py <owner/repo> <pr> <reviewed head sha> --read provider
+    python3 ~/.hermes/skills/ci-gate/scripts/checks_gate.py <owner/repo> <pr> <reviewed head sha> --read provider
+
+Run it through `terminal` in your worker, where skills sync to `~/.hermes/skills/`;
+never use the skill directory that skill_view reports or the skill-directory
+template variable, which both name the gateway's copy.
 
 Exit 0 means every check run at that head completed green. Exit 3 is a refusal:
 your verdict is "do not approve", naming each refused check run from its output.
