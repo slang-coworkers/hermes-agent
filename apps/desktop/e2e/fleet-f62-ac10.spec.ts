@@ -1,3 +1,4 @@
+import { backendProcesses } from './core/harness'
 import { type MockBackendFixture } from './fixtures'
 import {
   bootFleetDesktop,
@@ -94,7 +95,10 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
 
   await driveFleetF62Nav(page, checkpoints)
 
-  // Single-gateway invariant: bootFleetDesktop launches exactly ONE local backend
-  // (buildAppEnv(sandbox)), waitForAppReady gated on that one gateway, and the Kanban
-  // board rendered above is served by that same gateway — there is no second port anywhere.
+  // Single-gateway invariant: after every step above, exactly ONE `hermes serve` runs for this sandbox (the
+  // primary and any pooled backend both carry its HERMES_HOME), so the Kanban board rendered above is served by
+  // that same gateway — there is no second port anywhere.
+  const { sandbox } = fixture!
+  const serves = backendProcesses({ ...sandbox, home: sandbox.root, bin: '' })
+  expect(serves, `one hermes serve for this sandbox, got: ${serves.map(s => s.cmdline).join(' | ')}`).toHaveLength(1)
 })

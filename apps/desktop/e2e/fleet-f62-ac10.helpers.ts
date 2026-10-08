@@ -172,8 +172,13 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
     // /api/plugins/kanban/board (web_server.py honours HERMES_BUNDLED_PLUGINS via
     // get_bundled_plugins_dir; bundled plugins mount regardless of plugins.enabled).
     // Scoped to this AC-10 harness (preflight + counted both boot through here).
+    // One gateway: the fixture's isolated mode gives every coworker a pooled `hermes serve` of its own; with it
+    // off the sandbox's empty spawn ledger leaves one multiplexed host backend serving all six profiles.
     const launched = await launchDesktop(
-      buildAppEnv(sandbox, { HERMES_BUNDLED_PLUGINS: path.join(REPO_ROOT, 'plugins') })
+      buildAppEnv(sandbox, {
+        HERMES_BUNDLED_PLUGINS: path.join(REPO_ROOT, 'plugins'),
+        HERMES_DESKTOP_ISOLATED_BACKEND: '0'
+      })
     )
     app = launched.app
 
@@ -250,31 +255,14 @@ async function openOrchestratorChat(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 30_000 })
 }
 
-/** Dismiss the full-viewport Settings OverlayView (data-overlay-surface,
- *  overlay-view.tsx:74-104) before touching the Sessions tab: while open it intercepts
- *  pointer events on the panes beneath it, so a Sessions-tab click would be intercepted.
- *  Prefer the labeled Close-settings control (overlay-view.tsx:126-134), fall back to
- *  Escape (overlay-view.tsx:53-72), then await the surface's removal. */
-async function dismissSettingsOverlay(page: Page): Promise<void> {
-  const closeBtn = page.getByRole('button', { name: 'Close settings' })
-
-  if ((await closeBtn.count()) > 0) {
-    await closeBtn.first().click()
-  } else {
-    await page.keyboard.press('Escape')
-  }
-
-  await expect(page.locator('[data-overlay-surface]')).toHaveCount(0, { timeout: 30_000 })
-}
-
 /** The Kanban sidebar nav renders inside the Sessions pane, which stays hidden after
  *  openBots() activated the Bots pane; bring Sessions forward so the nav row enters the
  *  DOM (Bots and Sessions are one enforced tab group; the inactive pane is aria-hidden +
  *  visibility:hidden, tree-group.tsx). */
 async function activateSessions(page: Page): Promise<void> {
   const tab = page
-    .getByRole('button', { name: 'sessions', exact: true })
-    .or(page.getByRole('tab', { name: 'sessions', exact: true }))
+    .getByRole('button', { name: 'Sessions', exact: true })
+    .or(page.getByRole('tab', { name: 'Sessions', exact: true }))
     .first()
 
   await tab.click()
@@ -283,20 +271,17 @@ async function activateSessions(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 30_000 })
 }
 
-/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
- *  dismiss the Settings overlay, bring the Sessions pane forward, then dock the board
- *  via the split affordance. */
+/** Enable the opt-in Kanban plugin's desktop half through the product's Capabilities ▸ Plugins
+ *  switch, bring the Sessions pane forward, then dock the board via the split affordance. */
 async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.location.hash = '/settings?tab=plugins'
   })
-  const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
+  const enableKanban = page.getByRole('switch', { name: 'Desktop: Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })
+  await expect(enableKanban).not.toBeChecked()
   await enableKanban.click()
-  // The switch flipping to "Disable Kanban" confirms the plugin is enabled, so its
-  // /kanban route, board, and sidebar nav row are now contributed.
-  await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
-  await dismissSettingsOverlay(page)
+  await expect(enableKanban).toBeChecked({ timeout: 30_000 })
   await activateSessions(page)
   const kanbanNav = page.getByRole('button', { name: 'Kanban', exact: true })
   await expect(kanbanNav).toBeVisible({ timeout: 30_000 })

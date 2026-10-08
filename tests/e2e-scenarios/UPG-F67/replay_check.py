@@ -10,7 +10,8 @@ history: C1 (replay, parent = tag commit), C2 (authorized core re-home, parent =
   U-del  the tag deleted it and it is on the ruled list
 Fails (exit 1) on DROPPED, DIVERGED, U-UNRULED, any fork-added line neither present nor ledgered, EXTRA paths in C1,
 core edits in C1, unauthorized core in C2, any core edit after C2 other than the approved WP-D1 patch (exact bytes, with
---wp-d1-approved), and any old-gated desktop line after C2 that is not a recorded import re-point.
+--wp-d1-approved), and any old-gated desktop line after C2 that is not a recorded import re-point (an E6 path may also
+carry, after the E4 head, exactly the approved E6 patch).
 Ledger TSV columns: path, stripped fork-added line, tag-site replacement as file:line.
 Inventory TSV (--inventory): every delta path's status, surface, class and segment must equal this check's result.
 """
@@ -46,6 +47,10 @@ VI_MOCK_PATH = re.compile(r"""^vi\.mock\(\s*(['"])([^'"]+)\1(.*)$""")
 # A tab-locator row may differ only in a lone `name:` option; the rest of the line (other options included) is byte-equal.
 TAB_NAME = re.compile(r"""^(.*\bgetByRole\('tab', \{ name: )([^,]+?)( \}\).*)$""")
 TAB_NAME_PATHS = ("apps/desktop/e2e/fleet-f62-ac10.helpers.ts",)
+# E6: after the E4 head, the E6 paths may change only by the approved patch, byte for byte (same diff form as WP-D1).
+E6_BASE = "11fac72938084cb4013388410a607b4b461ee5cd"
+E6_PATHS = ("apps/desktop/e2e/fleet-f62-ac10.helpers.ts",)
+E6_PATCH_SHA256 = "2724641592b24323366e68385dc4ee5d7fc33002d5f346c27efbb6367f50f648"
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
 
 
@@ -141,6 +146,26 @@ def check_old_gated(repo, core, head, paths, rec):
     return fails
 
 
+def check_e6(repo, core, head, patch_path, rec):
+    """E6 paths: C2..E6_BASE obeys the re-point record; E6_BASE..head is empty or the approved E6 patch, byte for byte."""
+    import hashlib
+    fails = check_old_gated(repo, core, E6_BASE, E6_PATHS, rec)
+    got = git(repo, *WP_D1_DIFF_CONFIG, "diff", "--no-ext-diff", "--no-renames", "-U0", E6_BASE, head, "--",
+              *E6_PATHS).encode("utf-8")
+    if not got:
+        return fails
+    try:
+        with open(patch_path, "rb") as fh:
+            approved = fh.read()
+    except OSError:
+        return fails + [f"UNRECORDED-OLD-GATED: the E6 paths changed after the E4 head and {patch_path} is missing"]
+    if hashlib.sha256(approved).hexdigest() != E6_PATCH_SHA256:
+        return fails + [f"UNRECORDED-OLD-GATED: {patch_path} is not the approved E6 patch (sha256 mismatch)"]
+    if got != approved:
+        fails.append("UNRECORDED-OLD-GATED: the E6 paths' diff after the E4 head differs from the approved E6 patch")
+    return fails
+
+
 def is_core(path, old_delta):
     """Outside the allowed diff surface. A fork-modified non-ac desktop spec in the old delta is old-gated, not core."""
     if SURFACE.match(path):
@@ -218,6 +243,8 @@ def main():
     ap.add_argument("--wp-d1-patch", default="tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch")
     ap.add_argument("--repoints", default="tests/e2e-scenarios/UPG-F67/desktop_repoints.tsv",
                     help="old-gated desktop import re-point record: path, import before, import after, reason")
+    ap.add_argument("--e6-patch", default="tests/e2e-scenarios/UPG-F67/e6_approved.patch",
+                    help="the approved E6 patch for the E6 paths after the E4 head")
     a = ap.parse_args()
     repo, fails, flagged = a.repo, [], []
     led, bad = load_ledger(a.ledger, repo, a.tag)
@@ -294,7 +321,11 @@ def main():
         fails.extend(check_wp_d1(repo, a.core, a.head, a.wp_d1_patch))
     rec, rec_bad = load_repoints(a.repoints if old_gated else "")
     fails.extend(rec_bad)
-    fails.extend(check_old_gated(repo, a.core, a.head, old_gated, rec))
+    e6 = [p for p in old_gated if p in E6_PATHS]
+    on_e6 = bool(e6) and not subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", E6_BASE, a.head]).returncode
+    fails.extend(check_old_gated(repo, a.core, a.head, [p for p in old_gated if not (on_e6 and p in E6_PATHS)], rec))
+    if on_e6:
+        fails.extend(check_e6(repo, a.core, a.head, a.e6_patch, rec))
 
     inv_fails = check_inventory(a.inventory, observed)
     fails.extend(inv_fails)
