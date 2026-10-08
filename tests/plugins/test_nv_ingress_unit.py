@@ -18,7 +18,10 @@ but do not assert directly:
 - the coalesced owner drain (E13): one turn per (profile, tip, repo, PR) group per
   pass with every row's marker, capped by rows and bytes, never combining PRs or
   batching Bot Chat rows, reconciling each row before and after a turn, and
-  counting each committed row once toward its PR's hourly budget.
+  counting each committed row once toward its PR's hourly budget;
+- the gateway-boot health probe names the gateway sandbox with `-n` (D22);
+- the rendered ci-gate steps name the worker-side path the ssh skill sync writes,
+  never the gateway's copy (E14).
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -899,3 +903,56 @@ def test_a_group_of_one_is_the_single_row_prompt(tmp_path, monkeypatch):
     (raw,) = _ledger_rows(fleet, "SELECT envelope FROM outbox WHERE delivery_id = 'd-solo'")[0]
     assert [t["prompt"] for t in fleet.turns] == [fleet.module.deliver.prompt(json.loads(raw), 7,
                                                                              to_orchestrator=False)]
+
+
+def _boot_module():
+    spec = importlib.util.spec_from_file_location("_nv_ingress_gateway_boot_unit", PLUGIN_SRC / "edge" / "gateway_boot.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_gateway_boot_probe_names_the_sandbox_with_n_and_no_tty(monkeypatch):
+    boot = _boot_module()
+    calls: list = []
+    monkeypatch.setattr(boot.subprocess, "run",
+                        lambda argv, **kw: calls.append(list(argv)) or SimpleNamespace(returncode=0))
+    gw = {"openshell_bin": "/usr/local/bin/openshell", "sandbox": "ing-f66-gw", "port": 18644}
+    assert boot.gateway_healthy(gw) is True
+    (argv,) = calls
+    sep = argv.index("--")
+    head, probe = argv[:sep], argv[sep + 1:]
+    assert head == [gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty"], \
+        "a positional sandbox name runs in the last-used sandbox and is executed as the command"
+    assert probe[:2] == ["sh", "-c"] and "http://127.0.0.1:18644/health" in probe[2]
+
+
+_GATE_SCRIPT = re.compile(r"\S*checks_gate\.py")
+_GATEWAY_SIDE_SKILL_DIR = ("<skill dir>", "<ci-gate skill dir>", "${HERMES_SKILL_DIR}", "skill_dir")
+
+
+def test_rendered_ci_gate_steps_name_the_path_the_ssh_skill_sync_writes(tmp_path, monkeypatch):
+    from tools.credential_files import iter_skills_files
+
+    out = tmp_path / "out"
+    proc = _hermes(tmp_path, "coworker", "compose", str(ING_SPEC), "--out", str(out), "--provision-dry-run")
+    assert proc.returncode == 0, proc.stderr
+    monkeypatch.chdir(tmp_path)
+    for role, workflow in (("reviewer", "plan"), ("approver", "approve")):
+        profile = out / role
+        script = profile / "skills" / "ci-gate" / "scripts" / "checks_gate.py"
+        assert script.is_file(), role
+        paths: list = []
+        for skill in (workflow, "ci-gate"):
+            body = (profile / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            assert [t for t in _GATEWAY_SIDE_SKILL_DIR if t in body] == [], f"{role}/{skill} names the gateway's copy"
+            assert "python3 ~/.hermes/skills/ci-gate/scripts/checks_gate.py" in body, f"{role}/{skill}"
+            found = _GATE_SCRIPT.findall(body)
+            assert found, f"{role}/{skill}: no checks_gate.py step"
+            paths += found
+        assert all(p.startswith("~/.hermes/skills/") for p in paths), (role, paths)
+        monkeypatch.setenv("HERMES_HOME", str(profile))
+        for base in ("/home/sandbox/.hermes", "/root/.hermes"):
+            synced = {e["container_path"]: Path(e["host_path"]).resolve() for e in iter_skills_files(container_base=base)}
+            for path in set(paths):
+                assert synced.get(base + path[len("~/.hermes"):]) == script.resolve(), (role, base, path)

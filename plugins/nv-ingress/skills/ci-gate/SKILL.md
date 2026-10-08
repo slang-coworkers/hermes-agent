@@ -12,8 +12,12 @@ The legacy commit-status endpoint is not a CI signal. It can be empty while a
 check run is red, so this gate reads only the check runs.
 
 ```
-python3 <skill dir>/scripts/checks_gate.py <owner/repo> <pr> <pinned_head_sha> --read <mode> [--waive <check name> ...]
+python3 ~/.hermes/skills/ci-gate/scripts/checks_gate.py <owner/repo> <pr> <pinned_head_sha> --read <mode> [--waive <check name> ...]
 ```
+
+Run the gate through `terminal` in the worker, where skills sync to
+`~/.hermes/skills/`; never use the skill directory that skill_view reports or the
+skill-directory template variable, which both name the gateway's copy.
 
 - `--read provider`: authenticated GET reads through the GitHub CLI, credentialed
   at the egress proxy by the attached provider (the reviewer).
