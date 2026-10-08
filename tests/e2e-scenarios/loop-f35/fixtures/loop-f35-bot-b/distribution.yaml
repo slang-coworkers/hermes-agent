@@ -1,0 +1,8 @@
+name: loop-f35-bot-b
+version: 0.1.0
+description: "LOOP-F35 live a2a scenario — bot B (the message_agent responder)."
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - mcp.json
+  - distribution.yaml

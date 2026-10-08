@@ -1,0 +1,17 @@
+name: self-f55-coworker
+version: 1.0.0
+description: "Example coworker-type profile distribution for SELF-F55 (Hermes agent-templates port). This is the layout the coworker-compose plugin (LOOP-F35) must emit."
+hermes_requires: ">=0.21.0"
+author: "slang-coworkers"
+license: "MIT"
+
+# Credentials are declared here (and mirrored into .env.template); install renders a
+# .env.EXAMPLE from these and never carries a real .env in the repo.
+env_requires:
+  - name: SELF_F55_REQUIRED_TOKEN
+    description: "Required API token for this coworker type"
+    required: true
+  - name: SELF_F55_OPTIONAL_ENDPOINT
+    description: "Optional endpoint override for this coworker type"
+    required: false
+    default: "https://example.invalid/api"

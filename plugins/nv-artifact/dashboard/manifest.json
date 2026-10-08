@@ -1,0 +1,11 @@
+{
+  "name": "nv-artifact",
+  "label": "Artifacts",
+  "description": "Fleet PR→session ownership and per-artifact outcome/cost analytics (funnel, win-rate, cost-per-merge).",
+  "icon": "Activity",
+  "version": "0.1.0",
+  "tab": { "path": "/nv-artifact", "position": "after:analytics" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

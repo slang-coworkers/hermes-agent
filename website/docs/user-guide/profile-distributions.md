@@ -50,8 +50,12 @@ my-research-agent/
 ├── config.yaml          # model, temperature, reasoning, tool defaults
 ├── skills/              # bundled skills that come with the agent
 ├── cron/                # scheduled tasks the agent runs
-└── mcp.json             # MCP servers the agent connects to
+└── mcp.json             # copied distribution artifact; not read at runtime (see note)
 ```
+
+:::note Which `mcp.json` is live at runtime
+The profile-root `mcp.json` shown here is **distribution-owned and copied on install, but not read at runtime** in v0.21.0 — a coworker type's live MCP servers belong in `config.yaml`'s `mcp_servers` key, or ship as a portable [Agent Plugin](../developer-guide/plugins/index.md). See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md) for the two MCP lanes.
+:::
 
 Recipients run:
 
@@ -256,7 +260,7 @@ research-bot/
 ├── distribution.yaml            # required
 ├── SOUL.md                      # strongly recommended
 ├── config.yaml                  # model, provider, tool defaults
-├── mcp.json                     # MCP server connections
+├── mcp.json                     # copied MCP metadata; not read at runtime (see note above)
 ├── skills/
 │   ├── arxiv-search/SKILL.md
 │   ├── paper-summarization/SKILL.md
@@ -559,7 +563,7 @@ The install-delete cycle is cheap enough to be disposable.
 ### Pin to a specific version
 
 :::note
-Git ref pinning (`#v1.2.0`) is planned but not in the initial release — install currently tracks the default branch. Track your installed version via `hermes profile info <name>` and hold off on updates until you're ready.
+Git ref pinning (`#v1.2.0`) is **not available in v0.21.0** — install shallow-clones the source's default branch and cannot select a branch or tag within a repository. `hermes profile info <name>` reports the manifest version and source string, **not** a resolved commit SHA; to pin a type, install from a **distinct immutable source whose default branch is the release** (a per-release mirror repository or a versioned immutable local directory) and record its commit out of band. See [Porting agent templates and plugin MCP servers](./porting-agent-templates-and-plugin-mcp.md#pinning-a-type-to-an-exact-version).
 :::
 
 ### Check what version you're on vs. latest
@@ -762,3 +766,4 @@ The short version:
 - [Using SOUL with Hermes](../guides/use-soul-with-hermes.md) — authoring personalities
 - [Personality & SOUL](./features/personality.md) — how SOUL fits into the agent
 - [Skills catalog](../reference/skills-catalog.md) — skills you can bundle
+- [Per-Profile Config and Multi-Provider Runner](./per-profile-config-and-multi-provider.md) — what a distribution's `config.yaml` controls per coworker (model, provider, effort, container image, mounts, `mcp_servers`, timezone, toolsets) and switching provider/model with no runner restart

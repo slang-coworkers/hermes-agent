@@ -1,0 +1,6 @@
+name: iso-f16-worker
+version: 0.1.0
+description: >-
+  ISO-F16 reference profile distribution (worker role): cheap model, low
+  reasoning effort, normal service tier, terminal/coding/file toolsets.
+  Disjoint from the sibling orchestrator distribution.

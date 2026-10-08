@@ -1,0 +1,86 @@
+# OSH-F64.b fleet spec (openshell substrate, single-authority inference).
+# The FLEET-F62 five-coworker fleet composed under substrate: openshell, with the
+# OSH-F64.b egress.inference_provider block that gates the single-authority posture:
+# inference becomes an OpenShell protocol:rest provider endpoint (4 paths) with a fixed
+# rewrite-trigger placeholder api_key + a separate per-profile attribution tag, the 18255
+# OneCLI hop and the §D7 chain-dial are dropped, and the gateway profile gains a rendered
+# policy. The presence of egress.inference_provider is the trigger (ADR §D4, spec-gated):
+# a bare OSH-F64 spec (without it) still renders the legacy §D7 posture unchanged.
+#
+# proxy_addr is retained to exercise accept+ignore under OSH-F64.b: the gated render drops it
+# from the allow-set, while the legacy (ungated) path renders it as the 18255 raw hop.
+project: osh-f64b
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+install_surfaces: []
+
+egress:
+  proxy_addr: "172.17.0.1:18255"          # legacy OneCLI hop — accepted but DROPPED from the OSH-F64.b allow-set
+  inference_route: "inference.local:443"  # OpenShell inference provider endpoint (policy host:port; the 4 paths are the rules)
+  broker_addr: "172.17.0.1:18777"         # lane control plane — the ONLY raw tls:skip hop under OSH-F64.b
+  pinned_offline_lane: true               # AC-6/7 provision via `install-openshell` (lane-only; _require_openshell gates on this). Under the single-authority posture the chain-dial is still superseded — the flag only disables firecrawl + sets scan_on_install:false.
+  filesystem_read_only: ["/opt/osh-lane"]
+  binaries: ["/usr/bin/python3*", "/opt/hermes/.venv/bin/python"]  # gateway model call is in-process venv python, not curl
+  sandbox_image: "localhost/hermes-openshell-sandbox:pinned"
+  onecli_secret_ids: ["Anthropic-Dev"]    # retained → the base renders profile_secret_sets; OSH-F64.b suppresses it
+  # OSH-F64.b single-authority inference provider (the spec-gated trigger, ADR §D1/§D3):
+  inference_provider:
+    provider: compatible-endpoint         # the Hermes config provider key (providers.compatible-endpoint); the APF endpoint carries no provider field
+    base_url: "https://inference.local/v1"  # /v1 so the OpenAI SDK posts {base_url}/chat/completions → the policy-allowed /v1/chat/completions
+    api_mode: chat_completions            # accepted literal (agent_init.py:723); POST /v1/chat/completions is the operator-verified path
+    model_id: aws/anthropic/bedrock-claude-opus-5-5
+    rewrite_placeholder: "sk-OPENSHELL-PROXY-REWRITE"  # fixed routing trigger, identical across profiles — NOT an identity/attribution
+    attribution_tag_prefix: osh-f64b      # per-profile tag = <prefix>-<role> (top-level attribution_tag + X-Hermes-Profile header)
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "OSH-F64.b orchestrator — the elevated fleet-admin coworker; model turns run in its profile-scoped child inside the gateway sandbox, reaching inference as a single-authority OpenShell REST provider."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  architect:
+    extends: [base]
+    identity: "OSH-F64.b architect — designs the change; its model turns reach inference through the OpenShell provider, credential-rewritten at the boundary, APF the sole authority."
+    ui_meta: {title: "Architect", description: "Fleet architect", shape: "square"}
+  builder:
+    extends: [base]
+    identity: "OSH-F64.b builder — applies the change; its sandbox holds only the fixed rewrite placeholder, never the real credential."
+    ui_meta: {title: "Builder", description: "Fleet builder", shape: "square"}
+  tester:
+    extends: [base]
+    identity: "OSH-F64.b tester — runs the checks; its model turns carry a per-profile attribution tag the OpenShell logs record."
+    ui_meta: {title: "Tester", description: "Fleet tester", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "OSH-F64.b reviewer — reads the diff; APF refuses any off-policy host even with the served profile's full env (a badge cannot supersede APF)."
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "OSH-F64.b Fleet"
+    members: [orchestrator, architect, builder, tester, reviewer]
+  review-room:
+    name: "OSH-F64.b Review"
+    members: [builder, tester, reviewer]
+
+wires:
+  - [orchestrator, architect]
+  - [architect, builder]
+  - [builder, tester]
+  - [tester, reviewer]
+  - [reviewer, orchestrator]
+
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false

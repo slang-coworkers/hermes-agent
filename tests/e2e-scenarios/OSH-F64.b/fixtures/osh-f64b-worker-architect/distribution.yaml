@@ -1,0 +1,7 @@
+name: osh-f64b-worker-architect
+version: 0.1.0
+description: 'OSH-F64.b served coworker seed: architect (single-authority inference)'
+distribution_owned:
+- SOUL.md
+- config.yaml
+- distribution.yaml

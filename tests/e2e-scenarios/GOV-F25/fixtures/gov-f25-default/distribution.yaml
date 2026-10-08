@@ -1,0 +1,8 @@
+name: gov-f25-default
+version: 0.1.0
+description: "GOV-F25 AC-GOV-F25-7 live scenario — the DEFAULT (multiplexer) profile that carries the signed GitHub webhook route gh-pr; the nv-artifact pre_gateway_dispatch observer fires under this profile's manager and skips (durably enqueues) a claimed PR's later delivery."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

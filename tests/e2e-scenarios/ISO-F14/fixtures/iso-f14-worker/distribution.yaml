@@ -1,0 +1,8 @@
+name: iso-f14-worker
+version: 0.1.0
+description: "ISO-F14 sandbox scenario profile — one coworker type carrying the OPTION-A egress posture that nv-coworker-compose renders (proxy.enabled:false; OneCLI proxy + CA-bundle docker_env; one CA read-only mount; docker_persist_across_processes:false; pinned sandbox image + container_memory/cpu). A sandbox spawned off this profile through CRED-F28's podman wrapper reaches the outside world only via the OneCLI proxy and holds no raw credential. Mirrors compose()'s ISO-F14 render for the AC-ISO-F14-1/2/5 sandbox scenarios."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

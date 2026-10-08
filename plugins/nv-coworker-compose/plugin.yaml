@@ -1,0 +1,10 @@
+name: nv-coworker-compose
+version: 0.1.0
+description: "Compose Hermes coworker-type profile distributions from a coworker-types.yaml lego spec (extends chain: identity leaf-wins; invariants/context/skills/workflows/overlays append+dedup; trait-domain bindings) and onboard them into a Bot-Mode gateway. Exposes hermes coworker compose / hermes onboard project|coworker plus orchestrator-gated onboard_coworker/onboard_project/create_agent gateway tools."
+author: NousResearch
+kind: standalone
+manifest_version: 1
+provides_tools:
+  - onboard_coworker
+  - onboard_project
+  - create_agent

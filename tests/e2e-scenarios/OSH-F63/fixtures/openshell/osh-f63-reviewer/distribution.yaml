@@ -1,0 +1,14 @@
+name: reviewer
+version: 0.1.0
+description: 'Composed Hermes coworker profile: reviewer'
+distribution_owned:
+- SOUL.md
+- config.yaml
+- mcp.json
+- skills
+- cron
+- distribution.yaml
+- skill-bundles
+- .env.template
+- scripts
+- policy-reviewer.yaml

@@ -1,0 +1,9 @@
+name: loop-f40-reviewer
+version: 0.1.0
+description: "LOOP-F40 live human-invited post-back scenario — the reviewer profile. A real model reads gh pr diff and produces a PR review that the gh-pr-review-invite route posts back via deliver: github_comment (captured at a local gh stub)."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
+  - skills

@@ -1,0 +1,60 @@
+.nv-artifact {
+  padding: 1rem 1.25rem;
+}
+.nv-heading {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0 0 1rem;
+}
+.nv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+.nv-panel {
+  min-height: 120px;
+}
+.nv-panel-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+  opacity: 0.8;
+}
+.nv-metric {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.nv-sub {
+  font-size: 0.8rem;
+  opacity: 0.65;
+  margin-top: 0.25rem;
+}
+.nv-funnel {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.nv-funnel-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.15);
+}
+.nv-funnel-label {
+  text-transform: capitalize;
+}
+.nv-funnel-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.nv-empty,
+.nv-loading,
+.nv-restricted,
+.nv-error {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+.nv-error {
+  color: #d33;
+}

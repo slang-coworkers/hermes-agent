@@ -1,0 +1,8 @@
+name: gov-f25-owner
+version: 0.1.0
+description: "GOV-F25 AC-GOV-F25-7 live scenario — the worker profile whose post_tool_call claims the PR (gh pr create) and whose owning session must be woken by the notifier's profile-aware wake when a later delivery arrives. Carries the self-contained live provider block."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

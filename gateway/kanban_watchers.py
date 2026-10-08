@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +36,17 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
+
+# Generic durable-retry sub policy (retry_policy='durable'): a failing delivery
+# is retried with exponential capped backoff and NEVER dropped; on sustained
+# failure an operator alert is logged. Values are deliberately small
+# at the low end (a transient blip retries within seconds) and capped so a dead
+# owner does not hot-loop the notifier.
+_DURABLE_BACKOFF_BASE_SECONDS = 2.0
+_DURABLE_BACKOFF_CAP_SECONDS = 300.0
+# Consecutive failures after which the durable sub earns a loud operator alert
+# (still never dropped).
+_DURABLE_ALERT_THRESHOLD = 5
 
 
 class GatewayKanbanWatchersMixin:
@@ -120,13 +132,13 @@ class GatewayKanbanWatchersMixin:
                 logger.warning("kanban notifier tick failed: %s", exc)
             await self._sleep_between_ticks(interval)
 
-    def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
+    def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> Any:
         """Sync helper (runs in to_thread): call ``kanban_db_notify.<op>`` for one subscription on its board."""
         from hermes_cli import kanban_db_connect as _kbc
         from hermes_cli import kanban_db_notify as _kbn
         conn = _kbc.connect(board=board)
         try:
-            getattr(_kbn, op)(
+            return getattr(_kbn, op)(
                 conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "", **extra,
             )
@@ -142,6 +154,251 @@ class GatewayKanbanWatchersMixin:
     def _kanban_rewind(self, sub: dict, claimed_cursor: int, old_cursor: int, board: Optional[str] = None) -> None:
         """Undo a claimed notification cursor after send failure."""
         self._kanban_sub_op(board, "rewind_notify_cursor", sub, claimed_cursor=claimed_cursor, old_cursor=old_cursor)
+
+    def _kanban_claim(
+        self, sub: dict, expected_cursor: int, token: str,
+        lease_until: int, now: int, board: Optional[str] = None,
+    ) -> bool:
+        """Sync helper: take the durable-delivery lease on ``sub``. Runs in
+        to_thread. Returns True iff this drainer claimed the event range."""
+        return self._kanban_sub_op(
+            board, "claim_notify_sub_lease", sub,
+            expected_cursor=expected_cursor, token=token, lease_until=lease_until, now=now,
+        )
+
+    def _kanban_advance_release(
+        self, sub: dict, expected_cursor: int, new_cursor: int, token: str,
+        board: Optional[str] = None,
+    ) -> bool:
+        """Sync helper: advance the cursor and release the lease in one CAS
+        after a confirmed delivery. Runs in to_thread."""
+        return self._kanban_sub_op(
+            board, "advance_and_release_notify_sub", sub,
+            expected_cursor=expected_cursor, new_cursor=new_cursor, token=token,
+        )
+
+    def _kanban_release(
+        self, sub: dict, token: str, board: Optional[str] = None,
+    ) -> None:
+        """Sync helper: release the durable-delivery lease held by ``token``
+        without advancing the cursor. Runs in to_thread."""
+        self._kanban_sub_op(board, "release_notify_sub_lease", sub, token=token)
+
+    def _render_durable_event(self, ev, task, sub, board_slug) -> Optional[str]:
+        """Render ONE durable event to its wake text.
+
+        The body is built ONLY from the event's own immutable payload / kind and
+        the sub's task id — never from mutable task fields (assignee, title) —
+        because the wake carries a stable ``Idempotency-Key`` and the api_server
+        fingerprint hashes the body: a body that changed between a persisted-
+        but-unacked attempt and its retry would defeat the dedup and double-run.
+        A ``notification`` event carries the caller's free-form ``message``
+        (already the rendered event); other kinds get a concise per-event line.
+        """
+        if ev.kind == "notification":
+            note = ""
+            if isinstance(ev.payload, dict):
+                note = str(ev.payload.get("message") or "")
+            return note or f"Kanban {sub['task_id']} notification"
+        return f"Kanban {sub['task_id']}: {ev.kind}"
+
+    def _note_durable_failure(self, sub_key, cause) -> None:
+        """Record a durable-sub delivery failure: bump the fail count, schedule
+        an exponential capped backoff, and — on sustained failure — emit a loud
+        operator alert. Never drops the sub."""
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+        fails = fail_counts.get(sub_key, 0) + 1
+        fail_counts[sub_key] = fails
+        delay = min(
+            _DURABLE_BACKOFF_CAP_SECONDS,
+            # Cap the exponent before computing it — an unbounded shift on a
+            # long-poisoned sub is pointless work (the cap dominates anyway).
+            _DURABLE_BACKOFF_BASE_SECONDS * (2 ** min(fails - 1, 20)),
+        )
+        backoff[sub_key] = {"next_attempt": time.monotonic() + delay, "fails": fails}
+        if fails >= _DURABLE_ALERT_THRESHOLD:
+            logger.error(
+                "kanban notifier: DURABLE sub %s sustained delivery failure "
+                "(%d attempts, backoff %.1fs) — NOT dropping; operator "
+                "attention required: %s",
+                sub_key, fails, delay, cause,
+            )
+        else:
+            logger.warning(
+                "kanban notifier: durable wake failed for %s "
+                "(attempt %d, backoff %.1fs): %s",
+                sub_key, fails, delay, cause,
+            )
+
+    async def _deliver_durable_notifications(self, d: dict) -> None:
+        """Crash-safe, per-event delivery of a durable notify sub to its owner.
+
+        Peek-then-advance: each event is delivered individually and the cursor
+        advances to that event id ONLY after ``deliver_wake`` succeeds — an
+        api_server self-post that confirmed the persist ack (it raises
+        otherwise), deduped by a stable Idempotency-Key. Confirmable durable
+        delivery exists only for the api_server transport (its self-post carries
+        the persist ack); a durable sub on any other (push) transport, or one
+        whose route this gateway cannot authorize, is retained and alerted
+        rather than advanced. A failure stops at that event (cursor contiguity),
+        applies capped backoff, and NEVER deletes the sub; the next tick retries
+        from here.
+        """
+        from gateway.config import Platform as _Platform
+        from gateway.kanban_watchers_notifier import _KanbanNotification, _adapter_for_subscription
+        from gateway.wake import (
+            _RETRY_DELAYS_SECONDS,
+            WAKE_TURN_TIMEOUT_SECONDS,
+            adapter_supports_push,
+            deliver_wake,
+        )
+
+        sub = d["sub"]
+        task = d.get("task")
+        board_slug = d.get("board")
+        events = d.get("events") or []
+        owner_profile = sub.get("notifier_profile") or None
+        sub_key = (
+            sub["task_id"], sub["platform"],
+            sub["chat_id"], sub.get("thread_id") or "",
+        )
+
+        fail_counts = getattr(self, "_kanban_sub_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = self._kanban_sub_fail_counts = {}
+        backoff = getattr(self, "_kanban_durable_backoff", None)
+        if backoff is None:
+            backoff = self._kanban_durable_backoff = {}
+
+        # Still inside the capped-backoff window from a prior failure — leave the
+        # cursor untouched and retry a later tick.
+        state = backoff.get(sub_key)
+        if state and state.get("next_attempt", 0.0) > time.monotonic():
+            return
+
+        try:
+            plat = _Platform((sub.get("platform") or "").lower())
+        except ValueError:
+            # An unroutable platform must not hot-loop: retain, back off, alert.
+            self._note_durable_failure(
+                sub_key, f"durable sub has unroutable platform {sub.get('platform')!r}"
+            )
+            return
+        # The same fail-closed route rule the batched path applies: a secondary
+        # owner never borrows the default profile's adapter unless the route (or
+        # the served profile's own session store) authorizes it. Reads the
+        # served store, so it runs off the event loop.
+        adapter = await asyncio.to_thread(_adapter_for_subscription, self, plat, sub, owner_profile)
+        if adapter is None:
+            self._note_durable_failure(
+                sub_key, f"no authorized {plat.value} route for owner {owner_profile or 'default'}"
+            )
+            return
+        if adapter_supports_push(adapter):
+            # A push wake (synthetic MessageEvent through handle_message) returns
+            # after SPAWNING the turn — it is NOT a persistence ack, so advancing
+            # the cursor on its return would drop the event if the spawned turn
+            # fails. Durable delivery is confirmable only for api_server
+            # (self-post + X-Hermes-Turn-Persisted ack); a durable sub on a push
+            # transport is therefore retained (never advanced, never dropped) and
+            # surfaces as a sustained-failure alert rather than being delivered.
+            self._note_durable_failure(
+                sub_key,
+                f"durable delivery is unconfirmable on push transport {plat.value}",
+            )
+            return
+
+        # The served owner's runtime scope, exactly as the batched wake uses it;
+        # a served (non-default) profile then takes the in-process route, where
+        # require_persist_ack fails closed (no persistence receipt there).
+        notification = _KanbanNotification(
+            self, d, platform_cls=_Platform, sub_fail_counts=fail_counts,
+        )
+        notification.plat = plat
+        served_profile = notification._served_wake_profile()
+
+        # Hold the owner-fenced lease comfortably beyond the whole deliver_wake
+        # envelope (WAKE_TURN_TIMEOUT_SECONDS per attempt across 1 +
+        # len(_RETRY_DELAYS_SECONDS) attempts) so it can never expire
+        # mid-delivery and let a second drainer double-deliver. A lost holder —
+        # process death, task cancellation, or an unhandled failure that skips
+        # the release — waits out this expiry, and recovery is then
+        # at-least-once: the persist ack blocks a cursor advance, but the finite
+        # idempotency cache cannot guarantee dedup once the lease has outlived
+        # the cache TTL.
+        lease_seconds = int(
+            WAKE_TURN_TIMEOUT_SECONDS * (1 + len(_RETRY_DELAYS_SECONDS))
+            + sum(_RETRY_DELAYS_SECONDS)
+        ) + 300
+
+        # Peek-then-advance: the cursor advances only after a persist-confirmed
+        # ack, so the expected pre-delivery cursor starts at the peeked snapshot
+        # and moves forward one event at a time as each delivery is confirmed.
+        expected_cursor = int(d.get("old_cursor") or 0)
+        for ev in events:
+            text = self._render_durable_event(ev, task, sub, board_slug)
+            token = secrets.token_hex(16)
+            now = int(time.time())
+            # Owner-fenced claim: take an exclusive, non-advancing lease on this
+            # sub row at the current cursor. rowcount 0 ⇒ another live drainer
+            # holds the range (or the cursor already moved) ⇒ stop without
+            # delivering, so concurrent drainers deliver each event exactly once.
+            claimed = await _to_thread_process_service(
+                self._kanban_claim, sub, expected_cursor, token,
+                now + lease_seconds, now, board_slug,
+            )
+            if not claimed:
+                return
+            if text is None:
+                # Nothing to deliver for this kind — advance past it (cursor
+                # contiguity) and release the lease in one CAS.
+                await _to_thread_process_service(
+                    self._kanban_advance_release, sub, expected_cursor, ev.id,
+                    token, board_slug,
+                )
+                expected_cursor = ev.id
+                continue
+            key = None
+            if isinstance(ev.payload, dict):
+                key = ev.payload.get("idempotency_key")
+            key = key or f"{sub['task_id']}:{ev.id}"
+            try:
+                async with notification._owner_scope():
+                    await deliver_wake(
+                        adapter,
+                        text=text,
+                        session_id=sub["chat_id"],
+                        profile=served_profile,
+                        idempotency_key=key,
+                        require_persist_ack=True,
+                    )
+            except Exception as exc:
+                # Delivery unconfirmed: release the lease immediately (do NOT
+                # wait for expiry) so the next tick re-delivers, leave the
+                # cursor unmoved, back off, and NEVER drop the durable sub.
+                await _to_thread_process_service(
+                    self._kanban_release, sub, token, board_slug,
+                )
+                self._note_durable_failure(sub_key, exc)
+                return
+            # Delivery confirmed (deliver_wake raised otherwise) → advance the
+            # cursor past this event and release the lease atomically (SEEN).
+            await _to_thread_process_service(
+                self._kanban_advance_release, sub, expected_cursor, ev.id,
+                token, board_slug,
+            )
+            expected_cursor = ev.id
+            fail_counts.pop(sub_key, None)
+            backoff.pop(sub_key, None)
+            logger.info(
+                "kanban notifier: durable wake delivered task=%s event=%s owner=%s",
+                sub["task_id"], ev.id, owner_profile or "default",
+            )
 
     async def _deliver_kanban_artifacts(self, *, adapter, chat_id: str, metadata: dict, event_payload: Optional[dict], task) -> None:
         """Upload artifact files referenced by a completed kanban task.

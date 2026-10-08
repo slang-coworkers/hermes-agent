@@ -1011,7 +1011,16 @@ class _IdempotencyCache:
         while len(self._store) > self._max:
             self._store.popitem(last=False)
 
-    async def get_or_set(self, key: str, fingerprint: str, compute_coro):
+    async def get_or_set(self, key: str, fingerprint: str, compute_coro, cache_if=None):
+        """Serialize + cache a keyed computation.
+
+        ``cache_if`` (defaulted): a predicate over the computed result; when it
+        returns False the result is NOT stored (only returned), so a same-key
+        retry re-runs instead of serving a cached failure. Callers that omit it
+        keep the prior behaviour of caching every completed result. The
+        in-flight de-dup (a pending same-key task is awaited) is unaffected —
+        it never caches a failure, it only shares one live execution.
+        """
         self._purge()
         item = self._store.get(key)
         if item and item["fp"] == fingerprint:
@@ -1021,8 +1030,17 @@ class _IdempotencyCache:
         if task is None:
             async def _compute_and_store():
                 resp = await compute_coro()
-                self._store[key] = {"resp": resp, "fp": fingerprint, "ts": time.time()}
-                self._purge()
+                should_cache = True
+                if cache_if is not None:
+                    try:
+                        should_cache = bool(cache_if(resp))
+                    except Exception:
+                        # A predicate error must not poison the cache with a
+                        # possibly-bad result — fail toward re-running.
+                        should_cache = False
+                if should_cache:
+                    self._store[key] = {"resp": resp, "fp": fingerprint, "ts": time.time()}
+                    self._purge()
                 return resp
             task = asyncio.create_task(_compute_and_store())
             self._inflight[inflight_key] = task
@@ -2878,10 +2896,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return []
 
     async def run_internal_session_turn(self, *, session_id: str, text: str, profile: str,
-                                        notification_category: str = "result") -> None:
+                                        notification_category: str = "result") -> bool:
         """Run one background wake turn against a raw session id IN-PROCESS (no HTTP, no API key);
         see ``api_server_runs.run_internal_session_turn``."""
-        await _api_runs.run_internal_session_turn(
+        return await _api_runs.run_internal_session_turn(
             self, session_id=session_id, text=text, profile=profile,
             notification_category=notification_category, _api_server=sys.modules[__name__])
 

@@ -1,0 +1,28 @@
+# AC-OBS-F48-3 is a dashboard-read-only ui scenario: the nv-artifact outcomes
+# page reads the seeded ledger server-side and invokes NO model. The provider
+# block below is a placeholder so the profile loads without an onboarding
+# overlay; the testbed applies its ui stub (model: stub). The api_key literal is
+# a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-gov-f25-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false
+plugins:
+  enabled:
+    - nv-artifact
+  entries:
+    nv-artifact:
+      settings:
+        # Single-profile ui scenario: pin the ledger to THIS profile's home so
+        # the seed script and the dashboard read the identical file.
+        ledger_profile: gov-f25-orchestrator
+        orchestrator_profile: gov-f25-orchestrator
+        notify_route: gh-pr
