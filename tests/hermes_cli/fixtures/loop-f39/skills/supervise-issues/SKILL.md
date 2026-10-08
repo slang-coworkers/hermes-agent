@@ -30,6 +30,10 @@ escalate to the human only after two unanswered nudges — never a third.
    `message_agent` once per per-assignee action in the output, with its target and message verbatim, and
    make those calls first. Only your final response may begin with `F39-ESC:<card-token>`: if the output
    escalates a card, start the final response with that line (step 6) and put any summary after it.
+   **The escalation line is the first byte of that final response.** Write nothing before it: no
+   preamble, no note that the nudge is queued, no restating of these steps. The final response's very
+   first characters are `F39-ESC:` followed directly by the card's token; the nudge status and any other
+   summary come after the escalation line, never before it.
 6. **Escalate — a card already nudged twice.** If a blocked card's assignee is still unresponsive and the
    card **already has two** `[supervise-issues nudge]` comments, do **not** send a third nudge. Instead
    escalate to the human in your room: emit a message whose **very first characters are** `F39-ESC:` followed
