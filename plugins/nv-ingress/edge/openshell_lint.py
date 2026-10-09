@@ -1,4 +1,4 @@
-"""Lint ``openshell sandbox exec`` call sites against the 0.0.72 CLI rules (ING-F66 E16).
+"""Lint ``openshell sandbox exec`` call sites against the 0.0.72 CLI rules (ING-F66 E16, E18).
 
 Usage, from the plugin directory: ``python3 -m edge.openshell_lint PATH...``. A path is a file or a
 directory (``*.py``, ``*.sh``, ``*.service`` and shebang shell scripts below it), so lane scripts
@@ -7,18 +7,25 @@ the exit status is 1 when there is any finding.
 
 Rules, both host-CLI behaviour that mocked-subprocess tests cannot see:
 
-- ``positional-name``: the word after ``sandbox exec`` must be ``-n`` or ``--name``. 0.0.72 runs a
-  positional name as the command in the last-used sandbox.
+- ``positional-name``: ``-n <name>``, ``--name <name>`` or a nonempty ``--name=<name>`` must come before
+  the first positional word or ``--``. 0.0.72 runs a positional name as the command in the last-used
+  sandbox. Options before it are read with their 0.0.72 arity (``-n``, ``--name`` and ``-g`` take a value,
+  ``--no-tty`` none); an unknown option takes none, so the word after it reads as positional. In a
+  ``.service`` file the word right after ``exec`` must be ``-n`` or ``--name``.
 - ``multiline-arg``: no exec argument contains a newline or carriage return; the CLI refuses it.
 
 Python files are read as an AST: an argv list or tuple literal holding ``"sandbox", "exec"`` is
 checked element by element. An element is resolved when it is a string constant, an f-string, a
 module-level string constant, a local assigned once from one of those, or, one call deep, a
 parameter of the enclosing function, resolved at every call of that function in the same file.
-Shell and unit files are read as text, line by line with ``#`` comments skipped. In a ``.sh`` file
-the newline rule covers each ``sandbox exec`` command's own argv, from those words to its unquoted
-end with backslash continuations included; a quote opened anywhere else (``$(...)``, a function body, a
-multi-line ``python3 -c '...'``) is ordinary shell. In a ``.service`` file any quoted argument still
+A value the lint cannot read may fill an option's value slot but never counts as the name flag.
+Shell and unit files are read as text, line by line with ``#`` comments skipped. In a ``.sh`` file a
+``sandbox exec`` is a site only when the word before ``sandbox`` is ``openshell``, a path ending in
+``/openshell`` or a parameter expansion, inside quotes too: prose that names the verb is not a site,
+a nested ``sh -c 'openshell sandbox exec ...'`` is. The newline rule covers each ``sandbox exec``
+command's own argv, from those words to its unquoted end with backslash continuations included; a
+quote opened anywhere else (``$(...)``, a function body, a multi-line ``python3 -c '...'``) is
+ordinary shell. In a ``.service`` file any quoted argument still
 open at the end of its line is a finding. Values held in shell variables cannot be seen. Comments,
 docstrings and Markdown are never read.
 """
@@ -33,6 +40,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 Finding = Tuple[str, int, str, str]
 _NAME_FLAGS = ("-n", "--name")
+_OPTION_ARITY = {"-n": 1, "--name": 1, "-g": 1, "--no-tty": 0}
+_OPENSHELL_WORD = re.compile(
+    r"(?:^|[/'\"(;|&`])openshell['\"]?$"
+    r"|(?:^|['\"(;|&`])\$(?:[A-Za-z_]\w*|[0-9@*]|\{[^}]+\})['\"]?$"
+)
 _SKIP_DIRS = {".venv", "node_modules", ".git", "__pycache__"}
 _UNKNOWN = object()
 
@@ -41,11 +53,36 @@ def _crlf(s: str) -> bool:
     return "\n" in s or "\r" in s
 
 
+def _is_value(tok: object) -> bool:
+    return tok is _UNKNOWN or (isinstance(tok, str) and tok != "" and not tok.startswith("-"))
+
+
 def _head_problem(tokens: List[object]) -> Optional[str]:
     """The positional-name message for the tokens after ``exec``, or None.
 
     A token is a literal string, or ``_UNKNOWN`` for a value the lint cannot read.
     """
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _NAME_FLAGS:
+            if i + 1 < len(tokens) and _is_value(tokens[i + 1]):
+                return None
+            return f"{tok} has no value before the command"
+        if isinstance(tok, str) and tok.startswith("--name="):
+            return None if tok[len("--name="):] else "--name= is empty"
+        if tok == "--":
+            break
+        if not isinstance(tok, str) or not tok.startswith("-"):
+            return "a positional word comes before -n/--name; 0.0.72 runs a positional name as the command"
+        arity = _OPTION_ARITY.get(tok, 0)
+        if arity and (i + 1 >= len(tokens) or not _is_value(tokens[i + 1])):
+            return f"{tok} has no value before the command"
+        i += 1 + arity
+    return "no -n/--name names the sandbox before the command"
+
+
+def _first_word_problem(tokens: List[object]) -> Optional[str]:
     if tokens and tokens[0] in _NAME_FLAGS:
         return None
     return "the word after `sandbox exec` is not -n/--name; 0.0.72 runs a positional name as the command"
@@ -215,6 +252,22 @@ def _open_quote_at_eol(line: str) -> bool:
     return quote is not None
 
 
+def _word_before(text: str, at: int) -> str:
+    """The word before the blank run that ends at ``at``, across ``\\`` continuations; "" when there is none."""
+    i = at
+    while i > 0:
+        if text[i - 1] in " \t":
+            i -= 1
+        elif i >= 2 and text[i - 2:i] == "\\\n":
+            i -= 2
+        else:
+            break
+    j = i
+    while j > 0 and not text[j - 1].isspace():
+        j -= 1
+    return text[j:i] if i < at else ""
+
+
 def _comment_starts(prefix: str, mark: "re.Match[str]") -> bool:
     """Whether the ``#`` that ``mark`` ends on opens a shell comment: unquoted, after an unescaped boundary."""
     before = prefix[:mark.start()]
@@ -235,6 +288,8 @@ def lint_shell(path: Path, text: str) -> Tuple[List[Finding], int]:
         prefix = text[line_start:m.start()]
         if any(_comment_starts(prefix, mark) for mark in re.finditer(r"(^|[\s;|&()])#", prefix)):
             continue
+        if not unit and not _OPENSHELL_WORD.search(_word_before(text, m.start())):
+            continue
         sites += 1
         line = text.count("\n", 0, m.start()) + 1
         inside = _quote_at(text, line_start, m.start())
@@ -244,7 +299,7 @@ def lint_shell(path: Path, text: str) -> Tuple[List[Finding], int]:
         except ValueError as exc:
             findings.append((str(path), line, "unparsed", f"cannot split the exec command ({exc})"))
             continue
-        problem = _head_problem(tokens)
+        problem = (_first_word_problem if unit else _head_problem)(tokens)
         if problem:
             findings.append((str(path), line, "positional-name", problem))
         for i, tok in enumerate(tokens, 3):
