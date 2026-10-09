@@ -215,6 +215,13 @@ def _open_quote_at_eol(line: str) -> bool:
     return quote is not None
 
 
+def _comment_starts(prefix: str, mark: "re.Match[str]") -> bool:
+    """Whether the ``#`` that ``mark`` ends on opens a shell comment: unquoted, after an unescaped boundary."""
+    before = prefix[:mark.start()]
+    escaped = (len(before) - len(before.rstrip("\\"))) % 2 == 1
+    return not escaped and _quote_at(prefix, 0, mark.end() - 1) is None
+
+
 def lint_shell(path: Path, text: str) -> Tuple[List[Finding], int]:
     findings: List[Finding] = []
     sites = 0
@@ -225,7 +232,8 @@ def lint_shell(path: Path, text: str) -> Tuple[List[Finding], int]:
                 findings.append((str(path), n, "multiline-arg", "a quoted argument is still open at the end of the line"))
     for m in _SHELL_EXEC.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
-        if re.search(r"(^|\s)#", text[line_start:m.start()]):
+        prefix = text[line_start:m.start()]
+        if any(_comment_starts(prefix, mark) for mark in re.finditer(r"(^|[\s;|&()])#", prefix)):
             continue
         sites += 1
         line = text.count("\n", 0, m.start()) + 1

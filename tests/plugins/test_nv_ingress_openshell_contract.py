@@ -89,6 +89,11 @@ def test_openshell_lint_flags_the_c16d47c_multiline_inspection():
     ("unit-positional.service", "[Service]\nExecStart=openshell sandbox exec gw -- true\n", ["positional-name"]),
     ("split-verb.sh", "openshell sandbox \\\n  exec gw -- true\n", ["positional-name"]),
     ("subst-name.sh", 'openshell sandbox exec -n $(printf gw) -- sh -c "echo a\necho b"\n', ["multiline-arg"]),
+    ("quoted-hash-dq.sh", 'echo " #"; openshell sandbox exec gw -- true\n', ["positional-name"]),
+    ("quoted-hash-sq.sh", "log 'step #3'; openshell sandbox exec -n gw -- sh -c 'a\nb'\n", ["multiline-arg"]),
+    ("trailing-comment.sh", "true # openshell sandbox exec gw -- true\n", []),
+    ("escaped-semicolon.sh", "echo \\;#tag; openshell sandbox exec gw -- true\n", ["positional-name"]),
+    ("escaped-space.sh", "echo a\\ #tag; openshell sandbox exec gw -- true\n", ["positional-name"]),
 ])
 def test_openshell_lint_shell_and_unit_rules(tmp_path, name, body, rules):
     """(B) Shell and unit files: the name rule on both, the open-quote rule on `.sh` only within an exec argv."""
@@ -96,7 +101,8 @@ def test_openshell_lint_shell_and_unit_rules(tmp_path, name, body, rules):
     path.write_text(body, encoding="utf-8")
     findings, sites = _lint().lint_paths([path])
     assert [rule for *_, rule, _ in findings] == rules
-    assert sites == (0 if name in ("comment.sh", "open.service") else 1), "each live exec is one checked site"
+    assert sites == (0 if name in ("comment.sh", "trailing-comment.sh", "open.service") else 1), \
+        "each live exec is one checked site"
 
 
 def test_openshell_lint_cli_exits_by_finding(tmp_path):
