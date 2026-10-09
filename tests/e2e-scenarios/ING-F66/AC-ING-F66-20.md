@@ -52,7 +52,7 @@ The model is live; the provider block is the same as AC-ING-F66-19's.
   the call count and the in-scope delivery count; no event is dropped or
   filtered to stay under it.
 - **Time cap:** the whole scenario, Setup and `finally` included, fits the
-  tier's 10-minute cap:
+  tier's 10-minute cap as active time, per the E17 time rule (## Time, below):
 
   | part | cap |
   |---|---|
@@ -63,10 +63,11 @@ The model is live; the provider block is the same as AC-ING-F66-19's.
   | post-restart delivery | ≤ 180 s |
   | teardown | ≤ 30 s |
 
-  E11 adds the two concurrent transport preflights to Setup (≤ 60 s), which
-  count inside the same unchanged 600 s cap (D18). The ceilings now sum to
-  660 s, so the 600 s cap binds before every per-step ceiling can be reached;
-  no step's own deadline changes.
+  E11 adds the two concurrent transport preflights to Setup, now under one
+  shared 180 s deadline (E17, D26). They count inside the same 600 s
+  active-time cap (D18). The ceilings now sum to 780 s, so the 600 s cap binds
+  before every per-step ceiling can be reached; no other step's own deadline
+  changes.
 
 ## Setup (after the fixtures are installed)
 
@@ -111,8 +112,10 @@ No fixture is re-installed here.
    `FAIL(env): transport preflight refused (<reason>)` before any further
    scratch write. Then `REV_M0` and `APR_M0` are re-recorded. The session ids,
    `T0` and `CALLS0` are unchanged, and the preflight calls count toward the
-   40-call cap. Their elapsed time counts inside the scenario's 600 s timeout,
-   which does not change.
+   40-call cap. **The two preflights share one 180 s deadline from their
+   launch (E17, D26)**, replacing ≤ 60 s: the same shape as step 2. Their pass
+   conditions are unchanged. Their elapsed time counts inside the scenario's
+   600 s active-time cap.
 
 Drives resume the stored `Bot Chat` session over the gateway WS, as in AC-19;
 a dashboard drive selects the profile in the profile combobox first. A drive
@@ -214,6 +217,21 @@ rules (E11).
    scratch PR, both branches, the issue and the label for it. Otherwise the
    operator runs the round teardown (AC-ING-F66-19 step 7). Record which, with
    each teardown command's exit status.
+
+## Time
+
+- **Time (E17, ruling D26).** The 600 s cap (`timeout_s`) measures the tester's active time from `T0` to the end of `finally`.
+  - **Lane waits are excluded.** A lane wait runs from the moment a lane read or lane step is filed, or an operator ask leaves the tester through the chain, until its result is in the tester's hands. During one, the tester runs nothing that changes the fleet or GitHub; read-only reads are allowed and count as active time.
+  - **Event deadlines stay on the wall clock**, and a lane wait never pauses them: the preflights' shared 180 s and step 2's shared 180 s, both from their launch; the restart's 120 s from `T3`; and delivery's 180 s from the re-run's completion. The 40-call cap and `LIVE_BUDGET_USD` are unchanged.
+  - **Evidence.** `budget.txt` (or a `time.txt` beside it) lists each lane wait as `<what> filed <ISO> → result <ISO>`, plus the active total. An active total over 600 s is `FAIL(env): time cap`, uncounted.
+  - **A retest at a new head (D26).**
+    - Step 1 re-runs in full after the new instrumented start: both L-VAL exits, raw `gateway.pid` against the live `/proc` pid, the override unset, and one H9.
+    - Step 2 carries under D1 only if all of these are recorded:
+      - the reviewer and approver workers were not recreated, and their policy records are unchanged;
+      - the delta touches neither `checks_gate.py` nor the ci-gate skill;
+      - the round's scratch PR head is unchanged, `ing-f66-red` still concludes failure, and its combined status is still empty, by H18:<PR>. For the E16 retest that is #1926 at `f0da7c62`, read by H18:1926.
+      - Otherwise step 2 re-runs.
+    - Steps 3 and 4 run in full; then AC-24 runs in full.
 
 ## Pass
 

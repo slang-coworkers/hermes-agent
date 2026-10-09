@@ -47,12 +47,8 @@ def _run(argv: List[str]) -> subprocess.CompletedProcess:
 
 def _sandbox_sh(gw: Dict[str, Any], script: str) -> subprocess.CompletedProcess:
     # openshell takes the sandbox only as `-n <name>`: a positional name falls back to the
-    # last-used sandbox and is run as the command (exit 127). It also refuses an exec argument that
-    # holds a newline or carriage return, so such an argv is never sent and reads as a failed exec.
-    argv = [gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty", "--", "sh", "-c", script]
-    if any("\n" in arg or "\r" in arg for arg in argv):
-        return subprocess.CompletedProcess(argv, 1, "", "an exec argument contains a newline or carriage return")
-    return _run(argv)
+    # last-used sandbox and is run as the command (exit 127).
+    return _run([gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty", "--", "sh", "-c", script])
 
 
 def gateway_healthy(gw: Dict[str, Any]) -> bool:
@@ -67,18 +63,21 @@ def gateway_healthy(gw: Dict[str, Any]) -> bool:
 # newline and tab as \x1e and \x1d), then "#end". The match is done host-side on argv tokens, so
 # this script carries no gateway token that could match itself. A pid whose /proc entry vanished
 # mid-read exited and is skipped; any other failed read prints ERR and aborts without "#end", so
-# an unreadable process is never mistaken for an absent one. The script is a single line: openshell
-# refuses an exec argument that contains a newline.
-_INSPECT_SCRIPT = (
-    r"""[ -r /proc/self/stat ] || { echo "ERR - proc"; exit 3; }; """
-    r"""for d in /proc/[0-9]*; do p=${d#/proc/}; s=$(cat "$d/stat" 2>/dev/null); """
-    r"""if [ -z "$s" ]; then [ -d "$d" ] || continue; echo "ERR $p stat"; exit 3; fi; """
-    r"""if ! cl=$(tr '\000\n\t' '\037\036\035' < "$d/cmdline" 2>/dev/null); then """
-    r"""[ -d "$d" ] || continue; echo "ERR $p cmdline"; exit 3; fi; """
-    r"""n=${s#*\(}; n=${n%\)*}; r=${s##*\) }; """
-    r"""printf '%s\t%s\t%s\t%s\n' "$p" "${r%% *}" "$(printf '%s' "$n" | tr '\t\n' '  ')" "$cl"; """
-    r"""done; echo '#end'"""
-)
+# an unreadable process is never mistaken for an absent one.
+_INSPECT_SCRIPT = r"""
+[ -r /proc/self/stat ] || { echo "ERR - proc"; exit 3; }
+for d in /proc/[0-9]*; do
+  p=${d#/proc/}
+  s=$(cat "$d/stat" 2>/dev/null)
+  if [ -z "$s" ]; then [ -d "$d" ] || continue; echo "ERR $p stat"; exit 3; fi
+  if ! cl=$(tr '\000\n\t' '\037\036\035' < "$d/cmdline" 2>/dev/null); then
+    [ -d "$d" ] || continue; echo "ERR $p cmdline"; exit 3
+  fi
+  n=${s#*\(}; n=${n%\)*}; r=${s##*\) }
+  printf '%s\t%s\t%s\t%s\n' "$p" "${r%% *}" "$(printf '%s' "$n" | tr '\t\n' '  ')" "$cl"
+done
+echo '#end'
+"""
 
 _ENTRY_NAMES = ("hermes", "hermes.real")
 _PYTHON = re.compile(r"python(3(\.\d+)?)?")
@@ -182,23 +181,15 @@ def start_in_flight(lock: Path, now: float) -> bool:
         return False
 
 
-STILL_BLOCKED_EVERY_CHECKS = 20
 _last_block: Optional[tuple] = None
-_block_checks = 0
 
 
-def _blocked(gw: Dict[str, Any], key: tuple, reason: str, msg: str, *args: Any) -> None:
-    # Sparse on purpose: the lane reads only the journal's last 300 lines, and a persisting block must
-    # still show there that the loop is retrying.
-    global _last_block, _block_checks
+def _warn_once(key: tuple, msg: str, *args: Any) -> None:
+    # The check repeats every 15 s while a gateway is held; log each distinct condition once.
+    global _last_block
     if key != _last_block:
-        _last_block, _block_checks = key, 1
         logger.warning(msg, *args)
-        return
-    _block_checks += 1
-    if _block_checks % STILL_BLOCKED_EVERY_CHECKS == 0:
-        logger.warning("gateway-boot: still not starting in %s after %d checks: %s", gw["sandbox"], _block_checks,
-                       reason)
+    _last_block = key
 
 
 def tick(gw: Dict[str, Any], now: float) -> str:
@@ -209,14 +200,14 @@ def tick(gw: Dict[str, Any], now: float) -> str:
         return decide(True, False)
     pids, detail = gateway_processes(gw)
     if pids is None:
-        _blocked(gw, ("unknown", detail), detail,
-                 "gateway-boot: in-sandbox health check failed and the process inspection of %s is inconclusive: "
-                 "%s; not starting — read that sandbox's processes by hand", gw["sandbox"], detail)
+        _warn_once(("unknown", detail), "gateway-boot: in-sandbox health check failed and the process inspection "
+                   "of %s is inconclusive: %s; not starting — read that sandbox's processes by hand",
+                   gw["sandbox"], detail)
         return "unknown"
     if pids:
-        _blocked(gw, ("held", tuple(pids)), f"a Hermes gateway is alive (pids {pids})",
-                 "gateway-boot: in-sandbox health check failed but a Hermes gateway is alive in %s (pids %s); not "
-                 "starting another and not stopping it — inspect or restart it by hand", gw["sandbox"], pids)
+        _warn_once(("held", tuple(pids)), "gateway-boot: in-sandbox health check failed but a Hermes gateway is "
+                   "alive in %s (pids %s); not starting another and not stopping it — inspect or restart it by hand",
+                   gw["sandbox"], pids)
         return "held"
     _last_block = None
     action = decide(False, start_in_flight(lock, now))

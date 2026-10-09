@@ -310,6 +310,16 @@ inbound path at all. It is documented here only, not built.
   or restarts it. An inspection that fails or cannot be read also starts
   nothing. A start runs only when no gateway process is alive, for example
   after a sandbox restart.
+- Every check re-runs the probe and, when it fails, the inspection, so a
+  sandbox that is still provisioning is retried 15 s later. While the same
+  reason blocks a start, the unit logs it once and then one
+  `gateway-boot: still not starting in <gw> after <k> checks: <reason>` line
+  every 20 checks.
+- Each `openshell sandbox exec` names the sandbox with `-n` and passes its
+  command as one line: openshell 0.0.72 runs a positional name as the command
+  in the last-used sandbox, and refuses an argument that contains a newline.
+  `python3 -m edge.openshell_lint <path>...`, run from the plugin directory,
+  checks lane scripts for both.
 - The unit loads its code once, at start. After installing a new plugin
   version, restart `nv-ingress-gateway-boot.service` so it runs the new code.
 - Events are durable on both sides of the forward. The edge spool keeps
