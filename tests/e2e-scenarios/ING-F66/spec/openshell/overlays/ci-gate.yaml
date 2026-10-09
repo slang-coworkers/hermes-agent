@@ -1,0 +1,20 @@
+# ING-F66 / E2E-17: the reviewer reads the checks API before any verdict. Spliced
+# into the reviewer's plan workflow (nv-coworker-compose _splice_overlays).
+target-workflow: plan
+applies-to: [reviewer]
+body: |
+  ## Checks gate (before any approve verdict)
+
+  Before you recommend approving a pull request, run the ci-gate skill at the
+  exact head SHA you reviewed, in provider-read mode:
+
+      python3 ~/.hermes/skills/ci-gate/scripts/checks_gate.py <owner/repo> <pr> <reviewed head sha> --read provider
+
+  Run it through `terminal` in your worker, where skills sync to `~/.hermes/skills/`;
+  never use the skill directory that skill_view reports or the skill-directory
+  template variable, which both name the gateway's copy.
+
+  Exit 0 means every check run at that head completed green. Exit 3 is a refusal:
+  your verdict is "do not approve", naming each refused check run from its output.
+  Never fall back to the legacy commit-status endpoint; it can be empty while a
+  check run is red.

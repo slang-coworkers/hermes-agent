@@ -1,0 +1,3 @@
+skills:
+- approve
+instruction: Run the approve workflow anchored for the approver coworker.
