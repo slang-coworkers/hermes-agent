@@ -458,15 +458,19 @@ On a lane where the OpenShell broker validates `--policy` as a HOST path it read
 `--policy-root <host dir>`: each worker `sandbox create --policy` is then rebased to
 `<host dir>/render/<role>/policy-<role>.yaml` (the operator mirrors the rendered per-worker
 policies under that root first); with it unset, the gateway-internal render path is used and the
-plan is byte-for-byte unchanged. A rooted install has the broker verify each worker's host policy,
-because the installer cannot read that host root from inside the gateway sandbox. After compose and
-before any sandbox operation it asks `openshell policy digest --policy <file>` for every role and
-compares the answer with the render's sha256; a mirror it can read is also compared byte for byte.
-Each `sandbox create` then carries `--policy-sha256 <render sha>`, so the broker binds only those
-bytes, and a drifted sandbox is re-created with one `sandbox replace … --policy-sha256 <sha>` call
-that refuses before it deletes anything. A stale, unreadable or unverifiable mirror refuses the
-install rather than binding an unverified policy, and a digest is recorded only after a successful
-create or replace. The script:
+plan is byte-for-byte unchanged. A rooted install verifies every worker policy against the broker's
+digest of the host file it binds, and does not require access to the host root from inside the
+gateway sandbox (`brev-hermes` has no host mount). After compose and before any sandbox operation
+it asks `openshell policy digest --policy <file>` for every role and compares the answer with the
+render's sha256; when the installer can read a mirror, it also compares it byte for byte with the
+render. Each `sandbox create` then carries `--policy-sha256 <render sha>`, so the broker binds only
+those bytes, and a drifted sandbox is re-created with one `sandbox replace … --policy-sha256 <sha>`
+call that refuses before it deletes anything. A digest that disagrees with the render refuses the
+install and names that role's sandbox. Any answer that is not a digest refuses too, readable mirror
+or not, and names `openshell policy digest`; `flag not allowed: policy digest` (exit 2) means the
+broker must enable that verb for this sandbox prefix. A path the installer can read, such as an
+alias or a copy of the mirror, attests nothing about the broker's file. A digest is recorded only
+after a successful create or replace. The script:
 
 - **Phase A** installs the spine's `plugins.enabled` set at the pinned commit so `hermes coworker`
   exists. The set is the spine's, minus `podman-onecli` under the single-authority posture: the
