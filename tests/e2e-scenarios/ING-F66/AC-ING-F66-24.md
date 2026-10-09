@@ -124,6 +124,13 @@ No fixture is re-installed here.
    this round created it. If a step failed before the forward came back, start
    the forward unit first. Record each command's exit status.
 
+## Time
+
+- **Time (E17, ruling D26).** The 600 s cap (`timeout_s`) measures the tester's active time from `T0` to the end of `finally`.
+  - **Lane waits are excluded.** A lane wait runs from the moment a lane read or lane step is filed, or an operator ask leaves the tester through the chain, until its result is in the tester's hands. During one, the tester runs nothing that changes the fleet or GitHub; read-only reads are allowed and count as active time.
+  - **Event deadlines stay on the wall clock**, and a lane wait never pauses them: the 120 s from the service restart, within which the forward unit is `active` and a loopback health probe on 18644 answers, with `T_fwd` recorded when the forward returns; and the 180 s windows for `D1` from `T_fwd` and for `D2` from its re-run. The 24-call cap and `LIVE_BUDGET_USD` are unchanged.
+  - **Evidence.** `budget.txt` (or a `time.txt` beside it) lists each lane wait as `<what> filed <ISO> → result <ISO>`, plus the active total. An active total over 600 s is `FAIL(env): time cap`, uncounted.
+
 ## Pass
 
 The criterion holds when `D1`, acknowledged by the edge while the forward was

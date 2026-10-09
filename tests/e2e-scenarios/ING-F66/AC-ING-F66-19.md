@@ -415,6 +415,13 @@ Drives that need no tool (the fixer instruction) may stay on the gateway WS.
    `ing-f66-scratch-<ts>-*` branches, and delete `ing-f66-fleet` only if this
    round created it. Record which, with each teardown command's exit status.
 
+## Time
+
+- **Time (E17, ruling D26).** The 600 s cap (`timeout_s`) measures the tester's active time from `T0` to the end of `finally`.
+  - **Lane waits are excluded.** A lane wait runs from the moment a lane read or lane step is filed, or an operator ask leaves the tester through the chain, until its result is in the tester's hands. During one, the tester runs nothing that changes the fleet or GitHub; read-only reads are allowed and count as active time.
+  - **Event deadlines stay on the wall clock**, and a lane wait never pauses them: each step's own window from its triggering event: step 1's 180 s from the issue's opening, and step 4's 180 s from the check_run's completion. The 40-call cap and `LIVE_BUDGET_USD` are unchanged.
+  - **Evidence.** `budget.txt` (or a `time.txt` beside it) lists each lane wait as `<what> filed <ISO> → result <ISO>`, plus the active total. An active total over 600 s is `FAIL(env): time cap`, uncounted.
+
 ## Pass
 
 The criterion holds when steps 1–6 each meet their expectation against the
