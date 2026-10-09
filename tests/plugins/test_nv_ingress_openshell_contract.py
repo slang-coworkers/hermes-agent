@@ -94,15 +94,45 @@ def test_openshell_lint_flags_the_c16d47c_multiline_inspection():
     ("trailing-comment.sh", "true # openshell sandbox exec gw -- true\n", []),
     ("escaped-semicolon.sh", "echo \\;#tag; openshell sandbox exec gw -- true\n", ["positional-name"]),
     ("escaped-space.sh", "echo a\\ #tag; openshell sandbox exec gw -- true\n", ["positional-name"]),
+    # lane-exec.sh :118 and :119 as the operator quoted them in ruling D27, elisions kept
+    ("lane-exec-118.sh", 'echo "... via the broker (sandbox exec); the host adds nothing here"\n', []),
+    ("lane-exec-119.sh", "openshell sandbox exec -g nemoclaw --name ing-f66-gw --no-tty -- sh -c '...'\n", []),
+    ("nested-quoted.sh", "sh -c 'openshell sandbox exec gw -- true'\n", ["positional-name"]),
+    ("echo-quoted.sh", 'echo "openshell sandbox exec gw -- true"\n', ["positional-name"]),
+    ("expansion-word.sh", '"${OS_BIN}" sandbox exec gw -- true\n', ["positional-name"]),
+    ("path-word.sh", "/opt/bin/openshell sandbox exec gw -- true\n", ["positional-name"]),
+    ("continued-word.sh", "openshell \\\n  sandbox exec gw -- true\n", ["positional-name"]),
+    ("gateway-then-positional.sh", "openshell sandbox exec -g nemoclaw gw -- true\n", ["positional-name"]),
+    ("dashdash-first.sh", "openshell sandbox exec -- gw\n", ["positional-name"]),
+    ("no-tty-then-positional.sh", "openshell sandbox exec --no-tty gw --name x --\n", ["positional-name"]),
+    ("gateway-positional-name.sh", "openshell sandbox exec -g nemoclaw gw --name x --\n", ["positional-name"]),
+    ("gateway-no-value.sh", "openshell sandbox exec -g -- -n gw -- true\n", ["positional-name"]),
+    ("compound-expansion-prose.sh", 'echo "prefix$OS sandbox exec gw -- true"\n', []),
+    ("name-equals.sh", "openshell sandbox exec --name=gw -- true\n", []),
+    ("name-equals-empty.sh", "openshell sandbox exec --name= gw -- true\n", ["positional-name"]),
+    ("gateway-name.py", 'def run(os, gw, sb):\n    return [os, "sandbox", "exec", "-g", gw, "--name", sb, "--", "true"]\n', []),
+    ("gateway-positional.py", 'def run(os, gw, sb):\n    return [os, "sandbox", "exec", "-g", gw, sb, "--", "true"]\n',
+     ["positional-name"]),
+    ("unread-flag.py", 'def run(os, flag, sb):\n    return [os, "sandbox", "exec", flag, sb, "--", "true"]\n',
+     ["positional-name"]),
 ])
 def test_openshell_lint_shell_and_unit_rules(tmp_path, name, body, rules):
-    """(B) Shell and unit files: the name rule on both, the open-quote rule on `.sh` only within an exec argv."""
+    """(B) The name rule on `.py`, `.sh` and `.service`; the open-quote rule on `.sh` only within an exec argv."""
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
     findings, sites = _lint().lint_paths([path])
     assert [rule for *_, rule, _ in findings] == rules
-    assert sites == (0 if name in ("comment.sh", "trailing-comment.sh", "open.service") else 1), \
+    assert sites == (0 if name in ("comment.sh", "trailing-comment.sh", "open.service", "lane-exec-118.sh",
+                              "compound-expansion-prose.sh") else 1), \
         "each live exec is one checked site"
+
+
+def test_openshell_lint_reads_options_by_their_0_0_72_arity():
+    """(B) RE-CHECK (ruling D27): an option prefix passes only when -n/--name names the sandbox before a positional."""
+    head = _lint()._head_problem
+    probes = [["--no-tty", "gw", "--name", "x", "--"], ["-g", "nemoclaw", "gw", "--name", "x", "--"],
+              ["-g", "nemoclaw", "--name", "x", "--no-tty", "--"]]
+    assert [head(p) is not None for p in probes] == [True, True, False]
 
 
 def test_openshell_lint_cli_exits_by_finding(tmp_path):
