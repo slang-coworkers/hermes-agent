@@ -146,10 +146,14 @@ def _run_critique(monkeypatch, session_id, verdict="approve"):
         calls["n"] += 1
         return plugin_llm.PluginLlmStructuredResult(
             text="{}", provider="test", model="test", agent_id="test",
-            parsed={"verdict": verdict, "stage": "OUTPUT_REVIEW"}, content_type="json")
+            parsed={"verdict": verdict, "stage": "OUTPUT_REVIEW",
+                    "findings": [{"location": "x.py:1", "problem": "p", "fix": "f"}]},
+            content_type="json")
 
     monkeypatch.setattr(plugin_llm.PluginLlm, "acomplete_structured", _fake, raising=False)
-    registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW"}, session_id=session_id)
+    registry.dispatch("codex_critique",
+                      {"stage": "OUTPUT_REVIEW", "artifacts": [{"name": "diff", "content": "x"}]},
+                      session_id=session_id)
     return calls
 
 

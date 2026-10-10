@@ -72,8 +72,12 @@ class _FakeAgent:
         self.valid_tool_names: set = set()
 
 
+class _Calls(list):
+    armed: list
+
+
 def _capture_spawn(monkeypatch, tmp_path):
-    calls = []
+    calls = _Calls()
 
     def fake_terminal_tool(command, **kwargs):
         calls.append({"command": command, **kwargs})
@@ -85,6 +89,17 @@ def _capture_spawn(monkeypatch, tmp_path):
     # keep DM temp files inside pytest's tmp_path (auto-cleaned) instead of the
     # shared /tmp/hermes-dm dir — the faked terminal_tool never consumes them.
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
+    # the faked target accepts at once; arming is recorded on calls.armed
+    calls.armed = []
+    monkeypatch.setattr(
+        bot_mode_dm, "_await_delivery_ack", lambda *a, **k: {"state": "accepted"}
+    )
+
+    def fake_arm(proc_id):
+        calls.armed.append(proc_id)
+        return True, ""
+
+    monkeypatch.setattr(bot_mode_dm, "_arm_completion_notify", fake_arm)
     return calls
 
 
@@ -112,13 +127,15 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
     assert result["status"] == "sent"
     assert len(calls) == 1
     call = calls[0]
-    # background + notify_on_complete = the reply lands as a completion
-    # notification on the sender's next turn, not synchronously; task_id is the
-    # origin id passed through to terminal_tool (route-home keys on the queued
-    # event's session_key — see test_ac_a2a_f20_3). A mutant dropping any of the
-    # three flips this test.
+    # background + notify armed after acceptance = the reply lands as a
+    # completion notification on the sender's next turn, not synchronously;
+    # task_id is the origin id passed through to terminal_tool (route-home keys
+    # on the queued event's session_key — see test_ac_a2a_f20_3), and arming
+    # reads the spawn's own session_key. A mutant dropping any of the three
+    # flips this test.
     assert call["background"] is True
-    assert call["notify_on_complete"] is True
+    assert call["notify_on_complete"] is False
+    assert calls.armed == ["proc_test1234"]
     assert call["task_id"] == origin_task
 
 
