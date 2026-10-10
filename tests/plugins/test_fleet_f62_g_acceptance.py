@@ -667,6 +667,7 @@ def test_ac_fleet_f62_g_16(fleet, monkeypatch, channel):
     import gateway.session_context as sc
     monkeypatch.setattr(fleet.registry, "pending_watchers", [])
     fleet.configure(mode="accept", pre=0.2, post=3.0)
+    before = {s["session_id"] for s in _delivery_sessions(fleet.registry)}
     if channel == "stateless":
         def _send():
             sc.declare_stateless_channel()
@@ -677,7 +678,9 @@ def test_ac_fleet_f62_g_16(fleet, monkeypatch, channel):
         out = fleet.send()
     assert out.get("status") == "delivered_untracked", out
     assert out.get("reason") == "notify_unsupported", out
-    proc_id = _delivery_sessions(fleet.registry)[-1]["session_id"]
+    new = [s["session_id"] for s in _delivery_sessions(fleet.registry) if s["session_id"] not in before]
+    assert len(new) == 1, new                                         # list_sessions lists running before finished
+    proc_id = new[0]
     assert not [w for w in fleet.registry.pending_watchers if w.get("session_id") == proc_id]
     assert fleet.registry.get(proc_id).notify_on_complete is False
     assert not fleet.registry.get(proc_id).exited
