@@ -590,8 +590,10 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
 
 
 def _target_db_path(profile: str) -> Path:
-    """The target profile's own state.db, rooted exactly like ``_delivery_lock``."""
-    root = _hermes_root(Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes")))
+    """Use the process home inherited by the selected-profile child CLI."""
+    from hermes_constants import get_process_hermes_home
+
+    root = _hermes_root(get_process_hermes_home())
     return root / "state.db" if profile == "default" else root / "profiles" / profile / "state.db"
 
 

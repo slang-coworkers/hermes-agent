@@ -494,3 +494,17 @@ def test_accepted_retryable_failure_does_not_redeliver(fleet):
         time.sleep(0.2)
     assert count.read_text(encoding="utf-8") == "x", "an accepted delivery was re-sent"
     assert len([m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]) == 1
+
+
+def test_target_db_path_windows_fallback(tmp_path, monkeypatch):
+    from tools import bot_mode_dm
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    root = tmp_path / "AppData" / "Local" / "hermes"
+    monkeypatch.setenv("LOCALAPPDATA", str(root.parent))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert bot_mode_dm._target_db_path("default") == root / "state.db"
+    assert bot_mode_dm._target_db_path("researcher") == root / "profiles" / "researcher" / "state.db"
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom"))
+    assert bot_mode_dm._target_db_path("researcher") == tmp_path / "custom" / "profiles" / "researcher" / "state.db"
