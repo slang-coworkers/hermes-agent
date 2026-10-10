@@ -33,9 +33,11 @@ The transports themselves are unchanged and proven:
   --create-if-missing -Q --query-file <tmp>`` (one turn, reply on stdout)
 - peer teammate   → ``hermes peer dm <peer>[/<name>] < <tmp>``
 
-Both run through ``terminal_tool(background=True, notify_on_complete=True)``
-so the reply lands as a completion notification on the sender's NEXT turn —
-the same wake shape every Bot Mode agent already knows.
+Both run through ``terminal_tool(background=True)`` so the reply lands as a
+completion notification on the sender's NEXT turn — the same wake shape every
+Bot Mode agent already knows. A local delivery returns "sent" only once the
+target's Bot Chat holds the message, and arms that notification only then;
+a peer delivery returns "dispatched".
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -68,6 +71,24 @@ MESSAGE_MAX_CHARS = 16000
 _DM_DIR_NAME = "hermes-dm"
 _DM_STALE_SECONDS = 24 * 60 * 60
 
+# A local delivery is "sent" only once the target's Bot Chat holds the message.
+# The sender waits the target's turn-lock budget plus this slack for the target
+# CLI to start, resolve its Bot Chat, compress and persist the inbound row.
+_DELIVERY_ACK_SLACK_SECONDS = 60
+# After its verdict, the runner waits this long for the sender to arm the
+# completion notification (and remove the signal file) before it may exit.
+_DELIVERY_SIGNAL_HOLD_SECONDS = 30
+_DELIVERY_POLL_SECONDS = 0.25
+_NOTIFY_UNSUPPORTED = (
+    "notify_on_complete / watch_patterns are not available in "
+    "this session — it cannot receive an async completion after "
+    "the turn ends (a one-shot runner such as `hermes -z`, a "
+    "cron job, a Kanban worker, or a stateless HTTP endpoint). "
+    "The process is "
+    "running in the background; retrieve its result with "
+    "process(action='poll') or process(action='wait')."
+)
+
 _PEER_TARGET_RE = re.compile(r"^([a-z0-9][a-z0-9_-]{0,63})/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$")
 _LOCAL_TARGET_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
@@ -83,8 +104,10 @@ def message_agent_tool_schema() -> dict:
                 "agent on a registered peer gateway. This is FIRE-AND-FORGET and "
                 "asynchronous, like texting: it validates the target against the live "
                 "roster, delivers your message into that agent's own Bot Chat with your "
-                "attribution automatically prefixed, and returns immediately with a "
-                "delivery acknowledgement. It does NOT return their reply and you must "
+                "attribution automatically prefixed. A teammate on this install: it "
+                "returns once their Bot Chat holds your message (seconds). A peer-gateway "
+                "agent: it returns 'dispatched' before receipt is confirmed. It does NOT "
+                "return their reply and you must "
                 "not wait or poll for one — send it, finish your turn, and the reply "
                 "arrives later as a background-process completion notification that "
                 "wakes you. COMPOSE the message yourself: write what YOU want to say to "
@@ -488,7 +511,8 @@ def cleanup_bot_dm_cache(
         (temp_root, "hermes-relay-dm-*.txt"),
     ]
     try:
-        locations.append((_dm_dir(), "*.txt"))
+        dm_dir = _dm_dir()
+        locations += [(dm_dir, "*.txt"), (dm_dir, "*.signal"), (dm_dir, "*.signal.tmp")]
     except OSError:
         pass
     for directory, pattern in locations:
@@ -565,6 +589,164 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     return acquire_turn_lock(_hermes_root(home), argv[2])
 
 
+def _target_db_path(profile: str) -> Path:
+    """Use the process home inherited by the selected-profile child CLI."""
+    from hermes_constants import get_process_hermes_home
+
+    root = _hermes_root(get_process_hermes_home())
+    return root / "state.db" if profile == "default" else root / "profiles" / profile / "state.db"
+
+
+def _ack_needle(content: str) -> str:
+    # The -Q query path persists the query text with only lone surrogates replaced.
+    from agent.message_sanitization import _sanitize_surrogates
+
+    return _sanitize_surrogates(content).strip()
+
+
+def _delivery_baseline(db_path: Path) -> int:
+    """Table-wide MAX(messages.id), taken under the target's turn lock.
+
+    0 only when the target has no state.db yet: on an existing database a 0
+    baseline would let an older identical message acknowledge this delivery,
+    so a read failure raises instead.
+    """
+    if not db_path.exists():
+        return 0
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        try:
+            return int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"could not read the target transcript baseline: {exc}") from exc
+
+
+def _ack_seen(db_path: Path, baseline: int, content: str) -> Optional[bool]:
+    """True once the Bot Chat the target CLI resumes holds the whole message.
+
+    Resolves the session exactly as ``-c "Bot Chat"`` does (latest ``Bot Chat
+    #N``, then its compression tip). ``None`` means the transcript could not be
+    read: the message may or may not be there, so it is never a confirmed absence.
+    """
+    if not db_path.exists():
+        return False
+    db = None
+    try:
+        needle = _ack_needle(content)
+        if not needle:
+            return False
+        from hermes_state import SessionDB
+        from tools.bot_mode_probe import BOT_CHAT_TITLE
+
+        db = SessionDB(db_path=db_path, read_only=True)
+        sid = db.resolve_session_by_title(BOT_CHAT_TITLE)
+        if not sid:
+            return False
+        sid = db.get_compression_tip(sid) or sid
+        return any(
+            m.get("role") == "user" and needle in str(m.get("content") or "")
+            for m in db.get_messages(sid, after_id=baseline)
+        )
+    except Exception:
+        logger.debug("delivery ack read failed for %s", db_path, exc_info=True)
+        return None
+    finally:
+        if db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+
+
+def _write_signal(signal_file: str, state: dict) -> None:
+    tmp = f"{signal_file}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, signal_file)
+    except OSError:
+        logger.debug("delivery signal write failed", exc_info=True)
+
+
+def _read_signal(signal_file: str) -> dict:
+    try:
+        with open(signal_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _hold_for_sender(signal_file: str) -> None:
+    """Bounded wait until the sender has consumed the verdict (removed the file)."""
+    deadline = time.monotonic() + _DELIVERY_SIGNAL_HOLD_SECONDS
+    while os.path.exists(signal_file) and time.monotonic() < deadline:
+        time.sleep(_DELIVERY_POLL_SECONDS)
+
+
+def _signal_failed(signal_file: str, error: str, reason: str = "") -> None:
+    from tools.bot_failure_reasons import classify_agent_error
+
+    reason = reason or classify_agent_error(error)
+    _write_signal(signal_file, {
+        "state": "failed",
+        "reason": "delivery_unconfirmed" if reason == "unknown" else reason,
+        "error": error,
+    })
+    _hold_for_sender(signal_file)
+
+
+def _ack_baseline(signal_file: str, db_path: Path, content: str) -> tuple:
+    baseline = _delivery_baseline(db_path)
+    _write_signal(signal_file, {"state": "pending", "baseline": baseline, "db": str(db_path)})
+    return db_path, baseline, content
+
+
+def _run_acked_turn(argv: list[str], signal_file: str, ack: Optional[tuple]):
+    """Run one target turn; with ``ack``, signal ``accepted`` the moment its row lands.
+
+    Returns ``(completed_process, accepted)``. The turn runs on a helper thread
+    (``subprocess.run`` drains both pipes) while this thread polls the target's
+    Bot Chat; the predicate is checked once more after the turn exits, and
+    ``accepted`` is ``None`` when the transcript stayed unreadable by then.
+    """
+    def _run():
+        return subprocess.run(
+            argv, check=False, stdin=subprocess.DEVNULL, capture_output=True, text=True
+        )
+
+    if ack is None:
+        return _run(), False
+    done: list = []
+
+    def _worker():
+        try:
+            done.append(_run())
+        except BaseException as exc:
+            done.append(exc)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    unreadable_after_exit = 0
+    while True:
+        finished = not worker.is_alive()
+        accepted = _ack_seen(*ack)
+        if accepted:
+            _write_signal(signal_file, {"state": "accepted"})
+            break
+        if finished and (accepted is False or unreadable_after_exit >= 2):
+            break
+        if finished:
+            unreadable_after_exit += 1
+        time.sleep(_DELIVERY_POLL_SECONDS)
+    worker.join()
+    if isinstance(done[0], BaseException):
+        raise done[0]
+    return done[0], accepted
+
+
 def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     """Run one DM transport and remove its plaintext file after consumption.
 
@@ -579,7 +761,18 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     compression lever; no fresh session is ever minted. Auth/quota/config
     failures never retry. Peer transports (stdin mode) retry on their own
     gateway's deliver path, not here.
+
+    A sender that created ``<dm_file>.signal`` waits for acceptance. The local
+    branch then reports through it (``pending`` with the under-lock baseline,
+    then ``accepted`` once the target's resumed Bot Chat holds the message, or
+    ``failed``) and holds until the sender has read the verdict. There the
+    retry runs only while the message is confirmed absent: provider 5xx,
+    rate-limit and context-overflow failures surface after turn-start
+    persistence, so such a turn is not re-run, and a transcript that cannot be
+    read is reported as possibly delivered instead of retried.
     """
+    signal_file = f"{dm_file}.signal"
+    acked = not stdin_file and os.path.exists(signal_file)
     try:
         with _delivery_lock(argv, stdin_file=stdin_file):
             if stdin_file:
@@ -587,13 +780,13 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 # after subprocess.run returns, not merely after stdin reaches EOF.
                 with open(dm_file, "r", encoding="utf-8") as stream:
                     return subprocess.run(argv, stdin=stream, check=False).returncode
-            proc = subprocess.run(
-                [*argv, "--query-file", dm_file],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-            )
+            ack = None
+            if acked:
+                with open(dm_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                ack = _ack_baseline(signal_file, _target_db_path(argv[2]), content)
+            query_argv = [*argv, "--query-file", dm_file]
+            proc, accepted = _run_acked_turn(query_argv, signal_file, ack)
             if proc.returncode != 0:
                 from tools.bot_failure_reasons import (
                     RETRY_NONE,
@@ -602,14 +795,12 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 )
 
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
-                if retry_action(classify_agent_error(detail)) != RETRY_NONE:
-                    proc = subprocess.run(
-                        [*argv, "--query-file", dm_file],
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                    )
+                # Only a confirmed absence is retried: a turn that holds the
+                # message, or whose transcript could not be read, is never re-sent.
+                if accepted is False and retry_action(classify_agent_error(detail)) != RETRY_NONE:
+                    if acked:
+                        ack = _ack_baseline(signal_file, ack[0], content)
+                    proc, accepted = _run_acked_turn(query_argv, signal_file, ack)
             # Re-emit the transport's streams: stdout is the reply text the
             # completion notification carries back to the sending agent.
             if proc.stdout:
@@ -618,9 +809,33 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
             if proc.stderr:
                 sys.stderr.write(proc.stderr)
                 sys.stderr.flush()
+            if acked and accepted is None:
+                _signal_failed(
+                    signal_file,
+                    "its acceptance could not be confirmed (the transcript was unreadable after the "
+                    "turn); the message may already be in its Bot Chat, so check before resending",
+                    "delivery_unconfirmed",
+                )
+            elif acked and not accepted:
+                detail = (proc.stderr or proc.stdout or "").strip()[-500:]
+                _signal_failed(
+                    signal_file,
+                    f"target exited {proc.returncode} before its Bot Chat held the message"
+                    + (f": {detail}" if detail else ""),
+                    "" if proc.returncode else "delivery_unconfirmed",
+                )
+            elif acked:
+                _hold_for_sender(signal_file)
             return proc.returncode
+    except Exception as exc:
+        if acked:
+            _signal_failed(signal_file, str(exc), getattr(exc, "reason", ""))
+        raise
     finally:
         _unlink_dm_file(dm_file)
+        if acked:
+            _unlink_dm_file(signal_file)
+            _unlink_dm_file(f"{signal_file}.tmp")
 
 
 def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool) -> str:
@@ -662,9 +877,187 @@ def _start_delivery(
         command,
         label,
         dm_file=dm_file,
+        signal_file=None if stdin_file else f"{dm_file}.signal",
+        ack_content=None if stdin_file else content,
         task_id=task_id,
         agent=agent,
     )
+
+
+def _arm_completion_notify(proc_id: str) -> tuple[bool, str]:
+    """Give an accepted delivery the completion contract ``terminal_tool`` would.
+
+    Mirrors ``terminal_tool``'s notify block (async-delivery refusal, routing
+    fields, gateway watcher). Runs in the sender's own handler context, so the
+    session vars are the ones the spawn saw.
+    """
+    from tools.process_registry import process_registry
+
+    session = process_registry.get(proc_id)
+    if session is None or session.exited:
+        return False, "exited"
+    from gateway.session_context import async_delivery_supported, get_session_env
+
+    if not async_delivery_supported():
+        return False, "notify_unsupported"
+    if get_session_env("HERMES_SESSION_PLATFORM", ""):
+        session.watcher_platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        session.watcher_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        session.watcher_user_id = get_session_env("HERMES_SESSION_USER_ID", "")
+        session.watcher_user_name = get_session_env("HERMES_SESSION_USER_NAME", "")
+        session.watcher_thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
+        session.watcher_message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+        session.parent_session_id = get_session_env("HERMES_SESSION_ID", "")
+    session.notify_on_complete = True
+    if session.watcher_platform:
+        session.watcher_interval = 5
+        process_registry.pending_watchers.append({
+            "session_id": session.id,
+            "check_interval": 5,
+            "session_key": session.session_key,
+            "platform": session.watcher_platform,
+            "chat_id": session.watcher_chat_id,
+            "user_id": session.watcher_user_id,
+            "user_name": session.watcher_user_name,
+            "thread_id": session.watcher_thread_id,
+            "message_id": session.watcher_message_id,
+            "notify_on_complete": True,
+            "parent_session_id": session.parent_session_id,
+        })
+    return True, ""
+
+
+def _await_delivery_ack(proc_id: str, signal_file: str, bound: float) -> dict:
+    """Wait for the runner's verdict: ``accepted`` | ``failed`` | ``exited`` | ``timeout`` | ``cancelled``.
+
+    Non-verdict states carry the last ``baseline``/``db`` the runner published.
+    """
+    from tools.interrupt import is_interrupted
+    from tools.process_registry import process_registry
+
+    deadline = time.monotonic() + bound
+    pending: dict = {}
+    while True:
+        # Exit is sampled before the file, so a verdict written just before exit wins.
+        session = process_registry.get(proc_id)
+        exited = session is None or session.exited
+        state = _read_signal(signal_file)
+        if state.get("state") in ("accepted", "failed"):
+            return state
+        if state.get("state") == "pending":
+            pending = state
+        if exited:
+            return {**pending, "state": "exited", "exit_code": getattr(session, "exit_code", None)}
+        if is_interrupted():
+            return {**pending, "state": "cancelled"}
+        if time.monotonic() >= deadline:
+            return {**pending, "state": "timeout"}
+        time.sleep(_DELIVERY_POLL_SECONDS)
+
+
+def _delivered(proc_id: str, label: str, untracked: str = "") -> str:
+    payload: dict[str, Any] = {
+        "status": "delivered_untracked" if untracked else "sent",
+        "to": label,
+        "detail": (
+            f"Message delivered into {label}'s Bot Chat, but its reply will not arrive as a "
+            "notification in this session; read it in their Bot Chat. Do not resend."
+            if untracked else
+            f"Message delivered into {label}'s Bot Chat; its reply arrives later as a "
+            "completion notification. This is asynchronous — do NOT wait or poll. Finish "
+            "your turn now and relay the reply then, attributed to that agent."
+        ),
+        "process_id": proc_id,
+        "sent_at": int(time.time()),
+    }
+    if untracked:
+        payload["reason"] = untracked
+    if untracked == "notify_unsupported":
+        payload["notify_unsupported"] = _NOTIFY_UNSUPPORTED
+    return json.dumps(payload)
+
+
+def _stop_delivery(proc_id: str) -> bool:
+    """Tree-kill an unaccepted delivery (target CLI included); True once it is down."""
+    from tools.process_registry import process_registry
+
+    try:
+        status = process_registry.kill_process(proc_id, consume_output=True).get("status")
+    except Exception:
+        logger.warning("message_agent could not stop delivery %s", proc_id, exc_info=True)
+        return False
+    return status in ("killed", "already_exited")
+
+
+def _await_local_delivery(
+    proc_id: str, label: str, dm_file: str, signal_file: str, content: str
+) -> str:
+    """Turn the runner's verdict into the tool result; never ``sent`` before acceptance."""
+    from tools import bot_relay
+
+    files = [dm_file, signal_file, f"{signal_file}.tmp"]
+    bound = bot_relay.turn_wait_seconds() + _DELIVERY_ACK_SLACK_SECONDS
+    state = _await_delivery_ack(proc_id, signal_file, bound)
+    verdict = state.get("state")
+    stopped_by = None
+    if verdict in ("timeout", "cancelled"):
+        stopped = _stop_delivery(proc_id)
+        # An acceptance that landed at the bound is still a delivery: never invite a resend.
+        if _read_signal(signal_file).get("state") == "accepted":
+            verdict = "accepted"
+        elif not stopped:
+            # The runner still owns its files.
+            return json.dumps({
+                "error": (
+                    f"Delivery to {label} was not accepted within {int(bound)}s and could "
+                    "not be stopped; it may still be delivered."
+                ),
+                "reason": "delivery_timeout",
+            })
+        else:
+            # The row can land before the runner's next poll writes `accepted`.
+            stopped_by = verdict
+    if verdict == "accepted":
+        armed, why = _arm_completion_notify(proc_id)
+        for path in files if why == "exited" else [signal_file]:
+            _unlink_dm_file(path)
+        return _delivered(proc_id, label, "" if armed else why)
+    if verdict == "failed":
+        if _stop_delivery(proc_id):
+            for path in files:
+                _unlink_dm_file(path)
+        return json.dumps({
+            "error": f"Delivery to {label} failed: {state.get('error') or 'not accepted'}",
+            "reason": state.get("reason") or "delivery_unconfirmed",
+        })
+    for path in files:
+        _unlink_dm_file(path)
+    # The runner is gone without a verdict (killed, stopped, or its hold
+    # expired): re-check acceptance with the baseline it published, if any.
+    if state.get("db") and state.get("baseline") is not None:
+        seen = _ack_seen(Path(state["db"]), int(state["baseline"]), content)
+        if seen:
+            return _delivered(proc_id, label, "exited")
+        if seen is None:
+            return json.dumps({
+                "error": (
+                    f"Delivery to {label} could not be confirmed (its transcript was unreadable); "
+                    f"the message may already be in {label}'s Bot Chat, so check before resending."
+                ),
+                "reason": "delivery_unconfirmed",
+            })
+    if stopped_by:
+        return json.dumps({
+            "error": f"Delivery to {label} was stopped before {label} accepted the message.",
+            "reason": "cancelled" if stopped_by == "cancelled" else "delivery_timeout",
+        })
+    return json.dumps({
+        "error": (
+            f"Delivery to {label} ended before the message was accepted "
+            f"(exit {state.get('exit_code')})."
+        ),
+        "reason": "delivery_unconfirmed",
+    })
 
 
 def _spawn_delivery(
@@ -672,6 +1065,8 @@ def _spawn_delivery(
     label: str,
     *,
     dm_file: Optional[str] = None,
+    signal_file: Optional[str] = None,
+    ack_content: Optional[str] = None,
     task_id: Optional[str],
     agent: Any,
 ) -> str:
@@ -680,15 +1075,24 @@ def _spawn_delivery(
     ``dm_file`` is None for relay deliveries: the waiter command watches a
     reply file, and the envelope artifacts are owned and swept by
     ``tools/bot_relay.py`` — there is no plaintext DM tempfile to reclaim.
+
+    ``signal_file`` (local deliveries only) makes this wait until the target
+    accepted the message, and spawns WITHOUT ``notify_on_complete``: the
+    completion contract is armed only after acceptance, so a delivery that
+    fails before it can never wake the sender later.
     """
     transferred = False
     try:
         from tools.terminal_tool import terminal_tool
 
+        if signal_file:
+            # Created before the spawn: its presence is what opts the runner into
+            # the acceptance protocol. A failed write must abort the delivery.
+            Path(signal_file).write_text('{"state": "spawned"}', encoding="utf-8")
         raw = terminal_tool(
             command,
             background=True,
-            notify_on_complete=True,
+            notify_on_complete=not signal_file,
             task_id=task_id,
             workdir=str(Path(__file__).resolve().parent.parent),
             _host_local=True,
@@ -705,9 +1109,13 @@ def _spawn_delivery(
         # From this point the background runner owns the file and removes it
         # only after the local query-file or peer stdin consumer has finished.
         transferred = True
+        if signal_file:
+            return _await_local_delivery(proc_id, label, dm_file, signal_file, ack_content or "")
         return json.dumps(
             {
-                "status": "sent",
+                # A peer turn runs on the peer gateway with no acceptance seam,
+                # so it is only "dispatched"; a relay envelope is already queued.
+                "status": "dispatched" if dm_file else "sent",
                 "to": label,
                 "detail": (
                     f"Message dispatched to {label}. This is asynchronous — do NOT wait "
@@ -723,8 +1131,10 @@ def _spawn_delivery(
         logger.error("message_agent delivery spawn failed: %s", exc, exc_info=True)
         return _err(f"Delivery to {label} could not be started: {exc}")
     finally:
-        if dm_file and not transferred:
-            _unlink_dm_file(dm_file)
+        if not transferred:
+            for path in (dm_file, signal_file):
+                if path:
+                    _unlink_dm_file(path)
 
 
 def _delivery_main(args: list[str]) -> int:

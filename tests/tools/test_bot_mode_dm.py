@@ -198,8 +198,14 @@ def test_unregistered_peer_rejected(tmp_path):
 # ── delivery command shape ───────────────────────────────────────────────────
 
 
-def _capture_spawn(monkeypatch):
+def _capture_spawn(monkeypatch, armed=None):
+    """Fake the spawn; a local delivery is then accepted at once and armed.
+
+    ``armed`` (optional list) records the process ids ``_arm_completion_notify``
+    was called with.
+    """
     calls = []
+    armed = [] if armed is None else armed
 
     def fake_terminal_tool(command, **kwargs):
         calls.append({"command": command, **kwargs})
@@ -208,6 +214,15 @@ def _capture_spawn(monkeypatch):
     import tools.terminal_tool as terminal_tool_module
 
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", fake_terminal_tool)
+    monkeypatch.setattr(
+        bot_mode_dm, "_await_delivery_ack", lambda *a, **k: {"state": "accepted"}
+    )
+
+    def fake_arm(proc_id):
+        armed.append(proc_id)
+        return True, ""
+
+    monkeypatch.setattr(bot_mode_dm, "_arm_completion_notify", fake_arm)
     return calls
 
 
@@ -218,7 +233,8 @@ def _runner_parts(command):
 
 
 def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
-    calls = _capture_spawn(monkeypatch)
+    armed = []
+    calls = _capture_spawn(monkeypatch, armed)
     home = _managed_home(tmp_path, teammates=("researcher",))
     agent = _FakeAgent(home, title="Bot Chat")
 
@@ -235,12 +251,14 @@ def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     assert result["status"] == "sent"
     assert result["to"] == "@researcher"
     assert result["process_id"] == "proc_test1234"
+    assert "delivered into" in result["detail"]
     assert "do NOT wait" in result["detail"]
 
     assert len(calls) == 1
     call = calls[0]
     assert call["background"] is True
-    assert call["notify_on_complete"] is True
+    assert call["notify_on_complete"] is False
+    assert armed == ["proc_test1234"]
     assert call["_host_local"] is True
     assert Path(call["workdir"]) == Path(bot_mode_dm.__file__).resolve().parent.parent
     command = call["command"]
@@ -289,7 +307,7 @@ def test_peer_delivery_command_pins_registry_profile_for_secondary_bots(
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "dispatched"
     mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
     assert mode == "stdin"
     # The registry the tool validated against is the machine root's — the
@@ -306,7 +324,7 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="spark/researcher", message="ping", agent=agent)
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "dispatched"
     assert "spark" in result["to"]
     mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
     assert mode == "stdin"
@@ -317,7 +335,7 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     result2 = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result2["status"] == "sent"
+    assert result2["status"] == "dispatched"
     mode, _dm_file, transport_argv = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
     assert transport_argv[0] == bot_relay._hermes_cli()
@@ -618,7 +636,8 @@ def test_successful_spawn_transfers_cleanup_to_runner(tmp_path, monkeypatch):
         )
     )
 
-    assert result["status"] == "sent"
+    # a dm_file without a signal file is the peer shape: dispatched, not acked
+    assert result["status"] == "dispatched"
     assert dm_file.exists(), "the parent must not delete before the background runner reads"
 
 

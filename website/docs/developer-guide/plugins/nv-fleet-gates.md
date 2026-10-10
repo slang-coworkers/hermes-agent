@@ -98,6 +98,24 @@ file tools keep the full cross-profile + backend + dangerous-command checks.
   the critique gate consumes. Correlated by `session_id`; a critique recorded for
   one session never unlocks another. A file mutation after a critique **restales**
   it (freshness), re-requiring a critique before the next marked delivery.
+  - **Arguments:** `stage`, optional `task` (the request being critiqued), and
+    `artifacts` — a list of `{"name", "content"}` with the diff or file text
+    itself in `content`. The reviewer runs in the gateway, outside the caller's
+    sandbox, so a path alone is not reviewable. The slash alias
+    `/codex-critique <STAGE> <text>` reviews `<text>` as one artifact.
+  - **Result:** `{"ok": true, "stage", "verdict": "approve" | "must-fix",
+    "findings": [{"location", "problem", "fix"}]}`. A `must-fix` always carries
+    at least one finding; an `approve` may carry advisory ones. The row is
+    recorded for a well-formed verdict of either kind (a critique that ran counts).
+  - **Errors record no row** and carry no `verdict`: `critique_no_artifacts`
+    (no artifact content), `critique_artifacts_too_large` (task + artifacts over
+    `critique_max_chars`), `critique_invalid_reply` (the backend returned no
+    well-formed verdict for this stage, findings included, after one retry),
+    `critique_backend_error` (the backend call raised), `critique_record_failed`
+    (the review ran, but its row could not be written, so the gate stays closed),
+    and, for the slash alias, `critique_no_session`.
+  - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_max_chars`
+    (default `120000`) bounds the characters one critique may send.
 - **`hermes wire add|remove|list`** — administers the fleet-shared wiring edges.
   `add`/`remove` are bidirectional; `add --gated` marks an edge so its traversal
   escalates to the human-approval gate with a stable `rule_key` of the form

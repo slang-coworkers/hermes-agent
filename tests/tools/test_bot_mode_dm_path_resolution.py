@@ -82,6 +82,11 @@ def _capture_spawn(monkeypatch):
     import tools.terminal_tool as terminal_tool_module
 
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", fake_terminal_tool)
+    # a local delivery is accepted at once and armed; only argv resolution is under test
+    monkeypatch.setattr(
+        bot_mode_dm, "_await_delivery_ack", lambda *a, **k: {"state": "accepted"}
+    )
+    monkeypatch.setattr(bot_mode_dm, "_arm_completion_notify", lambda proc_id: (True, ""))
     return calls
 
 
@@ -164,7 +169,7 @@ def test_ac_msg_deliv_2(tmp_path, monkeypatch):
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "dispatched"
     assert len(calls) == 1
 
     _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
