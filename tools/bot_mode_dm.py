@@ -625,11 +625,12 @@ def _delivery_baseline(db_path: Path) -> int:
         raise RuntimeError(f"could not read the target transcript baseline: {exc}") from exc
 
 
-def _ack_seen(db_path: Path, baseline: int, content: str) -> bool:
+def _ack_seen(db_path: Path, baseline: int, content: str) -> Optional[bool]:
     """True once the Bot Chat the target CLI resumes holds the whole message.
 
     Resolves the session exactly as ``-c "Bot Chat"`` does (latest ``Bot Chat
-    #N``, then its compression tip). A read error means "not seen yet".
+    #N``, then its compression tip). ``None`` means the transcript could not be
+    read: the message may or may not be there, so it is never a confirmed absence.
     """
     if not db_path.exists():
         return False
@@ -651,7 +652,8 @@ def _ack_seen(db_path: Path, baseline: int, content: str) -> bool:
             for m in db.get_messages(sid, after_id=baseline)
         )
     except Exception:
-        return False
+        logger.debug("delivery ack read failed for %s", db_path, exc_info=True)
+        return None
     finally:
         if db is not None:
             with contextlib.suppress(Exception):
@@ -707,7 +709,8 @@ def _run_acked_turn(argv: list[str], signal_file: str, ack: Optional[tuple]):
 
     Returns ``(completed_process, accepted)``. The turn runs on a helper thread
     (``subprocess.run`` drains both pipes) while this thread polls the target's
-    Bot Chat; the predicate is checked once more after the turn exits.
+    Bot Chat; the predicate is checked once more after the turn exits, and
+    ``accepted`` is ``None`` when the transcript stayed unreadable by then.
     """
     def _run():
         return subprocess.run(
@@ -726,16 +729,18 @@ def _run_acked_turn(argv: list[str], signal_file: str, ack: Optional[tuple]):
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
-    accepted = False
-    while not accepted:
+    unreadable_after_exit = 0
+    while True:
         finished = not worker.is_alive()
-        if _ack_seen(*ack):
+        accepted = _ack_seen(*ack)
+        if accepted:
             _write_signal(signal_file, {"state": "accepted"})
-            accepted = True
-        elif finished:
             break
-        else:
-            time.sleep(_DELIVERY_POLL_SECONDS)
+        if finished and (accepted is False or unreadable_after_exit >= 2):
+            break
+        if finished:
+            unreadable_after_exit += 1
+        time.sleep(_DELIVERY_POLL_SECONDS)
     worker.join()
     if isinstance(done[0], BaseException):
         raise done[0]
@@ -760,7 +765,11 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     A sender that created ``<dm_file>.signal`` waits for acceptance. The local
     branch then reports through it (``pending`` with the under-lock baseline,
     then ``accepted`` once the target's resumed Bot Chat holds the message, or
-    ``failed``) and holds until the sender has read the verdict.
+    ``failed``) and holds until the sender has read the verdict. There the
+    retry runs only while the message is confirmed absent: provider 5xx,
+    rate-limit and context-overflow failures surface after turn-start
+    persistence, so such a turn is not re-run, and a transcript that cannot be
+    read is reported as possibly delivered instead of retried.
     """
     signal_file = f"{dm_file}.signal"
     acked = not stdin_file and os.path.exists(signal_file)
@@ -786,8 +795,9 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 )
 
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
-                # A turn that already holds the message is never re-sent.
-                if not accepted and retry_action(classify_agent_error(detail)) != RETRY_NONE:
+                # Only a confirmed absence is retried: a turn that holds the
+                # message, or whose transcript could not be read, is never re-sent.
+                if accepted is False and retry_action(classify_agent_error(detail)) != RETRY_NONE:
                     if acked:
                         ack = _ack_baseline(signal_file, ack[0], content)
                     proc, accepted = _run_acked_turn(query_argv, signal_file, ack)
@@ -799,7 +809,14 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
             if proc.stderr:
                 sys.stderr.write(proc.stderr)
                 sys.stderr.flush()
-            if acked and not accepted:
+            if acked and accepted is None:
+                _signal_failed(
+                    signal_file,
+                    "its acceptance could not be confirmed (the transcript was unreadable after the "
+                    "turn); the message may already be in its Bot Chat, so check before resending",
+                    "delivery_unconfirmed",
+                )
+            elif acked and not accepted:
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
                 _signal_failed(
                     signal_file,
@@ -982,6 +999,7 @@ def _await_local_delivery(
     bound = bot_relay.turn_wait_seconds() + _DELIVERY_ACK_SLACK_SECONDS
     state = _await_delivery_ack(proc_id, signal_file, bound)
     verdict = state.get("state")
+    stopped_by = None
     if verdict in ("timeout", "cancelled"):
         stopped = _stop_delivery(proc_id)
         # An acceptance that landed at the bound is still a delivery: never invite a resend.
@@ -997,12 +1015,8 @@ def _await_local_delivery(
                 "reason": "delivery_timeout",
             })
         else:
-            for path in files:
-                _unlink_dm_file(path)
-            return json.dumps({
-                "error": f"Delivery to {label} was stopped before {label} accepted the message.",
-                "reason": "cancelled" if verdict == "cancelled" else "delivery_timeout",
-            })
+            # The row can land before the runner's next poll writes `accepted`.
+            stopped_by = verdict
     if verdict == "accepted":
         armed, why = _arm_completion_notify(proc_id)
         for path in files if why == "exited" else [signal_file]:
@@ -1018,11 +1032,25 @@ def _await_local_delivery(
         })
     for path in files:
         _unlink_dm_file(path)
-    # The runner is gone without a verdict (killed, or its hold expired):
-    # re-check acceptance with the baseline it published, if any.
+    # The runner is gone without a verdict (killed, stopped, or its hold
+    # expired): re-check acceptance with the baseline it published, if any.
     if state.get("db") and state.get("baseline") is not None:
-        if _ack_seen(Path(state["db"]), int(state["baseline"]), content):
+        seen = _ack_seen(Path(state["db"]), int(state["baseline"]), content)
+        if seen:
             return _delivered(proc_id, label, "exited")
+        if seen is None:
+            return json.dumps({
+                "error": (
+                    f"Delivery to {label} could not be confirmed (its transcript was unreadable); "
+                    f"the message may already be in {label}'s Bot Chat, so check before resending."
+                ),
+                "reason": "delivery_unconfirmed",
+            })
+    if stopped_by:
+        return json.dumps({
+            "error": f"Delivery to {label} was stopped before {label} accepted the message.",
+            "reason": "cancelled" if stopped_by == "cancelled" else "delivery_timeout",
+        })
     return json.dumps({
         "error": (
             f"Delivery to {label} ended before the message was accepted "

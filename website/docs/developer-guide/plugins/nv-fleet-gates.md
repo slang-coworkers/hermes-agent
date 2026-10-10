@@ -111,8 +111,9 @@ file tools keep the full cross-profile + backend + dangerous-command checks.
     (no artifact content), `critique_artifacts_too_large` (task + artifacts over
     `critique_max_chars`), `critique_invalid_reply` (the backend returned no
     well-formed verdict for this stage, findings included, after one retry),
-    `critique_backend_error` (the backend call raised), and, for the slash alias,
-    `critique_no_session`.
+    `critique_backend_error` (the backend call raised), `critique_record_failed`
+    (the review ran, but its row could not be written, so the gate stays closed),
+    and, for the slash alias, `critique_no_session`.
   - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_max_chars`
     (default `120000`) bounds the characters one critique may send.
 - **`hermes wire add|remove|list`** — administers the fleet-shared wiring edges.

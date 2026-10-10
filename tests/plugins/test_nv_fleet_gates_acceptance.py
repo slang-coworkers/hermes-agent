@@ -546,3 +546,31 @@ def test_codex_critique_sends_every_artifact_including_empty_ones(tmp_path, monk
     blank = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
         {"name": "a", "content": ""}, {"name": "b", "content": "  \n"}]}, session_id="sess-1"))
     assert blank["reason"] == "critique_no_artifacts" and seen == []
+
+
+@pytest.mark.parametrize("path", ["tool", "slash"])
+def test_codex_critique_record_failure_is_an_error_without_verdict(tmp_path, monkeypatch, path):
+    """A critique row that cannot be recorded is ok:false critique_record_failed, no verdict, gate still blocked."""
+    import sqlite3
+
+    from model_tools import _run_async
+    manager, _, _ = _load(tmp_path, monkeypatch)
+    loaded = _loaded(manager)
+    _wire(manager, "add", "worker-a", "orch")
+
+    def _raise(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(loaded.module.stores, "record_critique", _raise)
+    _run_critique(monkeypatch, "sR")                     # installs the stubbed backend
+    if path == "tool":
+        out = json.loads(registry.dispatch("codex_critique", {
+            "stage": "OUTPUT_REVIEW", "artifacts": [{"name": "diff", "content": "x"}]}, session_id="sR"))
+    else:
+        handler = manager._plugin_commands["codex-critique"]["handler"]
+        out = json.loads(_run_async(handler("OUTPUT_REVIEW the drafted reply", session_id="sR")))
+    assert out.get("ok") is False, out
+    assert out.get("reason") == "critique_record_failed", out
+    assert "verdict" not in out, out
+    msg = {"target": "orch", "message": "[Review Verdict] APPROVE"}
+    assert _act(_gate(manager, "message_agent", msg, session_id="sR")) == "block"

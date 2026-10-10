@@ -244,6 +244,8 @@ def test_exit_before_acceptance_is_an_inline_error(fleet, how):
     out = fleet.send()
     assert out.get("status") != "sent", out
     assert "error" in out, out
+    if how == "runner_killed":
+        assert not _pid_alive(int(fleet.pidfile.read_text(encoding="utf-8"))), "the tree-kill must reach the target"
     if how == "target_exit0_unpersisted":
         assert out.get("reason") == "delivery_unconfirmed", out
     _no_autonomous_completion(fleet.registry, _delivery_sessions(fleet.registry)[-1]["session_id"])
@@ -508,3 +510,117 @@ def test_target_db_path_windows_fallback(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom"))
     assert bot_mode_dm._target_db_path("researcher") == tmp_path / "custom" / "profiles" / "researcher" / "state.db"
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("how", ["timeout", "cancelled"])
+def test_stopped_delivery_whose_row_landed_is_delivered_untracked(fleet, monkeypatch, how):
+    """A delivery stopped at the bound or on an interrupt whose row already landed is delivered_untracked, never an error."""
+    import threading
+
+    from tools import bot_mode_dm
+    fleet.configure(mode="accept", pre=1.5, post=30.0)
+
+    def _block_accepted_write():
+        # The runner's `accepted` write goes through <signal>.tmp; a directory there makes it fail,
+        # which is the window between the row landing and the next poll, held open.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for sig in fleet.dm_dir.glob("*.signal"):
+                if '"pending"' in sig.read_text(encoding="utf-8"):
+                    Path(f"{sig}.tmp").mkdir()
+                    return
+            time.sleep(0.02)
+
+    threading.Thread(target=_block_accepted_write, daemon=True).start()
+    real_await = bot_mode_dm._await_delivery_ack
+
+    def _await_after_row(proc_id, signal_file, bound):
+        deadline = time.monotonic() + 20
+        while not fleet.accepted.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        if how == "cancelled":
+            monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: True)
+            return real_await(proc_id, signal_file, bound)
+        return real_await(proc_id, signal_file, 0)
+
+    monkeypatch.setattr(bot_mode_dm, "_await_delivery_ack", _await_after_row)
+    out = fleet.send()
+    assert fleet.accepted.exists(), "the target never persisted the row"
+    assert out.get("status") == "delivered_untracked", out
+    assert "error" not in out, out
+    assert fleet.registry.get(out["process_id"]).exited
+    assert len([m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]) == 1
+
+
+_READ_FAIL_SHIM = textwrap.dedent('''\
+    import os, sys
+    _MARKER = {marker!r}
+
+    class _Finder:
+        def find_spec(self, name, path=None, target=None):
+            if name != "hermes_state":
+                return None
+            for finder in sys.meta_path:
+                if finder is self or not hasattr(finder, "find_spec"):
+                    continue
+                spec = finder.find_spec(name, path, target)
+                if spec is not None and spec.loader is not None:
+                    break
+            else:
+                return None
+            exec_module = spec.loader.exec_module
+
+            def _exec(module):
+                exec_module(module)
+                init = module.SessionDB.__init__
+
+                def __init__(self, *a, **k):
+                    if k.get("read_only") and os.path.exists(_MARKER):
+                        import sqlite3
+                        raise sqlite3.OperationalError("injected: database is locked")
+                    init(self, *a, **k)
+
+                module.SessionDB.__init__ = __init__
+
+            spec.loader.exec_module = _exec
+            return spec
+
+    sys.meta_path.insert(0, _Finder())
+''')
+
+
+@pytest.mark.linux_only
+def test_unreadable_ack_does_not_redeliver(fleet, tmp_path, monkeypatch):
+    """A persisted row whose acceptance cannot be read is never retried: one invocation, one row, possibly-delivered error."""
+    import pathlib
+    marker = tmp_path / "acks-unreadable"
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "sitecustomize.py").write_text(_READ_FAIL_SHIM.format(marker=str(marker)), encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(shim))
+    fake = pathlib.Path(fleet.bot_relay._hermes_cli())
+    wrapper = fake.with_name("hermes-unreadable-then-503")
+    count = fake.with_name("invocations.txt")
+    wrapper.write_text(textwrap.dedent(f'''\
+        #!{sys.executable}
+        import os, subprocess, sys
+        with open({str(count)!r}, "a", encoding="utf-8") as f:
+            f.write("x")
+        if os.path.getsize({str(count)!r}) == 1:
+            open({str(marker)!r}, "w", encoding="utf-8").close()
+            subprocess.run([{str(fake)!r}, *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        print("Error code: 503 - server error - overloaded", file=sys.stderr)
+        sys.exit(1)
+    '''), encoding="utf-8")
+    wrapper.chmod(0o755)
+    fleet.bot_relay._hermes_cli = lambda: str(wrapper)
+    fleet.configure(mode="accept", pre=0.2, post=0.0)
+    out = fleet.send()
+    assert count.exists(), out
+    assert count.read_text(encoding="utf-8") == "x", "an unconfirmed delivery was re-sent"
+    assert len([m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]) == 1
+    assert out.get("status") != "sent", out
+    assert out.get("reason") == "delivery_unconfirmed", out
+    assert "may already" in out.get("error", ""), out

@@ -613,7 +613,11 @@ def register(ctx) -> None:
                 if session_id:
                     # A well-formed critique HAVING RUN (not its verdict) is what the
                     # gate requires, porting NanoClaw's edits_since_critique==0 invariant.
-                    stores.record_critique(session_id, stage)
+                    try:
+                        stores.record_critique(session_id, stage)
+                    except Exception as exc:
+                        logger.warning("codex_critique could not record the critique row", exc_info=True)
+                        return _critique_error("critique_record_failed", str(exc), stage, session_id)
                 return json.dumps({
                     "ok": True, "session_id": session_id, "stage": stage,
                     "verdict": verdict, "findings": findings,
