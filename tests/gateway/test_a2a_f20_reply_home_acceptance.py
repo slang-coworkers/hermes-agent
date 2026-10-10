@@ -89,7 +89,6 @@ def _capture_spawn(monkeypatch, tmp_path):
     # keep DM temp files inside pytest's tmp_path (auto-cleaned) instead of the
     # shared /tmp/hermes-dm dir — the faked terminal_tool never consumes them.
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
-    # the faked target accepts at once; arming is recorded on calls.armed
     calls.armed = []
     monkeypatch.setattr(
         bot_mode_dm, "_await_delivery_ack", lambda *a, **k: {"state": "accepted"}

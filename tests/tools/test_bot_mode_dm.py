@@ -257,7 +257,6 @@ def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     assert len(calls) == 1
     call = calls[0]
     assert call["background"] is True
-    # notify is armed only after the target accepted, never at spawn
     assert call["notify_on_complete"] is False
     assert armed == ["proc_test1234"]
     assert call["_host_local"] is True
