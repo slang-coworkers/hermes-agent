@@ -23,6 +23,7 @@ no network, nothing under ``~/.hermes``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 from pathlib import Path
@@ -520,3 +521,28 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
     assert _act(_gate(manager, "terminal", {"command": "rm -rf /"})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "ls"})) != "block"
     assert calls["env"] >= 1
+
+
+def test_codex_critique_sends_every_artifact_including_empty_ones(tmp_path, monkeypatch):
+    """An empty file is reviewable context next to a non-blank artifact; blank-only is refused."""
+    import agent.plugin_llm as plugin_llm
+    _load(tmp_path, monkeypatch)
+    seen = []
+
+    async def _fake(self, **kw):
+        seen.append("\n".join(str(b.get("text")) for b in kw.get("input") or []))
+        return plugin_llm.PluginLlmStructuredResult(
+            text="{}", provider="t", model="t", agent_id="t",
+            parsed={"verdict": "approve", "stage": "OUTPUT_REVIEW", "findings": []},
+            content_type="json")
+
+    monkeypatch.setattr(plugin_llm.PluginLlm, "acomplete_structured", _fake, raising=False)
+    out = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "EMPTY_INIT_PY", "content": ""}, {"name": "diff", "content": "x = 1"}]},
+        session_id="sess-1"))
+    assert out["ok"] is True
+    assert "EMPTY_INIT_PY" in seen[0] and "x = 1" in seen[0]
+    seen.clear()
+    blank = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "a", "content": ""}, {"name": "b", "content": "  \n"}]}, session_id="sess-1"))
+    assert blank["reason"] == "critique_no_artifacts" and seen == []

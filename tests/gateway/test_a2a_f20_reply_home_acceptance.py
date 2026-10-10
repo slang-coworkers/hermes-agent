@@ -131,8 +131,7 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
     # completion notification on the sender's next turn, not synchronously;
     # task_id is the origin id passed through to terminal_tool (route-home keys
     # on the queued event's session_key — see test_ac_a2a_f20_3), and arming
-    # reads the spawn's own session_key. A mutant dropping any of the three
-    # flips this test.
+    # reads the spawn's own session_key.
     assert call["background"] is True
     assert call["notify_on_complete"] is False
     assert calls.armed == ["proc_test1234"]

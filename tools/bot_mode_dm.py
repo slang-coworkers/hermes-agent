@@ -104,8 +104,10 @@ def message_agent_tool_schema() -> dict:
                 "agent on a registered peer gateway. This is FIRE-AND-FORGET and "
                 "asynchronous, like texting: it validates the target against the live "
                 "roster, delivers your message into that agent's own Bot Chat with your "
-                "attribution automatically prefixed, and returns once the teammate has "
-                "received the message (seconds). It does NOT return their reply and you must "
+                "attribution automatically prefixed. A teammate on this install: it "
+                "returns once their Bot Chat holds your message (seconds). A peer-gateway "
+                "agent: it returns 'dispatched' before receipt is confirmed. It does NOT "
+                "return their reply and you must "
                 "not wait or poll for one — send it, finish your turn, and the reply "
                 "arrives later as a background-process completion notification that "
                 "wakes you. COMPOSE the message yourself: write what YOU want to say to "
@@ -782,13 +784,11 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 )
 
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
-                if retry_action(classify_agent_error(detail)) != RETRY_NONE:
-                    if acked and not accepted:
+                # A turn that already holds the message is never re-sent.
+                if not accepted and retry_action(classify_agent_error(detail)) != RETRY_NONE:
+                    if acked:
                         ack = _ack_baseline(signal_file, ack[0], content)
-                    proc, again = _run_acked_turn(
-                        query_argv, signal_file, None if accepted else ack
-                    )
-                    accepted = accepted or again
+                    proc, accepted = _run_acked_turn(query_argv, signal_file, ack)
             # Re-emit the transport's streams: stdout is the reply text the
             # completion notification carries back to the sending agent.
             if proc.stdout:
@@ -798,7 +798,6 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 sys.stderr.write(proc.stderr)
                 sys.stderr.flush()
             if acked and not accepted:
-                # An exit-0 turn that never persisted the message failed too.
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
                 _signal_failed(
                     signal_file,

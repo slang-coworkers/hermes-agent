@@ -232,18 +232,15 @@ _CRITIQUE_INSTRUCTIONS = (
 
 
 def _critique_artifacts(raw) -> list:
-    """Keep only ``{name, content}`` entries whose content is non-blank text.
+    """Keep the ``{name, content}`` entries that carry text content.
 
     The reviewer runs in the gateway, outside the caller's sandbox, so a path
     alone is not something it can read.
     """
     out = []
     for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if isinstance(content, str) and content.strip():
-            out.append({"name": str(item.get("name") or "artifact"), "content": content})
+        if isinstance(item, dict) and isinstance(item.get("content"), str):
+            out.append({"name": str(item.get("name") or "artifact"), "content": item["content"]})
     return out
 
 
@@ -581,7 +578,7 @@ def register(ctx) -> None:
         """Review inline artifacts; record the gate row only for a well-formed verdict."""
         task = task if isinstance(task, str) else ""
         artifacts = _critique_artifacts(artifacts)
-        if not artifacts:
+        if not any(a["content"].strip() for a in artifacts):
             return _critique_error(
                 "critique_no_artifacts",
                 "pass the diff or file text inline as artifacts=[{name, content}]; "

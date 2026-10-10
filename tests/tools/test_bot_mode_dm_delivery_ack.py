@@ -465,3 +465,32 @@ def test_unreadable_baseline_fails_closed_before_the_target_runs(fleet, monkeypa
     assert out.get("status") != "sent", out
     assert "baseline" in out.get("error", ""), out
     assert not fleet.pidfile.exists(), "the target must not run without a baseline"
+
+
+@pytest.mark.linux_only
+def test_accepted_retryable_failure_does_not_redeliver(fleet):
+    """A target that persisted the message and then failed retryably is never re-run."""
+    import pathlib
+    fake = pathlib.Path(fleet.bot_relay._hermes_cli())
+    wrapper = fake.with_name("hermes-accept-then-503")
+    count = fake.with_name("invocations.txt")
+    wrapper.write_text(textwrap.dedent(f'''\
+        #!{sys.executable}
+        import os, subprocess, sys
+        with open({str(count)!r}, "a", encoding="utf-8") as f:
+            f.write("x")
+        subprocess.run([{str(fake)!r}, *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        print("Error code: 503 - server error - overloaded", file=sys.stderr)
+        sys.exit(1)
+    '''), encoding="utf-8")
+    wrapper.chmod(0o755)
+    fleet.bot_relay._hermes_cli = lambda: str(wrapper)
+    fleet.configure(mode="accept", pre=0.2, post=0.0)
+    out = fleet.send()
+    assert out.get("status") == "sent", out
+    proc_id = out["process_id"]
+    deadline = time.monotonic() + 20
+    while not fleet.registry.get(proc_id).exited and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert count.read_text(encoding="utf-8") == "x", "an accepted delivery was re-sent"
+    assert len([m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]) == 1
