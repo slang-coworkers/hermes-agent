@@ -479,32 +479,45 @@ def test_ac_fleet_f62_g_10(fleet):
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("how", ["target_exits", "target_exit0_unpersisted", "runner_killed"])
-def test_ac_fleet_f62_g_11(fleet, how):
+def test_ac_fleet_f62_g_11(fleet, how, monkeypatch):
     """A local delivery whose target exits before accepting the message (non-zero, or zero without persisting it), or whose runner is killed before acceptance, returns an error (no status sent), queues no autonomous completion, and the target transcript holds no copy of the message."""
     import threading
+    from tools import bot_mode_dm
+    before = {s["session_id"] for s in _delivery_sessions(fleet.registry)}
+    killed, killer = [], None
     if how == "target_exits":
         fleet.configure(mode="exit3")
     elif how == "target_exit0_unpersisted":
         fleet.configure(mode="exit0_unpersisted")
     else:
-        fleet.configure(mode="accept", pre=6.0)
+        # the bound outlasts the kill window, so a missed kill cannot pass as delivery_timeout
+        monkeypatch.setattr(bot_mode_dm, "_DELIVERY_ACK_SLACK_SECONDS", 60, raising=False)
+        fleet.configure(mode="accept", pre=30.0)
 
         def _kill_runner():
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 25                        # slow target start-up on a loaded host
             while time.monotonic() < deadline:
-                live = [s for s in _delivery_sessions(fleet.registry) if s.get("status") == "running"]
+                live = [s for s in _delivery_sessions(fleet.registry)
+                        if s["session_id"] not in before and s.get("status") == "running"]
                 if live and fleet.pidfile.exists():
-                    fleet.registry.kill_process(live[-1]["session_id"], consume_output=False)
+                    killed.append(fleet.registry.kill_process(live[0]["session_id"], consume_output=False))
                     return
                 time.sleep(0.1)
 
-        threading.Thread(target=_kill_runner, daemon=True).start()
+        killer = threading.Thread(target=_kill_runner, daemon=True)
+        killer.start()
     out = fleet.send()
+    if killer is not None:
+        killer.join(timeout=30)                 # the sender can see the exit before kill_process returns
+        assert killed and killed[0].get("status") == "killed", killed
+        assert out.get("reason") != "delivery_timeout", out
     assert out.get("status") != "sent", out
     assert "error" in out, out
     if how == "target_exit0_unpersisted":
         assert out.get("reason") == "delivery_unconfirmed", out
-    _no_autonomous_completion(fleet.registry, _delivery_sessions(fleet.registry)[-1]["session_id"])
+    new = [s["session_id"] for s in _delivery_sessions(fleet.registry) if s["session_id"] not in before]
+    assert len(new) == 1, new
+    _no_autonomous_completion(fleet.registry, new[0])
     time.sleep(1.0)
     assert _no_payload(fleet)
 
