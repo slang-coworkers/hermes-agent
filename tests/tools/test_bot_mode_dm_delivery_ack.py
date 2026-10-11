@@ -624,3 +624,81 @@ def test_unreadable_ack_does_not_redeliver(fleet, tmp_path, monkeypatch):
     assert out.get("status") != "sent", out
     assert out.get("reason") == "delivery_unconfirmed", out
     assert "may already" in out.get("error", ""), out
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("row", ["present", "absent"])
+@pytest.mark.parametrize("how", ["timeout", "cancelled"])
+def test_baseline_first_seen_after_the_stop_is_rechecked(fleet, monkeypatch, how, row):
+    """A baseline first published after the sender's last poll still gets the re-check after a stop."""
+    import json as _json
+    import threading
+
+    from tools import bot_mode_dm
+    fleet.configure(mode="accept", pre=1.5 if row == "present" else 30.0, post=30.0)
+    blocked = threading.Event()
+    polled = threading.Event()
+    results = []
+    (fleet.root / "config.yaml").write_text(
+        yaml.safe_dump({"bot_mode": {"turn_wait_seconds": 30}}), encoding="utf-8")
+
+    def _signal_state():
+        for sig in fleet.dm_dir.glob("*.signal"):
+            try:
+                return _json.loads(sig.read_text(encoding="utf-8")).get("state"), sig
+            except (OSError, ValueError):
+                return None, sig
+        return None, None
+
+    def _block_accepted_write():
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            state, sig = _signal_state()
+            if state == "pending":
+                Path(f"{sig}.tmp").mkdir()
+                blocked.set()
+                return
+            time.sleep(0.02)
+
+    threading.Thread(target=_block_accepted_write, daemon=True).start()
+
+    def _last_poll_saw_only_spawned(proc_id, signal_file, bound):
+        assert bot_mode_dm._read_signal(signal_file) == {"state": "spawned"}
+        polled.set()
+        assert blocked.wait(20), "the runner never published pending"
+        if row == "present":
+            deadline = time.monotonic() + 20
+            while not fleet.accepted.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.5)
+        return {"state": how}
+
+    monkeypatch.setattr(bot_mode_dm, "_await_delivery_ack", _last_poll_saw_only_spawned)
+
+    def _send():
+        try:
+            results.append(fleet.send())
+        except BaseException as exc:  # surfaced on the test thread below
+            results.append(exc)
+
+    # Holding the target's turn lock keeps the runner from publishing `pending`
+    # until the sender's last poll has read `spawned`.
+    with fleet.bot_relay.acquire_turn_lock(fleet.root, "researcher", timeout_seconds=0):
+        sender = threading.Thread(target=_send, daemon=True)
+        sender.start()
+        assert polled.wait(20), "the sender never polled spawned"
+    sender.join(60)
+    assert not sender.is_alive()
+    out = results[0]
+    if isinstance(out, BaseException):
+        raise out
+    payload = [m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]
+    if row == "present":
+        assert out.get("status") == "delivered_untracked", out
+        assert "error" not in out, out
+        assert len(payload) == 1
+    else:
+        assert "status" not in out, out
+        assert out.get("reason") == ("cancelled" if how == "cancelled" else "delivery_timeout"), out
+        assert payload == []
+    assert fleet.registry.get(out.get("process_id") or _delivery_sessions(fleet.registry)[-1]["session_id"]).exited

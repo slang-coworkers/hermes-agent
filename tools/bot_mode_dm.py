@@ -1002,8 +1002,9 @@ def _await_local_delivery(
     stopped_by = None
     if verdict in ("timeout", "cancelled"):
         stopped = _stop_delivery(proc_id)
+        latest = _read_signal(signal_file)
         # An acceptance that landed at the bound is still a delivery: never invite a resend.
-        if _read_signal(signal_file).get("state") == "accepted":
+        if latest.get("state") == "accepted":
             verdict = "accepted"
         elif not stopped:
             # The runner still owns its files.
@@ -1015,7 +1016,10 @@ def _await_local_delivery(
                 "reason": "delivery_timeout",
             })
         else:
-            # The row can land before the runner's next poll writes `accepted`.
+            # The row can land before the runner's next poll writes `accepted`, and
+            # its baseline can first be published after the sender's last poll.
+            if latest.get("state") == "pending":
+                state = latest
             stopped_by = verdict
     if verdict == "accepted":
         armed, why = _arm_completion_notify(proc_id)
