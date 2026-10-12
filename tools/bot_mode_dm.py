@@ -710,7 +710,9 @@ def _run_acked_turn(argv: list[str], signal_file: str, ack: Optional[tuple]):
     Returns ``(completed_process, accepted)``. The turn runs on a helper thread
     (``subprocess.run`` drains both pipes) while this thread polls the target's
     Bot Chat; the predicate is checked once more after the turn exits, and
-    ``accepted`` is ``None`` when the transcript stayed unreadable by then.
+    ``accepted`` is ``None`` when the transcript stayed unreadable by then. A
+    worker exception is raised only on a confirmed absence; otherwise it is
+    returned as a failed turn so the message is never reported undelivered.
     """
     def _run():
         return subprocess.run(
@@ -743,7 +745,10 @@ def _run_acked_turn(argv: list[str], signal_file: str, ack: Optional[tuple]):
         time.sleep(_DELIVERY_POLL_SECONDS)
     worker.join()
     if isinstance(done[0], BaseException):
-        raise done[0]
+        if accepted is False:
+            raise done[0]
+        error = f"{type(done[0]).__name__}: {done[0]}"
+        return subprocess.CompletedProcess(argv, 1, "", error), accepted
     return done[0], accepted
 
 
@@ -773,6 +778,11 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     """
     signal_file = f"{dm_file}.signal"
     acked = not stdin_file and os.path.exists(signal_file)
+    accepted = False
+    unconfirmed = (
+        "its acceptance could not be confirmed (the transcript was unreadable after the "
+        "turn); the message may already be in its Bot Chat, so check before resending"
+    )
     try:
         with _delivery_lock(argv, stdin_file=stdin_file):
             if stdin_file:
@@ -810,12 +820,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 sys.stderr.write(proc.stderr)
                 sys.stderr.flush()
             if acked and accepted is None:
-                _signal_failed(
-                    signal_file,
-                    "its acceptance could not be confirmed (the transcript was unreadable after the "
-                    "turn); the message may already be in its Bot Chat, so check before resending",
-                    "delivery_unconfirmed",
-                )
+                _signal_failed(signal_file, unconfirmed, "delivery_unconfirmed")
             elif acked and not accepted:
                 detail = (proc.stderr or proc.stdout or "").strip()[-500:]
                 _signal_failed(
@@ -828,7 +833,13 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 _hold_for_sender(signal_file)
             return proc.returncode
     except Exception as exc:
-        if acked:
+        if acked and accepted:
+            _hold_for_sender(signal_file)
+        elif acked and accepted is None:
+            _signal_failed(
+                signal_file, f"{unconfirmed} ({type(exc).__name__}: {exc})", "delivery_unconfirmed"
+            )
+        elif acked:
             _signal_failed(signal_file, str(exc), getattr(exc, "reason", ""))
         raise
     finally:

@@ -702,3 +702,102 @@ def test_baseline_first_seen_after_the_stop_is_rechecked(fleet, monkeypatch, how
         assert out.get("reason") == ("cancelled" if how == "cancelled" else "delivery_timeout"), out
         assert payload == []
     assert fleet.registry.get(out.get("process_id") or _delivery_sessions(fleet.registry)[-1]["session_id"]).exited
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("ack", ["accepted", "unreadable"])
+def test_worker_error_after_acceptance_keeps_the_delivery(fleet, tmp_path, monkeypatch, ack):
+    """A turn that persists the message and then emits undecodable output keeps its delivery: never re-sent, never reported undelivered."""
+    import pathlib
+
+    from tools import bot_mode_dm
+    marker = tmp_path / "acks-unreadable"
+    if ack == "unreadable":
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        (shim / "sitecustomize.py").write_text(_READ_FAIL_SHIM.format(marker=str(marker)), encoding="utf-8")
+        monkeypatch.setenv("PYTHONPATH", str(shim))
+    fake = pathlib.Path(fleet.bot_relay._hermes_cli())
+    wrapper = fake.with_name("hermes-accept-then-bad-utf8")
+    count = fake.with_name("invocations.txt")
+    wrapper.write_text(textwrap.dedent(f'''\
+        #!{sys.executable}
+        import subprocess, sys
+        with open({str(count)!r}, "a", encoding="utf-8") as f:
+            f.write("x")
+        if {ack == "unreadable"!r}:
+            open({str(marker)!r}, "w", encoding="utf-8").close()
+        subprocess.run([{str(fake)!r}, *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        sys.stdout.buffer.write(b"REPLY \\xff\\xfe\\n")
+        sys.stdout.flush()
+    '''), encoding="utf-8")
+    wrapper.chmod(0o755)
+    fleet.bot_relay._hermes_cli = lambda: str(wrapper)
+    fleet.configure(mode="accept", pre=0.2, post=0.0)
+    real_await = bot_mode_dm._await_delivery_ack
+
+    def _await_after_the_worker(proc_id, signal_file, bound):
+        # Read the verdict only once the runner has handled the worker's result.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if bot_mode_dm._read_signal(signal_file).get("state") == "failed":
+                break
+            if "UnicodeDecodeError" in (fleet.registry.get(proc_id).output_buffer or ""):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the runner never handled the worker's result")
+        return real_await(proc_id, signal_file, bound)
+
+    monkeypatch.setattr(bot_mode_dm, "_await_delivery_ack", _await_after_the_worker)
+    out = fleet.send()
+    assert count.read_text(encoding="utf-8") == "x", "a delivered message was re-sent"
+    assert len([m for m in fleet.transcript() if "PAYLOAD_F62G" in (m.get("content") or "")]) == 1
+    if ack == "accepted":
+        assert out.get("status") == "sent", out
+        assert "error" not in out, out
+    else:
+        assert "status" not in out, out
+        assert out.get("reason") == "delivery_unconfirmed", out
+        assert "may already" in out.get("error", ""), out
+
+
+@pytest.mark.parametrize("ack", ["accepted", "unreadable"])
+def test_reemit_error_after_the_turn_keeps_its_verdict(tmp_path, monkeypatch, ack):
+    """A runner whose own output write fails after the turn never turns an accepted or unconfirmed delivery into a plain failure."""
+    import contextlib
+    import subprocess
+
+    from tools import bot_mode_dm
+    dm_file = tmp_path / "dm.txt"
+    dm_file.write_text("Message from hermes: PAYLOAD_F62G", encoding="utf-8")
+    signal_file = f"{dm_file}.signal"
+    bot_mode_dm._write_signal(signal_file, {"state": "spawned"})
+    seen = []
+
+    def _turn(argv, signal_file, ack_tuple):
+        if ack == "accepted":
+            bot_mode_dm._write_signal(signal_file, {"state": "accepted"})
+            return subprocess.CompletedProcess(argv, 0, "REPLY\n", ""), True
+        return subprocess.CompletedProcess(argv, 1, "", "boom\n"), None
+
+    class _BrokenPipe:
+        def write(self, _text):
+            raise BrokenPipeError("runner output closed")
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(bot_mode_dm, "_delivery_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(bot_mode_dm, "_ack_baseline", lambda sig, db, content: (db, 0, content))
+    monkeypatch.setattr(bot_mode_dm, "_run_acked_turn", _turn)
+    monkeypatch.setattr(bot_mode_dm, "_hold_for_sender", lambda sig: seen.append(bot_mode_dm._read_signal(sig)))
+    monkeypatch.setattr(sys, "stdout" if ack == "accepted" else "stderr", _BrokenPipe())
+    with pytest.raises(BrokenPipeError):
+        bot_mode_dm._run_delivery(["hermes", "-p", "researcher", "chat"], str(dm_file), stdin_file=False)
+    if ack == "accepted":
+        assert seen == [{"state": "accepted"}], seen
+    else:
+        assert seen and seen[-1].get("state") == "failed", seen
+        assert seen[-1].get("reason") == "delivery_unconfirmed", seen
+        assert "may already" in seen[-1].get("error", ""), seen
