@@ -1,0 +1,14 @@
+model:
+  default: mock-model
+  provider: mock
+providers:
+  mock:
+    api: http://127.0.0.1:9199/v1
+    api_mode: chat_completions
+    key_env: MOCK_API_KEY
+    models:
+      mock-model: {}
+    context_length: 4096
+plugins:
+  enabled:
+    - hello

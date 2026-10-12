@@ -2109,6 +2109,38 @@ agent:
 
 Legitimately slow work is not penalized: streaming responses, tool heartbeats (every 30s while a tool runs), and approval waits all keep touching the clock, so only a turn making *zero* progress for the full bound fires the watchdog. Invalid values (a typo, `NaN`, `Inf`, non-positive `poll_s`) log a warning and fall back to the defaults — they never crash startup or silently disable the watchdog. A fired abort reports the stall as it begins recovery, and publishes the definitive aborted/lease-stopped outcome only once the interrupt has actually committed.
 
+### Fleet runaway protection (managed-scope pinned)
+
+In a multi-coworker fleet the guardrails above are not left to each profile's discretion — they are a mandatory **policy**. Every coworker profile **must render** the same `tool_loop_guardrails` block and `kanban.failure_limit`, and because those values are identical for every coworker they are also **pinned in managed scope** (the one `/etc/hermes/config.yaml` that Hermes deep-merges, managed-wins, onto every profile) so a self-modifying bot cannot widen them:
+
+```yaml
+tool_loop_guardrails:
+  hard_stop_enabled: true      # circuit-break repeated failing calls, not just warn (mandatory for unattended coworkers)
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+kanban:
+  failure_limit: 2             # durable breaker: auto-block a task after N consecutive failures
+```
+
+This block **will be deployed** by the fleet's `nv-coworker-compose` render plus the managed-scope pin; wiring these exact keys into the compose plugin's render set is tracked under **LOOP-F35** and is not yet shipped, so treat the block above as the required fleet **policy** rather than something already rendered on every profile today. `hard_stop_enabled: true` must be set **explicitly**: at this release there is no `non_interactive_hard_stop_enabled` auto-default, so a gateway, cron job or kanban worker does **not** hard-stop on a repeated failing tool call unless the profile turns it on. `kanban.failure_limit` is the complementary durable circuit-breaker — a task whose consecutive-failure count reaches the limit is auto-blocked instead of retried forever.
+
+**Where each NanoClaw runaway behaviour landed.** The port is deliberately honest about what is native today and what is deferred:
+
+| NanoClaw runaway behaviour | Hermes landing in the managed-scope fleet |
+|---|---|
+| echo-drop (suppress a no-op / echo reply) | the in-turn **identical-call** breaker (`agent.stall_guards`, observational — it appends a notice, it never blocks) plus @-mention-gated room engagement; a strict message-level echo suppressor is **deferred / not shipped** and travels with CH-F53 |
+| bounced-a2a redrive | **cross-gateway** peering only, deferred (CH-F53) — there is no bounced-message redrive inside the one-gateway fleet |
+| runaway card | the fleet **cost**-ceiling alert (COST-F30), the one actionable human alert the fleet raises when a bot runs away |
+| `A2A_MAX_PINGPONG_TURNS` | **not rendered** in this one-gateway fleet — the a2a ping-pong cap is a cross-gateway peering guardrail and travels with CH-F53 if peering is ever revived |
+
+The identical-call breaker is an *observational* tool-call notice, and there is no consecutive-round cap on the in-gateway Bot Chat path, so echo-drop's message-level suppression is explicitly out of scope for this fleet configuration and deferred to CH-F53. See also [Docker / unattended deployments](docker.md).
+
 ## TTS Configuration
 
 ```yaml
@@ -2765,7 +2797,7 @@ The browser toolset supports multiple providers. See the [Browser feature page](
 
 ## Timezone
 
-Override the server-local timezone with an IANA timezone string. Affects timestamps in logs, cron scheduling, and system prompt time injection.
+Override the server-local timezone with an IANA timezone string. It grounds cron scheduling, durable cron run records, and the bot's system-prompt clock; standard application-log timestamps stay in the host (server) zone. See [Per-profile timezone](#per-profile-timezone) below for multi-profile behavior.
 
 ```yaml
 timezone: "America/New_York"   # IANA timezone (default: "" = server-local time)
@@ -2776,6 +2808,46 @@ Supported values: any IANA timezone identifier (e.g. `America/New_York`, `Europe
 `hermes doctor` (and the startup config check) reports a value the runtime cannot load — a typo such as `Asia/Tokio` would otherwise silently put the agent clock and every cron schedule on server-local time. `HERMES_TIMEZONE` overrides this key when set.
 
 The agent clock, cron schedules and time-aware tools follow this zone on every OS. Code run through `execute_code` also inherits it as `TZ` on Linux and macOS; on Windows those children keep the OS-configured zone instead (the Windows C runtime only parses POSIX-form `TZ` strings, and an IANA name there produces a wrong UTC offset), so set the Windows zone itself when child scripts must render local time in this zone.
+
+### Per-profile timezone
+
+Each [profile](/user-guide/profiles) has its own `config.yaml`, so each profile can set its own `timezone`. When `HERMES_TIMEZONE` is unset, resolution is keyed to the active profile's config path, so a process that multiplexes profiles — a [multi-profile gateway](/user-guide/multi-profile-gateways), or the desktop app running several bots — does not reuse one profile's cached zone for another. A process-level `HERMES_TIMEZONE` takes precedence over every profile in that process; see the warning below.
+
+**Resolution precedence** (first match wins):
+
+1. The `HERMES_TIMEZONE` environment variable.
+2. An administrator's **managed-scope** pin — a managed overlay applied over `config.yaml`, so an admin-pinned zone overrides the profile's own value.
+3. The active profile's own `config.yaml` `timezone` key.
+4. The server's local time.
+
+An invalid IANA value (a typo, an unknown zone) logs a warning and falls back to server-local time — Hermes never crashes on a bad timezone string.
+
+**What the configured zone grounds** — the bot's own clock and its durable records:
+
+- **Cron scheduling.** A job's `next_run_at` is computed in the profile's zone, so `0 14 * * *` fires at 14:00 profile-local rather than 14:00 UTC.
+- **Cron run records.** The execution-ledger `claimed_at` / `started_at` / `finished_at` stamps and the run-log output filenames use the profile's wall clock.
+- **The system-prompt clock.** The bot's temporal awareness (its `Conversation started:` line) is rendered in the profile's zone.
+
+**What stays in the host or operator zone** — operator-facing surfaces are not re-rendered per profile:
+
+- **Standard application logs.** Their timestamps render in the host (server) local zone, matching the operator's own shell — not the profile zone. Under a multiplexed gateway the log files are written to the gateway process's own `{HERMES_HOME}/logs/` directory, not per profile (the desktop dashboard is the exception, which routes logs per profile).
+- **The web dashboard** renders cron times in the operator's **browser** zone.
+- `hermes cron list` and status print the stored timestamp verbatim, so a job's time shows there in that job's own (profile) zone — a persisted value, not a re-render.
+
+:::warning Multiplexed gateways: leave the default profile's timezone empty
+A [multi-profile gateway](/user-guide/multi-profile-gateways) bridges the **launch (default) profile's** `timezone` into the process-global `HERMES_TIMEZONE` environment variable once at startup, and `HERMES_TIMEZONE` has the **highest** precedence for every profile in that process. For per-profile overrides to take effect:
+
+- leave the **default / multiplexer profile's** `timezone` **empty** (`""`), and
+- start the gateway process with **no** `HERMES_TIMEZONE` already set in its environment.
+
+If either is non-empty, that single zone pins every profile in the process and per-profile overrides are ignored. Set `timezone` only on the individual coworker profiles. (Likewise, an administrator's managed-scope pin overrides a profile's own `config.yaml` timezone — see the precedence list above.)
+:::
+
+Related:
+
+- Provisioning tooling — for example a [profile distribution](/user-guide/profile-distributions) — can write the `timezone` key into each profile's `config.yaml`.
+- Sandboxes do not read the active profile's `config.yaml` timezone directly. Hermes's built-in code-execution bridge sets the child `TZ` only from the process-global `HERMES_TIMEZONE` (which must stay unset for per-profile multiplexing), so provisioning must launch each profile's sandbox with `TZ` set from the same timezone value where matching shell timestamps matter.
+- An agent-initiated write to `config.yaml` is a dangerous command requiring human [approval](/user-guide/cli), so a bot cannot silently change its own timezone.
 
 ## Discord
 

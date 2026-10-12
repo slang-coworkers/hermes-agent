@@ -1,0 +1,8 @@
+name: nv-workflow-modes
+version: 0.1.0
+description: "Ports the NanoClaw plan-modes that stock Hermes has no builtin for — investigate, review, research — plus /implement, as /slash-invocable workflow-body skills that seed a normal agent turn (the mode is fixed by the command slug; the user's trailing text is passed as the skill's user_instruction). Ships four SKILL.md workflow bodies (plan-investigate, plan-review, plan-research, implement) and a `hermes workflow-modes install` CLI installer that copies them, idempotently and atomically, into the active profile's scanned skills tree so they auto-register as /plan-investigate, /plan-review, /plan-research, /implement. Stock /plan (default planning) and /review (independent subagent) are the pre-existing, non-equivalent surface and are left untouched."
+author: NousResearch
+kind: standalone
+manifest_version: 1
+provides_hooks: []
+provides_tools: []

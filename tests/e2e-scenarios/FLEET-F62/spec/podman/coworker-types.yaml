@@ -1,0 +1,70 @@
+# FLEET-F62 fleet spec (podman substrate column). Renders six distributions —
+# default + orchestrator/architect/builder/tester/reviewer — that the pytest
+# acceptance test re-renders on every run and the sandbox/live/ui scenarios boot.
+# `substrate: podman` is the DATA switch the render dispatches its backend emission
+# on (edit (e)); `default_config.gateway.systemd_watchdog_seconds: 1` is deliberately
+# below the >=30 floor so the render force-writer (edit (a)) is proven, not passed
+# through. secrets.onecli.enabled is true on every coworker (spine) and false on the
+# DEFAULT launch profile (below) — the multiplexer host makes no direct model call,
+# so it needs no per-profile OneCLI identity.
+project: fleet-f62
+substrate: podman
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+workspace_root: /data/hermes-fleet
+install_surfaces: []
+shared_learnings_root: /opt/hermes-fleet/shared-learnings
+
+egress:
+  proxy_addr: "172.17.0.1:10255"
+  ca_host_path: /opt/onecli/ca.crt
+  ca_container_path: /etc/ssl/certs/hermes-egress-ca.crt
+  sandbox_image: localhost/hermes-sandbox:pinned
+  provider_env:
+    - ANTHROPIC_API_KEY
+  container_memory: 1024
+  container_cpu: 0.5
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "FLEET-F62 orchestrator — the elevated fleet-admin coworker. Dispatches the change to the architect and closes the loop when the reviewer approves."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  architect:
+    extends: [base]
+    identity: "FLEET-F62 architect — designs the change and hands a plan+spec to the builder over the wired edge."
+    ui_meta: {title: "Architect", description: "Fleet architect", shape: "square"}
+  builder:
+    extends: [base]
+    identity: "FLEET-F62 builder — applies the change in its own sandbox and replies P6-BUILT:<nonce>."
+    ui_meta: {title: "Builder", description: "Fleet builder", shape: "square"}
+  tester:
+    extends: [base]
+    identity: "FLEET-F62 tester — runs the toy test in its own sandbox and replies P6-TESTED:<nonce>:PASS."
+    ui_meta: {title: "Tester", description: "Fleet tester", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "FLEET-F62 reviewer — reads the diff in its own sandbox and replies P6-REVIEW:<nonce>:APPROVE to the orchestrator."
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "FLEET-F62 Fleet"
+    members: [orchestrator, architect, builder, tester, reviewer]
+  review-room:
+    name: "FLEET-F62 Review"
+    members: [builder, tester, reviewer]
+
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false

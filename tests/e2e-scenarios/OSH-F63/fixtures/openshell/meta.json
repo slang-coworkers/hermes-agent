@@ -1,0 +1,8 @@
+{
+  "backend": "ssh",
+  "enabled_plugins": ["nv-coworker-compose", "nv-fleet-gates"],
+  "checks": [
+    {"op": "equals", "key": "terminal.backend", "value": "ssh"},
+    {"op": "equals", "key": "plugins.entries.nv-fleet-gates.settings.expected_backend", "value": "ssh"}
+  ]
+}

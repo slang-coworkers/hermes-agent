@@ -1,0 +1,14 @@
+# OSH-F64 live-scenario seed profile. The provider block is a named providers.<name>
+# with an inline DUMMY api_key + a remote base_url reached through the OneCLI egress
+# proxy (a bare `api:`/`key_env:` shape 404s behind the proxy; canonical `nvidia`/
+# `openai` have no credential and 401). The operator attaches the real per-profile
+# OneCLI identity at provisioning (CRED-F28); no real key is committed here.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-osh-f64-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8

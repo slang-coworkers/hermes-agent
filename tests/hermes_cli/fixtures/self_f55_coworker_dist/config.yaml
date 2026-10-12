@@ -1,0 +1,14 @@
+# Distribution-owned config for the self-f55-coworker type. On `hermes profile update`
+# this file is PRESERVED by default (an installer may have tuned it) and only overwritten
+# with --force-config.
+model: aws/anthropic/bedrock-claude-opus-4-8
+
+# A coworker type's LIVE runtime MCP servers are authored HERE, under config.yaml:mcp_servers
+# (the runtime discovery lane, tools/mcp_tool.py:_load_mcp_config). The distribution's
+# profile-root mcp.json is copied but INERT at runtime in v0.21.0 — see the porting doc.
+mcp_servers:
+  self_f55_runtime:
+    command: echo
+    args: ["self-f55-runtime-ready"]
+    env:
+      SELF_F55_ENDPOINT: "${SELF_F55_OPTIONAL_ENDPOINT}"

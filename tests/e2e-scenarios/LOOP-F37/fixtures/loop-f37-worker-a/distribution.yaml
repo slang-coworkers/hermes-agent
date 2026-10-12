@@ -1,0 +1,8 @@
+name: loop-f37-worker-a
+version: 0.1.0
+description: "LOOP-F37 AC-A2A-F19-3 live gated-edge-approval scenario — worker-a (the message_agent sender). A gated edge loop-f37-worker-a -> loop-f37-orch escalates its message_agent to the human-approval gate; used to prove the hold surfaces with pattern_key plugin_rule:wire:loop-f37-worker-a:loop-f37-orch and an operator once-approve releases the call."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

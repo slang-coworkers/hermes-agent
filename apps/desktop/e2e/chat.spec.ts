@@ -106,7 +106,12 @@ test.describe('chat interaction with mock backend', () => {
     // separate labeled button. Queue remains the explicit secondary action.
     await expect(primary).toHaveAttribute('aria-label', 'Send')
     await expect(queue).toBeVisible()
+    const controlLabels = await page
+      .locator('[data-slot="composer-root"] button')
+      .evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label')))
+    expect(controlLabels.indexOf('Queue message')).toBeLessThan(controlLabels.indexOf('Send'))
     await page.screenshot({ path: testInfo.outputPath('busy-composer-steer.png') })
+    await expect(primary.locator('.codicon-arrow-up')).toBeVisible()
 
     await queue.click()
     await expect(primary).toHaveAttribute('aria-label', 'Stop')

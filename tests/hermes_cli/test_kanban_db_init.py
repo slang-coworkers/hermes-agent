@@ -6,6 +6,7 @@ from pathlib import Path
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 def _make_legacy_db(path: Path) -> None:
@@ -223,3 +224,54 @@ def test_healthy_fast_path_stays_lock_free(tmp_path, monkeypatch):
     with kbc.connect_closing(db_path):
         pass
     assert len(locks) == 1
+
+
+def _make_pre_lease_notify_db(path: Path) -> None:
+    """A current-shape DB whose kanban_notify_subs predates the GOV-F25.b
+    durable-delivery lease columns: INTEGER last_event_id (so it does NOT trip
+    the type-drift rebuild path), but no claimed_by/lease_until. The additive-
+    column migration must add them on open."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(kb.SCHEMA_SQL)
+    conn.executescript(
+        """
+        DROP TABLE kanban_notify_subs;
+        CREATE TABLE kanban_notify_subs (
+            task_id TEXT NOT NULL, platform TEXT NOT NULL, chat_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '', user_id TEXT, user_id_alt TEXT,
+            chat_type TEXT, notifier_profile TEXT,
+            delivery_mode TEXT NOT NULL DEFAULT 'notify', delivery_metadata TEXT,
+            retry_policy TEXT NOT NULL DEFAULT 'default',
+            created_at INTEGER NOT NULL, last_event_id INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (task_id, platform, chat_id, thread_id));
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, created_at) VALUES ('task-1', 'T', 'done', 1000)"
+    )
+    conn.execute(
+        "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at, last_event_id) "
+        "VALUES ('task-1', 'api_server', 'sess-1', 1000, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_durable_lease_columns_added_nullable_on_legacy_db(tmp_path, monkeypatch):
+    """GOV-F25.b: a board created before the durable-delivery lease columns
+    gains claimed_by/lease_until as NULLABLE columns on open (SQLite forbids a
+    non-constant default), so already-deployed boards upgrade cleanly and every
+    pre-existing subscription is unclaimed (both NULL)."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_pre_lease_notify_db(db_path)
+
+    with kbc.connect(db_path) as conn:
+        cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
+        assert "claimed_by" in cols and "lease_until" in cols
+        assert cols["claimed_by"]["notnull"] == 0
+        assert cols["lease_until"]["notnull"] == 0
+        row = conn.execute(
+            "SELECT claimed_by, lease_until FROM kanban_notify_subs "
+            "WHERE task_id = 'task-1'"
+        ).fetchone()
+        assert row["claimed_by"] is None and row["lease_until"] is None

@@ -1,0 +1,26 @@
+model:
+  default: aws/anthropic/bedrock-claude-opus-4-8
+  provider: coworkers-live
+providers:
+  # Use a non-canonical key so this fixture's endpoint, protocol, and
+  # credential source remain authoritative over built-in provider resolution.
+  # Literal non-loopback host so the request routes through the OneCLI egress
+  # proxy (which substitutes the dummy key); a loopback base_url would authorize
+  # on the client key and reject a dummy.
+  coworkers-live:
+    api: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    key_env: ANTHROPIC_API_KEY
+    models:
+      aws/anthropic/bedrock-claude-opus-4-8: {}
+plugins:
+  enabled:
+    - hello
+    - a2a-platform
+# a2a inbound listener on loopback; no extra.agents, so the default agent
+# answers the root url bot-a dials (plugins/platforms/a2a/adapter.py:346).
+platforms:
+  a2a:
+    enabled: true
+    extra:
+      port: 9120

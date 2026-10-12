@@ -1,0 +1,18 @@
+openshell sandbox create --name nanoclaw-base-approver --from localhost/hermes-openshell-sandbox:pinned --policy policy-approver.yaml
+openshell sandbox create --name nanoclaw-base-fixer --from localhost/hermes-openshell-sandbox:pinned --policy policy-fixer.yaml
+openshell sandbox create --name nanoclaw-base-orchestrator --from localhost/hermes-openshell-sandbox:pinned --policy policy-orchestrator.yaml
+openshell sandbox create --name nanoclaw-base-reviewer --from localhost/hermes-openshell-sandbox:pinned --policy policy-reviewer.yaml
+openshell sandbox create --name nanoclaw-base-triager --from localhost/hermes-openshell-sandbox:pinned --policy policy-triager.yaml
+openshell sandbox provider attach nanoclaw-base-fixer github
+openshell sandbox provider attach nanoclaw-base-reviewer github
+openshell sandbox provider attach nanoclaw-base-triager github
+openshell sandbox ssh-config nanoclaw-base-approver
+openshell sandbox ssh-config nanoclaw-base-fixer
+openshell sandbox ssh-config nanoclaw-base-orchestrator
+openshell sandbox ssh-config nanoclaw-base-reviewer
+openshell sandbox ssh-config nanoclaw-base-triager
+openshell sandbox delete nanoclaw-base-approver
+openshell sandbox delete nanoclaw-base-fixer
+openshell sandbox delete nanoclaw-base-orchestrator
+openshell sandbox delete nanoclaw-base-reviewer
+openshell sandbox delete nanoclaw-base-triager

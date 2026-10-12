@@ -1,0 +1,9 @@
+name: cred-f28-bot-b
+version: 1.0.0
+description: "CRED-F28 AC-2 fixture profile (bot B) — sibling, stays ungranted (must get 401)."
+author: "slang-coworkers"
+hermes_requires: ">=0.21.0,<0.22.0"
+env_requires:
+  - name: ONECLI_API_KEY
+    description: "OneCLI control-plane bootstrap key (host env; authenticates onboard, never rendered into the profile)."
+    required: true

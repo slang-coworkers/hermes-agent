@@ -1,0 +1,16 @@
+# Keep this block aligned with spec/spines/live-base.yaml because onboarding
+# replaces fixture config with the rendered spine. The inline dummy key supports
+# the recipient's secret-sanitized subprocess; OneCLI injects the real credential
+# when requests use the remote provider URL.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-a2a-f21-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

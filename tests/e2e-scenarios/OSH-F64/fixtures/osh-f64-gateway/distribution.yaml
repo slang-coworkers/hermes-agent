@@ -1,0 +1,7 @@
+name: osh-f64-gateway
+version: 0.1.0
+description: 'OSH-F64 throwaway gateway/default seed'
+distribution_owned:
+- SOUL.md
+- config.yaml
+- distribution.yaml

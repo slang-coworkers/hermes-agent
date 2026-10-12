@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "self-f55-agent-plugin",
+  "version": "1.0.0",
+  "description": "Example portable Agent Plugins v1 package for SELF-F55: a coworker type's skill and MCP server travel with it as a namespaced, install-disabled package.",
+  "license": "MIT",
+  "author": {
+    "name": "slang-coworkers"
+  }
+}

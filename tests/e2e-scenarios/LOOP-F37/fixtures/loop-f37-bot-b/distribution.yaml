@@ -1,0 +1,8 @@
+name: loop-f37-bot-b
+version: 0.1.0
+description: "LOOP-F37 live wired-only messaging scenario — bot B (the inbound peer). Runs nv-fleet-gates against the same shared edges store; replies to bot A once the edge is wired."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

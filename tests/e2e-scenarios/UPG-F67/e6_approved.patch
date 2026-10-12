@@ -1,0 +1,53 @@
+diff --git a/apps/desktop/e2e/fleet-f62-ac10.helpers.ts b/apps/desktop/e2e/fleet-f62-ac10.helpers.ts
+index be6423dd97..f9204ae798 100644
+--- a/apps/desktop/e2e/fleet-f62-ac10.helpers.ts
++++ b/apps/desktop/e2e/fleet-f62-ac10.helpers.ts
+@@ -174,0 +175,2 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
++    // One gateway: the fixture's isolated mode gives every coworker a pooled `hermes serve` of its own; with it
++    // off the sandbox's empty spawn ledger leaves one multiplexed host backend serving all six profiles.
+@@ -176 +178,4 @@ export async function bootFleetDesktop(prefix: string): Promise<MockBackendFixtu
+-      buildAppEnv(sandbox, { HERMES_BUNDLED_PLUGINS: path.join(REPO_ROOT, 'plugins') })
++      buildAppEnv(sandbox, {
++        HERMES_BUNDLED_PLUGINS: path.join(REPO_ROOT, 'plugins'),
++        HERMES_DESKTOP_ISOLATED_BACKEND: '0'
++      })
+@@ -253,17 +257,0 @@ async function openOrchestratorChat(page: Page): Promise<void> {
+-/** Dismiss the full-viewport Settings OverlayView (data-overlay-surface,
+- *  overlay-view.tsx:74-104) before touching the Sessions tab: while open it intercepts
+- *  pointer events on the panes beneath it, so a Sessions-tab click would be intercepted.
+- *  Prefer the labeled Close-settings control (overlay-view.tsx:126-134), fall back to
+- *  Escape (overlay-view.tsx:53-72), then await the surface's removal. */
+-async function dismissSettingsOverlay(page: Page): Promise<void> {
+-  const closeBtn = page.getByRole('button', { name: 'Close settings' })
+-
+-  if ((await closeBtn.count()) > 0) {
+-    await closeBtn.first().click()
+-  } else {
+-    await page.keyboard.press('Escape')
+-  }
+-
+-  await expect(page.locator('[data-overlay-surface]')).toHaveCount(0, { timeout: 30_000 })
+-}
+-
+@@ -276,2 +264,2 @@ async function activateSessions(page: Page): Promise<void> {
+-    .getByRole('button', { name: 'sessions', exact: true })
+-    .or(page.getByRole('tab', { name: 'sessions', exact: true }))
++    .getByRole('button', { name: 'Sessions', exact: true })
++    .or(page.getByRole('tab', { name: 'Sessions', exact: true }))
+@@ -286,3 +274,2 @@ async function activateSessions(page: Page): Promise<void> {
+-/** Enable the opt-in Kanban plugin through the product's Settings ▸ Plugins Switch,
+- *  dismiss the Settings overlay, bring the Sessions pane forward, then dock the board
+- *  via the split affordance. */
++/** Enable the opt-in Kanban plugin's desktop half through the product's Capabilities ▸ Plugins
++ *  switch, bring the Sessions pane forward, then dock the board via the split affordance. */
+@@ -293 +280 @@ async function openKanbanBoard(page: Page): Promise<void> {
+-  const enableKanban = page.getByRole('switch', { name: 'Enable Kanban' })
++  const enableKanban = page.getByRole('switch', { name: 'Desktop: Kanban' })
+@@ -294,0 +282 @@ async function openKanbanBoard(page: Page): Promise<void> {
++  await expect(enableKanban).not.toBeChecked()
+@@ -296,4 +284 @@ async function openKanbanBoard(page: Page): Promise<void> {
+-  // The switch flipping to "Disable Kanban" confirms the plugin is enabled, so its
+-  // /kanban route, board, and sidebar nav row are now contributed.
+-  await expect(page.getByRole('switch', { name: 'Disable Kanban' })).toBeVisible({ timeout: 30_000 })
+-  await dismissSettingsOverlay(page)
++  await expect(enableKanban).toBeChecked({ timeout: 30_000 })

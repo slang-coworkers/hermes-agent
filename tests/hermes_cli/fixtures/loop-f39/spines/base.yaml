@@ -1,0 +1,4 @@
+identity: BASE
+config:
+  terminal:
+    container_persistent: true

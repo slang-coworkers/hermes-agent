@@ -849,6 +849,17 @@ _NOTIFY_SUB_COLUMNS = (
     # (which prefers ``user_id_alt``). NULL is inert.
     ("user_id_alt", "user_id_alt TEXT"),
     ("delivery_metadata", "delivery_metadata TEXT"),
+    # Additive: an existing DB gains the column with the 'default'
+    # value, so every pre-existing sub keeps stock delete-on-failure
+    # behavior. A sub opts into durable retention only by being
+    # (re-)added with retry_policy='durable'.
+    ("retry_policy", "retry_policy TEXT NOT NULL DEFAULT 'default'"),
+    # Additive + nullable: a legacy board gains the durable-delivery
+    # lease columns unclaimed (NULL), so every pre-existing sub is free
+    # for the first durable drainer to lease and no behaviour changes on
+    # the stock retry_policy path.
+    ("claimed_by", "claimed_by TEXT"),
+    ("lease_until", "lease_until INTEGER"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -1050,6 +1061,8 @@ _REBUILD_SPECS = {
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
+        " retry_policy TEXT NOT NULL DEFAULT 'default',"
+        " claimed_by TEXT, lease_until INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),

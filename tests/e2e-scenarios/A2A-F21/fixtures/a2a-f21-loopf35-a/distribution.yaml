@@ -1,0 +1,8 @@
+name: a2a-f21-loopf35-a
+version: 0.1.0
+description: "A2A-F21 AC-LOOP-F35-5 live scenario — bot A (the message_agent sender). Carries the self-contained providers.coworkers-live block with the remote base_url so the delivery path resolves a provider."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

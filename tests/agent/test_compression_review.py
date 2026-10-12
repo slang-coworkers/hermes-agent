@@ -32,6 +32,21 @@ from agent.conversation_compression import (
 )
 
 
+def _warm_compression_lazy_paths():
+    """Run the host's one-time lazy setup before a test arms a short deadline.
+
+    The first call in a process imports the worker-context callback API
+    (``tools.terminal_tool`` and friends) before the worker is submitted, and a
+    timed-out host resolves the stall-fallback route (config + plugin
+    discovery). Under CPU contention that cold setup alone can outlast F1's 1s
+    ceiling or F6's 5s host join, so it must not land inside the timed window.
+    """
+    from tools.thread_context import propagate_context_to_thread
+
+    propagate_context_to_thread(lambda: None)
+    cc.resolve_compression_fallback_route()
+
+
 def _drain_admission_slots():
     """Best-effort wait for pool admission slots to free between tests."""
     deadline = time.time() + 5
@@ -50,6 +65,7 @@ class TestF1CommitOverrunWhileHung:
         assertions on the callback have been made while the worker
         thread is still blocked inside the commit boundary.
         """
+        _warm_compression_lazy_paths()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         monkeypatch.setattr(cc, "_get_compress_timeout_executor", lambda: executor)
         original = [{"role": "user", "content": "a"}]
@@ -250,6 +266,7 @@ class TestF6ExecutorSaturation:
         """4 blocked summaries + 5th submission fails fast; recovery does not
         run the refused job."""
         _drain_admission_slots()
+        _warm_compression_lazy_paths()
         release = threading.Event()
         started = threading.Barrier(5, timeout=10)  # 4 workers + main
 

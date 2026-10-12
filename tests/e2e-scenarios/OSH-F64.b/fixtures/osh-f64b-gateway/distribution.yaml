@@ -1,0 +1,7 @@
+name: osh-f64b-gateway
+version: 0.1.0
+description: 'OSH-F64.b throwaway gateway/default seed (single-authority inference)'
+distribution_owned:
+- SOUL.md
+- config.yaml
+- distribution.yaml

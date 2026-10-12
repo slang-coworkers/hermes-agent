@@ -1,0 +1,14 @@
+# Named custom provider (avoids built-in-provider shadowing); OneCLI injects the
+# real credential at egress in place of the literal placeholder api_key.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-fleet-f62a-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

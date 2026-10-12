@@ -1,0 +1,47 @@
+# ISO-F16 reference profile distribution — orchestrator role.
+#
+# Disjoint from the sibling worker fixture so the acceptance test proves that a
+# coworker's runtime config resolves from THIS profile's own config.yaml with no
+# shared/global runner. Every value is a literal (no ${ENV}) so the explicitly
+# configured values resolve unchanged (load_config() also merges built-in defaults).
+# This is a reference fixture, not a live profile: endpoints are *.example.invalid
+# and carry no credentials.
+model:
+  default: orchestrator-frontier
+  provider: orch-gateway
+providers:
+  orch-gateway:
+    api: https://orchestrator-gateway.example.invalid/v1
+    transport: anthropic_messages
+    discover_models: false
+    models:
+      - orchestrator-frontier
+fallback_providers:
+  - provider: anthropic
+    model: claude-opus-4-1
+  - provider: openrouter
+    model: anthropic/claude-sonnet-4
+agent:
+  reasoning_effort: high
+  service_tier: priority
+toolsets:
+  - hermes-cli
+  - kanban
+  - delegation
+terminal:
+  backend: docker
+  docker_image: registry.example.invalid/hermes-orchestrator:2026.8.31
+  docker_volumes:
+    - /srv/orchestrator/data:/workspace/data:ro
+    - /srv/orchestrator/board:/workspace/board
+  docker_mount_cwd_to_workspace: true
+mcp_servers:
+  orch-filesystem:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - /workspace
+  orch-board:
+    url: https://orchestrator-board-mcp.example.invalid/mcp
+timezone: America/New_York

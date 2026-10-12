@@ -1,0 +1,10 @@
+# Base-NanoClaw fleet wire ring — five undirected pairs applied with
+# `hermes wire add`. The nv-fleet-gates edge store is bidirectional-only, so each
+# line writes both directions; the dispatch's chain-flow arrows denote the ring
+# and connectivity is undirected. This manifest is applied post-render (it is not
+# read by the compose renderer). See the fleet port notes.
+hermes wire add orchestrator triager
+hermes wire add triager fixer
+hermes wire add fixer reviewer
+hermes wire add reviewer approver
+hermes wire add approver orchestrator

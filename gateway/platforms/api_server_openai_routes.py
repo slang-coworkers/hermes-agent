@@ -521,6 +521,18 @@ class _ResponsesStream:
         await self.write_event("response.failed", {"type": "response.failed", "response": env})
 
 
+def _cache_if_persisted(r: Any) -> bool:
+    # A real agent turn always reports turn_persisted (True/False); caching a
+    # missing/None/False result would serve a same-key durable retry a
+    # non-durable answer for the cache TTL.
+    return (
+        isinstance(r, tuple)
+        and len(r) >= 1
+        and isinstance(r[0], dict)
+        and r[0].get("turn_persisted") is True
+    )
+
+
 class OpenAICompatRoutesMixin:
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
@@ -717,11 +729,20 @@ class OpenAICompatRoutesMixin:
 
         async def _compute_completion():
             return await self._run_agent(**run_kwargs)
+        # Persist-gating the idempotency cache is OPT-IN: only a caller that
+        # sends X-Hermes-Require-Persist:1 (the durable wake self-post, see
+        # gateway/wake.py) wants an UNPERSISTED turn kept OUT of the cache so
+        # its same-key retry re-runs until the turn commits. Every other
+        # Idempotency-Key client keeps the upstream default (cache any
+        # completed result), so an unpersisted 200 is served from cache on
+        # retry instead of re-running an expensive turn.
+        require_persist = request.headers.get("X-Hermes-Require-Persist") == "1"
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
                               "hermes_notification_category"],
             route="chat_completions",
+            require_persist=require_persist,
         )
         if err is not None:
             return err
@@ -735,7 +756,17 @@ class OpenAICompatRoutesMixin:
         # Same #13437 identity contract as the SSE path: an explicit-header client is echoed
         # the stable id it sent; a fingerprint-derived (header-less) turn keeps reporting the
         # id the agent actually resolved, so headerless clients still learn where the turn went.
-        response_headers = {"X-Hermes-Session-Id": (provided_session_id or result.get("session_id", session_id))}
+        response_headers = {
+            "X-Hermes-Session-Id": (provided_session_id or result.get("session_id", session_id)),
+            # Server-generated persistence ack (never reflected from a request
+            # header): 'true' ONLY when this turn's messages actually committed
+            # to the session DB (result['turn_persisted'] is True). A bare 200
+            # is emitted even on a failed flush, so a wake caller gates its
+            # cursor advance on this header; missing/false = not durable.
+            "X-Hermes-Turn-Persisted": (
+                "true" if result.get("turn_persisted") is True else "false"
+            ),
+        }
         if gateway_session_key:
             response_headers["X-Hermes-Session-Key"] = gateway_session_key
         # Hard fail (no usable text AND a real failure) -> 502 OpenAI error envelope so SDK
@@ -771,7 +802,7 @@ class OpenAICompatRoutesMixin:
 
     async def _run_idempotent(
         self, request: "web.Request", body: Dict[str, Any], compute, *,
-        log_label: str, fingerprint_keys: List[str], route: str) -> tuple:
+        log_label: str, fingerprint_keys: List[str], route: str, require_persist: bool = False) -> tuple:
         """Run ``compute()`` once per (principal scope, logical route, Idempotency-Key) + body fingerprint
         -> ``((result, usage), None)`` or ``(None, 500 response)``.
 
@@ -789,7 +820,16 @@ class OpenAICompatRoutesMixin:
                 principal_scope = self._run_idempotency_scope(request)
                 scoped_key = f"{principal_scope}\0{route}\0{idempotency_key}"
                 fp = _make_request_fingerprint(body, keys=fingerprint_keys)
-                result, usage = await _idem_cache.get_or_set(scoped_key, fp, compute)
+                if require_persist:
+                    # Keep the two cache modes disjoint: a same-key request that
+                    # flips the mode must not be served a result cached under the
+                    # other mode (a durable retry given a non-durable unpersisted
+                    # answer, or vice versa).
+                    fp = f"{fp}:require-persist"
+                result, usage = await _idem_cache.get_or_set(
+                    scoped_key, fp, compute,
+                    cache_if=_cache_if_persisted if require_persist else None,
+                )
             else:
                 result, usage = await compute()
             return (result, usage), None

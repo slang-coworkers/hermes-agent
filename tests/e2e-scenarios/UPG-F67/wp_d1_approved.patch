@@ -1,0 +1,44 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index c30abf34a5..79b90a17c0 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -2899 +2899 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+-                                        notification_category: str = "result") -> None:
++                                        notification_category: str = "result") -> bool:
+@@ -2902 +2902 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+-        await _api_runs.run_internal_session_turn(
++        return await _api_runs.run_internal_session_turn(
+diff --git a/gateway/platforms/api_server_runs.py b/gateway/platforms/api_server_runs.py
+index fc389b3316..d8c157d52a 100644
+--- a/gateway/platforms/api_server_runs.py
++++ b/gateway/platforms/api_server_runs.py
+@@ -503 +503 @@ async def run_internal_session_turn(self, *, session_id: str, text: str, profile
+-                                notification_category: str = "result", _api_server) -> None:
++                                notification_category: str = "result", _api_server) -> bool:
+@@ -553 +553 @@ async def run_internal_session_turn(self, *, session_id: str, text: str, profile
+-            await self._run_agent(
++            result, _usage = await self._run_agent(
+@@ -559 +559 @@ async def run_internal_session_turn(self, *, session_id: str, text: str, profile
+-            return
++            return result.get("turn_persisted") is True
+diff --git a/gateway/wake.py b/gateway/wake.py
+index 8a1fecd5c4..7bbebd3575 100644
+--- a/gateway/wake.py
++++ b/gateway/wake.py
+@@ -223,7 +222,0 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
+-        if require_persist_ack:
+-            # The in-process route returns no persistence receipt, so nothing could gate the
+-            # caller's cursor advance. Fail closed before any turn runs rather than claim
+-            # durability that was never confirmed.
+-            raise RuntimeError(
+-                f"wake for served profile {profile!r} runs in-process and cannot confirm "
+-                "persistence; require_persist_ack is unsupported on this route")
+@@ -235,2 +228,6 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
+-        await in_process(session_id=session_id, text=text, profile=str(profile),
+-                         notification_category=notification_category)
++        persisted = await in_process(session_id=session_id, text=text, profile=str(profile),
++                                     notification_category=notification_category)
++        if require_persist_ack and persisted is not True:
++            raise RuntimeError(
++                f"wake for served profile {profile!r} did not confirm persistence "
++                f"(turn_persisted={persisted!r}); treating as undelivered")

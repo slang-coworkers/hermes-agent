@@ -1070,6 +1070,9 @@ When a resume is refused the client receives error code `4130` with the count
 and the scope it was measured against (`across its lineage` or
 `in its tip segment`). `hermes sessions export` still works for such sessions.
 
+Fleets that must retain every transcript on disk pin `sessions.auto_prune: false`
+and prune deliberately — see the [Fleet transcript retention runbook](./fleet-transcript-retention.md).
+
 ### Manual Cleanup
 
 ```bash

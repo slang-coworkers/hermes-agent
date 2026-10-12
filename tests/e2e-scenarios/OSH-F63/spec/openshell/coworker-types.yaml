@@ -1,0 +1,83 @@
+# OSH-F63 fleet spec (openshell substrate column). Renders six distributions —
+# default + orchestrator/architect/builder/tester/reviewer — that the pytest
+# acceptance test re-renders on every run and the AC-OSH-F63-5 sandbox scenario
+# boots on-box. `substrate: openshell` is the DATA switch the render dispatches its
+# remote-ssh backend emission on: each coworker gets terminal.backend: ssh + a
+# per-profile ssh block + a per-profile openshell policy, and NO nested podman.
+# `sandbox_scope: profile` is the delivered scope (one OpenShell sandbox per
+# profile); `session` is recognised but fails closed (deferred provider). The
+# builder declares a stdio `mcp` server so the render scopes it `stdio` and
+# AC-OSH-F63-3 can prove the unchanged veto blocks a stdio mcp_* call.
+project: osh-f63
+substrate: openshell
+sandbox_scope: profile
+default_profile: default
+orchestrator_profile: orchestrator
+skills_root: skills
+workflows_root: workflows
+overlays_root: overlays
+
+# OpenShell egress: exactly the TWO endpoints the per-profile `openshell policy`
+# allows — the OneCLI data-plane hop and the inference route. proxy_addr is
+# 172.17.0.1:18255 (a source-preserving DNAT alias of onecli-lego:10255): OpenShell blocks
+# 10255 as a control-plane port, so the data plane is 18255; the podman substrate uses
+# 10255. The ssh control path is inbound via the OpenShell proxy socket, not an egress
+# target, so it is not listed. The OneCLI control plane (172.17.0.1:10256) and the OpenShell
+# gateway control plane (host.openshell.internal:8080) are deliberately NOT here. In-sandbox
+# clients reach these declared hops ONLY via HTTP_PROXY=http://10.200.0.1:3128 (direct
+# 172.17.0.1 is not routable). sandbox_image is the pinned `--from` for the provisioning
+# plan; it MUST be `osh-f63-base:trixie` (id 06f0220e7810, Debian trixie, glibc 2.41 —
+# OpenShell's PID1 restart-loops on older glibc; see fixtures/openshell/IMAGE-CONSTRAINT.md).
+# The broker refuses any other `--from`.
+egress:
+  proxy_addr: "172.17.0.1:18255"
+  inference_route: "inference-api.nvidia.com:443"
+  sandbox_image: "osh-f63-base:trixie"
+
+spines:
+  base:
+    source: spines/base.yaml
+
+types:
+  orchestrator:
+    extends: [base]
+    identity: "OSH-F63 orchestrator — the elevated fleet-admin coworker on the OpenShell substrate."
+    ui_meta: {title: "Orchestrator", description: "Fleet orchestrator (elevated)", shape: "circle"}
+  architect:
+    extends: [base]
+    identity: "OSH-F63 architect — designs the change; its tool calls run in its own OpenShell ssh sandbox."
+    ui_meta: {title: "Architect", description: "Fleet architect", shape: "square"}
+  builder:
+    extends: [base]
+    identity: "OSH-F63 builder — applies the change in its own OpenShell ssh sandbox."
+    ui_meta: {title: "Builder", description: "Fleet builder", shape: "square"}
+    # A stdio MCP server: `command` (no `url`) => the render scopes it transport
+    # "stdio", which the unchanged nv-fleet-gates veto blocks under enforce_sandbox
+    # (AC-OSH-F63-3's stdio-transport proof).
+    mcp:
+      somestdioserver:
+        command: /usr/bin/some-stdio-server
+        include: [tool]
+  tester:
+    extends: [base]
+    identity: "OSH-F63 tester — runs the checks in its own OpenShell ssh sandbox."
+    ui_meta: {title: "Tester", description: "Fleet tester", shape: "square"}
+  reviewer:
+    extends: [base]
+    identity: "OSH-F63 reviewer — reads the diff in its own OpenShell ssh sandbox."
+    ui_meta: {title: "Reviewer", description: "Fleet reviewer", shape: "square"}
+
+rooms:
+  fleet-room:
+    name: "OSH-F63 Fleet"
+    members: [orchestrator, architect, builder, tester, reviewer]
+  review-room:
+    name: "OSH-F63 Review"
+    members: [builder, tester, reviewer]
+
+default_config:
+  gateway:
+    systemd_watchdog_seconds: 1
+  secrets:
+    onecli:
+      enabled: false

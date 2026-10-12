@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+_NOTIFY_RETRY_POLICIES = ("default", "durable")
+# The sole transport whose delivery can confirm persistence (its wake self-post
+# carries the X-Hermes-Turn-Persisted ack), so the only one on which a 'durable'
+# retry_policy is deliverable. Mirrors gateway.config.Platform.API_SERVER as a
+# string — the adapter object is not in scope at add_notify_sub, and hermes_cli
+# must not import the gateway layer.
+_DURABLE_RETRY_PLATFORM = "api_server"
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -77,6 +84,7 @@ def add_notify_sub(
     notifier_profile: Optional[str] = None,
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
+    retry_policy: Optional[str] = None,
 ) -> None:
     """Register a gateway source wanting terminal-state notifications for
     ``task_id``; idempotent on (task, platform, chat, thread).
@@ -90,8 +98,37 @@ def add_notify_sub(
     into an existing row so re-subscribing never discards them. New subs start
     caught up (``last_event_id`` =
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
+
+    ``retry_policy`` (see ``_NOTIFY_RETRY_POLICIES``) selects the notifier's
+    delivery-failure handling: ``'default'`` keeps stock delete-on-repeated-
+    failure, ``'durable'`` never deletes the sub or advances past an unseen
+    event (capped backoff + operator alert instead). ``None`` leaves an
+    existing row's policy untouched (and inserts ``'default'`` for a fresh
+    row); an explicit value is last-write-wins. An unknown value falls back
+    to ``'default'``. ``retry_policy='durable'`` is accepted ONLY on the
+    ``api_server`` platform — the sole transport whose delivery confirms
+    persistence (its wake self-post carries the ``X-Hermes-Turn-Persisted``
+    ack). A push-capable transport cannot confirm delivery, so a durable sub
+    on it would be retained forever and never delivered; requesting one raises
+    ``ValueError`` here rather than creating a silently-undeliverable row.
     """
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
+    valid_retry = retry_policy if retry_policy in _NOTIFY_RETRY_POLICIES else None
+    # A 'durable' sub is only ever deliverable on a transport that can confirm
+    # persistence (api_server, via the wake self-post's X-Hermes-Turn-Persisted
+    # ack). On a push-capable transport the delivery path refuses it before any
+    # cursor advance, so it would be retained forever and never delivered —
+    # reject it at the source with an actionable error instead of accepting a
+    # silently-undeliverable sub. Validated on the platform string because the
+    # adapter object (whose supports_async_delivery is the real capability) is
+    # not in scope here.
+    if retry_policy == "durable" and platform != _DURABLE_RETRY_PLATFORM:
+        raise ValueError(
+            f"retry_policy='durable' requires a confirmable transport "
+            f"({_DURABLE_RETRY_PLATFORM}); platform {platform!r} is push-capable "
+            f"and cannot confirm persistence, so a durable sub on it would be "
+            f"retained forever and never delivered."
+        )
     # api_server is stateless: the adapter has no send(), the wake self-post IS
     # the delivery. A plain 'notify' default would leave those subs with no
     # delivery mechanism at all. Explicit modes still win.
@@ -112,13 +149,13 @@ def add_notify_sub(
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
                  chat_type, notifier_profile, delivery_mode, delivery_metadata,
-                 created_at, last_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 retry_policy, created_at, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 *key, user_id, user_id_alt, chat_type or "dm", notifier_profile,
-                insert_mode, metadata_json, int(time.time()), task_id,
+                insert_mode, metadata_json, valid_retry or "default", int(time.time()), task_id,
             ),
         )
         # chat_type / delivery_mode are last-write-wins; delivery metadata
@@ -131,6 +168,8 @@ def add_notify_sub(
             ("notifier_profile", notifier_profile, True),
             ("delivery_mode", valid_mode, False),
             ("delivery_metadata", metadata_json, False),
+            # Explicit retry_policy is last-write-wins; None leaves it unchanged.
+            ("retry_policy", valid_retry, False),
         ):
             if not value:
                 continue
@@ -295,7 +334,7 @@ def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int 
     cutoff = int(time.time()) - days * 86400
     with _kb.write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM kanban_notify_subs WHERE task_id IN ("
+            "DELETE FROM kanban_notify_subs WHERE retry_policy != 'durable' AND task_id IN ("
             " SELECT t.id FROM tasks t"
             " WHERE t.status IN ('done', 'blocked')"
             " AND COALESCE("
@@ -368,9 +407,32 @@ def claim_unseen_events_for_sub(
     delivery failure.
     """
     with _kb.write_txn(conn):
-        old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
-        if old_cursor is None:
+        row = conn.execute(
+            "SELECT last_event_id, retry_policy, claimed_by, lease_until "
+            "FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+            _sub_key(task_id, platform, chat_id, thread_id),
+        ).fetchone()
+        if row is None:
             return 0, 0, []
+        old_cursor = int(row["last_event_id"])
+        # The default claim path (advance-at-claim) must never touch a durable
+        # sub: durable delivery uses peek-then-advance via the owner-fenced
+        # lease, advancing only after a persist ack. Re-check the row's current
+        # policy/lease inside this txn so a policy switch after this watcher's
+        # poll snapshot cannot leak an event onto the wrong path:
+        #  - retry_policy == 'durable' (a default->durable switch) → leave it for
+        #    the durable path, do not pre-advance without an ack;
+        #  - an active lease (a durable->default switch mid-delivery) → leave it
+        #    for the lease holder.
+        if str(row["retry_policy"] or "default").lower() == "durable":
+            return old_cursor, old_cursor, []
+        lease_until = row["lease_until"]
+        if (
+            row["claimed_by"] is not None
+            and lease_until is not None
+            and int(lease_until) > int(time.time())
+        ):
+            return old_cursor, old_cursor, []
         new_cursor, events = unseen_events_for_sub(
             conn, task_id=task_id, platform=platform, chat_id=chat_id,
             thread_id=thread_id, kinds=kinds,
@@ -403,6 +465,128 @@ def advance_notify_cursor(
             "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE,
             (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id)),
         )
+
+
+def claim_notify_sub_lease(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    expected_cursor: int,
+    token: str,
+    lease_until: int,
+    now: int,
+) -> bool:
+    """Owner-fenced CAS claim of a durable sub's short-lived delivery lease.
+
+    Grants ONE drainer exclusive delivery of the event range that begins at
+    ``expected_cursor`` WITHOUT advancing the cursor, so the durable path keeps
+    its peek-then-advance crash-safety while gaining the single-active-delivery
+    guarantee the default (``claim_unseen_events_for_sub``) path gets from the
+    writer lock. Succeeds only when the row is still at ``expected_cursor`` and
+    is either unclaimed or its prior lease has expired (``lease_until <= now``,
+    reclaim after a dead drainer), AND the row is still ``retry_policy='durable'``
+    — so a sub switched to a non-durable policy after this drainer's snapshot
+    cannot be claimed here. Returns ``True`` iff this call took the lease.
+    """
+    with _kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET claimed_by = ?, lease_until = ? "
+            + _SUB_KEY_WHERE
+            + " AND last_event_id = ?"
+            " AND LOWER(retry_policy) = 'durable'"
+            " AND (claimed_by IS NULL OR lease_until <= ?)",
+            (token, int(lease_until), *_sub_key(task_id, platform, chat_id, thread_id),
+             int(expected_cursor), int(now)),
+        )
+        return cur.rowcount > 0
+
+
+def advance_and_release_notify_sub(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    expected_cursor: int,
+    new_cursor: int,
+    token: str,
+) -> bool:
+    """Advance the cursor and release the lease in one CAS after a confirmed
+    durable delivery. Applies only when THIS drainer still holds the lease
+    (``claimed_by = token``) and the cursor has not moved (``last_event_id =
+    expected_cursor``); returns ``True`` iff it advanced."""
+    with _kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET last_event_id = ?, claimed_by = NULL, lease_until = NULL "
+            + _SUB_KEY_WHERE
+            + " AND last_event_id = ? AND claimed_by = ?",
+            (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id),
+             int(expected_cursor), token),
+        )
+        return cur.rowcount > 0
+
+
+def release_notify_sub_lease(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    token: str,
+) -> None:
+    """Release a delivery lease held by ``token`` WITHOUT advancing the cursor.
+
+    Used after a handled delivery failure (process still alive) so the very
+    next notifier tick re-delivers, rather than waiting out ``lease_until``.
+    Scoped to ``claimed_by = token`` so it can never free a lease another
+    drainer has since taken."""
+    with _kb.write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET claimed_by = NULL, lease_until = NULL "
+            + _SUB_KEY_WHERE
+            + " AND claimed_by = ?",
+            (*_sub_key(task_id, platform, chat_id, thread_id), token),
+        )
+
+
+def publish_task_notification(
+    conn: sqlite3.Connection,
+    task_id: str,
+    message: str,
+    *,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Append a generic ``notification`` event carrying ``message`` for ``task_id``.
+
+    Public, plugin-facing writer for the gateway kanban-notifier: ``notification``
+    is claimed by both ``TERMINAL_KINDS`` (delivery) and ``_WAKE_KINDS`` (wake),
+    and the payload's ``message`` is rendered as the passive-delivery body and
+    carried into the synthetic wake turn. Unlike ``add_comment`` (which emits a
+    non-notifiable ``commented`` event), this lets any caller resume a task's
+    subscribers with arbitrary content through the existing claim/cursor/wake
+    machinery — no bespoke event kind, no new delivery mechanism.
+    """
+    if not message or not str(message).strip():
+        raise ValueError("notification message is required")
+    # Flatten metadata into the event payload alongside the message, so a
+    # consumer reads e.g. payload["idempotency_key"] directly (never nested).
+    payload: dict = {"message": str(message)}
+    if metadata:
+        payload.update(metadata)
+    with _kb.write_txn(conn, allow_nested=True):
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        _kb._append_event(conn, task_id, "notification", payload)
 
 
 def record_notify_ping(

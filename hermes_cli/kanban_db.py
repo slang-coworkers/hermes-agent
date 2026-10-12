@@ -1060,6 +1060,18 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_ping_event_id INTEGER NOT NULL DEFAULT 0,
+    -- Generic delivery-retry policy for the notifier: 'default' (stock
+    -- delete-on-repeated-failure) or 'durable' (never delete/advance past an
+    -- unseen event; capped backoff + operator alert on sustained failure).
+    retry_policy  TEXT NOT NULL DEFAULT 'default',
+    -- Owner-fenced, short-lived delivery lease for the durable notifier path:
+    -- claimed_by is the delivering drainer's opaque token and lease_until its
+    -- epoch expiry, so a single active delivery is enforced under concurrency
+    -- WITHOUT advancing the cursor (peek-then-advance crash-safety is kept).
+    -- Nullable because SQLite forbids a non-constant default; inert (always
+    -- NULL) on the stock 'default' retry_policy path.
+    claimed_by    TEXT,
+    lease_until   INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
@@ -1480,10 +1492,11 @@ def _inherit_notify_subs(
         INSERT OR IGNORE INTO kanban_notify_subs
             (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
              chat_type, notifier_profile, delivery_mode, delivery_metadata,
-             created_at, last_event_id)
+             retry_policy, created_at, last_event_id)
         SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
                COALESCE(chat_type, 'dm'), notifier_profile,
-               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
+               COALESCE(delivery_mode, 'notify'), delivery_metadata,
+               COALESCE(retry_policy, 'default'), ?, ?
           FROM kanban_notify_subs
          WHERE task_id IN ({placeholders})
         """,
