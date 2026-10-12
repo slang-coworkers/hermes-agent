@@ -220,6 +220,48 @@ def _parse_gh_comment(event):
     return repo, pr, stype == "User", (comment.get("body") or "")
 
 
+_CRITIQUE_VERDICTS = ("approve", "must-fix")
+_FINDING_FIELDS = ("location", "problem", "fix")
+_CRITIQUE_INSTRUCTIONS = (
+    "You are an independent critique gate. Review the task and every artifact below for the "
+    "named stage. Return a single JSON object "
+    '{{"verdict": "approve"|"must-fix", "stage": "{stage}", '
+    '"findings": [{{"location": str, "problem": str, "fix": str}}]}}. '
+    "A must-fix carries at least one finding; an approve may list advisory findings."
+)
+
+
+def _critique_artifacts(raw) -> list:
+    """Keep the ``{name, content}`` entries that carry text content.
+
+    The reviewer runs in the gateway, outside the caller's sandbox, so a path
+    alone is not something it can read.
+    """
+    out = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("content"), str):
+            out.append({"name": str(item.get("name") or "artifact"), "content": item["content"]})
+    return out
+
+
+def _validate_critique(parsed, stage):
+    """``(verdict, findings)`` for a well-formed reply to ``stage``, else None."""
+    if not isinstance(parsed, dict) or parsed.get("stage") != stage:
+        return None
+    verdict = parsed.get("verdict")
+    findings = parsed.get("findings")
+    if verdict not in _CRITIQUE_VERDICTS or not isinstance(findings, list):
+        return None
+    for finding in findings:
+        if not isinstance(finding, dict) or not all(
+            isinstance(finding.get(k), str) and finding[k].strip() for k in _FINDING_FIELDS
+        ):
+            return None
+    if verdict == "must-fix" and not findings:
+        return None
+    return verdict, findings
+
+
 def register(ctx) -> None:
     from .cli import setup_wire
 
@@ -238,6 +280,12 @@ def register(ctx) -> None:
     # into every profile ({profile: {sanitized mcp__srv__tool: transport}}); the
     # predicate selects this profile's entry by _current_profile().
     mcp_scope = ctx.get_config("mcp_scope", {}) or {}
+    # A malformed value must not raise here: register() failing disables the veto.
+    try:
+        critique_max_chars = int(ctx.get_config("critique_max_chars", 120000))
+    except (TypeError, ValueError):
+        logger.warning("nv-fleet-gates: invalid critique_max_chars; using 120000")
+        critique_max_chars = 120000
     # When the managed layer pins the role map, roles come ONLY from it (a
     # profile absent from it defaults to worker) so a per-profile config cannot
     # add itself as orchestrator — ctx.get_config alone returns the deep-merged
@@ -520,70 +568,106 @@ def register(ctx) -> None:
         return None
 
     # --- codex_critique tool + slash alias ----------------------------------
-    async def _run_critique(stage: str):
+    def _critique_error(reason, error, stage, session_id):
+        return json.dumps({
+            "ok": False, "reason": reason, "error": error,
+            "stage": stage, "session_id": session_id,
+        })
+
+    async def _critique_and_record(stage, task, artifacts, session_id):
+        """Review inline artifacts; record the gate row only for a well-formed verdict."""
+        task = task if isinstance(task, str) else ""
+        artifacts = _critique_artifacts(artifacts)
+        if not any(a["content"].strip() for a in artifacts):
+            return _critique_error(
+                "critique_no_artifacts",
+                "pass the diff or file text inline as artifacts=[{name, content}]; "
+                "the reviewer cannot read paths in your sandbox",
+                stage, session_id,
+            )
+        total = len(task) + sum(len(a["name"]) + len(a["content"]) for a in artifacts)
+        if total > critique_max_chars:
+            return _critique_error(
+                "critique_artifacts_too_large",
+                f"{total} chars > {critique_max_chars}; send the diff, not whole files",
+                stage, session_id,
+            )
         from agent.plugin_llm import PluginLlm
 
+        blocks = [{"type": "text", "text": f"Stage: {stage}\nTask: {task}"}]
+        blocks += [{"type": "text", "text": f"### {a['name']}\n{a['content']}"} for a in artifacts]
         llm = PluginLlm(plugin_id=PLUGIN_KEY)
-        result = await llm.acomplete_structured(
-            instructions=(
-                "You are an independent critique gate. Review the work for the named stage and "
-                'return a single JSON object {"verdict": "approve"|"must-fix", "stage": <stage>}.'
-            ),
-            input=[{"type": "text", "text": f"Stage: {stage}. Assess readiness for this delivery."}],
-            json_mode=True,
+        for _attempt in range(2):
+            try:
+                result = await llm.acomplete_structured(
+                    instructions=_CRITIQUE_INSTRUCTIONS.format(stage=stage),
+                    input=blocks,
+                    json_mode=True,
+                )
+            except Exception as exc:
+                logger.warning("codex_critique backend failed", exc_info=True)
+                return _critique_error("critique_backend_error", str(exc), stage, session_id)
+            valid = _validate_critique(getattr(result, "parsed", None), stage)
+            if valid:
+                verdict, findings = valid
+                if session_id:
+                    # A well-formed critique HAVING RUN (not its verdict) is what the
+                    # gate requires, porting NanoClaw's edits_since_critique==0 invariant.
+                    try:
+                        stores.record_critique(session_id, stage)
+                    except Exception as exc:
+                        logger.warning("codex_critique could not record the critique row", exc_info=True)
+                        return _critique_error("critique_record_failed", str(exc), stage, session_id)
+                return json.dumps({
+                    "ok": True, "session_id": session_id, "stage": stage,
+                    "verdict": verdict, "findings": findings,
+                })
+        return _critique_error(
+            "critique_invalid_reply",
+            "critique backend returned no well-formed verdict with findings after 2 attempts",
+            stage, session_id,
         )
-        parsed = getattr(result, "parsed", None) or {}
-        return parsed.get("verdict") if isinstance(parsed, dict) else None
 
     async def _tool_codex_critique(args, **kwargs):
         # session_id comes ONLY from the authoritative dispatch kwargs, never
         # from model-supplied args — otherwise a model could record a critique
         # for another session and unlock its gate.
-        session_id = kwargs.get("session_id")
-        stage = (args or {}).get("stage") or (required_stages[0] if required_stages else "OUTPUT_REVIEW")
-        try:
-            verdict = await _run_critique(stage)
-            if session_id:
-                # A critique HAVING RUN (not its verdict) is what the gate requires,
-                # porting NanoClaw's edits_since_critique==0 invariant.
-                stores.record_critique(session_id, stage)
-        except Exception as exc:
-            logger.warning("codex_critique failed", exc_info=True)
-            return json.dumps({"ok": False, "error": str(exc), "session_id": session_id})
-        return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
+        args = args if isinstance(args, dict) else {}
+        stage = args.get("stage") or (required_stages[0] if required_stages else "OUTPUT_REVIEW")
+        return await _critique_and_record(
+            stage, args.get("task"), args.get("artifacts"), kwargs.get("session_id"),
+        )
 
     def _check_codex_critique(*_a, **_k) -> bool:
         return True  # every session may run its own critique
 
     async def _slash_codex_critique(raw_args: str = "", **kwargs):
-        stage = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else (
-            required_stages[0] if required_stages else "OUTPUT_REVIEW"
-        )
+        parts = (raw_args or "").strip().split(None, 1)
+        stage = parts[0] if parts else (required_stages[0] if required_stages else "OUTPUT_REVIEW")
+        text = parts[1].strip() if len(parts) > 1 else ""
         # Authoritative session id only: dispatch kwargs, else the request-local
         # ContextVar the pre_command observer set for this same dispatch.
         session_id = kwargs.get("session_id") or kwargs.get("session_key") or _pending_slash_session.get()
         try:
-            verdict = await _run_critique(stage)
             if not session_id:
-                # No session to attribute the critique to — report honestly
-                # rather than claim success while recording nothing.
                 return json.dumps({
-                    "ok": False,
+                    "ok": False, "reason": "critique_no_session",
                     "error": "no session context for /codex-critique; invoke the codex_critique tool",
-                    "stage": stage, "verdict": verdict,
+                    "stage": stage,
                 })
-            stores.record_critique(session_id, stage)
-            return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
-        except Exception as exc:
-            return json.dumps({"ok": False, "error": str(exc)})
+            return await _critique_and_record(
+                stage, "", [{"name": "inline", "content": text}], session_id,
+            )
         finally:
             # Consume the request-local hint even on failure so it can't leak.
             _pending_slash_session.set(None)
 
     CODEX_CRITIQUE_SCHEMA = {
         "description": (
-            "Run an independent critique for the current session and record the critique row the "
-            "delivery/egress gate consumes. Correlated by session_id."
+            "Run an independent critique of inline artifacts for the current session and record "
+            "the critique row the delivery/egress gate consumes. Pass the diff or file text itself "
+            "as artifacts (the reviewer cannot read paths in your sandbox). Returns the verdict "
+            "with findings, or ok:false with a reason (no row recorded)."
         ),
         "parameters": {
             "type": "object",
@@ -592,7 +676,27 @@ def register(ctx) -> None:
                     "type": "string",
                     "description": "Critique stage (e.g. OUTPUT_REVIEW, CODE_REVIEW, PLAN_REVIEW).",
                 },
+                "task": {
+                    "type": "string",
+                    "description": "The request being critiqued, verbatim.",
+                },
+                "artifacts": {
+                    "type": "array",
+                    "description": (
+                        "What to review, inline: each entry's content is the diff or file text "
+                        "itself, never a path. Total size is capped by critique_max_chars."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["name", "content"],
+                    },
+                },
             },
+            "required": ["artifacts"],
         },
     }
 

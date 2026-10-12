@@ -6,9 +6,9 @@ description: Independent read-only second-opinion review run by codex.
 # Codex Critique
 
 Run an independent second-opinion review by codex at each natural workflow
-transition. Codex reads the artifacts itself in a separate, read-only session;
-hand it file paths, not contents, and keep the returned thread id for
-follow-up rounds.
+transition. The reviewer runs outside your sandbox and cannot read your paths:
+pass content inline as artifacts (the diff or the file text itself, within the
+configured size), and keep the returned thread id for follow-up rounds.
 
 ## Stages
 

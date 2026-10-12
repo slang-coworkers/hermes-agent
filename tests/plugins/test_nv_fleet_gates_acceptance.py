@@ -23,6 +23,7 @@ no network, nothing under ``~/.hermes``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 from pathlib import Path
@@ -146,10 +147,14 @@ def _run_critique(monkeypatch, session_id, verdict="approve"):
         calls["n"] += 1
         return plugin_llm.PluginLlmStructuredResult(
             text="{}", provider="test", model="test", agent_id="test",
-            parsed={"verdict": verdict, "stage": "OUTPUT_REVIEW"}, content_type="json")
+            parsed={"verdict": verdict, "stage": "OUTPUT_REVIEW",
+                    "findings": [{"location": "x.py:1", "problem": "p", "fix": "f"}]},
+            content_type="json")
 
     monkeypatch.setattr(plugin_llm.PluginLlm, "acomplete_structured", _fake, raising=False)
-    registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW"}, session_id=session_id)
+    registry.dispatch("codex_critique",
+                      {"stage": "OUTPUT_REVIEW", "artifacts": [{"name": "diff", "content": "x"}]},
+                      session_id=session_id)
     return calls
 
 
@@ -516,3 +521,56 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
     assert _act(_gate(manager, "terminal", {"command": "rm -rf /"})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "ls"})) != "block"
     assert calls["env"] >= 1
+
+
+def test_codex_critique_sends_every_artifact_including_empty_ones(tmp_path, monkeypatch):
+    """An empty file is reviewable context next to a non-blank artifact; blank-only is refused."""
+    import agent.plugin_llm as plugin_llm
+    _load(tmp_path, monkeypatch)
+    seen = []
+
+    async def _fake(self, **kw):
+        seen.append("\n".join(str(b.get("text")) for b in kw.get("input") or []))
+        return plugin_llm.PluginLlmStructuredResult(
+            text="{}", provider="t", model="t", agent_id="t",
+            parsed={"verdict": "approve", "stage": "OUTPUT_REVIEW", "findings": []},
+            content_type="json")
+
+    monkeypatch.setattr(plugin_llm.PluginLlm, "acomplete_structured", _fake, raising=False)
+    out = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "EMPTY_INIT_PY", "content": ""}, {"name": "diff", "content": "x = 1"}]},
+        session_id="sess-1"))
+    assert out["ok"] is True
+    assert "EMPTY_INIT_PY" in seen[0] and "x = 1" in seen[0]
+    seen.clear()
+    blank = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "a", "content": ""}, {"name": "b", "content": "  \n"}]}, session_id="sess-1"))
+    assert blank["reason"] == "critique_no_artifacts" and seen == []
+
+
+@pytest.mark.parametrize("path", ["tool", "slash"])
+def test_codex_critique_record_failure_is_an_error_without_verdict(tmp_path, monkeypatch, path):
+    """A critique row that cannot be recorded is ok:false critique_record_failed, no verdict, gate still blocked."""
+    import sqlite3
+
+    from model_tools import _run_async
+    manager, _, _ = _load(tmp_path, monkeypatch)
+    loaded = _loaded(manager)
+    _wire(manager, "add", "worker-a", "orch")
+
+    def _raise(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(loaded.module.stores, "record_critique", _raise)
+    _run_critique(monkeypatch, "sR")                     # installs the stubbed backend
+    if path == "tool":
+        out = json.loads(registry.dispatch("codex_critique", {
+            "stage": "OUTPUT_REVIEW", "artifacts": [{"name": "diff", "content": "x"}]}, session_id="sR"))
+    else:
+        handler = manager._plugin_commands["codex-critique"]["handler"]
+        out = json.loads(_run_async(handler("OUTPUT_REVIEW the drafted reply", session_id="sR")))
+    assert out.get("ok") is False, out
+    assert out.get("reason") == "critique_record_failed", out
+    assert "verdict" not in out, out
+    msg = {"target": "orch", "message": "[Review Verdict] APPROVE"}
+    assert _act(_gate(manager, "message_agent", msg, session_id="sR")) == "block"
