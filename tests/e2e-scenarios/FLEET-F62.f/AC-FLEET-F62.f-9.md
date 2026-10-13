@@ -23,9 +23,10 @@ injects the real key. `LIVE_MODEL_CALLS_MAX` is not consumed. The outcome is she
 Per the operator's standing rule of 2026-10-06, the evidence is `evidence.txt` plus logs, and no screenshots are
 required.
 
-**Runs on.** The operator lane, on brev-hermes (the operator's own NemoClaw Hermes sandbox), **after e2e run 2 has
-finished**, at the PR head under test. It takes no ING-F66 lane slot, no tester time during run 2, and no box load
-from either.
+**Runs on.** The operator lane, on brev-hermes (the operator's own NemoClaw Hermes sandbox), at the PR head under
+test, only once the Orchestrator releases brev-hermes for it: no e2e run owns brev-hermes, and the operator has
+done L1 on its broker (at Orchestrator msg 36 that means e2e run 3 on v2026.8.31-e2e.2 has reached its verdict).
+It takes no ING-F66 lane slot, no tester time during an e2e run, and no box load from either.
 
 **Fixtures.** None from the fork. The spec is the operator's brev-hermes install spec (the one the e2e reinstall
 uses, i.e. the `nanoclaw-base` fleet), staged with `install-into-sandbox.sh` at the PR head.

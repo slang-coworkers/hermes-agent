@@ -1,5 +1,4 @@
-"""Hermetic acceptance tests for FLEET-F62.f: the installer's policy-mirror check works without a host mount
-(ships to ``tests/plugins/test_fleet_f62_f_acceptance.py``).
+"""Hermetic acceptance tests for FLEET-F62.f: the installer's policy-mirror check works without a host mount.
 
 One ``test_ac_fleet_f62_f_<n>`` per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..AC-8, in order);
 the docstring's first line is the criterion text. AC-9 is a ``live:`` scenario file, not here.
@@ -273,7 +272,7 @@ def _refused(tmp_path, monkeypatch, inst, case, broker, policy_root, why, **kw):
 
 
 def _plan_creates(tmp_path, monkeypatch, inst, case, policy_root):
-    """The provision-create argv vectors `build_plan` emits for this home and root (the commands 35767fe2 executes)."""
+    """The provision-create argv vectors `build_plan` emits for this home and root."""
     with monkeypatch.context() as mp:
         mp.setenv("HOME", str(tmp_path / case / "user"))
         mp.setenv("HERMES_HOME", str(tmp_path / case / "home"))
