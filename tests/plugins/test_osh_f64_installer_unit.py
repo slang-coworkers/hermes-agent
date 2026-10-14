@@ -177,7 +177,7 @@ def test_phase_a_backs_up_before_first_plugin_command(monkeypatch):
 def test_collect_home_state_reads_shared_metadata_revision():
     """Installed refs come from the shared `<home>/plugins/.install-metadata.json`
     (keyed by name, field `revision`), so a re-run is not seen as universally stale."""
-    import os, json, yaml
+    import os, json, hermes_yaml as yaml
     inst = _installer()
     home = Path(os.environ["HERMES_HOME"]); (home / "plugins").mkdir(parents=True, exist_ok=True)
     enabled = _spine_enabled()
@@ -208,7 +208,7 @@ def test_managed_installed_requires_ssh_host_and_approvals():
     approval keys, and one still missing the scan guard each leave managed_installed False so the
     write backfills them — neither the ssh veto, the approval floor, nor the install-scan guard is
     left fail-open (a re-run without the guard hits the DANGEROUS verdict --force cannot override)."""
-    import os, yaml
+    import os, hermes_yaml as yaml
     inst = _installer()
     managed = Path(os.environ["HERMES_MANAGED_DIR"]); managed.mkdir(parents=True, exist_ok=True)
     Path(os.environ["HERMES_HOME"], "plugins").mkdir(parents=True, exist_ok=True)
@@ -236,7 +236,7 @@ def test_managed_installed_requires_ssh_host_and_approvals():
 def test_room_steps_carry_payload_and_execute_via_creator():
     """Each room is a structured step the executor dispatches through the injected
     groups.create creator; with no creator it fails closed (never a silent skip)."""
-    import os, yaml
+    import os, hermes_yaml as yaml
     inst = _installer()
     home = Path(os.environ["HERMES_HOME"]); (home / "plugins").mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text("gateway:\n  multiplex_profiles: false\n", encoding="utf-8")
