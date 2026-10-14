@@ -20,7 +20,7 @@ import copy
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.config import migrate_config
 from hermes_cli.config_defaults import DEFAULT_CONFIG

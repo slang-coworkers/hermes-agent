@@ -28,10 +28,19 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    import yaml
-except Exception:  # pragma: no cover - yaml is a Hermes runtime dependency
-    yaml = None  # type: ignore
+
+def _load_yaml_compat():
+    # By path, not a relative import: install-into-sandbox.sh runs this file as a script. The helper
+    # imports the sandbox Hermes install's ``hermes_yaml``; without it this import fails, naming it.
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "_yaml_compat.py"
+    spec = importlib.util.spec_from_file_location("_nv_yaml_compat_installer", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+yaml = _load_yaml_compat()
 
 FORK_REPO = "slang-coworkers/hermes-agent"
 _PLUGIN_SRC = FORK_REPO + "/plugins/{name}"
@@ -114,7 +123,6 @@ def _managed_dir() -> Optional[str]:
 
 
 def load_spec(spec_path: Any) -> Dict[str, Any]:
-    assert yaml is not None
     return yaml.safe_load(Path(spec_path).read_text(encoding="utf-8")) or {}
 
 

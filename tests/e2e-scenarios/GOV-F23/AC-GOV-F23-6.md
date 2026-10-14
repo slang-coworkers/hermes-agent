@@ -103,7 +103,7 @@ There are no `fixtures:` to install. Everything below is the scenario's own setu
      export HERMES_MANAGED_DIR="${HERMES_MANAGED_DIR:-$HERMES_HOME/managed}"
      # (a) the worker's real terminal env has the guard ACTIVE (docker + host access true)
      python3 -c "
-import os, yaml
+import os, hermes_yaml as yaml
 from hermes_cli.config import apply_terminal_config_to_env
 from tools.terminal_tool import _get_env_config, _docker_has_host_access
 from tools.approval import _should_skip_container_guards
@@ -118,7 +118,7 @@ print('guard ACTIVE: docker host_access=True host_cwd=' + str(env.get('host_cwd'
 "
      # (b) effective single_query_mode is deny; the probe verb is neither allowlisted nor deny-listed
      python3 -c "
-import os, yaml
+import os, hermes_yaml as yaml
 c = yaml.safe_load(open(os.path.join(os.environ['HERMES_HOME'], 'profiles', 'gov-f23-worker', 'config.yaml')))
 al = c.get('command_allowlist', []); dn = (c.get('approvals') or {}).get('deny', [])
 assert 'rm -rf gov-f23-victim' not in al and 'rm -rf gov-f23-victim' not in dn, 'victim command must not be allowlisted/denied'

@@ -59,7 +59,7 @@ def _launch_env(tmp_path: Path, stub: Path, rec: Path, log: Path) -> dict:
     return env
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_adds_nv_hermes_ppid_label(tmp_path):
     """An accepted long-lived launch gains --label nv.hermes-ppid, is logged, and
     never leaks the proxy userinfo token to the log or stderr."""
@@ -94,7 +94,7 @@ def test_wrapper_adds_nv_hermes_ppid_label(tmp_path):
     assert GOOD_PROXY not in logged and GOOD_PROXY not in result.stderr
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_sweep_removes_dead_ppid_only(tmp_path):
     """`sweep` removes hermes-agent=1 containers whose nv.hermes-ppid is dead and
     leaves containers whose recorded ppid is still alive."""
@@ -135,7 +135,7 @@ def test_wrapper_sweep_removes_dead_ppid_only(tmp_path):
     assert "cid_live" not in removed
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_broad_run_rm(tmp_path):
     """A `run --rm` that is not the pinned cgroup probe (here it ends `sleep
     infinity`, not `sleep 0`) is treated as a long-lived launch and refused —
@@ -158,7 +158,7 @@ def test_wrapper_refuses_broad_run_rm(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_ro_rw_ca_mount(tmp_path):
     """A CA mount whose mode carries both `ro` and `rw` (`:ro,rw`) is not
     read-only and is refused, even though `ro` is present."""
@@ -186,7 +186,7 @@ def test_wrapper_refuses_ro_rw_ca_mount(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_compact_env_override(tmp_path):
     """A launch that carries every required name-only -e AND a compact
     `-e=HTTPS_PROXY=<attacker proxy>` override is refused before podman runs,
@@ -218,7 +218,7 @@ def test_wrapper_refuses_compact_env_override(tmp_path):
     assert "aoc_override" not in logged and "aoc_override" not in result.stderr
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_env_file(tmp_path):
     """An `--env-file` on a long-lived launch is forbidden outright (its contents
     are opaque and could override a protected proxy/CA var)."""
@@ -246,7 +246,7 @@ def test_wrapper_refuses_env_file(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_env_host(tmp_path):
     """`--env-host` imports the whole host env (ONECLI_API_KEY, provider creds)
     into the sandbox, so it is refused on a long-lived launch even when the
@@ -275,7 +275,7 @@ def test_wrapper_refuses_env_host(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_nonprotected_value_env(tmp_path):
     """A value-bearing env argument for a NON-protected var (e.g.
     `-e API_TOKEN=sk-live-canary`) is refused too: only name-only `-e NAME` is
@@ -317,7 +317,7 @@ def _valid_argv(ca_host: Path, *, mode: str = "ro") -> list:
     return argv
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_container_run_bypass(tmp_path):
     """AC-CRED-F28-1 (dispatch): `podman container run …` is normalised to `run`
     and validated, not passed through unvalidated. A `container run -d … sleep
@@ -341,7 +341,7 @@ def test_wrapper_refuses_container_run_bypass(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("prefix", [["--log-level=error"], ["--log-level", "error"]])
 def test_wrapper_refuses_global_option_prefixed_launch(tmp_path, prefix):
     """AC-CRED-F28-1 (dispatch): a leading podman global option before the verb
@@ -368,7 +368,7 @@ def test_wrapper_refuses_global_option_prefixed_launch(tmp_path, prefix):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_ignores_post_image_env_and_volume(tmp_path):
     """AC-CRED-F28-1 (image boundary): `-e`/`-v` tokens AFTER the image are the
     container command, not podman flags, so they do not count toward the proxy /
@@ -399,7 +399,7 @@ def test_wrapper_ignores_post_image_env_and_volume(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_control_plane_key_env(tmp_path):
     """AC-CRED-F28-3 (no secret in sandbox): an otherwise-valid launch that also
     carries `-e ONECLI_API_KEY` is refused — the control-plane bootstrap key
@@ -431,7 +431,7 @@ def test_wrapper_refuses_control_plane_key_env(tmp_path):
     assert "aoc_bootstrap_canary_DO_NOT_LEAK" not in result.stderr
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_nonallowlisted_env(tmp_path):
     """AC-CRED-F28-3 (no secret in sandbox): a name-only `-e` for a var that is
     neither a rendered egress/CA/NO_PROXY name nor a declared provider
@@ -460,7 +460,7 @@ def test_wrapper_refuses_nonallowlisted_env(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_allows_declared_provider_placeholder(tmp_path):
     """AC-CRED-F28-3 (allowlist is additive): a provider placeholder name the
     substrate declares via PODMAN_ONECLI_ALLOWED_ENV is accepted on an otherwise
@@ -489,7 +489,7 @@ def test_wrapper_allows_declared_provider_placeholder(tmp_path):
     assert "ANTHROPIC_API_KEY" in rec.read_text(encoding="utf-8")
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_malformed_proxy_without_leak(tmp_path):
     """AC-CRED-F28-1 (redaction): a malformed proxy value with no scheme/userinfo
     delimiters (so authority parsing cannot strip it) is refused, and its token
@@ -515,7 +515,7 @@ def test_wrapper_refuses_malformed_proxy_without_leak(tmp_path):
     assert "LEAK_ME_TOKEN" not in result.stderr
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_wildcard_no_proxy(tmp_path):
     """AC-CRED-F28-1 (egress guarantee): when the launch forwards `-e NO_PROXY`
     and the process value is a broadened `*`, the launch is refused — a wildcard
@@ -543,7 +543,7 @@ def test_wrapper_refuses_wildcard_no_proxy(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_accepts_loopback_no_proxy(tmp_path):
     """AC-CRED-F28-1 (egress guarantee): a forwarded `-e NO_PROXY` whose value is
     exactly the expected loopback bypass list is accepted — only a broadened
@@ -571,7 +571,7 @@ def test_wrapper_accepts_loopback_no_proxy(tmp_path):
     assert "NO_PROXY" in rec.read_text(encoding="utf-8")
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_detach_keys_value_before_env(tmp_path):
     """AC-CRED-F28-1 (known value-flag boundary): a KNOWN value-taking flag
     (`--detach-keys ctrl-x`) has its value consumed as a value, so the image
@@ -605,7 +605,7 @@ def test_wrapper_refuses_detach_keys_value_before_env(tmp_path):
     assert "sk-live-canary" not in logged and "sk-live-canary" not in result.stderr
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_unknown_pre_image_option(tmp_path):
     """AC-CRED-F28-1 (fail-closed dispatch): a pre-image option that is neither a
     known value-taking nor a known boolean flag is refused outright — an unknown
@@ -637,7 +637,7 @@ def test_wrapper_refuses_unknown_pre_image_option(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_refuses_proxy_authority_in_path(tmp_path):
     """AC-CRED-F28-1 (authority parsing): a proxy value whose real host is hidden
     in the path (`http://evil.example/path@172.17.0.1:10255` — a URL parser
@@ -662,7 +662,7 @@ def test_wrapper_refuses_proxy_authority_in_path(tmp_path):
     assert rec.read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_exec_logs_value_free_marker_and_forwards_argv(tmp_path):
     """FLEET-F62 C1: a `docker exec` through the wrapper (it IS HERMES_DOCKER_BINARY) logs a
     value-free `exec` audit marker — the exec-mediation witness that a sandbox command ran
@@ -696,7 +696,7 @@ def test_wrapper_exec_logs_value_free_marker_and_forwards_argv(tmp_path):
     assert "aoc_secret_DO_NOT_LEAK" not in logged
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_wrapper_ps_rewrites_label_template(tmp_path):
     """`ps --format` with the docker backend's {{.Label "K"}} is rewritten to the
     podman-3.4.4-compatible {{index .Labels "K"}} before being forwarded."""

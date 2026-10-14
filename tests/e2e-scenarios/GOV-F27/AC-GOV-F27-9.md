@@ -43,7 +43,7 @@ composed and installed here rather than auto-installed.
    `plugins.entries.nv-fleet-gates.settings.mcp_scope`:
    ```
    python3 -c '
-   import sys, yaml, pathlib
+   import sys, hermes_yaml as yaml, pathlib
    name = sys.argv[1]
    cfg = yaml.safe_load((pathlib.Path(sys.argv[2]) / "config.yaml").read_text())
    scope = cfg["plugins"]["entries"]["nv-fleet-gates"]["settings"]["mcp_scope"]
@@ -80,7 +80,7 @@ server set and no other role's server (`gov-f27-reviewer` → `{docs-ro}`,
   `state.db`; the coworker image ships no `sqlite3` CLI):
   ```
   python3 -c '
-  import yaml, pathlib
+  import hermes_yaml as yaml, pathlib
   for name, want in (("gov-f27-reviewer", {"docs-ro"}), ("gov-f27-fixer", {"repo-rw"})):
       cfg = yaml.safe_load((pathlib.Path("'"$HERMES_HOME"'/profiles") / name / "config.yaml").read_text())
       got = set((cfg.get("mcp_servers") or {}).keys())

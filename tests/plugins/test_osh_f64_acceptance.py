@@ -24,11 +24,11 @@ from pathlib import Path
 import pytest
 
 try:
-    import yaml
+    import hermes_yaml as yaml
 except Exception:  # pragma: no cover - yaml is a Hermes runtime dependency
     yaml = None
 
-pytestmark = pytest.mark.linux_only  # subprocess bash + s6 supervisor detection are POSIX-only
+pytestmark = pytest.mark.platforms("linux")  # subprocess bash + s6 supervisor detection are POSIX-only
 
 PLUGIN_KEY = "nv-coworker-compose"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")

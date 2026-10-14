@@ -88,7 +88,7 @@ def _full_state(inst):
     fresh = {"gateway": {"multiplex_profiles": False}}
     _, diff, _ = inst.default_config_diff(fresh, str(_spec_path()))
     installed = inst.apply_config_diff(fresh, diff)
-    import yaml
+    import hermes_yaml as yaml
     spine = yaml.safe_load((_spec_path().parent / "spines" / "base.yaml").read_text(encoding="utf-8")) or {}
     enabled = list(((spine.get("config") or {}).get("plugins") or {}).get("enabled", []))
     return {
@@ -139,7 +139,7 @@ def test_enabled_plugins_resolves_from_spine():
     """enabled_plugins reads the canonical set from the SPINE (no top-level mirror); a
     divergent top-level mirror, if one were ever re-added, fails closed."""
     inst = _installer()
-    import yaml
+    import hermes_yaml as yaml
     data = yaml.safe_load(_spec_path().read_text(encoding="utf-8")) or {}
     assert "enabled" not in (data.get("plugins") or {}), "spec must carry no top-level plugins.enabled mirror"
     ok = inst.enabled_plugins(data, str(_spec_path()))
@@ -151,7 +151,7 @@ def test_enabled_plugins_resolves_from_spine():
 
 
 def _spine_enabled():
-    import yaml
+    import hermes_yaml as yaml
     spine = yaml.safe_load((_spec_path().parent / "spines" / "base.yaml").read_text(encoding="utf-8")) or {}
     return list(((spine.get("config") or {}).get("plugins") or {}).get("enabled", []))
 
@@ -400,13 +400,13 @@ def test_phase_a_snapshots_bootstrap_plugin_before_force(tmp_path, monkeypatch):
         "Phase A runs the default-home snapshot"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_atomic_write_preserves_existing_config_mode(tmp_path):
     """_atomic_write_yaml keeps the existing config's permission bits — an operator's 0600
     config is never silently widened to the temp file's umask default on rewrite."""
     import os
     import stat
-    import yaml
+    import hermes_yaml as yaml
     inst = _installer()
     cfg = tmp_path / "config.yaml"
     cfg.write_text("gateway:\n  multiplex_profiles: false\n", encoding="utf-8")
@@ -436,12 +436,12 @@ def test_managed_diff_installs_approvals_and_security():
     assert merged["logging"] == {"level": "debug"}            # unrelated operator key preserved
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_atomic_write_preserves_symlink_target(tmp_path):
     """_atomic_write_yaml writes THROUGH a symlinked config to its target — the symlink is
     never detached into a plain file, and the target receives the updated YAML."""
     import os
-    import yaml
+    import hermes_yaml as yaml
     inst = _installer()
     real = tmp_path / "real-config.yaml"
     real.write_text("gateway:\n  multiplex_profiles: false\n", encoding="utf-8")
@@ -460,7 +460,7 @@ def test_scan_guard_backup_records_original_absence_not_generated_file():
     deletes it rather than restoring plugins.scan_on_install: false. An EXISTING managed config is
     backed up verbatim before the guard mutates it."""
     import os
-    import yaml
+    import hermes_yaml as yaml
     inst = _installer()
     Path(os.environ["HERMES_HOME"], "plugins").mkdir(parents=True, exist_ok=True)
     managed = Path(os.environ["HERMES_MANAGED_DIR"]); managed.mkdir(parents=True, exist_ok=True)
@@ -509,7 +509,7 @@ def test_rollback_doc_deletes_absent_marker():
         "rollback runbook must delete the .osh-f64.absent marker so no stale marker misleads a later install"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_install_into_sandbox_dry_run_forwards_policy_root(tmp_path, monkeypatch):
     """§D3: the shell entrypoint forwards --policy-root to `installer.py plan`, so a --dry-run
     transcript rebases every `openshell sandbox create --policy` to <root>/render/<role>/

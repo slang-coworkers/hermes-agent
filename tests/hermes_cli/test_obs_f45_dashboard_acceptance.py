@@ -53,7 +53,7 @@ def _seed_session(session_id, *, input_tokens=0, output_tokens=0, estimated_cost
 
 def test_ac_obs_f45_1():
     """Pixel Office / Coworkers roster gate: ui_meta['hermes-bots'] marks a profile Bot-Mode-managed."""
-    import yaml
+    import hermes_yaml as yaml
     from hermes_constants import get_hermes_home
     from tools import bot_mode_probe
 

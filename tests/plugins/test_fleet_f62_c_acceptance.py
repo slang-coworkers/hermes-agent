@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
+import hermes_yaml as yaml
 
 HOME_TOKEN = "@HERMES_HOME@"  # golden portability: the render-time $HERMES_HOME is substituted on both sides before the byte-diff
 

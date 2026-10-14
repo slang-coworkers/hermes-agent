@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 from hermes_cli.plugins_cmd import cmd_install

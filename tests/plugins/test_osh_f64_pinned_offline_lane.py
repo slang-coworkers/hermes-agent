@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-yaml = pytest.importorskip("yaml")
+import hermes_yaml as yaml
 
 PLUGIN_KEY = "nv-coworker-compose"
 FIRECRAWL = {"web-firecrawl", "browser-firecrawl"}

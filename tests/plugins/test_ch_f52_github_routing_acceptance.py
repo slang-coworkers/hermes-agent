@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

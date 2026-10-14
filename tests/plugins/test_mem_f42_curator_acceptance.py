@@ -35,7 +35,7 @@ from pathlib import Path
 import re
 import shutil
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 from hermes_cli.config import migrate_config

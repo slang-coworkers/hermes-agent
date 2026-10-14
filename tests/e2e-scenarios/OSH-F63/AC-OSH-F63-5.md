@@ -83,7 +83,7 @@ mounted lane is §Gating & carry outcome (c): OSH-F63 stays BLOCKED on that infr
   the render creates them as empty 0600 files on the gateway, but the installed fixtures do
   not carry external key files. Create each referenced key as an empty 0600 placeholder
   after install (the tester container has the testbed mounted rw): for each installed
-  profile, `install -D -m 600 /dev/null "$(python3 -c 'import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))["terminal"]["ssh_key"])' "$HERMES_HOME/profiles/<profile>/config.yaml")"`
+  profile, `install -D -m 600 /dev/null "$(python3 -c 'import sys,hermes_yaml as yaml;print(yaml.safe_load(open(sys.argv[1]))["terminal"]["ssh_key"])' "$HERMES_HOME/profiles/<profile>/config.yaml")"`
   (`-D` creates the parent `openshell/keys/` dir, which the installed fixtures do not carry).
   The ssh-config auth rides the mTLS proxy, so the key need only EXIST (no key material).
 - The rendered `openshell policy` files ship in each distribution's `distribution_owned`,

@@ -41,7 +41,7 @@ FLEET_ADMIN_TOOLS = ("cronjob_manage", "onboard_coworker", "onboard_project", "c
 # as {backend, checks} — a list of {op, key, ...} run through the backend-neutral _run_check ops. The
 # parametrize set is DISCOVERED from the committed fixture dirs, so a second column is a new spec/<sub>/ +
 # fixtures/<sub>/ tree with its meta.json declaring its own checks, and NOTHING in this file changes.
-pytestmark = pytest.mark.linux_only  # generate_systemd_unit + reconcile_profile_gateways are the Linux CI target
+pytestmark = pytest.mark.platforms("linux")  # generate_systemd_unit + reconcile_profile_gateways are the Linux CI target
 
 
 def _spec_for(substrate: str) -> Path:
@@ -108,7 +108,7 @@ def _require_fixtures(substrate: str) -> None:
 
 
 def _read_yaml(path: Path) -> dict:
-    import yaml
+    import hermes_yaml as yaml
 
     with path.open(encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
@@ -151,7 +151,7 @@ def _render_fleet(substrate: str, out_dir: Path, tmp_path: Path, bundled: Path) 
     boot = tmp_path / "bootstrap"
     boot.mkdir()
     _copy_plugin_code(boot)
-    import yaml
+    import hermes_yaml as yaml
 
     (boot / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["nv-coworker-compose"]}}), encoding="utf-8")
     proc = _cli("coworker", "compose", str(_spec_for(substrate)), "--out", str(out_dir), home=boot, bundled=bundled)
@@ -468,7 +468,7 @@ def test_ac_fleet_f62_4(rendered, tmp_path, monkeypatch):
 
 def test_render_rejects_unknown_substrate(tmp_path, monkeypatch):
     """Unknown substrates fail before writing any distribution."""
-    import yaml
+    import hermes_yaml as yaml
 
     _require_fixtures("podman")
     bundled = tmp_path / "empty-bundled"
@@ -514,7 +514,7 @@ def _load_podman_onecli(tmp_path, monkeypatch, origins):
     """Load podman-onecli through the real discovery path with the bridge base + allowlist in config.yaml,
     so register(ctx) → ctx.get_config('insecure_no_auth_origins') → oneclient.configure(...) actually runs
     (proving the plumbing, not just the guard function). Returns the configured oneclient module."""
-    import yaml
+    import hermes_yaml as yaml
 
     from hermes_cli.plugins import PluginManager
 

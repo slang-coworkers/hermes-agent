@@ -20,7 +20,7 @@ inline in tmp_path so the test is self-contained (no external fixture tree).
 from pathlib import Path
 import shutil
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 

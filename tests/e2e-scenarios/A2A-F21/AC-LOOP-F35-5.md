@@ -94,7 +94,7 @@ substitutes the real credential at the `inference-api.nvidia.com` hop):
    fix (PyYAML ships with Hermes; the image has no yaml CLI):
    ```bash
    ( source $TB/harness.live.env && python3 -c "
-   import yaml, os
+   import hermes_yaml as yaml, os
    home = os.environ['HERMES_HOME']
    for bot in ('a2a-f21-loopf35-a', 'a2a-f21-loopf35-b'):
        c = yaml.safe_load(open(home + '/profiles/' + bot + '/config.yaml'))
