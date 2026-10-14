@@ -11,24 +11,30 @@ plugins copied in and an EMPTY bundled dir (the FLEET-F62.c/d harness). Start-ti
 process start. A "process start" is one ``apply_all`` on a fresh env; a "re-mint" rewrites the live bundle with a newly
 minted throwaway CA between two starts. Installer rows import ``openshell/installer.py`` by path.
 
-Behaviour contract, not a snapshot: no network, no socket, nothing under ``~/.hermes``, no plugin source is read. Every
+Behaviour contract, not a snapshot: no network (AC-4/AC-5 observe trust through loopback TLS handshakes in a fresh
+interpreter), nothing under ``~/.hermes``, no plugin source is read. Every
 certificate is a throwaway self-signed CA minted in ``tmp_path`` by the pinned ``cryptography``. Wording rule: no
 credential value, header or variable name appears here.
 """
 
+import contextlib
 import copy
 import datetime
+import http.server
 import importlib.util
+import ipaddress
+import json
 import os
 import re
 import shutil
 import ssl
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGINS_SRC = REPO_ROOT / "plugins"
@@ -55,6 +61,9 @@ KEPT_ENTRIES = ("localhost", "127.0.0.1", "::1", "10.200.0.1", ".svc.cluster.loc
 SHA = "a" * 40
 
 
+_MINTED = {}  # common name -> (key, cert) of the latest CA minted under it, so a loopback leaf can be signed by it
+
+
 def _mint_ca(common_name):
     """A throwaway self-signed CA, PEM text. Minted per test in memory; nothing real is ever loaded."""
     from cryptography import x509
@@ -72,23 +81,12 @@ def _mint_ca(common_name):
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
+    _MINTED[common_name] = (key, cert)
     return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
 
 
 def _pem_blocks(text):
     return re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", text, re.S)
-
-
-def _trusted_cns(ctx):
-    """Common names of the CAs an ssl.SSLContext trusts."""
-    assert isinstance(ctx, ssl.SSLContext), f"resolver returned {ctx!r}, not an SSLContext"
-    names = set()
-    for cert in ctx.get_ca_certs():
-        for rdn in cert.get("subject", ()):
-            for key, value in rdn:
-                if key == "commonName":
-                    names.add(value)
-    return names
 
 
 def _isolated_home(tmp_path, plugins=FLEET_PLUGINS):
@@ -330,16 +328,84 @@ def _source_report(report):
     return hits[0]
 
 
-def _resolver_trust(monkeypatch, environ):
-    """What the release TLS resolver trusts for a process whose env is ``environ``."""
-    from agent import ssl_verify
+@contextlib.contextmanager
+def _tls_servers(tmp_path, names):
+    """One loopback HTTPS server per minted CA name, its 127.0.0.1 leaf signed by that CA. Yields ``{name: url}``."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
 
-    for name in CA_ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    for name in CA_ENV_NAMES:
-        if name in environ:
-            monkeypatch.setenv(name, environ[name])
-    return _trusted_cns(ssl_verify.resolve_httpx_verify())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    servers, urls = [], {}
+    try:
+        for i, name in enumerate(names):
+            ca_key, ca_cert = _MINTED[name]
+            key = ec.generate_private_key(ec.SECP256R1())
+            leaf = (
+                x509.CertificateBuilder()
+                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"{name}-leaf")]))
+                .issuer_name(ca_cert.subject).public_key(key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
+                .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                               critical=False)
+                .sign(ca_key, hashes.SHA256())
+            )
+            cert_path, key_path = tmp_path / f"leaf-{i}.pem", tmp_path / f"leaf-{i}.key"
+            cert_path.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                   serialization.NoEncryption()))
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+
+            class _Ok(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.end_headers()
+
+                def log_message(self, *a):
+                    pass
+
+            server = http.server.HTTPServer(("127.0.0.1", 0), _Ok)
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            servers.append(server)
+            urls[name] = f"https://127.0.0.1:{server.server_address[1]}/"
+        yield urls
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+_HANDSHAKE = """
+import json, sys
+import httpx
+from agent.ssl_verify import resolve_httpx_verify
+out = {}
+for name, url in json.loads(sys.argv[1]).items():
+    try:
+        httpx.get(url, verify=resolve_httpx_verify(), timeout=10)
+        out[name] = True
+    except Exception:
+        out[name] = False
+print(json.dumps(out))
+"""
+
+
+def _resolver_trust(tmp_path, environ, names):
+    """Which of the named CAs the release TLS resolver trusts in a NEW process whose env is ``environ``: one fresh
+    interpreter builds ``httpx`` with ``resolve_httpx_verify()`` and handshakes a loopback server per CA. The resolver
+    caches one context per bundle path for the life of a process, so a process start is a new interpreter, never a
+    cleared cache."""
+    env = {k: v for k, v in environ.items() if k in (*CA_ENV_NAMES, "PATH")}
+    env.update(HOME=str(tmp_path / "client-os-home"), HERMES_HOME=str(tmp_path / "client-home"),
+               PYTHONPATH=str(REPO_ROOT), NO_PROXY="127.0.0.1,localhost", HERMES_DISABLE_LAZY_INSTALLS="1")
+    with _tls_servers(tmp_path, names) as urls:
+        proc = subprocess.run([sys.executable, "-c", _HANDSHAKE, json.dumps(urls)], capture_output=True, text=True,
+                              encoding="utf-8", env=env, cwd=str(tmp_path), timeout=120, stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, f"handshake probe failed: {proc.stderr[-1500:]}"
+    return {name for name, ok in json.loads(proc.stdout.strip().splitlines()[-1]).items() if ok}
 
 
 @pytest.fixture
@@ -370,14 +436,14 @@ def test_ac_fleet_f62_e_4(tmp_path, monkeypatch, lane):
     for name in CA_ENV_NAMES:
         assert env1[name] == str(lane["live"]), f"start 1: {name} must point at the live bundle, got {env1[name]!r}"
         assert name in sr1.applied, f"start 1: {name} must be applied by {SOURCE_NAME} (override of the stale copy)"
-    assert _resolver_trust(monkeypatch, env1) >= {"fleet-f62e-CA-B"}
+    assert _resolver_trust(tmp_path, env1, ["fleet-f62e-CA-B"]) >= {"fleet-f62e-CA-B"}
 
     lane["live"].write_text(_mint_ca("fleet-f62e-CA-C"), encoding="utf-8")
     env2 = _restarted_env(lane["stale"])
     _source_report(_start(home, cfg, env2))
     for name in CA_ENV_NAMES:
         assert env2[name] == str(lane["live"]), f"start 2: {name} must point at the live bundle, got {env2[name]!r}"
-    trusted = _resolver_trust(monkeypatch, env2)
+    trusted = _resolver_trust(tmp_path, env2, ["fleet-f62e-CA-A-stale", "fleet-f62e-CA-B", "fleet-f62e-CA-C"])
     assert "fleet-f62e-CA-C" in trusted, f"after the re-mint the resolver must trust the new CA, got {sorted(trusted)}"
     assert not trusted & {"fleet-f62e-CA-B", "fleet-f62e-CA-A-stale"}, \
         f"after the re-mint the resolver must not trust a superseded CA, got {sorted(trusted)}"
@@ -401,7 +467,8 @@ def test_ac_fleet_f62_e_5(tmp_path, monkeypatch, lane):
     merged = _pem_blocks(onecli_ca.read_text(encoding="utf-8"))
     assert _pem_blocks(derived.read_text(encoding="utf-8")) == live_b + merged, \
         "the derived bundle must be the live bundle followed by the merge PEMs, in order"
-    assert _resolver_trust(monkeypatch, env1) >= {"fleet-f62e-CA-B", "fleet-f62e-ONECLI"}
+    assert _resolver_trust(tmp_path, env1, ["fleet-f62e-CA-B", "fleet-f62e-ONECLI"]) >= {"fleet-f62e-CA-B",
+                                                                                      "fleet-f62e-ONECLI"}
 
     lane["live"].write_text(_mint_ca("fleet-f62e-CA-C"), encoding="utf-8")
     env2 = _restarted_env(lane["stale"])
@@ -409,7 +476,7 @@ def test_ac_fleet_f62_e_5(tmp_path, monkeypatch, lane):
     assert env2["SSL_CERT_FILE"] == str(derived), "the derived path is stable across starts"
     assert _pem_blocks(derived.read_text(encoding="utf-8")) == \
         _pem_blocks(lane["live"].read_text(encoding="utf-8")) + merged, "start 2 must re-derive from the re-minted bundle"
-    trusted = _resolver_trust(monkeypatch, env2)
+    trusted = _resolver_trust(tmp_path, env2, ["fleet-f62e-CA-B", "fleet-f62e-CA-C", "fleet-f62e-ONECLI"])
     assert {"fleet-f62e-CA-C", "fleet-f62e-ONECLI"} <= trusted and "fleet-f62e-CA-B" not in trusted, sorted(trusted)
     leftovers = [p.name for p in derived.parent.iterdir() if p != derived]
     assert not leftovers, f"the atomic replace must leave no temp file beside the derived bundle: {leftovers}"

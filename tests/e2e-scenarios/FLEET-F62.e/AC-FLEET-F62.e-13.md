@@ -96,7 +96,7 @@ cget() { HERMES_HOME="$GW" hermes "$@"; }
    `plugins.scan_on_install` before the write
    (`echo "scan_before=$(cget config get plugins.scan_on_install 2>&1)" >> "$EV"`), then merge the
    documented guard into `$MD/config.yaml`, keeping its other keys:
-   `$HPY -c 'import sys,yaml,pathlib;p=pathlib.Path(sys.argv[1])/"config.yaml";c=(yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None) or {};c.setdefault("plugins",{})["scan_on_install"]=False;p.write_text(yaml.safe_dump(c),encoding="utf-8")' "$MD"`
+   `$HPY -c 'import sys,hermes_yaml as yaml,pathlib;p=pathlib.Path(sys.argv[1])/"config.yaml";c=(yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else None) or {};c.setdefault("plugins",{})["scan_on_install"]=False;p.write_text(yaml.safe_dump(c),encoding="utf-8")' "$MD"`
    → expect: exit 0. Then `cget config get plugins.scan_on_install` → expect: `false` (under the
    gateway home). The triager profile does not exist yet; its check is in step 5.
 4. **Plugins at the head, the documented path only.** First assert that the lane's git rewrite maps

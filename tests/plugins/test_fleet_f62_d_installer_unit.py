@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "plugins" / "nv-coworker-compose" / "openshell" / "installer.py"
@@ -23,7 +23,7 @@ def _installer():
     return mod
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_ssh_include_is_matched_case_insensitively(tmp_path, monkeypatch):
     """An operator's own `include`/`INCLUDE=` line for the managed file is folded into the single
     first-line Include, so the directive stays exactly once across reruns."""

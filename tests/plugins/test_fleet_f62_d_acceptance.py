@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 HOME_TOKEN = "@HERMES_HOME@"
 
