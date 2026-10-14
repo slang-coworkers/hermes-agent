@@ -3,13 +3,13 @@
 # auth rides the OpenShell mTLS proxy, so this image carries NO sshd and NO key material;
 # the rendered `terminal.ssh_key` need only EXIST for the `-i` contract, never for auth.
 #
-# The base is pinned by immutable digest so the sandbox is reproducible. This is the same
-# published, digest-pinned image the release build uses (release Dockerfile:43); the
+# The base is pinned by immutable digest (the multi-arch index) so the sandbox is
+# reproducible, on the Python line the gateway's Hermes runs on (3.14 at v0.22.0); the
 # worker only needs a shell + the tools its terminal calls use (hermes runs on the
 # gateway, not in the worker), so no Hermes runtime is installed here. An operator on a
 # different registry substitutes their own digest-pinned base at provisioning (see
 # website/docs/user-guide/fleet-openshell.md § "install into an existing NemoClaw sandbox").
-FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.14-trixie@sha256:f3b1d933a49112e15fb02a24f9bfc8fef9986351afc601fcaba4c01a9b6a0eac
 
 ENV DEBIAN_FRONTEND=noninteractive
 
