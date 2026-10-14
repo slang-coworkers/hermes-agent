@@ -80,7 +80,7 @@ def test_a_image_installs_one_profile_d_fragment_before_user():
     assert (OPENSHELL_DIR / copies[0][1]).is_file(), f"fragment source missing in the build context: {copies[0][1]}"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_b_provider_credential_reaches_every_cli_name():
     cli, provider = _names()
     proc = _run({provider: SYNTHETIC})
@@ -90,7 +90,7 @@ def test_b_provider_credential_reaches_every_cli_name():
     assert not unmapped, f"CLI names at {unmapped} were not mapped from the provider's name"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("provider_value", [None, ""])
 def test_c_no_provider_credential_sets_no_cli_name(provider_value):
     cli, provider = _names()
@@ -101,7 +101,7 @@ def test_c_no_provider_credential_sets_no_cli_name(provider_value):
     assert not leaked, f"CLI names at {leaked} were set without a provider credential"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("preset_value", ["preset-by-operator", ""])
 def test_d_an_already_set_cli_name_is_never_overridden(preset_value):
     cli, provider = _names()
@@ -114,7 +114,7 @@ def test_d_an_already_set_cli_name_is_never_overridden(preset_value):
     assert not overridden, f"the fragment overrode already-set CLI names at {overridden}"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("with_provider", [True, False])
 def test_e_fragment_prints_nothing(with_provider):
     _cli, provider = _names()

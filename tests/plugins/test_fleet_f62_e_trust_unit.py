@@ -208,7 +208,7 @@ def test_no_proxy_guard_selects_keyless_fleet_homes_with_another_source(trust, s
 
 
 def _home_with(tmp_path, monkeypatch, cfg):
-    import yaml
+    import hermes_yaml as yaml
 
     home = tmp_path / "home"
     home.mkdir()
