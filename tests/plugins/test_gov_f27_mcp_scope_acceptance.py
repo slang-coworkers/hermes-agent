@@ -683,13 +683,8 @@ def test_ac_gov_f27_7(tmp_path, monkeypatch):
 
     import tools.mcp_tool as mcp_core  # _server_trust_levels lives on the core module in both trees
 
-    try:
-        from tools.mcp_tool_registration import _register_server_tools  # type: ignore
-        import tools.mcp_tool_registration as reg_mod  # type: ignore
-    except ImportError:
-        from tools.mcp_tool import _register_server_tools  # type: ignore
-
-        reg_mod = mcp_core
+    from tools.mcp_tool_registration import _register_server_tools
+    import tools.mcp_tool_registration as reg_mod
     from tools.registry import ToolRegistry
 
     def _tool(name):

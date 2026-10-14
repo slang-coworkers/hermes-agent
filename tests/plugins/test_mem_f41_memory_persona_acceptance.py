@@ -232,8 +232,8 @@ def _stable_tier(home: Path) -> str:
     from agent.system_prompt import build_system_prompt_parts
 
     with (
-        patch("run_agent.build_environment_hints", return_value=""),
-        patch("run_agent.build_context_files_prompt", return_value=""),
+        patch("agent.prompt_builder.build_environment_hints", return_value=""),
+        patch("agent.prompt_builder.build_context_files_prompt", return_value=""),
     ):
         return build_system_prompt_parts(_agent_for_home(home))["stable"]
 
