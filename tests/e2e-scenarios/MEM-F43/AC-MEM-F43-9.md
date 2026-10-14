@@ -31,7 +31,7 @@ into place. All steps below run AFTER the install:
    absolute clone path with no placeholder left:
    ```bash
    python3 - "$HERMES_HOME/profiles/mem-f43-bot/config.yaml" "$TB/shared-learnings/skills" <<'PY'
-   import sys, yaml
+   import sys, hermes_yaml as yaml
    cfg_path, ext = sys.argv[1], sys.argv[2]
    cfg = yaml.safe_load(open(cfg_path)) or {}
    cfg.setdefault("skills", {})["external_dirs"] = [ext]
@@ -43,7 +43,7 @@ into place. All steps below run AFTER the install:
    `profiles.configure` RPC path is what normally does, so the scenario seeds it directly):
    ```bash
    python3 - "$HERMES_HOME/profiles/mem-f43-bot/profile.yaml" <<'PY'
-   import sys, yaml, os
+   import sys, hermes_yaml as yaml, os
    p = sys.argv[1]
    data = yaml.safe_load(open(p)) if os.path.exists(p) else {}
    data = data or {}

@@ -122,7 +122,7 @@ def test_ac_loop_f38_3() -> None:
 
 def test_ac_loop_f38_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Per-turn re-entry: build_turn_context fires pre_llm_call with is_first_turn (True then False)."""
-    import yaml
+    import hermes_yaml as yaml
 
     from agent.turn_context import TurnContext, build_turn_context
     from hermes_cli.plugins import PluginManager
@@ -405,7 +405,7 @@ def test_ac_loop_f38_7() -> None:
 def test_ac_loop_f38_8(tmp_path, monkeypatch) -> None:
     """Buddy monitor: the automatic post-turn background_review fork consults its config master switch."""
     import run_agent
-    import yaml
+    import hermes_yaml as yaml
     from agent.background_review import load_background_review_settings
     from hermes_cli.config import DEFAULT_CONFIG
 

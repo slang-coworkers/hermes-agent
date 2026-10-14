@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 PLUGIN_KEY = "nv-coworker-compose"
 # v1 base egress: NO ssh_control_path (the v1 render forbids outbound :22; ssh is inbound).

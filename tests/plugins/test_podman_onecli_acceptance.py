@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from agent.secret_sources.base import ErrorKind
 from agent.secret_sources.registry import get_source
@@ -136,7 +136,7 @@ def _load(tmp_path, monkeypatch):
     return manager, loaded, hermes_home
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_ac_cred_f28_1(tmp_path, monkeypatch):
     """AC-CRED-F28-1: The podman wrapper fails closed AND allowlists the two probes: it refuses a long-lived sandbox launch (`run -d`/`create` … `sleep infinity`) whose env lacks the expected OneCLI proxy address or whose mounts lack the read-only CA (exit ≠ 0, logged, real podman not invoked), while passing through the cgroup probe (`run --rm … sleep 0`, no `-v`) and the storage-opt probe (`create --storage-opt size=1m hello-world`) unchanged and preserving stdout byte-for-byte."""
     manager, loaded, _ = _load(tmp_path, monkeypatch)

@@ -19,21 +19,21 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The planner needs PyYAML (a Hermes runtime dependency). A real NemoClaw sandbox's
-# `python3` has it; when this script is run from a dev checkout it may not, so prefer an
-# operator override, then the repo venv, then whatever `python3`/`python` can import yaml.
+# The planner needs Hermes' own `hermes_yaml` (Hermes 0.22 ships no PyYAML). A real NemoClaw
+# sandbox's Hermes interpreter has it; a bare system `python3` does not, so prefer an operator
+# override, then the repo venv, then whatever `python3`/`python` can import hermes_yaml.
 pick_python() {
   local py
   for py in "${HERMES_PYTHON:-}" "$DIR/../../../.venv/bin/python" "$DIR/../../../.venv/bin/python3" python3 python; do
     [ -n "$py" ] || continue
-    if { command -v "$py" >/dev/null 2>&1 || [ -x "$py" ]; } && "$py" -c 'import yaml' >/dev/null 2>&1; then
+    if { command -v "$py" >/dev/null 2>&1 || [ -x "$py" ]; } && "$py" -c 'import hermes_yaml' >/dev/null 2>&1; then
       printf '%s\n' "$py"
       return 0
     fi
   done
   return 1
 }
-PY="$(pick_python)" || { echo "install-into-sandbox.sh: no python with PyYAML found (set HERMES_PYTHON)" >&2; exit 3; }
+PY="$(pick_python)" || { echo "install-into-sandbox.sh: no python that can import hermes_yaml found (set HERMES_PYTHON)" >&2; exit 3; }
 
 SPEC=""
 REF=""

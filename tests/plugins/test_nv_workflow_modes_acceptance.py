@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 import tools.skills_tool as skills_tool_module
 from agent.skill_commands import (

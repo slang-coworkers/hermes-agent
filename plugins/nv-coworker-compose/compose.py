@@ -23,10 +23,21 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
-import yaml
-
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 from hermes_constants import get_default_hermes_root, get_hermes_home
+
+
+def _load_yaml_compat():
+    # By path, not a relative import: this module is also loaded standalone by file path.
+    import importlib.util
+    path = Path(__file__).resolve().parent / "_yaml_compat.py"
+    spec = importlib.util.spec_from_file_location("_nv_yaml_compat_compose", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+yaml = _load_yaml_compat()
 
 # Spec-controlled names become directory/file components and profile names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")

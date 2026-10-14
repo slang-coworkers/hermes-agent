@@ -14,7 +14,7 @@ colon-named gateway event bus (AC-3, AC-4).
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import yaml
+import hermes_yaml as yaml
 import pytest
 
 import hermes_cli.lifecycle as lifecycle

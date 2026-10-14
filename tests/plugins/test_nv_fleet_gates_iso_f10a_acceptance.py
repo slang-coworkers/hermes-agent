@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 

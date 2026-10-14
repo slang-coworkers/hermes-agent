@@ -83,7 +83,7 @@ def _fork_root():
 
 
 def _cfg(profile_dir):
-    import yaml
+    import hermes_yaml as yaml
 
     return yaml.safe_load((Path(profile_dir) / "config.yaml").read_text(encoding="utf-8"))
 
@@ -216,7 +216,7 @@ def test_ac_loop_f40_1(tmp_path, monkeypatch):
 
     assert (default_dir / "scripts" / "pr_ci_gate.py").is_file()
     assert (default_dir / "scripts" / "check_gate.py").is_file()
-    import yaml
+    import hermes_yaml as yaml
 
     dist = yaml.safe_load((default_dir / "distribution.yaml").read_text(encoding="utf-8"))
     owned = dist.get("distribution_owned") or []

@@ -31,7 +31,7 @@ import re
 import shutil
 import stat
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 from hermes_cli.env_loader import load_hermes_dotenv

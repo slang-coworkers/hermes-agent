@@ -20,11 +20,11 @@ import shutil
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 
-pytestmark = pytest.mark.linux_only
+pytestmark = pytest.mark.platforms("linux")
 
 PLUGIN_KEY = "nv-coworker-compose"
 PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / PLUGIN_KEY

@@ -17,7 +17,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 import hermes_cli.plugins as plugins_mod
 from hermes_cli.plugins import PluginManager

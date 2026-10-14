@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 PLUGIN_KEY = "nv-coworker-compose"
 PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / PLUGIN_KEY

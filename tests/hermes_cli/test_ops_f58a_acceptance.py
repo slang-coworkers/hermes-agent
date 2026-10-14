@@ -48,7 +48,7 @@ def test_ac_ops_f58_a_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     latest = int(DEFAULT_CONFIG["_config_version"])
     assert latest >= targets[-1] > SUPPORT_FLOOR_VERSION
 
-    import yaml
+    import hermes_yaml as yaml
 
     def _write_home(name: str, version: int) -> Path:
         home = tmp_path / name
@@ -257,7 +257,7 @@ def test_ac_ops_f58_a_7(
     """
     import subprocess
 
-    import yaml
+    import hermes_yaml as yaml
 
     import hermes_cli.main as hermes_main
     import hermes_cli.main_install_repair as main_install_repair

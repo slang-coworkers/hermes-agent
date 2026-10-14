@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 try:
-    import yaml
+    import hermes_yaml as yaml
 except Exception:  # pragma: no cover - yaml is a dev dependency
     yaml = None
 

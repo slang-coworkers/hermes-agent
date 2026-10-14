@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.config import load_config
 from hermes_cli.profile_distribution import install_distribution, update_distribution

@@ -21,7 +21,7 @@ from pathlib import Path
 import shutil
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli import managed_scope
 from hermes_cli.plugins import PluginManager

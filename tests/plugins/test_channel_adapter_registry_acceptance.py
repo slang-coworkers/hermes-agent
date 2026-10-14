@@ -13,7 +13,7 @@ import types
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from gateway.platform_registry import platform_registry
 from hermes_cli.plugins import PluginManager

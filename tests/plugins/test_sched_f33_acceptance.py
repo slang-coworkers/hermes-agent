@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 PLUGIN_KEY = "nv-coworker-compose"
 # The plugin is installed into an isolated HERMES_HOME (not discovered from the

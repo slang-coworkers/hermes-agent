@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SRC = REPO_ROOT / "plugins" / "nv-coworker-compose"

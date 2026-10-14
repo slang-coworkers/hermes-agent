@@ -80,7 +80,7 @@ def _sentinel_exists(estop):
 def _set_config_estop_on_breach(home, value):
     """Persist plugins.entries.nv-cost-cap.settings.estop_on_breach into the profile config.yaml
     (AC-8 Part B: estop_on_breach=false so the priced breach blocks IN-BAND without a sentinel)."""
-    import yaml
+    import hermes_yaml as yaml
 
     path = os.path.join(home, "config.yaml")
     try:

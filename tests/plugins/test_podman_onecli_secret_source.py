@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.plugins import PluginManager
 

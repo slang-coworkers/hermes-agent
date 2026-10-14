@@ -49,7 +49,7 @@ credential at the `inference-api.nvidia.com` hop):
    PyYAML ships with Hermes):
    ```bash
    ( source $TB/harness.live.env && python3 -c "
-   import yaml, os
+   import hermes_yaml as yaml, os
    c = yaml.safe_load(open(os.environ['HERMES_HOME'] + '/profiles/a2a-f21-runaway/config.yaml'))
    g = c['tool_loop_guardrails']
    assert g['hard_stop_enabled'] is True, g
