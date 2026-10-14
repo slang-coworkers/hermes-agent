@@ -20,6 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import hermes_yaml as yaml
+
+aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
