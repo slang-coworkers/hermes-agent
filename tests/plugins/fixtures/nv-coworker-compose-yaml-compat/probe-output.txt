@@ -1,5 +1,5 @@
 # ADR UPG-F68 §Design D2 / SF-2: recorded PyYAML-side run of the byte-parity claim (not executed by pytest).
-# tree: 31aff0b8d9d9697cec0dc2d97b5abe90cee07dbc (+ worktree edits of this commit)
+# tree: 8398385f7511a65040c9609bfb5ac91bb38f5970 (+ worktree edits of this commit)
 # interpreter: 3.14.7; PyYAML 6.0.3; ruamel.yaml 0.18.16
 # probe: reports/hermes-UPG-F68/probe-yaml-regression.py sha256 55ee9e1c4cf5f593 (architect), run on FLEET-F62.c/fixtures/openshell:
 home len 2: 23/23 identical

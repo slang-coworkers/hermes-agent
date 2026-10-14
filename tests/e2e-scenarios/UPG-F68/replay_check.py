@@ -401,10 +401,10 @@ def check_picks(repo, picks, after_c1):
         if mine != theirs:
             fails.append(f"PICK: {p}: path set/status differs from its source")
         for path in sorted(set(mine) & set(theirs)):
-            if (p, path) in {(q[:10], f) for q, f in PICK_CONFLICTS} or (full[:10], path) in PICK_CONFLICTS:
-                continue
+            # A recorded conflict (PICK_CONFLICTS) was resolved by keeping both sides byte for byte, so its line
+            # multiset must still equal the source's; only the hunk position may differ.
             if multiset_diff(repo, f"{got[0]}^", got[0], path) != multiset_diff(repo, f"{full}^", full, path):
-                fails.append(f"PICK: {p}: {path} diff differs from the source's (not a recorded conflict)")
+                fails.append(f"PICK: {p}: {path} diff differs from the source's")
     shas = [s for s, _src, _i in after_c1]
     if order != sorted(order, key=shas.index):
         fails.append("PICK: picks are not in the order " + " -> ".join(picks))

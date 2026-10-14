@@ -171,3 +171,16 @@ One paragraph keeping upstream's log-file sentence and H5's durable cron run rec
 
 Recorded with item 3 (the `-x` pick of `1fb4d74ccb`).
 
+
+`git cherry-pick -x 1fb4d74ccb` onto the item-2 tip conflicts in this one file, one hunk. Both sides added a block at the same
+anchor (after `_profile_dir`): H5's UPG-F67 N2 park helper (`_PROFILE_IDENTITY_MARKERS` … `_unparked_non_fleet`) and #77's
+`_managed_fleet_maps`. Neither edits the other. Resolution: both, H5's first, each byte for byte, two blank lines between.
+The pick commit's line multiset for the file equals the source commit's (`replay_check.py` (b)); only the hunk's position
+moved.
+
+- fork side @H5 `plugins/nv-coworker-compose/openshell/installer.py:675-707` (`a2afed6dfa`)
+- fork side @#77 `plugins/nv-coworker-compose/openshell/installer.py:729-737` (`1fb4d74ccb`)
+- resolved @pick `plugins/nv-coworker-compose/openshell/installer.py:746-789` (pick commit `4602b13a71`; H5's block `:746-778`,
+  #77's function `:781-789`)
+
+The other two picks are clean: #78 `b41d14df02` and #80 `35767fe243` apply with no conflict.
