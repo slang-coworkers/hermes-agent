@@ -70,6 +70,9 @@ not achieve F64.b.
 
 ## GitHub ingress ships disabled
 
+For the secret-free inbound path that replaces these routes under `ingress:` on the
+OpenShell substrate, see [Fleet inbound gateway](./fleet-ingress.md).
+
 The DEFAULT profile declares three repo-level webhook routes (no GitHub App id):
 `github-triager` (issues, issue_comment) → the triager, `github-fixer`
 (pull_request, push) → the fixer, and `github-reviewer` (pull_request_review,
