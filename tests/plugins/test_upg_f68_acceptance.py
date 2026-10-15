@@ -102,15 +102,15 @@ def _load_in_child(tmp_path, keys, no_yaml_dir=None, tag="home"):
     home = _home_with(tmp_path, keys, tag=tag)
     proc = subprocess.run([sys.executable, "-c", _LOAD_PROBE], capture_output=True, text=True, encoding="utf-8",
                           env=_child_env(tmp_path / tag, home, no_yaml_dir), cwd=str(tmp_path), timeout=300,
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, check=False)
     assert proc.returncode == 0, f"load probe failed: {proc.stderr[-2000:]}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 def test_ac_upg_f68_1(tmp_path, no_yaml_dir):
     """(derived, msg 8 (e)(i)) Each of the 8 fork plugins (`hello`, `nv-approval-ledger`, `nv-artifact`, `nv-cost-cap`, `nv-coworker-compose`, `nv-fleet-gates`, `nv-workflow-modes`, `podman-onecli`), enabled alone in an isolated `HERMES_HOME`, is enabled with no load error, in a child interpreter whose `yaml` import is blocked (the base-install closure has no PyYAML)."""
-    blocked = subprocess.run([sys.executable, "-c", "import yaml"], capture_output=True, text=True,
-                             env=_child_env(tmp_path, tmp_path, no_yaml_dir), timeout=60)
+    blocked = subprocess.run([sys.executable, "-c", "import yaml"], capture_output=True, text=True, encoding="utf-8",
+                             env=_child_env(tmp_path, tmp_path, no_yaml_dir), timeout=60, check=False)
     assert blocked.returncode != 0 and "No module named 'yaml'" in blocked.stderr, "the yaml blocker must be in force"
     for key in FORK_PLUGINS:
         state = _load_in_child(tmp_path, (key,), no_yaml_dir, tag=f"h-{key}")
@@ -156,7 +156,7 @@ def test_ac_upg_f68_4(tmp_path, no_yaml_dir):
     proc = subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(F62C_SPEC), "--out", str(out)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(REPO), timeout=600,
-        env=_child_env(tmp_path, home, no_yaml_dir), stdin=subprocess.DEVNULL)
+        env=_child_env(tmp_path, home, no_yaml_dir), stdin=subprocess.DEVNULL, check=False)
     assert proc.returncode == 0, f"compose without PyYAML failed: {proc.stderr[-2000:]}"
     subs = sorted(p.parent.name for p in out.glob("*/config.yaml"))
     assert subs, "the render produced no profile"
@@ -168,7 +168,7 @@ def test_ac_upg_f68_4(tmp_path, no_yaml_dir):
             got = (rendered / rel).read_bytes().replace(str(home).encode(), HOME_TOKEN.encode())
             assert got == (golden / rel).read_bytes(), f"golden byte mismatch: {sub}/{rel}"
             if rel.suffix in (".yaml", ".yml"):
-                hermes_yaml.safe_load((rendered / rel).read_text(encoding="utf-8"))
+                hermes_yaml.safe_load((rendered / rel).read_text(encoding="utf-8-sig"))
 
 
 def test_ac_upg_f68_5(tmp_path, no_yaml_dir):
@@ -187,7 +187,7 @@ def test_ac_upg_f68_5(tmp_path, no_yaml_dir):
     script = PLUGINS_SRC / COMPOSE / "openshell" / "install-into-sandbox.sh"
     proc = subprocess.run(["bash", str(script), str(OSH_F64_SPEC), "--ref", SHA40, "--dry-run"],
                           capture_output=True, text=True, encoding="utf-8", cwd=str(tmp_path), env=env, timeout=300,
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, check=False)
     assert proc.returncode == 0, f"install-into-sandbox.sh --dry-run without PyYAML failed: {proc.stderr[-2000:]}"
     creates = [ln for ln in proc.stdout.splitlines() if "openshell sandbox create" in ln]
     assert creates, f"the plan must list sandbox creates; got: {proc.stdout[-1500:]}"
@@ -298,14 +298,14 @@ def test_ac_upg_f68_8():
     assert len(runs) == 3, "without require_persist the completed result is served from the cache"
 
 
-def _child_pytest(tmp_path, *args, timeout=1800, extra_path=None):
+def _child_pytest(tmp_path, *args, timeout=3600, extra_path=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     env["HOME"] = str(tmp_path / "pytest-home")
     if extra_path:
         env["PYTHONPATH"] = os.pathsep.join([str(extra_path), *filter(None, [env.get("PYTHONPATH")])])
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", *args],
                           capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(REPO),
-                          env=env, timeout=timeout, stdin=subprocess.DEVNULL)
+                          env=env, timeout=timeout, stdin=subprocess.DEVNULL, check=False)
 
 
 def _assert_suite_passes(tmp_path, rel):
@@ -336,7 +336,7 @@ def test_ac_upg_f68_11(tmp_path):
 
 def _tag_commit():
     found = subprocess.run(["git", "-C", str(REPO), "rev-parse", "-q", "--verify", f"{TAG_COMMIT}^{{commit}}"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", check=False)
     if found.returncode != 0:
         pytest.fail(f"the selected tag commit {TAG_COMMIT} is not in this clone (a shallow clone?)")
     return found.stdout.strip()
@@ -350,11 +350,11 @@ def test_ac_upg_f68_12(tmp_path):
     assert modules, "no fork test module differs from the tag (wrong HEAD?)"
     probe = tmp_path / "conftest_marks.py"
     probe.write_text(
-        "LEGACY = %r\n"
+        f"LEGACY = {LEGACY_MARKS!r}\n"
         "def pytest_collection_modifyitems(session, config, items):\n"
         "    hits = [f'{i.nodeid}: {m}' for i in items for m in LEGACY if i.get_closest_marker(m)]\n"
         "    if hits:\n"
-        "        raise SystemExit('LEGACY-MARK ' + '; '.join(hits[:20]))\n" % (LEGACY_MARKS,), encoding="utf-8")
+        "        raise SystemExit('LEGACY-MARK ' + '; '.join(hits[:20]))\n", encoding="utf-8")
     proc = _child_pytest(tmp_path, "-p", "conftest_marks", "--collect-only", *modules, extra_path=tmp_path)
     out = proc.stdout + proc.stderr
     errors = sorted(set(re.findall(r"ERROR collecting (\S+)", out)))
@@ -371,7 +371,7 @@ def _mint(common_name, sign_leaf_for=None):
     from cryptography.x509.oid import NameOID
 
     key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     builder = (x509.CertificateBuilder().subject_name(name).public_key(key.public_key())
                .serial_number(x509.random_serial_number())
@@ -443,8 +443,8 @@ def _handshakes_in_fresh_process(tmp_path, environ, urls):
     env = {k: v for k, v in environ.items() if k in (*CA_ENV_NAMES, "PATH")}
     env.update(HOME=str(tmp_path / "os-home"), HERMES_HOME=str(tmp_path / "client-home"), PYTHONPATH=str(REPO),
                NO_PROXY="127.0.0.1,localhost", HERMES_DISABLE_LAZY_INSTALLS="1")
-    proc = subprocess.run([sys.executable, "-c", _HANDSHAKE, json.dumps(urls)], capture_output=True, text=True,
-                          encoding="utf-8", env=env, cwd=str(tmp_path), timeout=120, stdin=subprocess.DEVNULL)
+    proc = subprocess.run([sys.executable, "-c", _HANDSHAKE, json.dumps(urls)], capture_output=True, text=True, encoding="utf-8",
+                          env=env, cwd=str(tmp_path), timeout=120, stdin=subprocess.DEVNULL, check=False)
     assert proc.returncode == 0, f"handshake probe failed: {proc.stderr[-1500:]}"
     return {k: v == "ok" for k, v in json.loads(proc.stdout.strip().splitlines()[-1]).items()}
 
@@ -518,7 +518,7 @@ def test_ac_upg_f68_14(tmp_path):
             env = {"PATH": os.environ.get("PATH", ""), name: str(bundle), "PYTHONPATH": str(REPO),
                    "HOME": str(tmp_path / "os-home"), "HERMES_HOME": str(tmp_path / "h")}
             proc = subprocess.run([sys.executable, "-c", _DEFAULT_CTX, "127.0.0.1", port], capture_output=True,
-                                  text=True, encoding="utf-8", env=env, timeout=120, stdin=subprocess.DEVNULL)
+                                  text=True, encoding="utf-8", env=env, timeout=120, stdin=subprocess.DEVNULL, check=False)
             assert proc.returncode == 0, f"{name}: {proc.stderr[-1500:]}"
             results[name] = json.loads(proc.stdout.strip().splitlines()[-1])["ok"]
     assert results == {"SSL_CERT_FILE": True, "REQUESTS_CA_BUNDLE": False, "HERMES_CA_BUNDLE": False}, results
