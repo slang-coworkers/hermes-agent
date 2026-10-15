@@ -97,7 +97,7 @@ def test_ac_self_f56_5(profile_env):
 def test_ac_self_f56_6(profile_env, monkeypatch):
     """AC-SELF-F56-6: Stock install_distribution installs a whole-agent coworker profile from a local distribution directory with no network, the stock primitive onboard coworker rides to install each rendered coworker type"""
     from hermes_cli.profiles import _get_profiles_root, list_profiles
-    import hermes_cli.profile_distribution as profile_distribution
+    from hermes_cli import profile_distribution
     from hermes_cli.profile_distribution import (
         DistributionManifest,
         install_distribution,

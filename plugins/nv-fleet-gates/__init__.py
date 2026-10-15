@@ -123,13 +123,13 @@ def _edges_lookup(from_profile: str, to_profile: str, db_path: str):
     return edges.lookup(db_path, from_profile, to_profile)
 
 
-def _block(message: str) -> Dict[str, Any]:
+def _block(message: str) -> dict[str, Any]:
     # Core DROPS a block directive that carries no message (a message-less block
     # is a fail-open), so every block outcome is minted here with a non-empty one.
     return {"action": "block", "message": message or "nv-fleet-gates: blocked"}
 
 
-def _approve(rule_key: str, message: str) -> Dict[str, Any]:
+def _approve(rule_key: str, message: str) -> dict[str, Any]:
     return {"action": "approve", "rule_key": rule_key, "message": message}
 
 
@@ -487,7 +487,7 @@ def register(ctx) -> None:
     def _observe(tool_name=None, args=None, status=None, result=None, session_id=None, **kwargs):
         try:
             if not session_id or not _status_ok(status):
-                return None
+                return
             canon = canonicalise(tool_name or "")
             args = args if isinstance(args, dict) else {}
             if predicates.is_mutation(canon, args):
@@ -497,7 +497,7 @@ def register(ctx) -> None:
                     stores.record_plan(session_id)
         except Exception:
             logger.warning("nv-fleet-gates post_tool_call observer failed", exc_info=True)
-        return None
+        return
 
     def _capture_session(surface=None, command=None, session_key=None, session_id=None, **kwargs):
         # Stash this dispatch's session in a request-local ContextVar so the
@@ -508,7 +508,6 @@ def register(ctx) -> None:
             sid = session_id or session_key
             if sid:
                 _pending_slash_session.set(sid)
-        return None
 
     def _capture_invitation(event=None, gateway=None, session_store=None, **kwargs):
         try:
@@ -517,7 +516,6 @@ def register(ctx) -> None:
                 stores.record_invitation(repo, pr)
         except Exception:
             logger.warning("nv-fleet-gates pre_gateway_dispatch observer failed", exc_info=True)
-        return None
 
     # --- codex_critique tool + slash alias ----------------------------------
     async def _run_critique(stage: str):

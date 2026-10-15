@@ -109,7 +109,7 @@ def test_ac_obs_f47_2(tmp_path: Path) -> None:
     assert "tool-call.active" in html, "no expand-toggle rule (not collapsible)"
     # Collapsed by default: the .tool-call-content rule sets display:none (the
     # .tool-call.active override flips it to block on click).
-    assert re.search(r"\.tool-call-content\s*\{[^}]*display:\s*none", html, re.S), (
+    assert re.search(r"\.tool-call-content\s*\{[^}]*display:\s*none", html, re.DOTALL), (
         "tool-call arguments are not collapsed by default"
     )
     # Application CSS/JS are inlined (web fonts load remotely under the page CSP,

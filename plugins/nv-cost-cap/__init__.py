@@ -29,7 +29,7 @@ import contextlib
 import json
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from types import SimpleNamespace
 
 from . import policy, resume, store
@@ -104,7 +104,7 @@ def _today(kwargs) -> str:
     injected = kwargs.get("_today")
     if isinstance(injected, str) and injected:
         return injected
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _state_db_path() -> str:
@@ -457,7 +457,6 @@ def _post_tool_call(session_id=None, **kwargs):
             _refresh_effective(session_id)
     except Exception:
         logger.warning("nv-cost-cap post_tool_call failed", exc_info=True)
-    return None
 
 
 def _on_session_start(session_id=None, **kwargs):
@@ -473,7 +472,6 @@ def _on_session_start(session_id=None, **kwargs):
             _resolve_immortal(session_id, kwargs.get("platform"))
     except Exception:
         logger.warning("nv-cost-cap on_session_start failed", exc_info=True)
-    return None
 
 
 def _on_session_end(session_id=None, **kwargs):
@@ -491,7 +489,6 @@ def _on_session_end(session_id=None, **kwargs):
         reconcile_once()
     except Exception:
         logger.warning("nv-cost-cap on_session_end reconcile failed", exc_info=True)
-    return None
 
 
 def _on_session_finalize(session_id=None, profile=None, **kwargs):
@@ -508,11 +505,11 @@ def _on_session_finalize(session_id=None, profile=None, **kwargs):
     """
     try:
         if not session_id:
-            return None
+            return
         if profile:
             with _pinned_profile_home(profile):
                 store.mark_session_closed(session_id)
-            return None
+            return
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.profiles import get_profile_dir, list_profiles
 
@@ -521,7 +518,7 @@ def _on_session_finalize(session_id=None, profile=None, **kwargs):
         except Exception:
             logger.warning("nv-cost-cap finalize: list_profiles failed", exc_info=True)
             store.mark_session_closed(session_id)
-            return None
+            return
         for info in profiles:
             name = getattr(info, "name", None)
             if not name:
@@ -535,7 +532,7 @@ def _on_session_finalize(session_id=None, profile=None, **kwargs):
                 reset_hermes_home_override(token)
     except Exception:
         logger.warning("nv-cost-cap on_session_finalize failed", exc_info=True)
-    return None
+    return
 
 
 @contextlib.contextmanager

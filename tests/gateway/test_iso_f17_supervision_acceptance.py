@@ -13,7 +13,7 @@ import json
 import os
 import plistlib
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -789,10 +789,10 @@ def test_ac_iso_f17_10(monkeypatch):
 
     from datetime import timedelta, timezone
 
-    old_iso = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(
+    old_iso = (datetime.now(UTC) - timedelta(hours=2)).strftime(
         "%Y-%m-%dT%H:%M:%S.000000000Z"
     )
-    young_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    young_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     ps_argv: list[str] = []
     rm_ids: list[str] = []
 
@@ -828,7 +828,7 @@ def test_ac_iso_f17_10(monkeypatch):
     assert rm_ids == ["cid-old"] and removed == 1
 
     # Once-per-process guard + config gate (owner: terminal_tool).
-    import tools.terminal_tool as terminal_tool
+    from tools import terminal_tool
 
     calls = {"n": 0}
     monkeypatch.setattr(

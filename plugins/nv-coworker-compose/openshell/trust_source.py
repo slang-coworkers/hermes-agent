@@ -32,7 +32,7 @@ class OpenShellTrustSource(SecretSource):
     def is_enabled(self, cfg: dict) -> bool:
         return self._keyed(cfg) or self._guards_no_proxy(cfg)
 
-    def protected_env_vars(self, cfg: dict) -> FrozenSet[str]:
+    def protected_env_vars(self, cfg: dict) -> frozenset[str]:
         return frozenset(trust.NO_PROXY_NAMES) if self._guards_no_proxy(cfg) else frozenset()
 
     def fetch(self, cfg: dict, home_path: Path) -> FetchResult:

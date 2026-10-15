@@ -24,7 +24,7 @@ import math
 import secrets
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ _STAYS_STOPPED = "session {session_id} itself stays stopped (Stop decision)"
 
 
 def _iso(epoch) -> str:
-    return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+    return datetime.fromtimestamp(float(epoch), UTC).isoformat()
 
 
 def _result(ok, reason, card_id, text=None, **extra):

@@ -158,7 +158,7 @@ def lineage_unknown(session_id: str, *, state_db_path: str, strict: bool = False
         conn.close()
 
 
-def completed_session_totals(profile_home: str, window: int) -> List[float]:
+def completed_session_totals(profile_home: str, window: int) -> list[float]:
     """Per-session OWN totals of the most-recently-COMPLETED sessions.
 
     Completed = ``ended_at IS NOT NULL``; the population is the ``window`` most
@@ -188,7 +188,7 @@ def completed_session_totals(profile_home: str, window: int) -> List[float]:
         conn.close()
 
 
-def p90(values: List[float]) -> float:
+def p90(values: list[float]) -> float:
     """Nearest-rank p90 over ``values``. Empty population -> ``inf`` (no Tier-1)."""
     vals = sorted(float(v) for v in values)
     n = len(vals)

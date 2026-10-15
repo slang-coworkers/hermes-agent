@@ -108,7 +108,7 @@ GITHUB_BINARIES = {"gh", "git"}
 GITHUB_WRITE_METHODS = {"POST", "PATCH"}
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _LITERAL_TOKEN_RE = re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
-_GH_URL_RE = re.compile(r"https?://[^\s\"']*github", re.I)
+_GH_URL_RE = re.compile(r"https?://[^\s\"']*github", re.IGNORECASE)
 SANDBOX_IMAGE = "localhost/hermes-openshell-sandbox:pinned"
 # AC-10 default-off baseline: the committed, merged, pre-widening OSH-F63 openshell
 # fleet (declares no providers:). Rendering it through the widened renderer must
@@ -188,7 +188,7 @@ def _parse_frontmatter(text):
     """Strict frontmatter parse: the file must OPEN with a --- fence and have a
     matching closing --- on its own line; the block must be a YAML mapping.
     Rejects a stray ``---`` substring in the body (the loose-split defect)."""
-    m = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", text, re.S)
+    m = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", text, re.DOTALL)
     assert m, "SKILL.md must open with a --- fenced frontmatter block"
     data = yaml.safe_load(m.group(1))
     assert isinstance(data, dict), "frontmatter must parse to a mapping"

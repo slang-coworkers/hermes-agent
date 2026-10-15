@@ -172,7 +172,7 @@ def test_ac_sched_f34_7(tmp_path, monkeypatch):
     (offset from host-UTC by >= 4h)."""
     _activate(monkeypatch, _profile_home(tmp_path, "newyork", "America/New_York"))
 
-    import cron.executions as executions
+    from cron import executions
     from cron.jobs import save_job_output
 
     monkeypatch.setattr(

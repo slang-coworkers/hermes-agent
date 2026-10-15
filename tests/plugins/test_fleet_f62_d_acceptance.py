@@ -690,7 +690,7 @@ def test_ac_fleet_f62_d_11(rendered):
     Base red: every worker policy's read_only is /usr /bin /lib /etc and read_write is /tmp — the home is in neither."""
     out, _lines = rendered
     logical = re.sub(r"\\\s*\n", " ", (OPENSHELL_DIR / "Dockerfile.worker").read_text(encoding="utf-8"))
-    m = re.search(r"\buseradd\b[^\n]*?--create-home[^\n]*?\s([a-z_][a-z0-9_-]*)\s*(?:&&|$)", logical, re.M)
+    m = re.search(r"\buseradd\b[^\n]*?--create-home[^\n]*?\s([a-z_][a-z0-9_-]*)\s*(?:&&|$)", logical, re.MULTILINE)
     assert m, "Dockerfile.worker must create the sandbox user with a home dir"
     user_home = f"/home/{m.group(1)}"
     for role in COWORKERS:

@@ -238,7 +238,7 @@ def test_keyed_or_unguarded_source_protects_nothing(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("raw", [
-    "NO_PROXY=localhost ,172.17.0.1\n".encode("utf-8"),
+    "NO_PROXY=localhost ,172.17.0.1\n".encode(),
     "NO_PROXY=localhost\u0085,host.docker.internal\n".encode("utf-8"),
     b"A=1\rNO_PROXY=172.17.0.1\r",
     "﻿NO_PROXY=localhost ,172.17.0.1\r\n".encode("utf-16"),

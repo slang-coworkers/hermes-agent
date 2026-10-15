@@ -352,7 +352,7 @@ def test_ac_cost_f29_2(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 def test_ac_cost_f29_3(tmp_path, monkeypatch):
     """Tier-1 = deterministic p90 over completed session TOTALS (authoritative read); over-cap fires record episodes with monotonic budgetGen and no hard-stop."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch,
@@ -394,7 +394,7 @@ def test_ac_cost_f29_3(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 def test_ac_cost_f29_4(tmp_path, monkeypatch):
     """Non-immortal cap is per fire; a crossing fire refuses that session in-band, engages profile ESTOP when estop_on_breach (default) but not when false, and never skips recovery commands."""
-    import agent.estop as estop
+    from agent import estop
 
     # --- Part A: default estop_on_breach -> gateway per-fire + ESTOP belt ---
     hermes_home, manager, loaded = _load(
@@ -510,7 +510,7 @@ def test_ac_cost_f29_5(tmp_path, monkeypatch, api_mode):
 # ---------------------------------------------------------------------------
 def test_ac_cost_f29_6(tmp_path, monkeypatch):
     """Immortal sessions cap per calendar day on the window delta, are never hard-stopped (incl. mid-fire), record once per day, and roll the window over on a new day."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch,
@@ -656,7 +656,7 @@ def test_ac_cost_f29_8(tmp_path, monkeypatch):
 @pytest.mark.parametrize("unknown_on", ["usage", "session"])
 def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
     """A reconciled lineage row with cost_status='unknown' (estimated_cost_usd=0.0) is fail-CLOSED on the authoritative path: a non-immortal session is a Tier-2 breach, while a same-0.0-total priced control is not refused."""
-    import agent.estop as estop
+    from agent import estop
 
     # Ceiling 100 >> the 0.0 an unknown row sums to numerically, so a refusal
     # here can ONLY come from unknown-pricing detection on the reconcile path,
@@ -701,7 +701,7 @@ def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
 # ---------------------------------------------------------------------------
 def test_ac_cost_f29_10(tmp_path, monkeypatch):
     """A named-profile Tier-2 breach engages its OWN profile-local ESTOP sentinel even while a fleet-root ESTOP is already engaged, so a fleet resume leaves the breaching profile paused (no fail-open on the belt)."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},

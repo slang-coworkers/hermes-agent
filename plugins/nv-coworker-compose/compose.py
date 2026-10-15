@@ -49,7 +49,7 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # config.get("command_allowlist") (approval.py:3188), so a nested
 # agent.command_allowlist would be inert. Extend this map only when a new trait
 # domain is genuinely wired to a config reader.
-_TRAIT_DOMAIN: Dict[str, str] = {
+_TRAIT_DOMAIN: dict[str, str] = {
     "command_allowlist": "command_allowlist",
 }
 
@@ -77,7 +77,7 @@ _trust = _load_trust()
 # a tree whose sessions.auto_prune default has flipped to True cannot silently
 # start deleting on-disk transcripts + request_dump_* files. Every key has a real
 # reader at the pin (see the MEM-F44 fleet-transcript-retention runbook).
-_RETENTION_INVARIANTS: Dict[str, Any] = {
+_RETENTION_INVARIANTS: dict[str, Any] = {
     "sessions.auto_prune": False,
     "sessions.auto_archive": True,
     "compression.in_place": True,
@@ -90,14 +90,14 @@ _RETENTION_INVARIANTS: Dict[str, Any] = {
 # A type that legitimately needs more may declare a higher value: it is preserved
 # unchanged and per-key (never clamped down, never coupled). Both keys have real
 # readers (MemoryStore.__init__ and the _char_limit truncation gate).
-_MEMORY_FLOOR: Dict[str, int] = {
+_MEMORY_FLOOR: dict[str, int] = {
     "memory.memory_char_limit": 4000,
     "memory.user_char_limit": 2000,
 }
 # Coworkers and the DEFAULT multiplexer are unattended, so a memory write must
 # not stall on a human approval prompt: write_approval is forced off on every
 # rendered profile, overriding a spine/type that declared it true.
-_MEMORY_INVARIANTS: Dict[str, Any] = {"memory.write_approval": False}
+_MEMORY_INVARIANTS: dict[str, Any] = {"memory.write_approval": False}
 
 # Curator SAFETY invariants (MEM-F42). The curator maintains the agent-created
 # skills index that is loaded into every turn's system prompt, so enabling it and
@@ -107,7 +107,7 @@ _MEMORY_INVARIANTS: Dict[str, Any] = {"memory.write_approval": False}
 # index unbounded, and so every real pass attempts a recoverable snapshot. The
 # per-role TUNING keys (interval_hours/min_idle_hours/consolidate/prune_builtins)
 # are deliberately NOT here — they flow from the resolved spec per profile.
-_CURATOR_INVARIANTS: Dict[str, Any] = {
+_CURATOR_INVARIANTS: dict[str, Any] = {
     "curator.enabled": True,
     "curator.backup.enabled": True,
 }
@@ -134,7 +134,7 @@ _CURATOR_BACKUP_KEEP_FLOOR = 5
 # Pinned EXPLICITLY (the MEM-F44 "never by assumption" standard) so a re-pin or an
 # upstream default flip cannot silently loosen them. Every key has a real reader
 # (readers cited in the GOV-F23 runbook).
-_GOV_APPROVALS_MANAGED: Dict[str, Any] = {
+_GOV_APPROVALS_MANAGED: dict[str, Any] = {
     "approvals.mode": "smart",
     "approvals.timeout": 300,
     "approvals.cron_mode": "deny",
@@ -185,7 +185,7 @@ _MANAGED_FRAGMENT_DIR = "managed"
 # at cluster positions 1-3 (-f, -uf, -uqf). The 'git push* *+*' / 'git -*push* *+*'
 # pair catches the unquoted and shell-quoted +refspec, contiguous and behind a git
 # global option.
-_GOV_APPROVALS_DENY_FLOOR: List[str] = [
+_GOV_APPROVALS_DENY_FLOOR: list[str] = [
     "git *push* --forc*",       # --force / --force-with-lease, any argument order
     "git *push* -f",            # standalone -f at command end
     "git *push* -f *",          # standalone -f mid-command
@@ -214,7 +214,7 @@ _GOV_APPROVALS_DENY_FLOOR: List[str] = [
 # what enables Slack's _register_mentioned_thread wake.
 _ALL_ENGAGE_MODES = ("mention", "mention-sticky", "pattern", "always-on")
 
-_ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
+_ENGAGE_CAPS: dict[str, dict[str, Any]] = {
     "slack": {
         "scope_key": "allowed_channels",
         "free_response_key": "free_response_channels",
@@ -280,11 +280,11 @@ _ENGAGE_CAPS: Dict[str, Dict[str, Any]] = {
 # to every profile's adapter (gateway/run.py:16823), so the isolation flags are
 # gateway-global, never per-profile. The two flags below are the store-lane keys
 # SessionStore reads (gateway/config.py:1220-1221 -> gateway/session.py:2010-2017).
-_SESSION_FLAG_KEYS: Tuple[str, str] = ("group_sessions_per_user", "thread_sessions_per_user")
+_SESSION_FLAG_KEYS: tuple[str, str] = ("group_sessions_per_user", "thread_sessions_per_user")
 
 # Accepted session modes -> the (group, thread) sessions-per-user flags each
 # renders. per-thread is the native default (group split per user, thread shared).
-_SESSION_MODE_FLAGS: Dict[str, Dict[str, bool]] = {
+_SESSION_MODE_FLAGS: dict[str, dict[str, bool]] = {
     "shared": {"group_sessions_per_user": False, "thread_sessions_per_user": False},
     "per-thread": {"group_sessions_per_user": True, "thread_sessions_per_user": False},
 }
@@ -303,7 +303,7 @@ _AGENT_SHARED_MODE = "agent-shared"
 # each profile a CI-gated route binds; the installer skips a declared owned path
 # that a profile does not have, so coworker profiles without a scripts/ dir are
 # unaffected (hermes_cli/profile_distribution.py:372-374).
-_DIST_OWNED: List[str] = [
+_DIST_OWNED: list[str] = [
     "SOUL.md", "config.yaml", "mcp.json", "skills", "cron",
     "distribution.yaml", "skill-bundles", ".env.template", "scripts",
 ]
@@ -350,12 +350,12 @@ def _safe_join(root: Path, *parts: str) -> Path:
     return target
 
 
-def load_spec(spec: str) -> Dict[str, Any]:
+def load_spec(spec: str) -> dict[str, Any]:
     """Parse a coworker-types.yaml spec file into a plain dict."""
     return yaml.safe_load(Path(spec).read_text(encoding="utf-8")) or {}
 
 
-def _dedup(items: List[Any]) -> List[Any]:
+def _dedup(items: list[Any]) -> list[Any]:
     seen = set()
     out = []
     for it in items:
@@ -382,7 +382,7 @@ def _deep_merge(base: Any, overlay: Any) -> Any:
     return copy.deepcopy(overlay)
 
 
-def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
+def _set_dotted(mapping: dict[str, Any], dotted: str, value: Any) -> None:
     node = mapping
     parts = dotted.split(".")
     for key in parts[:-1]:
@@ -394,7 +394,7 @@ def _set_dotted(mapping: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = copy.deepcopy(value)
 
 
-def _get_dotted(mapping: Dict[str, Any], dotted: str) -> Any:
+def _get_dotted(mapping: dict[str, Any], dotted: str) -> Any:
     """Read counterpart to ``_set_dotted``: return the leaf named by a dotted
     path, or ``None`` if any segment is absent or blocked by a non-mapping node.
     Used to compare a declared value against the floor before enforcing it."""
@@ -406,13 +406,13 @@ def _get_dotted(mapping: Dict[str, Any], dotted: str) -> Any:
     return node
 
 
-def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
+def _pop_dotted(mapping: dict[str, Any], dotted: str) -> None:
     """Remove the leaf named by a dotted path, then prune each now-empty mapping
     along the path bottom-up. A sibling key that is still populated stops the
     prune, so an unrelated ``security.*`` value survives while ``security.approval``
     is emptied. A path that is absent or blocked by a non-mapping node is a no-op."""
     parts = dotted.split(".")
-    chain: List[Tuple[Dict[str, Any], str]] = []
+    chain: list[tuple[dict[str, Any], str]] = []
     node: Any = mapping
     for key in parts[:-1]:
         child = node.get(key)
@@ -432,7 +432,7 @@ def _pop_dotted(mapping: Dict[str, Any], dotted: str) -> None:
             break
 
 
-def _ensure_list_member(config: Dict[str, Any], dotted: str, value: str) -> None:
+def _ensure_list_member(config: dict[str, Any], dotted: str, value: str) -> None:
     """Append ``value`` to the list at ``dotted`` iff absent, preserving every
     pre-existing entry — the opposite of ``_set_dotted``'s overwrite. A missing
     or non-list leaf is replaced with a fresh single-element list."""
@@ -458,7 +458,7 @@ def _is_platform_key(key: Any) -> bool:
         return False
 
 
-def _enforce_retention(config: Dict[str, Any]) -> None:
+def _enforce_retention(config: dict[str, Any]) -> None:
     """Force the fleet-safe retention values onto ``config``, overriding a
     declared value and inserting an omitted one alike — the requirement's
     "explicitly and never by assumption". A setdefault-style fill would leave a
@@ -493,7 +493,7 @@ class _SubstrateDescriptor:
 
 
 _DEFAULT_SUBSTRATE = "podman"
-_SUBSTRATE_DESCRIPTORS: Dict[str, _SubstrateDescriptor] = {
+_SUBSTRATE_DESCRIPTORS: dict[str, _SubstrateDescriptor] = {
     "podman": _SubstrateDescriptor(
         substrate="podman", backend="docker", terminal_prefix="docker", kind="container"),
     # OSH-F63: OpenShell-native sandbox per profile, reached over the builtin ssh
@@ -506,7 +506,7 @@ _FLEET_GATES_PLUGIN = "nv-fleet-gates"
 _FLEET_GATES_SETTINGS = "plugins.entries.nv-fleet-gates.settings"
 
 
-def _resolve_substrate(data: Dict[str, Any]) -> _SubstrateDescriptor:
+def _resolve_substrate(data: dict[str, Any]) -> _SubstrateDescriptor:
     """Resolve the fleet spec's ``substrate`` DATA field to its descriptor.
 
     Absent -> ``podman`` (back-compat). A known value -> its descriptor. An unknown
@@ -523,7 +523,7 @@ def _resolve_substrate(data: Dict[str, Any]) -> _SubstrateDescriptor:
     )
 
 
-def _validate_sandbox_scope(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
+def _validate_sandbox_scope(data: dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
     """Validate the top-level ``sandbox_scope`` DATA field for the remote-ssh
     substrate, at the TOP of ``compose`` before any distribution is written.
 
@@ -552,7 +552,7 @@ def _validate_sandbox_scope(data: Dict[str, Any], descriptor: _SubstrateDescript
     )
 
 
-def _reject_openshell_container_fields(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
+def _reject_openshell_container_fields(data: dict[str, Any], descriptor: _SubstrateDescriptor) -> None:
     """Refuse a remote-ssh spec that sets container-only mount fields. The
     remote-ssh substrate skips the docker mount/egress writers, so honouring these
     would be impossible — failing closed here is safer than silently ignoring them."""
@@ -572,7 +572,7 @@ def _reject_openshell_container_fields(data: Dict[str, Any], descriptor: _Substr
         )
 
 
-def _enforce_session_driver(config: Dict[str, Any], profile_name: str,
+def _enforce_session_driver(config: dict[str, Any], profile_name: str,
                             descriptor: _SubstrateDescriptor) -> None:
     """Force the fleet session-driver invariants onto one profile's ``config``
     (ISO-F15), rejecting any spec that fights them.
@@ -691,7 +691,7 @@ def _canon_host(host: str) -> str:
     return _DOCKER_BRIDGE_IP if canon == _DOCKER_BRIDGE_HOST else canon
 
 
-def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
+def _validate_egress_spec(egress: Any) -> dict[str, Any]:
     """Validate + normalise the spec's top-level ``egress:`` block into the
     parameters ``_enforce_egress`` writes. Fail-closed: a missing or malformed
     field raises ``CompositionError`` rather than rendering a half-formed egress
@@ -719,7 +719,7 @@ def _validate_egress_spec(egress: Any) -> Dict[str, Any]:
         set(_EGRESS_PROXY_VARS) | set(_EGRESS_NO_PROXY_VARS)
         | set(_EGRESS_CA_BUNDLE_VARS) | set(_EGRESS_CONTROL_PLANE_VARS)
     )
-    normalized_providers: List[str] = []
+    normalized_providers: list[str] = []
     for name in providers:
         if not isinstance(name, str):
             raise CompositionError(
@@ -766,7 +766,7 @@ def _targets_ca(entry: Any, ca_container_path: str) -> bool:
     return dest == ca_container_path
 
 
-def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
+def _egress_controlled_names(params: dict[str, Any]) -> set[str]:
     return (
         set(_EGRESS_PROXY_VARS)
         | set(_EGRESS_NO_PROXY_VARS)
@@ -776,7 +776,7 @@ def _egress_controlled_names(params: Dict[str, Any]) -> Set[str]:
     )
 
 
-def _is_controlled_env_name(name: Any, controlled: Set[str]) -> bool:
+def _is_controlled_env_name(name: Any, controlled: set[str]) -> bool:
     if not isinstance(name, str):
         return False
     # Compare after strip: the docker backend strips whitespace off env names, so a
@@ -795,7 +795,7 @@ def _extra_arg_env_name(tok: str, nxt: Any) -> Optional[str]:
         return tok[len("--env="):].split("=", 1)[0]
     if tok.startswith("-e") and tok != "-e":
         rest = tok[2:]
-        rest = rest[1:] if rest.startswith("=") else rest
+        rest = rest.removeprefix("=")
         return rest.split("=", 1)[0]
     return None
 
@@ -814,7 +814,7 @@ def _extra_arg_mount_dest(tok: str, nxt: Any) -> Optional[str]:
         spec = tok[len("--volume="):]
     elif tok.startswith("-v") and tok != "-v":
         rest = tok[2:]
-        spec = rest[1:] if rest.startswith("=") else rest
+        spec = rest.removeprefix("=")
     elif tok == "--mount":
         spec, is_mount = (None if nxt is None else str(nxt)), True
     elif tok.startswith("--mount="):
@@ -839,8 +839,8 @@ def _consumes_next_extra_arg(tok: str) -> bool:
     return tok in ("-e", "--env", "-v", "--volume", "--mount")
 
 
-def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
-                                   profile_name: str, controlled: Set[str]) -> None:
+def _assert_extra_args_egress_safe(extra: list[Any], params: dict[str, Any],
+                                   profile_name: str, controlled: set[str]) -> None:
     """Reject a ``docker_extra_args`` list that would inject a competing egress control
     the render does not own: a non-string entry (the backend drops it, shifting the
     argv into a valid override), a controlled env var (any ``-e``/``--env`` spelling),
@@ -898,7 +898,7 @@ def _assert_extra_args_egress_safe(extra: List[Any], params: Dict[str, Any],
         i += 2 if _consumes_next_extra_arg(tok) else 1
 
 
-def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_name: str,
+def _assert_egress_safe(config: dict[str, Any], params: dict[str, Any], profile_name: str,
                         descriptor: _SubstrateDescriptor) -> None:
     """Fail-closed pre-pass (ISO-F14): refuse a resolved profile whose merged
     inputs would fight the render-owned egress posture, BEFORE any profile is
@@ -983,7 +983,7 @@ def _assert_egress_safe(config: Dict[str, Any], params: Dict[str, Any], profile_
         _assert_extra_args_egress_safe(extra, params, profile_name, controlled)
 
 
-def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name: str,
+def _enforce_egress(config: dict[str, Any], params: dict[str, Any], profile_name: str,
                     descriptor: _SubstrateDescriptor) -> None:
     """Force the OPTION-A egress posture onto one profile's ``config`` (ISO-F14),
     overwriting a declared leaf and inserting an omitted one alike (mirrors
@@ -1023,7 +1023,7 @@ def _enforce_egress(config: Dict[str, Any], params: Dict[str, Any], profile_name
     ca_container_path = params["ca_container_path"]
     ca_mount = params["ca_mount"]
     current_vols = _get_dotted(config, descriptor.key("volumes"))
-    kept: List[Any] = []
+    kept: list[Any] = []
     for v in (current_vols if isinstance(current_vols, list) else []):
         if _targets_ca(v, ca_container_path):
             if str(v) != ca_mount:
@@ -1087,7 +1087,7 @@ def _openshell_ssh_alias(fleet_name: str, profile_name: str) -> str:
     return f"openshell-{_openshell_sandbox_name(fleet_name, profile_name)}"
 
 
-def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: List[str]) -> None:
+def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: list[str]) -> None:
     """Fail-closed, ALL-OR-NOTHING creation of every profile's ssh_key placeholder,
     run ONCE before the Phase-B write loop emits any distribution. Two passes: first
     validate every target (a dangling symlink is invisible to ``Path.exists()``, so a
@@ -1112,7 +1112,7 @@ def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: List[str]) -> Non
         key_path.chmod(0o600)
 
 
-def _enforce_openshell_ssh(config: Dict[str, Any], profile_name: str, fleet_name: str,
+def _enforce_openshell_ssh(config: dict[str, Any], profile_name: str, fleet_name: str,
                            keys_dir: Path) -> None:
     """Write one coworker's builtin-ssh terminal block for its OWN OpenShell sandbox:
     a distinct ``ssh_host`` (the ssh-config alias ``openshell-<fleet>-<profile>``), a
@@ -1175,7 +1175,7 @@ _OSH_F64B_ONECLI_HOP = ("172.17.0.1", 18255)
 _OSH_F64B_BROKER_HOP = ("172.17.0.1", 18777)
 
 
-def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
+def _validate_openshell_inference_provider(block: Any) -> dict[str, Any]:
     """Validate the OSH-F64.b ``egress.inference_provider`` block — the spec-gated trigger
     for the single-authority inference posture (ADR §D1/§D3/§D4). Fail-closed on a
     missing/malformed field. Returns the normalized dict the render reads: ``provider`` (the
@@ -1253,7 +1253,7 @@ def _validate_openshell_inference_provider(block: Any) -> Dict[str, Any]:
     }
 
 
-def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
+def _validate_openshell_egress(egress: Any) -> dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
     raises ``CompositionError`` rather than emitting a half-formed policy. The BASE ALLOW
@@ -1321,7 +1321,7 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     # broker_addr == the dropped proxy_addr reintroduces the superseded 18255 raw tunnel. The
     # config provider base_url must also be the SAME endpoint the policy allows (reachability).
     if inference_provider is not None:
-        def _canon_hp(addr: str) -> Tuple[str, int]:
+        def _canon_hp(addr: str) -> tuple[str, int]:
             h, p = _openshell_hostport(addr)
             return _canon_host(h), p
         route_hp = _canon_hp(inference_route)
@@ -1421,7 +1421,7 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
     }
 
 
-def _validate_openshell_read_only(value: Any) -> List[str]:
+def _validate_openshell_read_only(value: Any) -> list[str]:
     """Validate a PRESENT ``egress.filesystem_read_only`` into the paths the policy's
     ``filesystem_policy.read_only`` admits: a non-empty list of absolute paths, each free
     of control characters, wildcards and ``..`` traversal (write-denied lanes). Called only
@@ -1430,7 +1430,7 @@ def _validate_openshell_read_only(value: Any) -> List[str]:
     if not isinstance(value, list) or not value:
         raise CompositionError(
             f"egress.filesystem_read_only must be a non-empty list of absolute paths, got {value!r}")
-    out: List[str] = []
+    out: list[str] = []
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
             raise CompositionError(
@@ -1450,7 +1450,7 @@ def _validate_openshell_read_only(value: Any) -> List[str]:
     return out
 
 
-def _validate_openshell_read_write(value: Any) -> List[str]:
+def _validate_openshell_read_write(value: Any) -> list[str]:
     """Validate a PRESENT ``egress.filesystem_read_write`` into the paths appended to the
     policy's ``filesystem_policy.read_write``: the ``filesystem_read_only`` grammar (non-empty
     list of absolute paths, no control characters, wildcard or ``..``), and never ``/`` — a
@@ -1458,7 +1458,7 @@ def _validate_openshell_read_write(value: Any) -> List[str]:
     if not isinstance(value, list) or not value:
         raise CompositionError(
             f"egress.filesystem_read_write must be a non-empty list of absolute paths, got {value!r}")
-    out: List[str] = []
+    out: list[str] = []
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
             raise CompositionError(
@@ -1476,14 +1476,14 @@ def _validate_openshell_read_write(value: Any) -> List[str]:
     return out
 
 
-def _validate_openshell_anonymous_reads(value: Any) -> Dict[str, List[str]]:
+def _validate_openshell_anonymous_reads(value: Any) -> dict[str, list[str]]:
     """Validate a PRESENT ``egress.anonymous_reads`` (role → non-empty list of ``host:port``)
     into the per-role credential-free read targets. Each target is held to the endpoint grammar
     and the forbidden-host guard; ``compose()`` checks that every role is a declared type."""
     if not isinstance(value, dict):
         raise CompositionError(
             f"egress.anonymous_reads must be a mapping of role -> [host:port], got {value!r}")
-    out: Dict[str, List[str]] = {}
+    out: dict[str, list[str]] = {}
     for role, targets in value.items():
         rname = _safe_name("type", role)
         if (not isinstance(targets, list) or not targets
@@ -1497,7 +1497,7 @@ def _validate_openshell_anonymous_reads(value: Any) -> Dict[str, List[str]]:
     return out
 
 
-def _validate_openshell_binaries(value: Any) -> List[str]:
+def _validate_openshell_binaries(value: Any) -> list[str]:
     """Validate a PRESENT ``egress.binaries`` into the paths appended to the worker-egress
     ``binaries`` allow-list: a non-empty list of absolute paths, each free of control
     characters and ``..`` traversal. A ``*`` glob IS permitted (``/usr/bin/python3*`` matches
@@ -1507,7 +1507,7 @@ def _validate_openshell_binaries(value: Any) -> List[str]:
     if not isinstance(value, list) or not value:
         raise CompositionError(
             f"egress.binaries must be a non-empty list of absolute paths, got {value!r}")
-    out: List[str] = []
+    out: list[str] = []
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
             raise CompositionError(
@@ -1523,7 +1523,7 @@ def _validate_openshell_binaries(value: Any) -> List[str]:
     return out
 
 
-def _validate_openshell_secret_ids(value: Any) -> List[str]:
+def _validate_openshell_secret_ids(value: Any) -> list[str]:
     """Validate a PRESENT ``egress.onecli_secret_ids`` into a non-empty list of non-empty
     OneCLI secret ids. An empty list is rejected: onboarding an empty grant does
     ``set_secrets([])``, which REVOKES the identity's secret. Opaque ids, not filesystem
@@ -1531,7 +1531,7 @@ def _validate_openshell_secret_ids(value: Any) -> List[str]:
     if not isinstance(value, list) or not value:
         raise CompositionError(
             f"egress.onecli_secret_ids must be a non-empty list of OneCLI secret ids, got {value!r}")
-    out: List[str] = []
+    out: list[str] = []
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
             raise CompositionError(
@@ -1567,7 +1567,7 @@ _OPENSHELL_POLICY_ALLOW_METHOD = "POST"
 _OPENSHELL_POLICY_ALLOW_PATH = "/**"
 
 
-def _openshell_hostport(entry: str) -> Tuple[str, int]:
+def _openshell_hostport(entry: str) -> tuple[str, int]:
     """Split an allow-list ``host:port`` string into ``(host, int(port))``. Fails
     closed (``CompositionError``) on an empty host, a missing/non-numeric port, or a
     port outside 1..65535 — the endpoint grammar requires a host AND a valid port, so
@@ -1588,7 +1588,7 @@ _CHAIN_DIAL_FORCED_VARS = frozenset({
 })
 
 
-def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
+def _enforce_openshell_chain_dial(config: dict[str, Any], profile_name: str,
                                   chain_addr: str, ca_bundle: Optional[str]) -> None:
     """Repoint a served coworker's profile-scoped child model turn through the operator
     onecli-chain (OSH-F64 §D7). Written into the RAW per-profile config, since secret
@@ -1616,7 +1616,7 @@ def _enforce_openshell_chain_dial(config: Dict[str, Any], profile_name: str,
         _set_dotted(config, "plugins.entries.podman-onecli.settings.ca_bundle", ca_bundle)
 
 
-def _forbid_bridge_no_proxy(config: Dict[str, Any], profile_name: str) -> None:
+def _forbid_bridge_no_proxy(config: dict[str, Any], profile_name: str) -> None:
     """Refuse a top-level NO_PROXY/no_proxy scalar listing the docker bridge (FLEET-F62.e D6):
     the gateway bridges top-level scalars into the env, and a bridge entry makes a client dial
     the hop directly, which the sandbox does not route."""
@@ -1627,7 +1627,7 @@ def _forbid_bridge_no_proxy(config: Dict[str, Any], profile_name: str) -> None:
             f"list 172.17.0.1 or host.docker.internal)")
 
 
-def _validate_openshell_trust_profile(config: Dict[str, Any], profile_name: str) -> None:
+def _validate_openshell_trust_profile(config: dict[str, Any], profile_name: str) -> None:
     """Pre-pass refusals for a profile that will carry ``secrets.openshell_trust`` (D3, D9):
     without nv-coworker-compose the source never registers, and a preserved CA or NO_PROXY
     name outranks the source's override."""
@@ -1643,15 +1643,15 @@ def _validate_openshell_trust_profile(config: Dict[str, Any], profile_name: str)
             f"{_trust.SPEC_KEY} is declared — a preserved value outranks the trust source's override")
 
 
-def _enforce_openshell_trust(config: Dict[str, Any], trust: Dict[str, Any]) -> None:
+def _enforce_openshell_trust(config: dict[str, Any], trust: dict[str, Any]) -> None:
     """Render the start-time trust source's config: its section plus first claim in
     ``secrets.sources`` (first claim wins across sources)."""
     _set_dotted(config, f"secrets.{_trust.SOURCE_NAME}", _trust.trust_block(trust))
     _set_dotted(config, "secrets.sources", _trust.with_trust_source(_get_dotted(config, "secrets.sources")))
 
 
-def _enforce_openshell_secret_sets(config: Dict[str, Any], served_profiles: List[str],
-                                   secret_ids: List[str]) -> None:
+def _enforce_openshell_secret_sets(config: dict[str, Any], served_profiles: list[str],
+                                   secret_ids: list[str]) -> None:
     """Populate the gateway config's ``profile_secret_sets`` onboard grant map, which
     ``onecli-onboard`` reads to grant each served identity. DEFAULT profile only — a served
     coworker's own config does not read this map."""
@@ -1683,7 +1683,7 @@ def _assert_openshell_host_allowed(entry: str) -> None:
             f"gateway / wildcard / inbound-ssh host)")
 
 
-def _provider_str_list(entry: Dict[str, Any], pname: str, key: str) -> List[str]:
+def _provider_str_list(entry: dict[str, Any], pname: str, key: str) -> list[str]:
     """One required provider-catalog field: a non-empty list of non-empty strings."""
     val = entry.get(key)
     if (not isinstance(val, list) or not val
@@ -1694,7 +1694,7 @@ def _provider_str_list(entry: Dict[str, Any], pname: str, key: str) -> List[str]
     return [v.strip() for v in val]
 
 
-def _validate_provider_catalog(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def _validate_provider_catalog(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Validate the OPTIONAL top-level ``providers:`` catalog into a name->spec map
     (``{name: {"endpoints", "binaries", "methods"}}``). A provider is extra OpenShell
     egress a worker opts into via its own ``providers: [<name>]`` list: ``endpoints`` are
@@ -1712,7 +1712,7 @@ def _validate_provider_catalog(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]
     if not isinstance(catalog, dict):
         raise CompositionError(
             f"providers must be a mapping of name -> spec, got {type(catalog).__name__}")
-    resolved: Dict[str, Dict[str, Any]] = {}
+    resolved: dict[str, dict[str, Any]] = {}
     for name, entry in catalog.items():
         pname = _safe_name("provider", name)
         if not isinstance(entry, dict):
@@ -1732,8 +1732,8 @@ def _validate_provider_catalog(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
 
 def _type_providers(
-    data: Dict[str, Any], tname: str, catalog: Dict[str, Dict[str, Any]]
-) -> List[Tuple[str, Dict[str, Any]]]:
+    data: dict[str, Any], tname: str, catalog: dict[str, dict[str, Any]]
+) -> list[tuple[str, dict[str, Any]]]:
     """Resolve one type's opt-in ``providers: [<name>]`` list against the validated
     catalog, in declared order (deduped) — ``[(name, spec)]``, or ``[]`` when the type
     declares none. ``_resolve_type`` does not carry the per-type ``providers`` key, so it
@@ -1745,8 +1745,8 @@ def _type_providers(
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise CompositionError(
             f"{tname}: providers must be a list of provider names, got {names!r}")
-    resolved: List[Tuple[str, Dict[str, Any]]] = []
-    seen: Set[str] = set()
+    resolved: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
     for n in names:
         pname = _safe_name("provider", n)
         if pname not in catalog:
@@ -1760,8 +1760,8 @@ def _type_providers(
     return resolved
 
 
-def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: str,
-                                          inference_provider: Dict[str, Any]) -> None:
+def _enforce_openshell_inference_provider(config: dict[str, Any], profile_name: str,
+                                          inference_provider: dict[str, Any]) -> None:
     """Render a served coworker's single-authority inference model-provider config
     (OSH-F64.b §D3), REPLACING the OSH-F64 §D7 OneCLI chain-dial for the openshell path.
     The provider carries the OpenShell endpoint ``base_url`` (with the ``/v1`` path so the
@@ -1850,16 +1850,16 @@ def _enforce_openshell_inference_provider(config: Dict[str, Any], profile_name: 
 
 
 def _openshell_policy_document(
-    allow: List[str],
-    providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
-    filesystem_read_only: Optional[List[str]] = None,
-    binaries: Optional[List[str]] = None,
-    raw_hops: Optional[List[str]] = None,
-    rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-    extra_read_only: Optional[List[str]] = None,
-    extra_read_write: Optional[List[str]] = None,
-    anonymous_reads: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    allow: list[str],
+    providers: Optional[list[tuple[str, dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[list[str]] = None,
+    binaries: Optional[list[str]] = None,
+    raw_hops: Optional[list[str]] = None,
+    rest_overrides: Optional[dict[str, dict[str, Any]]] = None,
+    extra_read_only: Optional[list[str]] = None,
+    extra_read_write: Optional[list[str]] = None,
+    anonymous_reads: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section grammar
     from the validated egress targets (§D1.3), plus any opted-in provider
     endpoints/binaries/methods (FLEET-F62.c). The base document carries one endpoint per
@@ -1969,15 +1969,15 @@ def _openshell_policy_document(
 def _enforce_openshell_policy(
     pdir: Path,
     profile_name: str,
-    allow: List[str],
-    providers: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
-    filesystem_read_only: Optional[List[str]] = None,
-    binaries: Optional[List[str]] = None,
-    raw_hops: Optional[List[str]] = None,
-    rest_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-    extra_read_only: Optional[List[str]] = None,
-    extra_read_write: Optional[List[str]] = None,
-    anonymous_reads: Optional[List[str]] = None,
+    allow: list[str],
+    providers: Optional[list[tuple[str, dict[str, Any]]]] = None,
+    filesystem_read_only: Optional[list[str]] = None,
+    binaries: Optional[list[str]] = None,
+    raw_hops: Optional[list[str]] = None,
+    rest_overrides: Optional[dict[str, dict[str, Any]]] = None,
+    extra_read_only: Optional[list[str]] = None,
+    extra_read_write: Optional[list[str]] = None,
+    anonymous_reads: Optional[list[str]] = None,
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
@@ -2029,7 +2029,7 @@ def _render_openshell_gitconfig(pdir: Path) -> None:
     target.write_text(_OPENSHELL_GITCONFIG, encoding="utf-8")
 
 
-def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor) -> List[str]:
+def build_provision_plan(data: dict[str, Any], descriptor: _SubstrateDescriptor) -> list[str]:
     """Build the deterministic ``openshell`` provisioning plan for a remote-ssh fleet:
     per coworker profile, a sandbox-create line (carrying one ``--provider <name>`` per
     provider the role opts into, bound at create) + an ssh-config line, then the
@@ -2046,7 +2046,7 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
     image = shlex.quote(_validate_openshell_egress(data.get("egress") or {})["sandbox_image"])
     roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
     catalog = _validate_provider_catalog(data)
-    lines: List[str] = []
+    lines: list[str] = []
     # `--policy` names the BARE `policy-<role>.yaml` (each profile's distribution ships
     # that file; the operator materialises it at that name before running the plan). The
     # create `--name` is the BARE sandbox name `<fleet>-<role>`; the profile's rendered
@@ -2079,7 +2079,7 @@ def build_provision_plan(data: Dict[str, Any], descriptor: _SubstrateDescriptor)
 WIKI_MOUNT = "/mnt/shared-learnings"
 
 
-def _enforce_shared_learnings(config: Dict[str, Any], clone: str, is_orchestrator: bool) -> None:
+def _enforce_shared_learnings(config: dict[str, Any], clone: str, is_orchestrator: bool) -> None:
     """Surface the fleet's shared-learnings clone into a coworker profile (MEM-F43).
 
     Three edits, each idempotent: add ``<clone>/skills`` to ``skills.external_dirs``
@@ -2106,7 +2106,7 @@ def _enforce_shared_learnings(config: Dict[str, Any], clone: str, is_orchestrato
     _set_dotted(config, "terminal.docker_volumes", volumes)
 
 
-def _reject_malformed_terminal(config: Dict[str, Any], profile_name: str) -> None:
+def _reject_malformed_terminal(config: dict[str, Any], profile_name: str) -> None:
     """Fail closed on a non-mapping ``terminal`` or a non-list ``terminal.docker_volumes``.
 
     Runs in the Phase-A pre-pass BEFORE any enforcer normalizes those values:
@@ -2210,7 +2210,7 @@ def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
 # exactly one policed channel, docker_volumes.
 # Value True = the flag consumes a value (inline ``=value`` or the next token); False =
 # boolean. Each permitted flag is a resource-limit, lifecycle, or hardening flag.
-_EXTRA_ARG_ALLOWLIST: Dict[str, bool] = {
+_EXTRA_ARG_ALLOWLIST: dict[str, bool] = {
     "--shm-size": True,
     "--cap-drop": True,
     "--memory": True,
@@ -2230,7 +2230,7 @@ _EXTRA_ARG_ALLOWLIST: Dict[str, bool] = {
 }
 
 
-def _reject_disallowed_extra_args(extra_args: List[str], profile_name: str) -> None:
+def _reject_disallowed_extra_args(extra_args: list[str], profile_name: str) -> None:
     """Refuse any ``terminal.docker_extra_args`` flag not on ``_EXTRA_ARG_ALLOWLIST``.
 
     Tokens are walked left to right exactly as the container runtime parses them: a
@@ -2267,7 +2267,7 @@ def _reject_disallowed_extra_args(extra_args: List[str], profile_name: str) -> N
 
 
 def _enforce_mount_composition(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     profile_name: str,
     workspace_root: Any,
     install_surfaces: Any,
@@ -2380,7 +2380,7 @@ def _enforce_mount_composition(
     if clone_mount is not None:
         destinations.append(("shared_learnings_root", WIKI_MOUNT))
     destinations.extend(("install_surface", str(surface)) for surface in surfaces)
-    seen: Dict[str, str] = {}
+    seen: dict[str, str] = {}
     for label, dest in destinations:
         if dest in seen:
             raise CompositionError(
@@ -2404,7 +2404,7 @@ def _enforce_mount_composition(
     _set_dotted(config, descriptor.key("mount_cwd_to_workspace"), True)
 
 
-def _enforce_memory_policy(config: Dict[str, Any]) -> None:
+def _enforce_memory_policy(config: dict[str, Any]) -> None:
     """Raise per-agent memory caps to the fleet floor (never clamp a higher
     declared value down; each key independently) and force write_approval off.
     Mirrors ``_enforce_retention``: always writes the leaf so a stale or omitted
@@ -2421,7 +2421,7 @@ def _enforce_memory_policy(config: Dict[str, Any]) -> None:
         _set_dotted(config, dotted, value)
 
 
-def _enforce_curator(config: Dict[str, Any]) -> None:
+def _enforce_curator(config: dict[str, Any]) -> None:
     """Force the curator safety invariants and floor backup.keep on ``config``,
     overriding a declared value and inserting an omitted one alike. Mirrors
     ``_enforce_memory_policy``: the two booleans are always overwritten so a stale
@@ -2439,7 +2439,7 @@ def _enforce_curator(config: Dict[str, Any]) -> None:
     _set_dotted(config, "curator.backup.keep", max(declared_int, _CURATOR_BACKUP_KEEP_FLOOR))
 
 
-def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool) -> None:
+def _validate_approval_lists(config: dict[str, Any], *, include_allowlist: bool) -> None:
     """Fail closed on a malformed per-role approval list.
 
     A present top-level ``command_allowlist`` (coworker profiles only — DEFAULT's
@@ -2449,7 +2449,7 @@ def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool)
     and a non-list is a spec error. Type-checked before any iteration so a hostile
     value raises ``CompositionError``, never a raw ``TypeError``.
     """
-    to_check: List[Tuple[str, Any]] = []
+    to_check: list[tuple[str, Any]] = []
     if include_allowlist and "command_allowlist" in config:
         to_check.append(("command_allowlist", config["command_allowlist"]))
     approvals = config.get("approvals")
@@ -2472,7 +2472,7 @@ def _validate_approval_lists(config: Dict[str, Any], *, include_allowlist: bool)
                 )
 
 
-def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
+def _strip_fleet_uniform_approvals(config: dict[str, Any]) -> None:
     """Remove the eight fleet-uniform keys (six ``approvals.*`` plus
     ``security.approval.transport`` / ``security.approval.transport_fallback``) from
     a per-profile config so the immutability split is disjoint — they live ONLY in
@@ -2485,7 +2485,7 @@ def _strip_fleet_uniform_approvals(config: Dict[str, Any]) -> None:
         _pop_dotted(config, dotted)
 
 
-def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
+def _force_default_allowlist_empty(config: dict[str, Any]) -> None:
     """Force the DEFAULT/multiplexer profile's top-level ``command_allowlist`` to
     ``[]`` — the in-gateway LAUNCH BASELINE, not steady-state isolation. The gateway
     process loads its permanent allowlist once at import from the launch (DEFAULT)
@@ -2499,7 +2499,7 @@ def _force_default_allowlist_empty(config: Dict[str, Any]) -> None:
     config["command_allowlist"] = []
 
 
-def _strip_default_timezone(config: Dict[str, Any]) -> None:
+def _strip_default_timezone(config: dict[str, Any]) -> None:
     """Drop any ``timezone`` from the DEFAULT/multiplexer profile config. The gateway
     promotes a non-empty ``timezone`` in the launch (DEFAULT) profile's config.yaml to
     the PROCESS-GLOBAL ``HERMES_TIMEZONE`` env var (gateway/run.py:2862-2865,
@@ -2513,7 +2513,7 @@ def _strip_default_timezone(config: Dict[str, Any]) -> None:
     config.pop("timezone", None)
 
 
-def _enforce_deny_floor(config: Dict[str, Any]) -> None:
+def _enforce_deny_floor(config: dict[str, Any]) -> None:
     """OVERWRITE ``approvals.deny`` with exactly the fixed force-push/tag/release
     deny floor on a rendered profile config.
 
@@ -2535,9 +2535,9 @@ def _enforce_deny_floor(config: Dict[str, Any]) -> None:
     approvals["deny"] = list(_GOV_APPROVALS_DENY_FLOOR)
 
 
-def _build_managed_fragment(profile_roles: Dict[str, str],
-                            expected_ssh_host: Optional[Dict[str, str]] = None,
-                            *, disable_install_scan: bool = False) -> Dict[str, Any]:
+def _build_managed_fragment(profile_roles: dict[str, str],
+                            expected_ssh_host: Optional[dict[str, str]] = None,
+                            *, disable_install_scan: bool = False) -> dict[str, Any]:
     """Build the machine-wide managed-scope fragment: the eight fleet-uniform
     approval keys (GOV-F23) plus the FLEET-F62 fleet role map. The operator installs
     this one file to ``$HERMES_MANAGED_DIR/config.yaml`` (else
@@ -2562,7 +2562,7 @@ def _build_managed_fragment(profile_roles: Dict[str, str],
     verdict (which ``--force`` cannot override) would otherwise refuse them. Every other
     fleet (plain-host/container, and an openshell fleet outside that lane) leaves the flag
     unset so scanning stays ON."""
-    fragment: Dict[str, Any] = {}
+    fragment: dict[str, Any] = {}
     for dotted, value in _GOV_APPROVALS_MANAGED.items():
         _set_dotted(fragment, dotted, value)
     _set_dotted(fragment, f"{_FLEET_GATES_SETTINGS}.profile_roles", dict(profile_roles))
@@ -2571,14 +2571,14 @@ def _build_managed_fragment(profile_roles: Dict[str, str],
     if disable_install_scan:
         _set_dotted(fragment, "plugins.scan_on_install", False)
     return fragment
-def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str, Any]]:
+def _engage_alias_nodes(config: dict[str, Any], platform: str) -> list[dict[str, Any]]:
     """Every loader-alias location a controlled key can occupy for ``platform``:
     root ``<p>``, ``platforms.<p>``, ``gateway.<p>``, ``gateway.platforms.<p>``.
     The loader bridges values from these locations over ``platforms.<p>.extra`` at
     load time (gateway/config.py:1676-1809 lifts require_mention/mention_patterns/
     free_response_channels), so a stale inherited value left in any of them would
     override the rendered gate — which is why they are all stripped."""
-    nodes: List[Dict[str, Any]] = []
+    nodes: list[dict[str, Any]] = []
 
     def _add(node: Any) -> None:
         if isinstance(node, dict) and not any(node is seen for seen in nodes):
@@ -2597,12 +2597,12 @@ def _engage_alias_nodes(config: Dict[str, Any], platform: str) -> List[Dict[str,
     return nodes
 
 
-def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> Set[int]:
+def _strip_engage_key(config: dict[str, Any], platform: str, key: str) -> set[int]:
     """Pop ``key`` from every alias location and its nested ``extra`` block. Return
     the ``id()``s of alias nodes a value was actually removed from, so only a block
     the strip itself emptied is later pruned — a pre-existing empty noncanonical
     block must survive for RT-F01's canonical-layout check to reject it."""
-    removed: Set[int] = set()
+    removed: set[int] = set()
     for node in _engage_alias_nodes(config, platform):
         hit = False
         if key in node:
@@ -2617,7 +2617,7 @@ def _strip_engage_key(config: Dict[str, Any], platform: str, key: str) -> Set[in
     return removed
 
 
-def _engage_extra_target(config: Dict[str, Any], platform: str) -> Dict[str, Any]:
+def _engage_extra_target(config: dict[str, Any], platform: str) -> dict[str, Any]:
     """The canonical write destination ``config["platforms"][<p>]["extra"]``,
     created as needed. Never replaces an existing block, so unrelated keys (token,
     enabled, a hand-set extra value, an inherited scope) are preserved."""
@@ -2644,7 +2644,7 @@ def _is_blank_or_wildcard(value: Any) -> bool:
     return str(value).strip() in ("", "*")
 
 
-def _bounded_ids(values: Any, what: str) -> List[Any]:
+def _bounded_ids(values: Any, what: str) -> list[Any]:
     """Validate a bounded, non-wildcard allowlist (always-on channels or
     sender_scope). Missing/empty, a scalar, or any blank/``*`` member all mean "no
     restriction" and are refused rather than rendered. Each member must be a string or
@@ -2665,7 +2665,7 @@ def _bounded_ids(values: Any, what: str) -> List[Any]:
     return list(values)
 
 
-def _bounded_patterns(values: Any, platform: str) -> List[str]:
+def _bounded_patterns(values: Any, platform: str) -> list[str]:
     """Validate the non-empty pattern list a ``pattern`` mode requires. A blank
     pattern matches everything, and a syntactically-invalid one is silently dropped
     by the adapter (degrading ``pattern`` → mention-only), so every element must be
@@ -2689,7 +2689,7 @@ def _bounded_patterns(values: Any, platform: str) -> List[str]:
     return list(values)
 
 
-def _render_engage(config: Dict[str, Any]) -> None:
+def _render_engage(config: dict[str, Any]) -> None:
     """Translate the plugin's ``config.engage`` block into the concrete per-platform
     gate keys the adapters read under ``platforms.<p>.extra``, then remove the inert
     ``engage`` pseudo-key. Deterministic (canonical reset + alias strip), fail-closed
@@ -2707,14 +2707,14 @@ def _render_engage(config: Dict[str, Any]) -> None:
         _render_engage_platform(config, str(platform), block)
 
 
-def _detach_shared_engage_blocks(config: Dict[str, Any], platform_names: List[str]) -> None:
+def _detach_shared_engage_blocks(config: dict[str, Any], platform_names: list[str]) -> None:
     """Give every engage platform block its own dict identity at each loader-alias
     location, so an in-place render of one platform cannot pollute another that
     shares the same object via a YAML anchor (``platforms: {slack: &a {...},
     telegram: *a}`` survives ``_deep_merge``'s subtree-insert path). A deep copy of
     an already-unique block is value-equal, so a spec without cross-referenced blocks
     renders identically; copying each block also detaches a shared nested ``extra``."""
-    parents: List[Dict[str, Any]] = [config]
+    parents: list[dict[str, Any]] = [config]
     platforms = config.get("platforms")
     if isinstance(platforms, dict):
         parents.append(platforms)
@@ -2731,7 +2731,7 @@ def _detach_shared_engage_blocks(config: Dict[str, Any], platform_names: List[st
                 parent[platform] = copy.deepcopy(block)
 
 
-def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -> None:
+def _render_engage_platform(config: dict[str, Any], platform: str, block: Any) -> None:
     caps = _ENGAGE_CAPS.get(platform)
     if caps is None:
         raise CompositionError(
@@ -2777,7 +2777,7 @@ def _render_engage_platform(config: Dict[str, Any], platform: str, block: Any) -
     # ALL aliases, then write the canonical set to platforms.<p>.extra so nothing
     # bridges over it at load time. update() preserves unrelated keys in that extra.
     controlled = {key for md in modes.values() for key in md}
-    stripped: Set[int] = set()
+    stripped: set[int] = set()
     for key in controlled:
         stripped |= _strip_engage_key(config, platform, key)
     target = _engage_extra_target(config, platform)
@@ -2817,7 +2817,7 @@ def _is_vacuous_platform_block(block: Any) -> bool:
     return set(block) == {"extra"} and isinstance(block.get("extra"), dict) and not block["extra"]
 
 
-def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str, stripped_ids: Set[int]) -> None:
+def _prune_vacuous_noncanonical(config: dict[str, Any], platform: str, stripped_ids: set[int]) -> None:
     """Remove a NONCANONICAL platform alias (root ``<p>``, ``gateway.<p>``,
     ``gateway.platforms.<p>``) ONLY when the controlled-key strip is what emptied it
     (its ``id()`` is in ``stripped_ids``), so it does not trip RT-F01's
@@ -2842,7 +2842,7 @@ def _prune_vacuous_noncanonical(config: Dict[str, Any], platform: str, stripped_
 
 
 def _require_canonical_profile_names(
-    types: Dict[str, Any], default_profile: str, orchestrator_profile: str
+    types: dict[str, Any], default_profile: str, orchestrator_profile: str
 ) -> None:
     """Refuse a spec whose profile names would desynchronize the multiplex joins.
 
@@ -2888,7 +2888,7 @@ def _require_canonical_profile_names(
             )
 
 
-def _enforce_multiplex(default_config: Dict[str, Any]) -> None:
+def _enforce_multiplex(default_config: dict[str, Any]) -> None:
     """Force the DEFAULT profile into multiplexer mode.
 
     Written explicitly and never by assumption: a spec that omits the key — or
@@ -2910,7 +2910,7 @@ def _enforce_multiplex(default_config: Dict[str, Any]) -> None:
     _set_dotted(default_config, "gateway.multiplex_profiles", True)
 
 
-def park_non_fleet_profiles(roster: List[str]) -> List[str]:
+def park_non_fleet_profiles(roster: list[str]) -> list[str]:
     """Park every live named profile outside ``roster`` so the multiplexing DEFAULT
     serves exactly ``default`` + the roster.
 
@@ -2924,7 +2924,7 @@ def park_non_fleet_profiles(roster: List[str]) -> List[str]:
     from hermes_cli.profiles import parked_marker_path, profiles_to_serve
 
     fleet = set(roster)
-    parked: List[str] = []
+    parked: list[str] = []
     for name, home in profiles_to_serve(True, include_parked=True):
         if name == "default" or name in fleet:
             continue
@@ -2949,7 +2949,7 @@ def park_non_fleet_profiles(roster: List[str]) -> List[str]:
 _SYSTEMD_WATCHDOG_FLOOR = 30
 
 
-def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
+def _enforce_watchdog_floor(default_config: dict[str, Any]) -> None:
     from gateway.config import coerce_systemd_watchdog_seconds
 
     # Take the value the loader would resolve: the ROOT spelling wins over the nested
@@ -2964,7 +2964,7 @@ def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
     else:
         effective = _get_dotted(default_config, "gateway.systemd_watchdog_seconds")
     coerced = coerce_systemd_watchdog_seconds(effective)
-    value = coerced if coerced >= _SYSTEMD_WATCHDOG_FLOOR else _SYSTEMD_WATCHDOG_FLOOR
+    value = max(coerced, _SYSTEMD_WATCHDOG_FLOOR)
     default_config.pop("systemd_watchdog_seconds", None)
     nested = default_config.get("gateway")
     if isinstance(nested, dict):
@@ -2973,8 +2973,8 @@ def _enforce_watchdog_floor(default_config: Dict[str, Any]) -> None:
 
 
 def _resolve_session_mode(
-    default_config: Dict[str, Any], resolved_by_type: Dict[str, Dict[str, Any]]
-) -> Dict[str, bool]:
+    default_config: dict[str, Any], resolved_by_type: dict[str, dict[str, Any]]
+) -> dict[str, bool]:
     """Resolve the single fleet-wide session mode from every EXPLICIT declaration.
 
     Phase A of the two-phase session-mode render: a session mode is a
@@ -2990,7 +2990,7 @@ def _resolve_session_mode(
     native Bot Chat lane, not a flag mode) each fail closed pre-startup. Returns
     the store-lane flags for the resolved mode.
     """
-    declarations: List[Tuple[str, Any]] = []
+    declarations: list[tuple[str, Any]] = []
     if "session_mode" in default_config:
         declarations.append(("default_config.session_mode", default_config["session_mode"]))
     for tname, resolved in resolved_by_type.items():
@@ -2998,7 +2998,7 @@ def _resolve_session_mode(
         if "session_mode" in cfg:
             declarations.append((f"coworker {tname!r} config.session_mode", cfg["session_mode"]))
 
-    modes: Set[str] = set()
+    modes: set[str] = set()
     for where, mode in declarations:
         # isinstance BEFORE membership: an unhashable value (e.g. a YAML list)
         # would raise a raw TypeError from ``in``, failing OPEN.
@@ -3044,14 +3044,14 @@ def _strip_session_flags(block: Any) -> None:
         block.pop(key, None)
 
 
-def _prune_empty(container: Dict[str, Any], key: str) -> None:
+def _prune_empty(container: dict[str, Any], key: str) -> None:
     """Remove ``key`` from ``container`` iff it now maps to an empty dict."""
     value = container.get(key)
     if isinstance(value, dict) and not value:
         container.pop(key, None)
 
 
-def _mirror_and_strip_platform_flags(config: Dict[str, Any], flags: Dict[str, bool]) -> None:
+def _mirror_and_strip_platform_flags(config: dict[str, Any], flags: dict[str, bool]) -> None:
     """Mirror the resolved flags into every canonical ``platforms.<p>.extra`` and
     strip them from every alias location the loader would merge, so the store
     lane and the EFFECTIVE merged adapter lane cannot diverge.
@@ -3105,7 +3105,7 @@ def _mirror_and_strip_platform_flags(config: Dict[str, Any], flags: Dict[str, bo
     _prune_empty(config, "gateway")
 
 
-def _apply_session_mode(config: Dict[str, Any], flags: Dict[str, bool], is_default: bool) -> None:
+def _apply_session_mode(config: dict[str, Any], flags: dict[str, bool], is_default: bool) -> None:
     """Serialize the resolved fleet session mode onto one rendered profile.
 
     Phase B, called per profile after ``_enforce_retention`` and before
@@ -3140,7 +3140,7 @@ def _apply_session_mode(config: Dict[str, Any], flags: Dict[str, bool], is_defau
     _mirror_and_strip_platform_flags(config, flags)
 
 
-def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[str, str]]:
+def _iter_noncanonical_platform_keys(config: dict[str, Any]) -> Iterator[tuple[str, str]]:
     """Yield ``(location, platform)`` for every platform-named key spelled outside
     the canonical ``platforms.<x>`` map: a top-level key, a ``gateway.<x>`` key,
     or a ``gateway.platforms.<x>`` key.
@@ -3166,7 +3166,7 @@ def _iter_noncanonical_platform_keys(config: Dict[str, Any]) -> Iterator[Tuple[s
                     yield "gateway.platforms", key
 
 
-def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
+def _require_canonical_platform_layout(config: dict[str, Any]) -> None:
     """Refuse a platform block spelled non-canonically or carrying a non-mapping
     ``extra``.
 
@@ -3204,7 +3204,7 @@ def _require_canonical_platform_layout(config: Dict[str, Any]) -> None:
         )
 
 
-def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -> None:
+def _validate_webhook_routes(default_config: dict[str, Any], served: set[str]) -> None:
     """Every webhook route on the DEFAULT profile carries its OWN non-empty secret
     and an EXPLICIT ``profile:`` binding to a served profile.
 
@@ -3240,7 +3240,7 @@ def _validate_webhook_routes(default_config: Dict[str, Any], served: Set[str]) -
             )
 
 
-def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
+def _forbid_coworker_port_binding(config: dict[str, Any], tname: str) -> None:
     """No coworker profile may enable a port-binding platform.
 
     In a multiplexer the DEFAULT profile owns the single shared listener and
@@ -3265,7 +3265,7 @@ def _forbid_coworker_port_binding(config: Dict[str, Any], tname: str) -> None:
             )
 
 
-def _forbid_coworker_webhook_routes(config: Dict[str, Any], tname: str) -> None:
+def _forbid_coworker_webhook_routes(config: dict[str, Any], tname: str) -> None:
     """Webhook routes belong only on the DEFAULT profile — refuse any on a
     coworker even when the block is disabled.
 
@@ -3288,20 +3288,20 @@ def _forbid_coworker_webhook_routes(config: Dict[str, Any], tname: str) -> None:
         )
 
 
-def _resolve_type(tname: str, tinfo: Dict[str, Any], spines: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_type(tname: str, tinfo: dict[str, Any], spines: dict[str, Any]) -> dict[str, Any]:
     """Resolve one coworker type's extends chain into concrete artifacts."""
     identity: Any = None
-    invariants: List[Any] = []
-    context: List[Any] = []
-    skills: List[Any] = []
-    workflows: List[Any] = []
-    overlays: List[Any] = []
-    cron_jobs: List[Any] = []
-    traits: Dict[str, Any] = {}
-    config: Dict[str, Any] = {}
+    invariants: list[Any] = []
+    context: list[Any] = []
+    skills: list[Any] = []
+    workflows: list[Any] = []
+    overlays: list[Any] = []
+    cron_jobs: list[Any] = []
+    traits: dict[str, Any] = {}
+    config: dict[str, Any] = {}
     mcp: Any = None
 
-    def _apply(layer: Dict[str, Any]) -> None:
+    def _apply(layer: dict[str, Any]) -> None:
         nonlocal identity, traits, config, mcp
         if layer.get("identity") is not None:
             identity = layer["identity"]
@@ -3362,7 +3362,7 @@ def _write_yaml(path: Path, data: Any) -> None:
     )
 
 
-def _write_soul(path: Path, name: str, identity: Any, context: List[Any], invariants: List[Any]) -> None:
+def _write_soul(path: Path, name: str, identity: Any, context: list[Any], invariants: list[Any]) -> None:
     lines = [f"# {name}", "", str(identity or ""), ""]
     if context:
         lines.append("## Context")
@@ -3403,7 +3403,7 @@ _CRON_JOB_KEYS = frozenset(
 )
 
 
-def _normalize_monitor(name: str, decl: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+def _normalize_monitor(name: str, decl: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     """Resolve the model-facing ``monitor`` alias into the stored
     ``(monitor_script, monitor_url)`` pair, mirroring
     ``tools/cronjob_tools.py:_split_monitor_arg``: an ``http(s)://`` value is a
@@ -3439,7 +3439,7 @@ def _normalize_monitor(name: str, decl: Dict[str, Any]) -> Tuple[Optional[str], 
     return _clean(explicit_script, "monitor_script"), _clean(explicit_url, "monitor_url")
 
 
-def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
+def _build_cron_job(profile: str, decl: Any) -> dict[str, Any]:
     """Render one declared cron job into the persisted record ``cron.jobs`` loads.
 
     A deterministic ``id`` (uuid5 of profile+name, never uuid4) and the parsed
@@ -3606,7 +3606,7 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
             f"{profile}: cron job {name!r}: no_agent requires a script (the script is the job)"
         )
 
-    job: Dict[str, Any] = {
+    job: dict[str, Any] = {
         "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{_SELF_PLUGIN}:{profile}:{name}").hex[:12],
         "name": name,
         "schedule": schedule,
@@ -3636,7 +3636,7 @@ def _build_cron_job(profile: str, decl: Any) -> Dict[str, Any]:
     return job
 
 
-def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> None:
+def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: list[Any]) -> None:
     """Serialize a coworker type's resolved cron_jobs to ``<profile>/cron/jobs.json``
     in the canonical ``{"jobs": [...]}`` shape ``load_jobs`` consumes. A duplicate
     job name across the resolved extends chain is a render error — job identity
@@ -3647,8 +3647,8 @@ def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> Non
     renders ``{"jobs": []}``) so re-rendering into a persistent, git-tracked output
     tree clears a job removed from the spec instead of leaving a stale record that
     ``profile update`` would then redeploy."""
-    jobs: List[Dict[str, Any]] = []
-    seen: Set[str] = set()
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for decl in cron_jobs:
         job = _build_cron_job(profile, decl)
         name_key = job["name"].lower()
@@ -3664,7 +3664,7 @@ def _render_cron_jobs(cron_dir: Path, profile: str, cron_jobs: List[Any]) -> Non
     )
 
 
-def _load_overlays(names: List[Any], overlays_root: Path) -> List[Dict[str, Any]]:
+def _load_overlays(names: list[Any], overlays_root: Path) -> list[dict[str, Any]]:
     out = []
     for name in names:
         src = _safe_join(overlays_root, f"{_safe_name('overlay', name)}.yaml")
@@ -3673,7 +3673,7 @@ def _load_overlays(names: List[Any], overlays_root: Path) -> List[Dict[str, Any]
     return out
 
 
-def _splice_overlays(body: str, workflow: str, tname: str, overlays: List[Dict[str, Any]]) -> str:
+def _splice_overlays(body: str, workflow: str, tname: str, overlays: list[dict[str, Any]]) -> str:
     applicable = [
         ov for ov in overlays
         if ov.get("target-workflow") == workflow and tname in (ov.get("applies-to") or [])
@@ -3696,7 +3696,7 @@ def _splice_overlays(body: str, workflow: str, tname: str, overlays: List[Dict[s
     return result
 
 
-def _render_coworker(pdir: Path, tname: str, resolved: Dict[str, Any],
+def _render_coworker(pdir: Path, tname: str, resolved: dict[str, Any],
                      skills_root: Path, workflows_root: Path, overlays_root: Path) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", tname, resolved["identity"],
@@ -3772,7 +3772,7 @@ def _render_route_scripts(pdir: Path) -> None:
         )
 
 
-def _render_bound_route_scripts(out_root: Path, default_config: Dict[str, Any],
+def _render_bound_route_scripts(out_root: Path, default_config: dict[str, Any],
                                 default_profile: str) -> None:
     """Also materialize each CI-gated route's script into its BOUND profile's scripts/.
 
@@ -3797,7 +3797,7 @@ def _render_bound_route_scripts(out_root: Path, default_config: Dict[str, Any],
         )
 
 
-def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
+def _render_default(pdir: Path, name: str, config: dict[str, Any]) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", name, "Multiplexer profile for the Bot-Mode gateway.", [], [])
     _write_yaml(pdir / "config.yaml", config)
@@ -3808,7 +3808,7 @@ def _render_default(pdir: Path, name: str, config: Dict[str, Any]) -> None:
     _write_distribution(pdir, name, "Composed Hermes multiplexer (DEFAULT) profile")
 
 
-def _inject_self_plugin(config: Dict[str, Any], orchestrator_profile: str) -> None:
+def _inject_self_plugin(config: dict[str, Any], orchestrator_profile: str) -> None:
     """Enable this plugin on a rendered coworker config and record which profile
     is the orchestrator, so its onboard tools load fleet-wide and check_fn can
     gate them. Append-if-absent preserves the fixture's list order."""
@@ -3823,7 +3823,7 @@ def _inject_self_plugin(config: Dict[str, Any], orchestrator_profile: str) -> No
 _FIRECRAWL_DISABLE = ("web-firecrawl", "browser-firecrawl")
 
 
-def _disable_firecrawl_providers(config: Dict[str, Any]) -> None:
+def _disable_firecrawl_providers(config: dict[str, Any]) -> None:
     # `plugins.disabled` matches a bundled backend by manifest name and wins ahead of the
     # bundled-backend auto-load, so disabling the firecrawl providers stops the multiplex
     # boot warm-up from reading their unscoped FIRECRAWL_API_KEY (§D8). Append-if-absent
@@ -3834,8 +3834,8 @@ def _disable_firecrawl_providers(config: Dict[str, Any]) -> None:
             disabled.append(name)
 
 
-def _merged_spine_config(spines: Dict[str, Any]) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
+def _merged_spine_config(spines: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
     for spine in spines.values():
         merged = _deep_merge(merged, spine.get("config") or {})
     return merged
@@ -3869,7 +3869,7 @@ _MCP_STDIO_TRANSPORTS = frozenset({"stdio"})
 # Utility tool names core grants when resources/prompts are enabled
 # (tools/mcp_tool.py:6905-6963); listed in a role's scope ONLY when that role
 # grants the capability (else rendered false, closing the utility bypass).
-_MCP_UTILITY_TOOLS: Dict[str, Tuple[str, ...]] = {
+_MCP_UTILITY_TOOLS: dict[str, tuple[str, ...]] = {
     "resources": ("list_resources", "read_resource"),
     "prompts": ("list_prompts", "get_prompt"),
 }
@@ -3901,7 +3901,7 @@ def _mcp_iter_strings(value: Any) -> Iterator[str]:
             yield from _mcp_iter_strings(sub)
 
 
-def _mcp_reject_env_refs(server: str, connection: Dict[str, Any]) -> None:
+def _mcp_reject_env_refs(server: str, connection: dict[str, Any]) -> None:
     from agent.secret_scope import _is_global_env
 
     for text in _mcp_iter_strings(connection):
@@ -3926,7 +3926,7 @@ def _mcp_reject_env_refs(server: str, connection: Dict[str, Any]) -> None:
             )
 
 
-def _mcp_transport(server: str, decl: Dict[str, Any]) -> str:
+def _mcp_transport(server: str, decl: dict[str, Any]) -> str:
     """Policy transport ('remote'|'stdio'); fail-closed on an ambiguous connection."""
     def _present(key: str) -> bool:
         if key not in decl or decl[key] is None:
@@ -3965,7 +3965,7 @@ def _mcp_transport(server: str, decl: Dict[str, Any]) -> str:
     return policy
 
 
-def _mcp_validate_include(profile: str, server: str, include_raw: Any) -> List[str]:
+def _mcp_validate_include(profile: str, server: str, include_raw: Any) -> list[str]:
     # Missing/non-list include is refused, never forwarded: core treats an
     # inactive include filter as "register ALL tools" (tools/mcp_tool.py:7194),
     # a fail-open the exact-set contract cannot allow. include: [] is kept (core
@@ -3976,7 +3976,7 @@ def _mcp_validate_include(profile: str, server: str, include_raw: Any) -> List[s
             f"{profile}: mcp server {server!r} 'include' must be a list of exact tool names "
             f"(present, list-valued), got {type(include_raw).__name__}"
         )
-    out: List[str] = []
+    out: list[str] = []
     for entry in include_raw:
         if not isinstance(entry, str) or not entry.strip():
             raise CompositionError(
@@ -4001,7 +4001,7 @@ def _mcp_trust(value: Any) -> str:
     return "untrusted"
 
 
-def _mcp_server_stanza(server: str, decl: Dict[str, Any]) -> Tuple[Dict[str, Any], str, List[str], bool, bool]:
+def _mcp_server_stanza(server: str, decl: dict[str, Any]) -> tuple[dict[str, Any], str, list[str], bool, bool]:
     transport = _mcp_transport(server, decl)
     connection = {k: v for k, v in decl.items() if k not in _MCP_MANAGED_KEYS}
     _mcp_reject_env_refs(server, connection)
@@ -4015,8 +4015,8 @@ def _mcp_server_stanza(server: str, decl: Dict[str, Any]) -> Tuple[Dict[str, Any
     return stanza, transport, include, resources, prompts
 
 
-def _mcp_scope_entries(include: List[str], resources: bool, prompts: bool) -> List[Tuple[str, str]]:
-    entries: List[Tuple[str, str]] = [("native", tool) for tool in include]
+def _mcp_scope_entries(include: list[str], resources: bool, prompts: bool) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = [("native", tool) for tool in include]
     if resources:
         entries.extend(("utility", tool) for tool in _MCP_UTILITY_TOOLS["resources"])
     if prompts:
@@ -4024,14 +4024,14 @@ def _mcp_scope_entries(include: List[str], resources: bool, prompts: bool) -> Li
     return entries
 
 
-def _mcp_connection_identity(stanza: Dict[str, Any]) -> Dict[str, Any]:
+def _mcp_connection_identity(stanza: dict[str, Any]) -> dict[str, Any]:
     # Identity = every emitted field except the four merged policy fields. Two
     # roles declaring the same server id must agree on it, else they must use
     # distinct ids (a shared registry key cannot hold two connections).
     return {k: v for k, v in stanza.items() if k not in ("tools", "trust")}
 
 
-def _mcp_merge_into_union(union: Dict[str, Dict[str, Any]], server: str, stanza: Dict[str, Any]) -> None:
+def _mcp_merge_into_union(union: dict[str, dict[str, Any]], server: str, stanza: dict[str, Any]) -> None:
     identity = _mcp_connection_identity(stanza)
     if server not in union:
         union[server] = copy.deepcopy(stanza)
@@ -4052,7 +4052,7 @@ def _mcp_merge_into_union(union: Dict[str, Dict[str, Any]], server: str, stanza:
         union[server]["trust"] = "untrusted"
 
 
-def _mcp_write_scope(config: Dict[str, Any], full_scope: Dict[str, Dict[str, str]]) -> None:
+def _mcp_write_scope(config: dict[str, Any], full_scope: dict[str, dict[str, str]]) -> None:
     # Deep-navigate to the fleet-gates settings and REPLACE only mcp_scope (a
     # stale/inherited map is overwritten, never merged into — a leftover entry
     # would silently widen the boundary), preserving sibling settings.
@@ -4067,8 +4067,8 @@ def _mcp_write_scope(config: Dict[str, Any], full_scope: Dict[str, Dict[str, str
 
 
 def _render_mcp_scope(
-    resolved_by_type: Dict[str, Dict[str, Any]],
-    default_config: Dict[str, Any],
+    resolved_by_type: dict[str, dict[str, Any]],
+    default_config: dict[str, Any],
     default_profile: str,
 ) -> None:
     """Emit per-role mcp_servers + the DEFAULT union + the profile-keyed mcp_scope."""
@@ -4078,22 +4078,22 @@ def _render_mcp_scope(
     for resolved in resolved_by_type.values():
         resolved["config"].pop("mcp_servers", None)
 
-    role_servers: Dict[str, Dict[str, Any]] = {}
-    role_scope: Dict[str, Dict[str, str]] = {}
-    union: Dict[str, Dict[str, Any]] = {}
-    sanitized_servers: Dict[str, str] = {}
+    role_servers: dict[str, dict[str, Any]] = {}
+    role_scope: dict[str, dict[str, str]] = {}
+    union: dict[str, dict[str, Any]] = {}
+    sanitized_servers: dict[str, str] = {}
     # Fleet-wide map from the full model-facing name to its (server, kind, tool)
     # owner. The mcp__<server>__<tool> delimiter is ambiguous when a component
     # contains "__" ((a, b__c) and (a__b, c) both yield mcp__a__b__c), and a
     # native tool can clash with a generated resource/prompt utility; either
     # would let one profile's scope key match another's registered tool, so a
     # divergent owner for the same key is refused fleet-wide.
-    scope_owners: Dict[str, Tuple[str, str, str]] = {}
+    scope_owners: dict[str, tuple[str, str, str]] = {}
 
     for profile, resolved in resolved_by_type.items():
         mcp = resolved.get("mcp")
-        servers_out: Dict[str, Any] = {}
-        scope_out: Dict[str, str] = {}
+        servers_out: dict[str, Any] = {}
+        scope_out: dict[str, str] = {}
         if mcp is not None:
             if not isinstance(mcp, dict):
                 raise CompositionError(f"{profile}: 'mcp' must be a mapping of server-id -> stanza")
@@ -4139,7 +4139,7 @@ def _render_mcp_scope(
     # resolves against the active profile home, so each profile must carry the
     # whole map; the predicate selects mcp_scope[_current_profile()]). The
     # DEFAULT/multiplexer profile is the registrar, not a caller → empty scope.
-    full_scope: Dict[str, Dict[str, str]] = {p: role_scope.get(p, {}) for p in resolved_by_type}
+    full_scope: dict[str, dict[str, str]] = {p: role_scope.get(p, {}) for p in resolved_by_type}
     full_scope[default_profile] = {}
 
     for profile, resolved in resolved_by_type.items():
@@ -4152,7 +4152,7 @@ def _render_mcp_scope(
     _mcp_write_scope(default_config, full_scope)
 
 
-def compose(spec: str, out: str) -> Dict[str, str]:
+def compose(spec: str, out: str) -> dict[str, str]:
     """Render each coworker type + the DEFAULT profile into ``out``.
 
     Returns ``{profile_name: rendered_dir}`` for every profile (the DEFAULT
@@ -4177,7 +4177,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
     workflows_root = _safe_join(spec_dir, str(data.get("workflows_root", "workflows")))
     overlays_root = _safe_join(spec_dir, str(data.get("overlays_root", "overlays")))
 
-    spines: Dict[str, Any] = {}
+    spines: dict[str, Any] = {}
     for sname, sinfo in (data.get("spines") or {}).items():
         source = (sinfo or {}).get("source")
         if not source:
@@ -4191,11 +4191,11 @@ def compose(spec: str, out: str) -> Dict[str, str]:
 
     _require_canonical_profile_names(types, default_profile, orchestrator_profile)
     roster = list(types)
-    served: Set[str] = {"default", *roster}
+    served: set[str] = {"default", *roster}
 
     # Phase A: resolve every coworker type and the DEFAULT config, then resolve
     # the single fleet-wide session mode ONCE — before rendering any profile.
-    resolved_by_type: Dict[str, Dict[str, Any]] = {}
+    resolved_by_type: dict[str, dict[str, Any]] = {}
     for tname, tinfo in types.items():
         tname = _safe_name("type", tname)
         resolved_by_type[tname] = _resolve_type(tname, tinfo or {}, spines)
@@ -4254,7 +4254,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
         # policy (inference is gateway-only; the base host-guard forbids neither). Fail closed here
         # — before any distribution is written — if any opted-in provider endpoint resolves to one.
         if openshell_params.get("inference_provider") is not None:
-            def _canon_hp(addr: str) -> Tuple[str, int]:
+            def _canon_hp(addr: str) -> tuple[str, int]:
                 # Canonicalize the host (case, trailing dot, docker-bridge alias) so a type-opted
                 # FQDN or alias variant cannot slip the inference route or the 18255 hop past this
                 # guard.
@@ -4348,7 +4348,7 @@ def compose(spec: str, out: str) -> Dict[str, str]:
 
     # Phase B: render each profile, applying the fleet session mode after
     # retention and before the canonical-layout / port / route checks.
-    rendered: Dict[str, str] = {}
+    rendered: dict[str, str] = {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])

@@ -244,7 +244,7 @@ def _check_wellformed(text: bytes) -> None:
 
 
 class _Pattern:
-    __slots__ = ("text", "negative", "mustbedir", "nodir", "endswith", "prefix")
+    __slots__ = ("endswith", "mustbedir", "negative", "nodir", "prefix", "text")
 
     def __init__(self, entry: bytes) -> None:
         self.negative = entry[:1] == b"!"
@@ -295,8 +295,7 @@ def load_patterns(allowlist: Path) -> list:
     if not kept:
         raise Unanswerable(f"{allowlist} carries no patterns")
     buf = b"".join(line.encode("utf-8", "surrogateescape") + b"\n" for line in kept)
-    if buf.startswith(codecs.BOM_UTF8):
-        buf = buf[len(codecs.BOM_UTF8):]
+    buf = buf.removeprefix(codecs.BOM_UTF8)
     patterns = []
     for entry in buf.split(b"\n")[:-1]:
         if not entry or entry[:1] == b"#":

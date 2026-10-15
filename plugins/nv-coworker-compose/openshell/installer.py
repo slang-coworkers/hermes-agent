@@ -88,7 +88,7 @@ class Step:
     A plain class (not a dataclass) so it imports cleanly via
     ``importlib.util.module_from_spec`` without ``sys.modules`` registration."""
 
-    __slots__ = ("command", "tag", "data")
+    __slots__ = ("command", "data", "tag")
 
     def __init__(self, command: Any, tag: str, data: Any = None) -> None:
         self.command = command
@@ -139,18 +139,18 @@ def _managed_dir() -> Optional[str]:
     return os.environ.get("HERMES_MANAGED_DIR", "").strip() or None
 
 
-def load_spec(spec_path: Any) -> Dict[str, Any]:
+def load_spec(spec_path: Any) -> dict[str, Any]:
     return yaml.safe_load(Path(spec_path).read_text(encoding="utf-8")) or {}
 
 
-def _coworker_roles(spec: Dict[str, Any]) -> List[str]:
+def _coworker_roles(spec: dict[str, Any]) -> list[str]:
     """Served coworker roles, in spec-declared order (never the default profile)."""
     types = spec.get("types") or {}
     default_profile = spec.get("default_profile", "default")
     return [name for name in types if name != default_profile]
 
 
-def _type_provider_names(spec: Dict[str, Any], role: str) -> List[str]:
+def _type_provider_names(spec: dict[str, Any], role: str) -> list[str]:
     """The OpenShell providers a role binds at sandbox create, in declared order (deduped),
     each checked against the top-level ``providers:`` catalog. Mirrors compose's provider
     resolution without importing compose (the dry-run runs before the plugin is installed)."""
@@ -160,7 +160,7 @@ def _type_provider_names(spec: Dict[str, Any], role: str) -> List[str]:
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise ValueError(f"{role}: providers must be a list of provider names, got {names!r}")
     catalog = spec.get("providers") or {}
-    out: List[str] = []
+    out: list[str] = []
     for name in names:
         if name not in catalog:
             raise ValueError(
@@ -170,7 +170,7 @@ def _type_provider_names(spec: Dict[str, Any], role: str) -> List[str]:
     return out
 
 
-def _require_openshell(spec: Dict[str, Any]) -> None:
+def _require_openshell(spec: dict[str, Any]) -> None:
     """Refuse a spec this installer must not act on, before any state collection or install,
     so a wrong spec cannot install/enable plugins and only then fail (the entry points call
     this first). It must be an openshell fleet AND declare the pinned offline lane: the
@@ -186,10 +186,10 @@ def _require_openshell(spec: Dict[str, Any]) -> None:
             f"install-openshell requires egress.pinned_offline_lane: true (spec has {lane!r})")
 
 
-def _spine_enabled(spec: Dict[str, Any], spec_path: Any) -> List[str]:
+def _spine_enabled(spec: dict[str, Any], spec_path: Any) -> list[str]:
     """plugins.enabled as the RENDER sees it — resolved from the referenced spine's
     ``config`` block (the canonical source; there is no top-level mirror)."""
-    enabled: List[str] = []
+    enabled: list[str] = []
     if spec_path is None:
         return enabled
     spines = spec.get("spines") or {}
@@ -205,7 +205,7 @@ def _spine_enabled(spec: Dict[str, Any], spec_path: Any) -> List[str]:
     return enabled
 
 
-def enabled_plugins(spec: Dict[str, Any], spec_path: Any) -> List[str]:
+def enabled_plugins(spec: dict[str, Any], spec_path: Any) -> list[str]:
     """The installer-visible plugin set: the SPINE's ``config.plugins.enabled`` — the
     canonical source compose renders from. There is no top-level mirror. Fails closed if
     the spine declares none; if a top-level mirror is present anyway it must not diverge,
@@ -228,12 +228,12 @@ def enabled_plugins(spec: Dict[str, Any], spec_path: Any) -> List[str]:
     return spine
 
 
-def _spine_entries(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
+def _spine_entries(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
     """The ``plugins.entries`` the render merges from the referenced spine's ``config``.
     Seeds the in-place default-profile edit so a setting the veto needs in the default
     home (e.g. ``nv-fleet-gates.settings.edges_db_path``, which `hermes wire add` reads
     with no default) is present there, not only in the rendered coworker profiles."""
-    entries: Dict[str, Any] = {}
+    entries: dict[str, Any] = {}
     if spec_path is None:
         return entries
     base = Path(spec_path).parent
@@ -248,7 +248,7 @@ def _spine_entries(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     return entries
 
 
-def _get_dotted(cfg: Dict[str, Any], dotted: str) -> Tuple[bool, Any]:
+def _get_dotted(cfg: dict[str, Any], dotted: str) -> tuple[bool, Any]:
     cur: Any = cfg
     for part in dotted.split("."):
         if not isinstance(cur, dict) or part not in cur:
@@ -257,7 +257,7 @@ def _get_dotted(cfg: Dict[str, Any], dotted: str) -> Tuple[bool, Any]:
     return True, cur
 
 
-def _set_dotted(cfg: Dict[str, Any], dotted: str, value: Any) -> None:
+def _set_dotted(cfg: dict[str, Any], dotted: str, value: Any) -> None:
     cur = cfg
     parts = dotted.split(".")
     for part in parts[:-1]:
@@ -282,7 +282,7 @@ def _set_dotted(cfg: Dict[str, Any], dotted: str, value: Any) -> None:
 _DELETE = object()
 
 
-def _del_dotted(cfg: Dict[str, Any], dotted: str) -> bool:
+def _del_dotted(cfg: dict[str, Any], dotted: str) -> bool:
     """Remove ``dotted`` from ``cfg`` if present. Returns True when something was removed.
     Prunes a parent mapping only when it becomes empty AND it is one this edit created the leaf
     under, so an operator's sibling key never drags an unrelated parent away."""
@@ -307,8 +307,8 @@ def _del_dotted(cfg: Dict[str, Any], dotted: str) -> bool:
 
 
 def _desired_default(
-    existing: Dict[str, Any], spec: Dict[str, Any], enabled: List[str], entries: Dict[str, Any]
-) -> Dict[str, Any]:
+    existing: dict[str, Any], spec: dict[str, Any], enabled: list[str], entries: dict[str, Any]
+) -> dict[str, Any]:
     """The OSH-owned default-config values, computed from the spec + the resolved plugin
     set + the spine's plugin entries. ``plugins.enabled`` is a UNION with whatever the
     operator already had, so an unrelated enabled plugin is never dropped; each enabled
@@ -329,7 +329,7 @@ def _desired_default(
     # would re-enable the plugin the render scrubbed.
     if gated:
         merged = [name for name in merged if name != "podman-onecli"]
-    desired: Dict[str, Any] = {
+    desired: dict[str, Any] = {
         "gateway.multiplex_profiles": True,
         "plugins.enabled": merged,
     }
@@ -393,7 +393,7 @@ def _desired_default(
     return desired
 
 
-def _trust_keys(existing: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+def _trust_keys(existing: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     """The two ``secrets.*`` keys a spec declaring ``egress.openshell_trust`` adds to a home."""
     trust = _trust.trust_from_spec(spec)
     if trust is None:
@@ -405,7 +405,7 @@ def _trust_keys(existing: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any
     }
 
 
-def _preflight_trust_inputs(spec: Dict[str, Any], existing: Dict[str, Any]) -> None:
+def _preflight_trust_inputs(spec: dict[str, Any], existing: dict[str, Any]) -> None:
     """Refuse an input that outranks the start-time trust/NO_PROXY guards before any step."""
     if spec.get("substrate") != "openshell":
         return
@@ -414,7 +414,7 @@ def _preflight_trust_inputs(spec: Dict[str, Any], existing: Dict[str, Any]) -> N
                              keyed=_trust.trust_from_spec(spec) is not None)
 
 
-def install_trust(spec_path: Any) -> Dict[str, Any]:
+def install_trust(spec_path: Any) -> dict[str, Any]:
     """``hermes coworker install-trust``: merge only the rendered trust keys into the active
     gateway home of an openshell spec that ``install-openshell`` does not install."""
     spec = load_spec(spec_path)
@@ -434,8 +434,8 @@ def install_trust(spec_path: Any) -> Dict[str, Any]:
 
 
 def default_config_diff(
-    existing: Dict[str, Any], spec: Any, *, backup_present: bool = False
-) -> Tuple[str, Dict[str, Any], bool]:
+    existing: dict[str, Any], spec: Any, *, backup_present: bool = False
+) -> tuple[str, dict[str, Any], bool]:
     """Compute the OSH-owned default-config edit for an EXISTING default profile.
 
     Returns ``(backup_path, diff, backup_required)``. ``diff`` maps a dotted key to its
@@ -448,7 +448,7 @@ def default_config_diff(
     desired = _desired_default(
         existing, data, enabled_plugins(data, spec_path), _spine_entries(data, spec_path)
     )
-    diff: Dict[str, Any] = {}
+    diff: dict[str, Any] = {}
     for dotted, want in desired.items():
         have, cur = _get_dotted(existing, dotted)
         if not have or cur != want:
@@ -458,7 +458,7 @@ def default_config_diff(
     return backup_path, diff, backup_required
 
 
-def apply_config_diff(config: Dict[str, Any], diff: Dict[str, Any]) -> Dict[str, Any]:
+def apply_config_diff(config: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy of ``config`` with the dotted-key ``diff`` applied. Unrelated
     keys are preserved verbatim (never clobbered). A ``_DELETE`` value removes the key
     (OSH-F64.b single-authority upgrade), rather than setting it to ``None``."""
@@ -471,7 +471,7 @@ def apply_config_diff(config: Dict[str, Any], diff: Dict[str, Any]) -> Dict[str,
     return out
 
 
-def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(base) if isinstance(base, dict) else {}
     for key, value in (overlay or {}).items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
@@ -482,8 +482,8 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]
 
 
 def managed_config_diff(
-    existing_managed: Dict[str, Any], rendered_managed: Dict[str, Any]
-) -> Dict[str, Any]:
+    existing_managed: dict[str, Any], rendered_managed: dict[str, Any]
+) -> dict[str, Any]:
     """Deep-merge the FULL rendered managed fragment onto the existing managed config: the
     fleet-uniform GOV-F23 approval policy (``approvals.*`` / ``security.approval.*``) AND the
     ``nv-fleet-gates`` settings (``profile_roles`` + ``expected_ssh_host``) the render emits.
@@ -502,7 +502,7 @@ def managed_config_diff(
     return merged
 
 
-def _plugin_step(prefix: List[str], name: str, ref: str, state: Optional[Dict[str, Any]]) -> Optional[Step]:
+def _plugin_step(prefix: list[str], name: str, ref: str, state: Optional[dict[str, Any]]) -> Optional[Step]:
     """One state-aware plugin step. ``state`` is ``{ref, enabled}`` for an already
     installed plugin, or None if absent. Returns None when nothing is needed (present +
     enabled at the pinned ref), so a re-run of an installed home plans no plugin work."""
@@ -534,7 +534,7 @@ def _snapshot_step(plugins_dir: str, name: str) -> Step:
     )
 
 
-def _legacy_snapshots(plugins_dir: Path) -> List[str]:
+def _legacy_snapshots(plugins_dir: Path) -> list[str]:
     """Snapshot dirs an older installer left INSIDE ``plugins_dir`` (``<name>.osh-f64.bak``)."""
     if not plugins_dir.is_dir():
         return []
@@ -548,13 +548,13 @@ def _render_out_dir() -> str:
     return os.path.join(str(_require_home()), ".osh-f64", "render")
 
 
-def _profile_drifted(role: str, digests: Dict[str, Any]) -> bool:
+def _profile_drifted(role: str, digests: dict[str, Any]) -> bool:
     d = digests.get(role) or {}
     cur, want = d.get("current"), d.get("desired")
     return cur is not None and want is not None and cur != want
 
 
-def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root: Optional[str] = None) -> List[Step]:
+def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root: Optional[str] = None) -> list[Step]:
     """The full ordered, state-aware install plan. Backups come FIRST (before any
     ``plugins install/enable`` rewrites config.yaml). A fully-installed home plans no
     mutating step; ``hermes gateway restart`` is emitted only when something changed.
@@ -581,7 +581,7 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
     installed_rooms = home_state.get("rooms")
     backup_present = bool(home_state.get("backup_present"))
 
-    steps: List[Step] = []
+    steps: list[Step] = []
     mutated = False
 
     # Legacy snapshots inside a scanned plugins dir shadow the fresh install under the same key,
@@ -753,7 +753,7 @@ def build_plan(home_state: Dict[str, Any], spec_path: Any, ref: str, policy_root
     return steps
 
 
-def render_transcript(steps: List[Step]) -> str:
+def render_transcript(steps: list[Step]) -> str:
     """Deterministic one-line-per-step transcript. hermes argv vectors are shlex-joined;
     action lines print verbatim. Byte-identical for the same (state, spec, ref)."""
     out = []
@@ -763,7 +763,7 @@ def render_transcript(steps: List[Step]) -> str:
     return "\n".join(out) + ("\n" if steps else "")
 
 
-def _install_metadata(home: Path) -> Dict[str, Any]:
+def _install_metadata(home: Path) -> dict[str, Any]:
     """The shared install-metadata sidecar Hermes writes at
     ``<home>/plugins/.install-metadata.json`` — a JSON object keyed by plugin name whose
     entries carry the pinned commit under ``revision`` (plugins_cmd.py:561-568,855-867)."""
@@ -777,12 +777,12 @@ def _install_metadata(home: Path) -> Dict[str, Any]:
         return {}
 
 
-def _installed_revision(meta: Dict[str, Any], name: str) -> Optional[str]:
+def _installed_revision(meta: dict[str, Any], name: str) -> Optional[str]:
     entry = meta.get(name)
     return entry.get("revision") if isinstance(entry, dict) else None
 
 
-def _collect_wires(default_config: Dict[str, Any]) -> Optional[List[List[str]]]:
+def _collect_wires(default_config: dict[str, Any]) -> Optional[list[list[str]]]:
     """Existing wire edges from the nv-fleet-gates edges DB, so a re-run skips edges
     already present. Filesystem-only sqlite read of the ``edges`` table
     (from_profile, to_profile); None when the DB path is absent or unreadable."""
@@ -811,7 +811,7 @@ _PROFILE_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
-def _unparked_non_fleet(home: Path, roles: List[str]) -> List[str]:
+def _unparked_non_fleet(home: Path, roles: list[str]) -> list[str]:
     """Named profiles the multiplexer would serve that are not in the fleet roster: a live
     profile dir (valid id, an identity file, no tombstone) that is neither parked nor
     ``gateway.standalone`` — the same set ``hermes_cli.profiles.profiles_to_serve(True)``
@@ -820,7 +820,7 @@ def _unparked_non_fleet(home: Path, roles: List[str]) -> List[str]:
     root = home / "profiles"
     if not root.is_dir():
         return []
-    out: List[str] = []
+    out: list[str] = []
     for entry in sorted(root.iterdir()):
         name = entry.name
         if (not entry.is_dir() or name == "default" or name in roles or not _PROFILE_ID_RE.match(name)
@@ -841,7 +841,7 @@ def _unparked_non_fleet(home: Path, roles: List[str]) -> List[str]:
     return out
 
 
-def _managed_fleet_maps(spec: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+def _managed_fleet_maps(spec: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
     """The nv-fleet-gates ``profile_roles`` and ``expected_ssh_host`` maps compose renders into
     the managed fragment for this spec: each served role → orchestrator|worker, and → its ssh
     alias ``openshell-<project>-<role>`` (compose's alias rule, computed without importing it)."""
@@ -852,7 +852,7 @@ def _managed_fleet_maps(spec: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str,
             {r: f"openshell-{project}-{r}" for r in roles})
 
 
-def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
+def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
     """Build the installer's view of an EXISTING home from the filesystem only — no
     render, no hermes import — so the dry-run transcript is producible in a fresh
     sandbox before the plugin exists. Drift for profiles (``profile_digests``) is left
@@ -862,21 +862,21 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
     plugins = enabled_plugins(spec, spec_path)
     roles = _coworker_roles(spec)
 
-    default_config: Dict[str, Any] = {}
+    default_config: dict[str, Any] = {}
     cfg = home / "config.yaml"
     if cfg.exists():
         default_config = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
     cfg_enabled = set(((default_config.get("plugins") or {}).get("enabled")) or [])
 
     home_meta = _install_metadata(home)
-    installed: Dict[str, Dict[str, Any]] = {}
+    installed: dict[str, dict[str, Any]] = {}
     for name in plugins:
         if (home / "plugins" / name).exists():
             installed[name] = {"ref": _installed_revision(home_meta, name), "enabled": name in cfg_enabled}
 
     legacy_snapshots = _legacy_snapshots(home / "plugins")
-    profile_plugins: Dict[str, Dict[str, Any]] = {}
-    present_profiles: List[str] = []
+    profile_plugins: dict[str, dict[str, Any]] = {}
+    present_profiles: list[str] = []
     for role in roles:
         pdir = _profile_dir(home, role)
         if not pdir.exists():
@@ -887,13 +887,13 @@ def collect_home_state(spec: Dict[str, Any], spec_path: Any) -> Dict[str, Any]:
         pcfg = yaml.safe_load(pconf.read_text(encoding="utf-8")) or {} if pconf.exists() else {}
         penabled = set(((pcfg.get("plugins") or {}).get("enabled")) or [])
         pmeta = _install_metadata(pdir)
-        scope: Dict[str, Any] = {}
+        scope: dict[str, Any] = {}
         for name in plugins:
             if (pdir / "plugins" / name).exists():
                 scope[name] = {"ref": _installed_revision(pmeta, name), "enabled": name in penabled}
         profile_plugins[role] = scope
 
-    managed_config: Dict[str, Any] = {}
+    managed_config: dict[str, Any] = {}
     mcfg = Path(managed_dir, "config.yaml") if managed_dir else None
     if mcfg and mcfg.exists():
         managed_config = yaml.safe_load(mcfg.read_text(encoding="utf-8")) or {}
@@ -948,7 +948,7 @@ def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None) -> st
 # unrelated operator keys.
 # --------------------------------------------------------------------------------------
 
-def _run(cmd: List[str], env: Optional[Dict[str, str]] = None) -> None:
+def _run(cmd: list[str], env: Optional[dict[str, str]] = None) -> None:
     import subprocess
     # stdin is closed: these are non-interactive hermes/openshell invocations, and a child left
     # attached to the parent's stdin can consume the apply driver's input (subprocess-stdin guard).
@@ -964,7 +964,7 @@ def _is_refused_secret_env(name: str) -> bool:
     return name in _REFUSED_ENV_NAMES or name.endswith("_TOKEN_FILE")
 
 
-def _gateway_restart_env() -> Dict[str, str]:
+def _gateway_restart_env() -> dict[str, str]:
     # Env for the `hermes gateway restart` child: os.environ minus the refused secret-shaped
     # names, so the wrapper guard does not refuse it. Scoping the child's inherited names does
     # NOT waive the core api_server API_SERVER_KEY guard — a gateway that actually enables
@@ -993,7 +993,7 @@ def _sandbox_exists(name: str) -> bool:
     return False
 
 
-def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
+def _atomic_write_yaml(path: Path, data: dict[str, Any]) -> None:
     # Resolve a symlinked config to its target so os.replace updates the target in place and
     # never detaches an operator's symlink into a plain file. Write the temp beside the target
     # (same directory) so os.replace stays an atomic same-filesystem rename.
@@ -1012,14 +1012,14 @@ def _digest(path: Path) -> Optional[str]:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
-def _compute_profile_digests(spec_path: Any, ref: str, state: Dict[str, Any]) -> Dict[str, Any]:
+def _compute_profile_digests(spec_path: Any, ref: str, state: dict[str, Any]) -> dict[str, Any]:
     """Production drift detection: render the fleet to a temp dir and compare each
     already-present profile's config against the freshly-rendered one, so a drifted
     profile is planned with ``--force`` rather than silently left stale."""
     import tempfile
     spec = load_spec(spec_path)
     home = _require_home()
-    digests: Dict[str, Any] = {}
+    digests: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="osh-f64-drift-") as tmp:
         _run(["hermes", "coworker", "compose", str(spec_path), "--out", tmp])
         for role in state.get("profiles") or []:
@@ -1034,7 +1034,7 @@ _STATUS_POLLS = 3
 _STATUS_POLL_INTERVAL_S = 2.0
 
 
-def _run_capture(cmd: List[str]) -> str:
+def _run_capture(cmd: list[str]) -> str:
     import subprocess
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
@@ -1089,7 +1089,7 @@ def _record_policy_digest(home: Path, sandbox: str) -> Path:
     return home / ".osh-f64" / "sandbox-policy" / f"{sandbox}.sha256"
 
 
-def _provision_create(cmd: List[str], step: Step, ctx: Dict[str, Any]) -> None:
+def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
     """Create a worker sandbox, or re-create it when the policy it was created with differs from
     the current render. The rendered policy's digest is recorded after each create; a sandbox
     with no record (an older install) counts as drifted. A ``--policy-root`` mirror must match
@@ -1123,7 +1123,7 @@ def _gateway_answered(status_stdout: str) -> bool:
     return "gateway is running" in text or "active (running)" in text
 
 
-def _restart_gateway_detached(cmd: List[str], home: Path) -> None:
+def _restart_gateway_detached(cmd: list[str], home: Path) -> None:
     """Run ``hermes gateway restart`` so the installer returns. Without a service manager the
     release restart runs the new gateway in the foreground of its own process, so the child is
     started in its own session (``setsid -f``, else ``start_new_session``) with stdin closed and
@@ -1161,12 +1161,12 @@ def _restart_gateway_detached(cmd: List[str], home: Path) -> None:
     sys.stderr.write(f"[osh-f64] gateway restart launched detached (log {log_path}); {status}\n")
 
 
-def _migrate_legacy_snapshots(snapshots: List[str]) -> None:
+def _migrate_legacy_snapshots(snapshots: list[str]) -> None:
     """Move every legacy ``<plugins>/<name>.osh-f64.bak`` snapshot (and its plugins dir's
     ``.install-metadata.json.osh-f64.bak``) to that plugins dir's ``_snapshot_dir``. All
     destinations are checked before anything moves, and an existing destination refuses."""
     import shutil
-    moves: List[Tuple[Path, Path]] = []
+    moves: list[tuple[Path, Path]] = []
     for raw in snapshots:
         src = Path(raw)
         if not src.is_dir():
@@ -1185,7 +1185,7 @@ def _migrate_legacy_snapshots(snapshots: List[str]) -> None:
         shutil.move(str(src), str(dest))
 
 
-def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
+def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
     tag = step.tag
     if isinstance(step.command, (list, tuple)):
         cmd = list(step.command)
@@ -1294,7 +1294,7 @@ def _execute_step(step: Step, ctx: Dict[str, Any]) -> None:
         creator(payload.get("room_id"), payload.get("name"), list(payload.get("members") or []))
 
 
-def _apply_ctx(spec: Dict[str, Any], spec_path: Any, room_creator=None, parker=None) -> Dict[str, Any]:
+def _apply_ctx(spec: dict[str, Any], spec_path: Any, room_creator=None, parker=None) -> dict[str, Any]:
     return {
         "home": str(_require_home()),
         "managed_dir": _managed_dir() or "",
@@ -1364,7 +1364,7 @@ def phase_a(spec_path: Any, ref: str) -> None:
             _execute_step(step, ctx)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="osh-f64-installer")
     sub = parser.add_subparsers(dest="mode", required=True)
     for mode in ("plan", "apply", "phase-a"):

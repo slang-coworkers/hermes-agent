@@ -41,7 +41,7 @@ import secrets
 import sqlite3
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -57,7 +57,7 @@ _BUSY_TIMEOUT_MS = 5000
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _ensure_schema(conn) -> None:
@@ -250,7 +250,7 @@ def unpriced_count(session_id: str) -> int:
 
 # --- per-session state -----------------------------------------------------
 
-_STATE_DEFAULTS: Dict[str, Any] = {
+_STATE_DEFAULTS: dict[str, Any] = {
     "effective_usd": 0.0,
     "window_start_total": 0.0,
     "last_evaluated_total": 0.0,
@@ -276,7 +276,7 @@ def session_exists(session_id: str) -> bool:
         conn.close()
 
 
-def get_state(session_id: str) -> Dict[str, Any]:
+def get_state(session_id: str) -> dict[str, Any]:
     conn = _conn()
     try:
         row = conn.execute(
@@ -351,7 +351,7 @@ def set_state(session_id: str, **fields) -> None:
         conn.close()
 
 
-def all_states() -> List[Dict[str, Any]]:
+def all_states() -> list[dict[str, Any]]:
     """Every tracked per-session state row (``hermes cost-cap show``). Carries ``ended_at`` and
     ``recon_unpriced`` alongside spend/baseline/blocked so a caller can distinguish closed sessions
     and the reconcile-path unknown-pricing marker.
@@ -428,7 +428,7 @@ def record_episode(
         conn.close()
 
 
-def episodes(session_id: str) -> List[Dict[str, Any]]:
+def episodes(session_id: str) -> list[dict[str, Any]]:
     conn = _conn()
     try:
         rows = conn.execute(
@@ -510,7 +510,7 @@ def _cas_conn():
     return conn
 
 
-def episode_by_id(episode_id: str) -> Optional[Dict[str, Any]]:
+def episode_by_id(episode_id: str) -> Optional[dict[str, Any]]:
     """Return ``{session_id, budget_gen, kind, day, raised_at}`` for an episode, or None."""
     conn = _conn()
     try:
@@ -980,7 +980,7 @@ def ceiling_setting_is_managed() -> bool:
         return False
 
 
-def resolutions(session_id: str) -> List[Dict[str, Any]]:
+def resolutions(session_id: str) -> list[dict[str, Any]]:
     """Every resolution row for a session (episode_id/decision/actor/amount_usd/status/reason)."""
     conn = _conn()
     try:
@@ -999,7 +999,7 @@ def resolutions(session_id: str) -> List[Dict[str, Any]]:
     ]
 
 
-def claimed_unapplied() -> List[Dict[str, Any]]:
+def claimed_unapplied() -> list[dict[str, Any]]:
     """Resolution rows still ``pending`` — claimed but not yet applied (reconciler input)."""
     conn = _conn()
     try:
@@ -1075,7 +1075,7 @@ def mark_session_closed(session_id: str) -> None:
         conn.close()
 
 
-def latest_pending_episode(session_id: str) -> Optional[Dict[str, Any]]:
+def latest_pending_episode(session_id: str) -> Optional[dict[str, Any]]:
     """The newest episode for a session with no terminal resolution (the gateway /cost target)."""
     conn = _conn()
     try:
@@ -1094,7 +1094,7 @@ def latest_pending_episode(session_id: str) -> Optional[Dict[str, Any]]:
     return {"episode_id": row[0], "budget_gen": int(row[1]), "kind": row[2], "day": row[3]}
 
 
-def latest_episode(session_id: str) -> Optional[Dict[str, Any]]:
+def latest_episode(session_id: str) -> Optional[dict[str, Any]]:
     """The newest episode for a session REGARDLESS of resolution status.
 
     The gateway ``/cost`` fallback: once the pending episode is resolved a repeat ``/cost``
@@ -1173,7 +1173,7 @@ def resolved_ceiling() -> float:
     return float(default) if default is not None and _finite(default) else DEFAULT_CEILING_USD
 
 
-def pending_escalations() -> List[Dict[str, Any]]:
+def pending_escalations() -> list[dict[str, Any]]:
     """The dashboard feed: one dict per unresolved episode in the CURRENT profile."""
     conn = _conn()
     try:
@@ -1189,7 +1189,7 @@ def pending_escalations() -> List[Dict[str, Any]]:
     finally:
         conn.close()
     ceiling = resolved_ceiling()
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in rows:
         effective = float(r[5]) if r[5] is not None else 0.0
         window_start = float(r[6]) if r[6] is not None else 0.0
@@ -1236,7 +1236,7 @@ _OUTBOX_COLUMNS = ("id", "card_id", "kind", "target", "body", "status", "error",
                    "attempts")
 
 
-def _card_from_row(row) -> Dict[str, Any]:
+def _card_from_row(row) -> dict[str, Any]:
     card = dict(zip(_CARD_COLUMNS, row))
     card["candidates"] = json.loads(card.pop("candidates_json"))
     card["published_body"] = bytes(card["published_body"])
@@ -1346,7 +1346,7 @@ def append_decision(card_id, *, decision, actor, ts, stop, candidates=None, outc
     _in_tx(_tx)
 
 
-def resume_card(card_id) -> Optional[Dict[str, Any]]:
+def resume_card(card_id) -> Optional[dict[str, Any]]:
     conn = _conn()
     try:
         row = conn.execute(f"SELECT {', '.join(_CARD_COLUMNS)} FROM resume_cards WHERE card_id = ?",
@@ -1356,7 +1356,7 @@ def resume_card(card_id) -> Optional[Dict[str, Any]]:
     return None if row is None else _card_from_row(row)
 
 
-def resume_cards(status=None) -> List[Dict[str, Any]]:
+def resume_cards(status=None) -> list[dict[str, Any]]:
     """Every resume card of the current profile (optionally one status), oldest first."""
     conn = _conn()
     try:
@@ -1368,7 +1368,7 @@ def resume_cards(status=None) -> List[Dict[str, Any]]:
     return [_card_from_row(r) for r in rows]
 
 
-def resume_decisions(card_id=None) -> List[Dict[str, Any]]:
+def resume_decisions(card_id=None) -> list[dict[str, Any]]:
     """The append-only decision record (optionally one card), in insertion order."""
     conn = _conn()
     try:
@@ -1382,7 +1382,7 @@ def resume_decisions(card_id=None) -> List[Dict[str, Any]]:
              "outcome": json.loads(r[6]) if r[6] else {}} for r in rows]
 
 
-def resume_outbox() -> List[Dict[str, Any]]:
+def resume_outbox() -> list[dict[str, Any]]:
     conn = _conn()
     try:
         rows = conn.execute(f"SELECT {', '.join(_OUTBOX_COLUMNS)} FROM resume_outbox ORDER BY id ASC").fetchall()
@@ -1391,7 +1391,7 @@ def resume_outbox() -> List[Dict[str, Any]]:
     return [dict(zip(_OUTBOX_COLUMNS, r)) for r in rows]
 
 
-def outbox_claimable(notice_max_attempts: int) -> List[Dict[str, Any]]:
+def outbox_claimable(notice_max_attempts: int) -> list[dict[str, Any]]:
     """Rows the drain may claim: every ``pending`` row, plus a ``failed`` post-resume notice (never a card, never
     ``no-target``) that has not yet used its ``notice_max_attempts`` sends (erratum E1)."""
     conn = _conn()
@@ -1427,7 +1427,7 @@ def finish_outbox_row(row_id, status, error, *, sent_at=None) -> None:
         conn.close()
 
 
-def open_mortal_session_ids() -> List[str]:
+def open_mortal_session_ids() -> list[str]:
     """Sessions of the current profile that are neither immortal nor closed (``ended_at`` unset)."""
     conn = _conn()
     try:

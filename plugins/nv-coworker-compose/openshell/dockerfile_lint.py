@@ -48,19 +48,19 @@ class LintResult:
     """Plain class (not a dataclass) so the module imports via
     ``importlib.util.module_from_spec`` without sys.modules registration."""
 
-    __slots__ = ("errors", "warnings", "findings", "report")
+    __slots__ = ("errors", "findings", "report", "warnings")
 
-    def __init__(self, errors: int, warnings: int, findings: List[Tuple[str, str, str, int]], report: str) -> None:
+    def __init__(self, errors: int, warnings: int, findings: list[tuple[str, str, str, int]], report: str) -> None:
         self.errors = errors
         self.warnings = warnings
         self.findings = findings
         self.report = report
 
 
-def _logical_lines(text: str) -> List[Tuple[int, str]]:
+def _logical_lines(text: str) -> list[tuple[int, str]]:
     """Dockerfile instructions with backslash-continuations joined, keeping the FIRST
     physical line number, dropping comments and blanks."""
-    out: List[Tuple[int, str]] = []
+    out: list[tuple[int, str]] = []
     buf, start = "", 0
     for i, raw in enumerate(text.splitlines(), start=1):
         line = raw.rstrip("\n")
@@ -83,7 +83,7 @@ def _logical_lines(text: str) -> List[Tuple[int, str]]:
 def lint(path) -> LintResult:
     text = Path(path).read_text(encoding="utf-8")
     instrs = _logical_lines(text)
-    findings: List[Tuple[str, str, str, int]] = []
+    findings: list[tuple[str, str, str, int]] = []
 
     def add(level: str, rule: str, msg: str, lineno: int) -> None:
         findings.append((level, rule, msg, lineno))

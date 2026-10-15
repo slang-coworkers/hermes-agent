@@ -16,7 +16,7 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def _safe_handler(fn):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _detail_blob(detail):
@@ -331,44 +331,44 @@ def _on_gateway_dispatch(event=None, **kwargs):
     try:
         ctx = _CTX
         if ctx is None or event is None:
-            return None
+            return
         review_route = ctx.get_config("review_route")
         if not review_route:
-            return None
+            return
         source = getattr(event, "source", None)
         if source is None:
-            return None
+            return
 
         from gateway.config import Platform
 
         if getattr(source, "platform", None) != Platform.WEBHOOK:
-            return None
+            return
         if getattr(source, "chat_type", None) != "webhook":
-            return None
+            return
         delivery_id = getattr(event, "message_id", None)
         if not isinstance(delivery_id, str) or not delivery_id:
-            return None
+            return
         # Core builds chat_id as webhook:{route}:{delivery_id}. Match it exactly so
         # a route whose name merely shares this route's prefix cannot smuggle in a
         # trusted human verdict.
         if getattr(source, "chat_id", None) != f"webhook:{review_route}:{delivery_id}":
-            return None
+            return
 
         raw = getattr(event, "raw_message", None)
         if not isinstance(raw, dict) or not {"review", "pull_request", "repository"}.issubset(raw):
-            return None
+            return
         review = raw["review"]
         pull_request = raw["pull_request"]
         repository = raw["repository"]
         if not (isinstance(review, dict) and isinstance(pull_request, dict) and isinstance(repository, dict)):
-            return None
+            return
 
         repo = repository.get("full_name")
         pr = pull_request.get("number")
         commit_sha = review.get("commit_id") or (pull_request.get("head") or {}).get("sha")
         decision = review.get("state")
         if not (repo and pr is not None and commit_sha and decision):
-            return None
+            return
 
         result = ctx.dispatch_tool(
             "record_human_verdict",
@@ -400,7 +400,7 @@ def _on_gateway_dispatch(event=None, **kwargs):
             )
     except Exception:  # noqa: BLE001 - the dispatch seam must never raise into the gateway
         logger.warning("nv-approval-ledger pre_gateway_dispatch callback failed", exc_info=True)
-    return None
+    return
 
 
 def list_trusted_decisions(repo=None, pr=None):

@@ -360,7 +360,6 @@ def _fail_if_sentinel_unlinked(estop):
 
     def _guard_disengage(*a, **k):
         attempts.append("estop.disengage")
-        return None
 
     pathlib.Path.unlink = _guard_path_unlink
     _os.unlink = _guard_os_unlink
