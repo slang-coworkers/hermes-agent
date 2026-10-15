@@ -493,7 +493,7 @@ A	tests/e2e-scenarios/UPG-F67/replay_ledger.tsv	in-surface	R	H5
 A	tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch	in-surface	R	H5			
 A	tests/e2e-scenarios/UPG-F68/conflicts.md	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/UPG-F68/desktop_repoints.tsv	in-surface	post-C1	item-5			item-5
-A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new
+A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L701	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
@@ -518,7 +518,7 @@ A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/config.yaml	in-surface	R	H5
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/distribution.yaml	in-surface	R	H5			
 A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	R	H5			item-5
-A	tests/gateway/test_gov_f25b_hardening.py	in-surface	R	H5			
+A	tests/gateway/test_gov_f25b_hardening.py	in-surface	R	H5			item-5
 A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	R	H5			item-5
 M	tests/gateway/test_plugin_message_injection.py	in-surface	M	H5			item-5
@@ -729,6 +729,7 @@ A	tests/plugins/test_upg_f68_acceptance.py	in-surface	post-C1	item-5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py#allow:L243	in-surface	health-allow	item-5			
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
+M	tests/test_tests_tree_layout.py	in-surface	post-C1	item-5			item-5
 A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	R	H5			
 A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5			
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	R	H5			
