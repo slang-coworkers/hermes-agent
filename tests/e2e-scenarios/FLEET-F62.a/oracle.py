@@ -68,7 +68,7 @@ def _iter_message_agent_calls(conn, base_id):
             yield row_id, sid, call.get("id"), target, message
 
 
-def main():
+def main():  # health: allow CC -- every metric is judged against the same read-only snapshot and baselines, and all failed metrics are reported together, so the checks stay in one pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--home", required=True, help="testbed HERMES_HOME root")
     ap.add_argument("--job-id", required=True)
@@ -149,7 +149,7 @@ def main():
     a_ids = tuple(cid for (_r, cid) in a_calls if cid)
     sent = 0
     if orch is not None and a_ids:
-        res = _rows(orch, "SELECT content FROM messages WHERE id>? AND role='tool' "
+        res = _rows(orch, "SELECT content FROM messages WHERE id>? AND role='tool' "  # noqa: UP031
                     "AND tool_name='message_agent' AND tool_call_id IN (%s)"
                     % ",".join("?" * len(a_ids)), (base_orch, *a_ids))
         if len(res) == 1:
