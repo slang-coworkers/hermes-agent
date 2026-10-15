@@ -473,3 +473,38 @@ def test_ac_osh_f64_e_9(loaded, tmp_path):
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     _, configs, _ = _render(loaded, path, root / "out")
     assert "gw" in configs, "managed mode has no gateway line, so a type named gw must still render"
+
+
+def test_ac_osh_f64_e_10(loaded, tmp_path):
+    """(derived) In direct mode, an egress.anonymous_reads target or a worker-opted-in provider endpoint whose canonical host is the managed inference host (inference.local on any port, including case and trailing-dot variants) raises CompositionError before any config.yaml is written, so no worker policy can name inference.local; the provision plan refuses the same input; without inference_provider the same input still renders."""
+    cases = [
+        ("direct-anon-managed-variant", lambda c: _anon_read(c, "architect", "Inference.Local.:443"),
+         "anonymous_reads"),
+        ("direct-anon-managed-other-port", lambda c: _anon_read(c, "architect", "inference.local:8443"),
+         "anonymous_reads"),
+        ("direct-provider-managed",
+         lambda c: _opt_in(c, "architect", "managed-probe", endpoint="inference.local:443"),
+         r"(?i)inference\.local"),
+        ("direct-provider-managed-variant",
+         lambda c: _opt_in(c, "architect", "managed-probe", endpoint="INFERENCE.local.:8443"),
+         r"(?i)inference\.local"),
+    ]
+    for name, mutate, match in cases:
+        _refused(loaded, tmp_path, name, mutate, DIRECT_SPEC, match=match)
+        with pytest.raises(loaded.module.CompositionError, match=match):
+            _plan(loaded, DIRECT_SPEC, mutate)
+
+    # The ban is direct-mode only: with no inference_provider an anonymous read or provider endpoint on
+    # inference.local renders as before, so the guard cannot have become a global host ban.
+    for name, mutate in (("noip-anon-managed", lambda c: _anon_read(c, "approver", "inference.local:8443")),
+                         ("noip-provider-managed",
+                          lambda c: _opt_in(c, "approver", "managed-probe", endpoint="inference.local:8443"))):
+        root = tmp_path / name
+        shutil.copytree(F62C_OPENSHELL_SPEC.parent, root / "spec")
+        path = root / "spec" / "coworker-types.yaml"
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+        mutate(cfg)
+        path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        policies, _, _ = _render(loaded, path, root / "out")
+        assert any(e.get("host") == "inference.local" for e in _endpoints(policies["policy-approver"])), (
+            f"{name}: without inference_provider the direct-mode ban must not apply")
