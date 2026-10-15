@@ -1,0 +1,15 @@
+{
+  "backend": "docker",
+  "enabled_plugins": ["nv-coworker-compose", "nv-fleet-gates", "podman-onecli"],
+  "checks": [
+    {"op": "equals", "key": "secrets.onecli.enabled", "value": true},
+    {"op": "equals", "key": "terminal.docker_image", "value": "localhost/hermes-sandbox:pinned"},
+    {"op": "equals", "key": "terminal.docker_shared_container_key", "value": ""},
+    {"op": "equals", "key": "terminal.docker_mount_cwd_to_workspace", "value": true},
+    {"op": "is_bool", "key": "terminal.container_persistent"},
+    {"op": "nonempty_list", "key": "terminal.docker_volumes"},
+    {"op": "list_field_outside_home", "key": "terminal.docker_volumes", "sep": ":"},
+    {"op": "list_item_contains", "key": "terminal.docker_volumes", "substring": "shared-learnings"},
+    {"op": "mapping_any_entry_contains", "key": "terminal.docker_env", "entries": ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"], "value_contains": "172.17.0.1:10255"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "self_f55_inert_example": {
+      "command": "echo",
+      "args": ["this profile-root mcp.json is distribution-owned and copied on install, but is NOT read at runtime in v0.21.0 — author live servers in config.yaml:mcp_servers or ship them as an Agent Plugin"]
+    }
+  }
+}
