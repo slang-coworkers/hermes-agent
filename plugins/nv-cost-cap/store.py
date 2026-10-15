@@ -813,7 +813,7 @@ def estop_receipt() -> Optional[str]:
     try:
         from agent import estop
 
-        current = json.loads(estop.sentinel_path().read_text(encoding="utf-8"))
+        current = json.loads(estop.sentinel_path().read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     if isinstance(current, dict) and current.get("nv_cost_cap_receipt") == token:

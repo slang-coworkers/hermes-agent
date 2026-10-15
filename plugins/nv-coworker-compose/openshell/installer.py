@@ -140,7 +140,7 @@ def _managed_dir() -> Optional[str]:
 
 
 def load_spec(spec_path: Any) -> dict[str, Any]:
-    return yaml.safe_load(Path(spec_path).read_text(encoding="utf-8")) or {}
+    return yaml.safe_load(Path(spec_path).read_text(encoding="utf-8-sig")) or {}
 
 
 def _coworker_roles(spec: dict[str, Any]) -> list[str]:
@@ -198,7 +198,7 @@ def _spine_enabled(spec: dict[str, Any], spec_path: Any) -> list[str]:
         src = (entry or {}).get("source")
         if not src:
             continue
-        spine = yaml.safe_load((base / src).read_text(encoding="utf-8")) or {}
+        spine = yaml.safe_load((base / src).read_text(encoding="utf-8-sig")) or {}
         for name in ((spine.get("config") or {}).get("plugins") or {}).get("enabled") or []:
             if name not in enabled:
                 enabled.append(name)
@@ -241,7 +241,7 @@ def _spine_entries(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
         src = (entry or {}).get("source")
         if not src:
             continue
-        spine = yaml.safe_load((base / src).read_text(encoding="utf-8")) or {}
+        spine = yaml.safe_load((base / src).read_text(encoding="utf-8-sig")) or {}
         for name, e in (((spine.get("config") or {}).get("plugins") or {}).get("entries") or {}).items():
             if isinstance(e, dict):
                 entries[name] = e
@@ -425,7 +425,7 @@ def install_trust(spec_path: Any) -> dict[str, Any]:
             f"install-trust requires {_trust.SPEC_KEY} (the live OpenShell bundle) in the spec")
     home = _require_home()
     cfg_path = home / "config.yaml"
-    existing = (yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}) if cfg_path.exists() else {}
+    existing = (yaml.safe_load(cfg_path.read_text(encoding="utf-8-sig")) or {}) if cfg_path.exists() else {}
     _preflight_trust_inputs(spec, existing)
     diff = {k: v for k, v in _trust_keys(existing, spec).items() if _get_dotted(existing, k) != (True, v)}
     if diff:
@@ -772,7 +772,7 @@ def _install_metadata(home: Path) -> dict[str, Any]:
         return {}
     import json
     try:
-        return json.loads(meta.read_text(encoding="utf-8")) or {}
+        return json.loads(meta.read_text(encoding="utf-8-sig")) or {}
     except Exception:
         return {}
 
@@ -830,7 +830,7 @@ def _unparked_non_fleet(home: Path, roles: list[str]) -> list[str]:
             continue
         cfg = entry / "config.yaml"
         try:
-            gw = ((yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("gateway") or {}) if cfg.is_file() else {}
+            gw = ((yaml.safe_load(cfg.read_text(encoding="utf-8-sig")) or {}).get("gateway") or {}) if cfg.is_file() else {}
         except Exception:
             gw = {}
         standalone = gw.get("standalone") if isinstance(gw, dict) else None
@@ -865,7 +865,7 @@ def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
     default_config: dict[str, Any] = {}
     cfg = home / "config.yaml"
     if cfg.exists():
-        default_config = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        default_config = yaml.safe_load(cfg.read_text(encoding="utf-8-sig")) or {}
     cfg_enabled = set(((default_config.get("plugins") or {}).get("enabled")) or [])
 
     home_meta = _install_metadata(home)
@@ -884,7 +884,7 @@ def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
         present_profiles.append(role)
         legacy_snapshots += _legacy_snapshots(pdir / "plugins")
         pconf = pdir / "config.yaml"
-        pcfg = yaml.safe_load(pconf.read_text(encoding="utf-8")) or {} if pconf.exists() else {}
+        pcfg = yaml.safe_load(pconf.read_text(encoding="utf-8-sig")) or {} if pconf.exists() else {}
         penabled = set(((pcfg.get("plugins") or {}).get("enabled")) or [])
         pmeta = _install_metadata(pdir)
         scope: dict[str, Any] = {}
@@ -896,7 +896,7 @@ def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
     managed_config: dict[str, Any] = {}
     mcfg = Path(managed_dir, "config.yaml") if managed_dir else None
     if mcfg and mcfg.exists():
-        managed_config = yaml.safe_load(mcfg.read_text(encoding="utf-8")) or {}
+        managed_config = yaml.safe_load(mcfg.read_text(encoding="utf-8-sig")) or {}
     fleet_settings = (
         (((managed_config.get("plugins") or {}).get("entries") or {}).get(_FLEET_GATES) or {}).get("settings") or {}
     )
@@ -1064,7 +1064,7 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
     alias = f"openshell-{sandbox}"
     begin, end = f"# >>> {alias}", f"# <<< {alias}"
     new_block = f"{begin}\n{block.rstrip()}\n{end}\n"
-    text = inc_path.read_text(encoding="utf-8") if inc_path.exists() else ""
+    text = inc_path.read_text(encoding="utf-8-sig") if inc_path.exists() else ""
     pattern = re.compile(rf"(?ms)^{re.escape(begin)}\n.*?^{re.escape(end)}\n?")
     if pattern.search(text):
         text = pattern.sub(lambda _m: new_block, text, count=1)
@@ -1072,7 +1072,7 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
         text = text + ("\n" if text and not text.endswith("\n") else "") + new_block
     _atomic_write_text(inc_path, text)
     main = ssh_dir / "config"
-    lines = main.read_text(encoding="utf-8").splitlines(keepends=True) if main.exists() else []
+    lines = main.read_text(encoding="utf-8-sig").splitlines(keepends=True) if main.exists() else []
     include = f"Include {inc_rel}\n"
 
     def _is_ours(line: str) -> bool:
@@ -1109,7 +1109,7 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
     digest = hashlib.sha256(want).hexdigest()
     record = _record_policy_digest(Path(ctx["home"]), name)
     if exists:
-        recorded = record.read_text(encoding="utf-8").strip() if record.is_file() else None
+        recorded = record.read_text(encoding="utf-8-sig").strip() if record.is_file() else None
         if recorded == digest:
             return
         _run(["openshell", "sandbox", "delete", name])
@@ -1244,7 +1244,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
             shutil.copy2(side, sbak)
     elif tag == "default_edit":
         cfg_path = home / "config.yaml"
-        current = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {} if cfg_path.exists() else {}
+        current = yaml.safe_load(cfg_path.read_text(encoding="utf-8-sig")) or {} if cfg_path.exists() else {}
         _, diff, _ = default_config_diff(current, ctx["spec_path"], backup_present=True)
         _atomic_write_yaml(cfg_path, apply_config_diff(current, diff))
     elif tag == "scan_guard_write":
@@ -1254,7 +1254,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
                 "absent); refusing to write the §D6 scan guard to the cwd"
             )
         managed_path = Path(managed_dir, "config.yaml")
-        existing = yaml.safe_load(managed_path.read_text(encoding="utf-8")) or {} if managed_path.exists() else {}
+        existing = yaml.safe_load(managed_path.read_text(encoding="utf-8-sig")) or {} if managed_path.exists() else {}
         managed_path.parent.mkdir(parents=True, exist_ok=True)
         # Deep-merge just the guard so any pre-seeded operator managed keys survive; the durable
         # step-4 managed_write later folds in the full rendered fragment (which also carries it).
@@ -1269,8 +1269,8 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         rendered = {}
         rhits = sorted(Path(ctx["out"]).rglob("managed/config.yaml"))
         if rhits:
-            rendered = yaml.safe_load(rhits[0].read_text(encoding="utf-8")) or {}
-        existing = yaml.safe_load(managed_path.read_text(encoding="utf-8")) or {} if managed_path.exists() else {}
+            rendered = yaml.safe_load(rhits[0].read_text(encoding="utf-8-sig")) or {}
+        existing = yaml.safe_load(managed_path.read_text(encoding="utf-8-sig")) or {} if managed_path.exists() else {}
         managed_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_yaml(managed_path, managed_config_diff(existing, rendered))
     elif tag == "park":
@@ -1279,7 +1279,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
             raise ValueError("non-fleet profiles cannot be parked: apply() was given no park dispatcher")
         parked = parker(list((step.data or {}).get("roster") or []))
         record = home / _PARKED_RECORD
-        listed = record.read_text(encoding="utf-8").split() if record.exists() else []
+        listed = record.read_text(encoding="utf-8-sig").split() if record.exists() else []
         new = [name for name in parked if name not in listed]
         if new:
             record.write_text("".join(f"{name}\n" for name in [*listed, *new]), encoding="utf-8")

@@ -418,7 +418,7 @@ def _scan_source_files(root: Path, max_files: int) -> list[tuple[str, str]]:
         candidates.append((str(rel), path))
     candidates.sort(key=lambda pair: pair[0])
     picked = candidates[: max(0, int(max_files))]
-    return [(rel, path.read_text(encoding="utf-8", errors="ignore")) for rel, path in picked]
+    return [(rel, path.read_text(encoding="utf-8-sig", errors="ignore")) for rel, path in picked]
 
 
 def _write_project_scaffold(scaffold: Path, project: str, files: list[tuple[str, str]]) -> None:
@@ -560,7 +560,7 @@ def _upsert_env_var(env_path: str | Path, key: str, value: str) -> None:
     if env_path.exists():
         existing_mode = stat.S_IMODE(env_path.stat().st_mode)
         kept = [
-            line for line in env_path.read_text(encoding="utf-8").splitlines()
+            line for line in env_path.read_text(encoding="utf-8-sig").splitlines()
             if not assign_re.match(line)
         ]
     kept.append(f"{key}={value}")
@@ -610,7 +610,7 @@ def apply_capture_env(profile_home: str | Path) -> None:
     if managed_dir is not None:
         managed_env_path = managed_dir / ".env"
         try:
-            managed_env_path.read_text(encoding="utf-8")
+            managed_env_path.read_text(encoding="utf-8-sig")
         except FileNotFoundError:
             pass
         except (OSError, UnicodeError) as exc:
@@ -710,7 +710,7 @@ def _shipped_cron_jobs(rendered_dir: str) -> dict[str, str]:
     store = Path(rendered_dir) / "cron" / "jobs.json"
     if not store.is_file():
         return {}
-    data = json.loads(store.read_text(encoding="utf-8"))
+    data = json.loads(store.read_text(encoding="utf-8-sig"))
     jobs = data.get("jobs", []) if isinstance(data, dict) else data
     return {str(j["id"]): str(j.get("name") or "") for j in jobs if isinstance(j, dict) and j.get("id")}
 
