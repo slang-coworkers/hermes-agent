@@ -24,7 +24,7 @@ def _git(cwd, *args):
     }
     return subprocess.run(
         ["git", "-C", str(cwd), "-c", "user.email=t@e", "-c", "user.name=t", *args],
-        capture_output=True, text=True, env=env, timeout=30,
+        capture_output=True, text=True, env=env, timeout=30, check=False,
     )
 
 

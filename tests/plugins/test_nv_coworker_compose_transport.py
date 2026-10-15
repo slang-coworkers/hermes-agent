@@ -290,7 +290,7 @@ def test_dispatch_maps_members_and_normalizes_absent_room(tmp_path, monkeypatch)
 
     mod._dispatch_rpc("groups.create",
                       {"room_id": "r", "name": "R", "members": ["orchestrator", "reviewer"]})
-    create_req = [r for r in seen if r["method"] == "groups.create"][0]
+    create_req = next(r for r in seen if r["method"] == "groups.create")
     wire_members = create_req["params"]["members"]
     assert all(isinstance(m, dict) for m in wire_members)
     assert {m["profile"] for m in wire_members} == {"orchestrator", "reviewer"}

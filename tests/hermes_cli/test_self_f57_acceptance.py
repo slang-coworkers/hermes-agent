@@ -114,7 +114,7 @@ def test_ac_self_f57_2(tmp_path, hermes_home, monkeypatch):
     monkeypatch.setattr(st.time, "monotonic", lambda: clock["t"])
 
     def _desc(skills):
-        return [s for s in skills if s["name"] == "skill-one"][0]["description"]
+        return next(s for s in skills if s["name"] == "skill-one")["description"]
 
     assert _desc(st._find_all_skills()) == "old-desc"
 
@@ -134,7 +134,7 @@ def test_ac_self_f57_2(tmp_path, hermes_home, monkeypatch):
 
 # --- Profile-distribution update behavior ----------------------------------
 
-from hermes_cli.profile_distribution import (  # noqa: E402
+from hermes_cli.profile_distribution import (
     install_distribution,
     read_manifest,
     update_distribution,

@@ -79,7 +79,7 @@ def test_crlf_only_difference_is_a_conflict(tmp_path):
     dest = tmp_path / "skills"
     crlf = (SRC / "implement" / "SKILL.md").read_bytes().replace(b"\n", b"\r\n")
     _seed(dest, "implement", crlf)
-    to_copy, conflicts = M.build_install_plan(SRC, dest, force=False)
+    _, conflicts = M.build_install_plan(SRC, dest, force=False)
     assert "implement" in conflicts
 
 

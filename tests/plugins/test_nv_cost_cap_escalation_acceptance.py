@@ -1003,7 +1003,7 @@ def test_estop_acquisition_barrier(loaded_plugin, monkeypatch):
             # A mortal Stop engages the profile-local sentinel through store.engage_owned's link-publish
             # — the SAME production engage seam the breach path uses — so driving it drives real logic.
             box["res"] = mod.resolve_escalation("sess-f30-acq-bar", ep, 1, "stop", OPERATOR)
-        except Exception as exc:          # noqa: BLE001 — EEXIST must be handled INTERNALLY; any leak is a defect
+        except Exception as exc:          # EEXIST must be handled INTERNALLY; any leak is a defect
             box["err"] = exc
 
     t = threading.Thread(target=_drive_stop)

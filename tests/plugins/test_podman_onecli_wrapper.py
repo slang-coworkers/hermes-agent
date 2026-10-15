@@ -81,7 +81,7 @@ def test_wrapper_adds_nv_hermes_ppid_label(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode == 0
     forwarded = rec.read_text(encoding="utf-8")
@@ -127,7 +127,7 @@ def test_wrapper_sweep_removes_dead_ppid_only(tmp_path):
         "RM_REC": str(rm_rec),
     }
     result = subprocess.run(
-        [str(WRAPPER), "sweep"], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), "sweep"], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode == 0
     removed = rm_rec.read_text(encoding="utf-8")
@@ -152,7 +152,7 @@ def test_wrapper_refuses_broad_run_rm(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -180,7 +180,7 @@ def test_wrapper_refuses_ro_rw_ca_mount(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -210,7 +210,7 @@ def test_wrapper_refuses_compact_env_override(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -240,7 +240,7 @@ def test_wrapper_refuses_env_file(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -269,7 +269,7 @@ def test_wrapper_refuses_env_host(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -299,7 +299,7 @@ def test_wrapper_refuses_nonprotected_value_env(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -335,7 +335,7 @@ def test_wrapper_refuses_container_run_bypass(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -362,7 +362,7 @@ def test_wrapper_refuses_global_option_prefixed_launch(tmp_path, prefix):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -393,7 +393,7 @@ def test_wrapper_ignores_post_image_env_and_volume(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -422,7 +422,7 @@ def test_wrapper_refuses_control_plane_key_env(tmp_path):
     env = _launch_env(tmp_path, stub, rec, log)
     env["ONECLI_API_KEY"] = "aoc_bootstrap_canary_DO_NOT_LEAK"
     result = subprocess.run(
-        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -454,7 +454,7 @@ def test_wrapper_refuses_nonallowlisted_env(tmp_path):
     env = _launch_env(tmp_path, stub, rec, log)
     env["AWS_SECRET_ACCESS_KEY"] = "host-only-secret-canary"
     result = subprocess.run(
-        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -483,7 +483,7 @@ def test_wrapper_allows_declared_provider_placeholder(tmp_path):
     env["PODMAN_ONECLI_ALLOWED_ENV"] = "ANTHROPIC_API_KEY"
     env["ANTHROPIC_API_KEY"] = "onecli-injects-at-egress"  # placeholder, not a secret
     result = subprocess.run(
-        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode == 0
     assert "ANTHROPIC_API_KEY" in rec.read_text(encoding="utf-8")
@@ -507,7 +507,7 @@ def test_wrapper_refuses_malformed_proxy_without_leak(tmp_path):
         env[name] = "aoc_LEAK_ME_TOKEN"  # malformed: no scheme, no userinfo '@'
     result = subprocess.run(
         [str(WRAPPER), *_valid_argv(ca_host)], env=env,
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -537,7 +537,7 @@ def test_wrapper_refuses_wildcard_no_proxy(tmp_path):
     env = _launch_env(tmp_path, stub, rec, log)
     env["NO_PROXY"] = "*"
     result = subprocess.run(
-        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -565,7 +565,7 @@ def test_wrapper_accepts_loopback_no_proxy(tmp_path):
     env = _launch_env(tmp_path, stub, rec, log)
     env["NO_PROXY"] = "127.0.0.1,localhost,::1"
     result = subprocess.run(
-        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30
+        [str(WRAPPER), *argv], env=env, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode == 0
     assert "NO_PROXY" in rec.read_text(encoding="utf-8")
@@ -597,7 +597,7 @@ def test_wrapper_refuses_detach_keys_value_before_env(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -631,7 +631,7 @@ def test_wrapper_refuses_unknown_pre_image_option(tmp_path):
         env=_launch_env(tmp_path, stub, rec, log),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -656,7 +656,7 @@ def test_wrapper_refuses_proxy_authority_in_path(tmp_path):
         env[name] = f"http://evil.example/path@{EXPECTED_PROXY}"
     result = subprocess.run(
         [str(WRAPPER), *_valid_argv(ca_host)], env=env,
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode != 0
     assert rec.read_text(encoding="utf-8") == ""
@@ -686,7 +686,7 @@ def test_wrapper_exec_logs_value_free_marker_and_forwards_argv(tmp_path):
         },
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode == 0
     assert "exec hermes-cid sh -c" in rec.read_text(encoding="utf-8")  # argv forwarded unchanged
@@ -710,7 +710,7 @@ def test_wrapper_ps_rewrites_label_template(tmp_path):
         env={**os.environ, "PODMAN_ONECLI_PODMAN": str(stub), "STUB_REC": str(rec)},
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode == 0
     forwarded = rec.read_text(encoding="utf-8")

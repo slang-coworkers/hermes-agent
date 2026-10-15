@@ -1017,7 +1017,7 @@ def _compute_profile_digests(spec_path: Any, ref: str, state: dict[str, Any]) ->
     already-present profile's config against the freshly-rendered one, so a drifted
     profile is planned with ``--force`` rather than silently left stale."""
     import tempfile
-    spec = load_spec(spec_path)
+    _ = load_spec(spec_path)  # an unreadable or invalid spec fails here, before compose is shelled out
     home = _require_home()
     digests: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="osh-f64-drift-") as tmp:
@@ -1151,7 +1151,7 @@ def _restart_gateway_detached(cmd: list[str], home: Path) -> None:
         try:
             probe = subprocess.run(["hermes", "gateway", "status"], capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
-                                   stdin=subprocess.DEVNULL, env=env, timeout=_CAPTURE_TIMEOUT_S)
+                                   stdin=subprocess.DEVNULL, env=env, timeout=_CAPTURE_TIMEOUT_S, check=False)
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
             continue
         if _gateway_answered(getattr(probe, "stdout", "")):

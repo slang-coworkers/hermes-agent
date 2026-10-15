@@ -295,7 +295,7 @@ def test_ac_cost_f29_1(tmp_path, monkeypatch):
 
     # Durable idempotency: reload (fresh PluginManager, same HERMES_HOME) and
     # re-deliver req-B -> the persisted total must not grow.
-    hermes_home, manager2, loaded2 = _load(
+    hermes_home, manager2, _ = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0}
     )
     t3b = _hook_num(manager2.invoke_hook("post_api_request",
@@ -397,7 +397,7 @@ def test_ac_cost_f29_4(tmp_path, monkeypatch):
     from agent import estop
 
     # --- Part A: default estop_on_breach -> gateway per-fire + ESTOP belt ---
-    hermes_home, manager, loaded = _load(
+    hermes_home, manager, _ = _load(
         tmp_path / "A", monkeypatch, settings={"profile_ceiling_usd": 1.0},
     )
     assert not estop.is_engaged()
@@ -489,7 +489,7 @@ def _assert_terminal(resp, api_mode):
 )
 def test_ac_cost_f29_5(tmp_path, monkeypatch, api_mode):
     """llm_execution over Tier-2 returns a transport-valid synthetic response valid for the active api_mode (incl. codex_responses, accepted by ResponsesApiTransport.validate_response) without calling next_call and without raising; under Tier-2 it calls next_call once."""
-    hermes_home, manager, loaded = _load(
+    hermes_home, manager, _ = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
     )
     cb = _llm_execution_cb(manager)
@@ -661,7 +661,7 @@ def test_ac_cost_f29_9(tmp_path, monkeypatch, unknown_on):
     # Ceiling 100 >> the 0.0 an unknown row sums to numerically, so a refusal
     # here can ONLY come from unknown-pricing detection on the reconcile path,
     # not from a numeric cap crossing.
-    hermes_home, manager, loaded = _load(
+    hermes_home, manager, _ = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0},
     )
     # The unknown marker sits on a DESCENDANT (parent_session_id=s-unknown), so a
@@ -703,7 +703,7 @@ def test_ac_cost_f29_10(tmp_path, monkeypatch):
     """A named-profile Tier-2 breach engages its OWN profile-local ESTOP sentinel even while a fleet-root ESTOP is already engaged, so a fleet resume leaves the breaching profile paused (no fail-open on the belt)."""
     from agent import estop
 
-    hermes_home, manager, loaded = _load(
+    hermes_home, manager, _ = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
         profile_name="worker",
     )

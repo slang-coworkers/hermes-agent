@@ -7,7 +7,7 @@ plugin as loaded on a stock tree.
 
 import pathlib
 
-from tests.plugins.test_nv_cost_cap_resume_card_acceptance import (  # noqa: F401  (env is a fixture)
+from tests.plugins.test_nv_cost_cap_resume_card_acceptance import (  # env is a fixture
     NOTICE_TAIL,
     _approve,
     _card,

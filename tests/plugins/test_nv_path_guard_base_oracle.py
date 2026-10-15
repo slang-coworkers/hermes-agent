@@ -42,7 +42,7 @@ def _git_owned(tmp_path, patterns, paths):
     proc = subprocess.run(
         ["git", "-C", str(repo), "-c", "core.ignoreCase=false", "-c", f"core.excludesFile={allowlist}",
          "check-ignore", "-z", "--no-index", "--stdin"],
-        input=b"".join(p.encode("utf-8") + b"\0" for p in paths), capture_output=True, env=env, timeout=60)
+        input=b"".join(p.encode("utf-8") + b"\0" for p in paths), capture_output=True, env=env, timeout=60, check=False)
     assert proc.returncode in (0, 1), proc.stderr
     return {raw.decode("utf-8") for raw in proc.stdout.split(b"\0") if raw}, allowlist
 

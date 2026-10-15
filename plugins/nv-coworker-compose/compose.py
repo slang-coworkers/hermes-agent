@@ -3493,7 +3493,7 @@ def _build_cron_job(profile: str, decl: Any) -> dict[str, Any]:
         # a naive timestamp to the compositor's active timezone, so its run_at
         # would differ across hosts — breaking the host-independent render.
         try:
-            declared_dt = datetime.fromisoformat(raw_schedule.replace("Z", "+00:00"))
+            declared_dt = datetime.fromisoformat(raw_schedule)
         except ValueError:
             declared_dt = None
         if declared_dt is None or declared_dt.tzinfo is None:

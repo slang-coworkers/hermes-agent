@@ -140,9 +140,9 @@ def _cli(*args: str, home: Path, bundled: Path) -> subprocess.CompletedProcess:
     env["HERMES_HOME"] = str(home)
     env["HERMES_BUNDLED_PLUGINS"] = str(bundled)
     env["HERMES_ENABLE_PROJECT_PLUGINS"] = "0"
-    return subprocess.run(  # noqa: S603 - fixed argv, test-controlled paths
+    return subprocess.run(  # fixed argv, test-controlled paths
         [sys.executable, "-m", "hermes_cli.main", *args],
-        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True,
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=False,
     )
 
 

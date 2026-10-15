@@ -912,10 +912,9 @@ def test_ac_cost_f30_b_12(env):
     """AC-COST-F30.b-12: (mitigation 1) Approve re-reads every candidate sentinel immediately before its single disengage() call and refuses changed-during-approve unless that final read is still the carded stop (reason, receipt, engaged_at, byte equality); no DB / delivery / logging / other file I/O between that read and the call; one attempt — a disengage returning False or raising is never retried."""
     import logging
 
-    resume, store = _resume(env), env.mod.store
+    resume = _resume(env)
     card = _new_stop(env, "s-order", blocked=False)
     trace = []
-    state = {"after_final": False}
     real_read = resume._read_candidates
 
     def _rd(*a, **k):
@@ -1034,12 +1033,12 @@ def test_ac_cost_f30_b_13(env):
         _approve(env, card["card_id"])
     assert seen_at_call["rows"] == ["attempt"], seen_at_call
     rows = _decisions(env, card["card_id"])
-    attempt = [d for d in rows if d["decision"] == "attempt"][0]
+    attempt = next(d for d in rows if d["decision"] == "attempt")
     assert attempt["actor"] == OPERATOR and attempt["ts"]
     assert attempt["stop"]["receipt"] == card["receipt"] and attempt["stop"]["reason"] == card["reason"]
     import base64
 
-    own = [c for c in attempt["candidates"] if c["path"] == str(_own_sp(env))][0]
+    own = next(c for c in attempt["candidates"] if c["path"] == str(_own_sp(env)))
     assert own["present"] is True and base64.b64decode(own["content_b64"]) == card["published_body"]
     assert {c["path"] for c in attempt["candidates"]} == set(card["candidates"])
     absent = [c for c in attempt["candidates"] if c["path"] != str(_own_sp(env))]
@@ -1059,8 +1058,8 @@ def test_ac_cost_f30_b_13(env):
     blob = bytes(range(256)) * 300  # 76.8 KiB, not valid UTF-8
     _root_sp(env).write_bytes(blob)
     assert _approve(env, card_big["card_id"])["reason"] == "fleet-pause-present"
-    refusal = [d for d in _decisions(env, card_big["card_id"]) if d["decision"] == "refused:fleet-pause-present"][0]
-    root_entry = [c for c in refusal["candidates"] if c["path"] == str(_root_sp(env))][0]
+    refusal = next(d for d in _decisions(env, card_big["card_id"]) if d["decision"] == "refused:fleet-pause-present")
+    root_entry = next(c for c in refusal["candidates"] if c["path"] == str(_root_sp(env)))
     assert base64.b64decode(root_entry["content_b64"]) == blob
     _root_sp(env).unlink()
 
@@ -1092,7 +1091,7 @@ def test_ac_cost_f30_b_14(env):
     _deny(env, c_deny["card_id"])
     _clear_all(env)
     t0 = resume._clock()
-    c_exp = _new_stop(env, "s-n-exp", blocked=False)
+    _ = _new_stop(env, "s-n-exp", blocked=False)
     env.monkeypatch.setattr(resume, "_clock", lambda: t0 + TTL + 10)
     env.mod.reconcile_once()
     env.monkeypatch.setattr(resume, "_clock", lambda: t0)
@@ -1118,7 +1117,7 @@ def test_ac_cost_f30_b_14(env):
     assert len(notes) == 1, notes
     note = notes[0]
     assert note.startswith("session s-n-ok resumed by approval of ") and OPERATOR in note, note
-    approve_row = [d for d in _decisions(env, c_ok["card_id"]) if d["decision"] == "approve"][0]
+    approve_row = next(d for d in _decisions(env, c_ok["card_id"]) if d["decision"] == "approve")
     assert f" at {approve_row['ts']}; " in note, (note, approve_row["ts"])
     assert [c["args"]["target"] for c in env.sent if NOTICE_TAIL in c["args"].get("message", "")] == [TARGET]
 
@@ -1242,7 +1241,7 @@ def test_ac_cost_f30_b_17(env):
     with _pinned(APPROVER_PROFILE):
         res = _approve(env, card["card_id"], APPROVER_ONLY_OP)
         assert res["reason"] == "unauthorized", res
-        _, replies = _pgd(env, f"/cost resume approve {card['card_id']}", profile=APPROVER_PROFILE,
+        _, _ = _pgd(env, f"/cost resume approve {card['card_id']}", profile=APPROVER_PROFILE,
                           route="rk-no-session", session_id=None)
     assert len(env.disengage_calls) == 1, env.disengage_calls
     assert not _own_sp(env).exists(), "the owning profile's stop is lifted"
@@ -1257,7 +1256,7 @@ def test_ac_cost_f30_b_18(env):
                     blocked=0, immortal=0)
     ep = store.record_episode("s-stopped", "escalation", 1, "2026-10-05", dedup_key="s-stopped:esc:1")
     assert mod.resolve_escalation("s-stopped", ep, 1, "stop", OPERATOR)["granted"] is True
-    card = [c for c in _cards(env) if c["session_id"] == "s-stopped" and c["origin"] == "stop"][0]
+    card = next(c for c in _cards(env) if c["session_id"] == "s-stopped" and c["origin"] == "stop")
     res = _approve(env, card["card_id"])
     assert res["ok"] is True and res["reason"] == "resumed", res
     assert len(env.disengage_calls) == 1 and not _own_sp(env).exists()

@@ -370,7 +370,7 @@ def test_ac_rt_f03_6(loaded, tmp_path):
 # ── AC-RT-F03-7 ──────────────────────────────────────────────────────────────────────
 def test_ac_rt_f03_7(loaded, tmp_path):
     """AC-RT-F03-7: The plugin registers no session-identity seam — `provides_hooks` is empty and neither `pre_gateway_dispatch` nor `on_session_start` is in the loaded plugin's registered hooks — so `build_session_key` remains the sole key authority; the doc assigns `^gh` per-artifact continuity to CH-F52/GOV-F25 (kanban card), not a rewritten key."""
-    module, entry = loaded
+    _, entry = loaded
     hooks = set(getattr(entry, "hooks_registered", []) or [])
     assert "pre_gateway_dispatch" not in hooks
     assert "on_session_start" not in hooks
@@ -450,7 +450,7 @@ def test_ac_rt_f03_8(loaded, tmp_path, monkeypatch):
             entry = store.get_or_create_session(src)
             with lock:
                 results.append((entry.session_key, entry.session_id))
-        except BaseException as exc:  # noqa: BLE001 — surface any failure to the assert
+        except BaseException as exc:  # surface any failure to the assert
             with lock:
                 errors.append(exc)
 

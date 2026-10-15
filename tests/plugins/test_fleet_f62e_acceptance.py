@@ -108,7 +108,7 @@ def _compose(spec, out, home, *extra):
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(spec), "--out", str(out), *extra],
         capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(REPO_ROOT),
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, check=False,
     )
 
 
@@ -403,7 +403,7 @@ def _resolver_trust(tmp_path, environ, names):
                PYTHONPATH=str(REPO_ROOT), NO_PROXY="127.0.0.1,localhost", HERMES_DISABLE_LAZY_INSTALLS="1")
     with _tls_servers(tmp_path, names) as urls:
         proc = subprocess.run([sys.executable, "-c", _HANDSHAKE, json.dumps(urls)], capture_output=True, text=True,
-                              encoding="utf-8", env=env, cwd=str(tmp_path), timeout=120, stdin=subprocess.DEVNULL)
+                              encoding="utf-8", env=env, cwd=str(tmp_path), timeout=120, stdin=subprocess.DEVNULL, check=False)
     assert proc.returncode == 0, f"handshake probe failed: {proc.stderr[-1500:]}"
     return {name for name, ok in json.loads(proc.stdout.strip().splitlines()[-1]).items() if ok}
 
@@ -756,7 +756,7 @@ def _cli(home, *argv):
                HERMES_BUNDLED_PLUGINS=str(home.parent.parent / "empty-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     return subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", *argv], capture_output=True,
                           text=True, encoding="utf-8", errors="replace", env=env, cwd=str(REPO_ROOT),
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, check=False)
 
 
 def test_ac_fleet_f62_e_15(tmp_path):
