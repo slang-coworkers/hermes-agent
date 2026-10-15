@@ -52,7 +52,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     exfiltrate the bootstrap bearer key to another origin. The OneCLI API does
     not redirect, so any redirect is treated as an error rather than followed."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise urllib.error.HTTPError(
             req.full_url, code,
             "OneCLI: refusing HTTP redirect (would forward the bootstrap key to another origin)",
@@ -151,7 +151,7 @@ def _real_request(method: str, path: str, *, json: Any = None) -> tuple[int, Any
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with _OPENER.open(req, timeout=30) as resp:  # noqa: S310 - base is https-checked operator config
+        with _OPENER.open(req, timeout=30) as resp:  # base is https-checked operator config
             status = int(resp.getcode())
             raw = resp.read()
     except urllib.error.HTTPError as exc:

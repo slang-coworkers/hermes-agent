@@ -95,7 +95,7 @@ def test_secret_source_exposes_all_four_proxy_spellings(tmp_path, monkeypatch):
     SecretSource must mirror the token-bearing value onto all four so the render's
     name-only docker_forward_env resolves each to a token at exec (curl prefers the
     lowercase spelling)."""
-    manager, loaded, oneclient = _load(tmp_path, monkeypatch)
+    _, loaded, oneclient = _load(tmp_path, monkeypatch)
     source = loaded.module.secret_source.OneCLISecretSource()
 
     token_url = f"http://x:aoc_architect@{EXPECTED_PROXY}"
@@ -123,7 +123,7 @@ def test_secret_source_exposes_all_four_proxy_spellings(tmp_path, monkeypatch):
 def test_secret_source_no_proxy_synthesizes_nothing(tmp_path, monkeypatch):
     """A keyless / no-proxy container-config leaves no proxy spelling in the secret scope —
     the source never invents a proxy value where OneCLI provided none."""
-    manager, loaded, oneclient = _load(tmp_path, monkeypatch)
+    _, loaded, oneclient = _load(tmp_path, monkeypatch)
     source = loaded.module.secret_source.OneCLISecretSource()
 
     monkeypatch.setattr(oneclient, "get_container_config", lambda *, agent: {
@@ -144,7 +144,7 @@ def test_set_secrets_strict_get_then_put_grant_and_revoke(tmp_path, monkeypatch)
     """set_secrets makes EXACTLY [GET /api/agents, PUT /api/agents/<uuid>/secrets] — grant
     body is the exact secretIds list, revoke body is an empty list — and never a
     POST/PUT to /api/agents/<identifier>/secrets (the 404-ing base behaviour)."""
-    manager, loaded, oneclient = _load(tmp_path, monkeypatch)
+    _, _, oneclient = _load(tmp_path, monkeypatch)
     uuid = "4d1da6ff-4af8-44f3-8831-07b11bfd004f"
     agents_body = json.dumps([{"identifier": "architect", "id": uuid}]).encode()
     secret_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

@@ -139,7 +139,7 @@ def _load(tmp_path, monkeypatch):
 @pytest.mark.platforms("linux")
 def test_ac_cred_f28_1(tmp_path, monkeypatch):
     """AC-CRED-F28-1: The podman wrapper fails closed AND allowlists the two probes: it refuses a long-lived sandbox launch (`run -d`/`create` … `sleep infinity`) whose env lacks the expected OneCLI proxy address or whose mounts lack the read-only CA (exit ≠ 0, logged, real podman not invoked), while passing through the cgroup probe (`run --rm … sleep 0`, no `-v`) and the storage-opt probe (`create --storage-opt size=1m hello-world`) unchanged and preserving stdout byte-for-byte."""
-    manager, loaded, _ = _load(tmp_path, monkeypatch)
+    _, loaded, _ = _load(tmp_path, monkeypatch)
     assert "on_session_start" in loaded.hooks_registered
     assert WRAPPER.is_file() and os.access(WRAPPER, os.X_OK)
 
@@ -191,7 +191,7 @@ def test_ac_cred_f28_1(tmp_path, monkeypatch):
         rec.write_text("", encoding="utf-8")
         log.write_text("", encoding="utf-8")
         return subprocess.run([str(WRAPPER), *argv], env=env_for(proxy),
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, check=False)
 
     r = run_wrap(launch("run", required_env, ca_ro), proxy=None)
     assert r.returncode != 0 and rec.read_text() == "" and "refuse" in log.read_text().lower()

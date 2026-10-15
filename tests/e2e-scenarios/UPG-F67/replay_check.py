@@ -55,7 +55,7 @@ SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac
 
 
 def git(repo, *args, ok=(0,)):
-    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
     if r.returncode not in ok:
         sys.exit(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout
@@ -254,7 +254,7 @@ def main():
     for child, parent, label in ((a.replay, tag_c, "C1^ == tag"), (a.core, a.replay, "C2^ == C1")):
         if git(repo, "rev-parse", f"{child}^").strip() != git(repo, "rev-parse", f"{parent}^{{commit}}").strip():
             fails.append(f"BASE: {label} does not hold")
-    if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", a.core, a.head]).returncode:
+    if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", a.core, a.head], check=False).returncode:
         fails.append("BASE: C2 is not an ancestor of the head")
     if git(repo, "rev-list", "--merges", f"{tag_c}..{a.head}").strip():
         fails.append("BASE: merge commits between the tag and the head (expected a linear history)")
@@ -322,7 +322,7 @@ def main():
     rec, rec_bad = load_repoints(a.repoints if old_gated else "")
     fails.extend(rec_bad)
     e6 = [p for p in old_gated if p in E6_PATHS]
-    on_e6 = bool(e6) and not subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", E6_BASE, a.head]).returncode
+    on_e6 = bool(e6) and not subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", E6_BASE, a.head], check=False).returncode
     fails.extend(check_old_gated(repo, a.core, a.head, [p for p in old_gated if not (on_e6 and p in E6_PATHS)], rec))
     if on_e6:
         fails.extend(check_e6(repo, a.core, a.head, a.e6_patch, rec))

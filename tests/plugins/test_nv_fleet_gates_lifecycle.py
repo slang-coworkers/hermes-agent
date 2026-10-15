@@ -84,7 +84,7 @@ def _gate(mgr, tool_name, args):
 
 def test_partial_registry_loads_veto_not_fail_open(tmp_path, monkeypatch):
     """1/12 restricted groups present (profile-switch reload) loads the veto, never fail-open."""
-    home = _install(tmp_path, monkeypatch)
+    _ = _install(tmp_path, monkeypatch)
     mgr = _load(monkeypatch, _View(["skill_manage"]))
     loaded = mgr._plugins[PLUGIN_KEY]
     assert loaded.enabled is True
@@ -94,7 +94,7 @@ def test_partial_registry_loads_veto_not_fail_open(tmp_path, monkeypatch):
 
 def test_kanban_dispatch_empty_registry_loads_veto(tmp_path, monkeypatch):
     """0/12 present (the kanban-dispatch snapshot) also loads the veto, not fail-load."""
-    home = _install(tmp_path, monkeypatch)
+    _ = _install(tmp_path, monkeypatch)
     mgr = _load(monkeypatch, _View([]))
     loaded = mgr._plugins[PLUGIN_KEY]
     assert loaded.enabled is True
@@ -104,7 +104,7 @@ def test_kanban_dispatch_empty_registry_loads_veto(tmp_path, monkeypatch):
 
 def test_partial_load_then_veto_gates_unwired(tmp_path, monkeypatch):
     """Once discovery completes the backstop clears; the veto then gates on policy, not on the partial-registry block."""
-    home = _install(tmp_path, monkeypatch)
+    _ = _install(tmp_path, monkeypatch)
     view = _View(["skill_manage"])
     mgr = _load(monkeypatch, view)
     assert mgr._plugins[PLUGIN_KEY].enabled is True
@@ -119,7 +119,7 @@ def test_partial_load_then_veto_gates_unwired(tmp_path, monkeypatch):
 
 def test_lazy_backstop_blocks_when_genuinely_missing(tmp_path, monkeypatch):
     """If restricted core is still absent at gate time, the gate fails CLOSED (block), never open."""
-    home = _install(tmp_path, monkeypatch)
+    _ = _install(tmp_path, monkeypatch)
     view = _View(["skill_manage"])          # stays partial through the gate call
     mgr = _load(monkeypatch, view)
     assert mgr._plugins[PLUGIN_KEY].enabled is True
@@ -129,7 +129,7 @@ def test_lazy_backstop_blocks_when_genuinely_missing(tmp_path, monkeypatch):
 
 def test_complete_registry_missing_tool_still_fail_loads(tmp_path, monkeypatch):
     """A genuine removal from a COMPLETE registry still fail-loads (AC-GOV-F22-1 preserved)."""
-    home = _install(tmp_path, monkeypatch)
+    _ = _install(tmp_path, monkeypatch)
     # first load (empty view -> partial -> loads) only reads the plugin's own
     # restricted-core group table, so the "complete" set is never hard-coded here
     full = _canonical_full(_load(monkeypatch, _View([])))

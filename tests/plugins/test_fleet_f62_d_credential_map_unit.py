@@ -65,7 +65,7 @@ def _run(extra_env):
     script = f'. "{_fragment()}"; env'
     env = {"PATH": "/usr/bin:/bin", **extra_env}
     return subprocess.run([sh, "-c", script], capture_output=True, text=True, encoding="utf-8", env=env, stdin=subprocess.DEVNULL,
-                          timeout=30)
+                          timeout=30, check=False)
 
 
 def _set_names(stdout):
@@ -121,7 +121,7 @@ def test_e_fragment_prints_nothing(with_provider):
     sh = shutil.which("sh")
     env = {"PATH": "/usr/bin:/bin", **({provider: SYNTHETIC} if with_provider else {})}
     proc = subprocess.run([sh, "-c", f'. "{_fragment()}"'], capture_output=True, text=True, encoding="utf-8", env=env,
-                          stdin=subprocess.DEVNULL, timeout=30)
+                          stdin=subprocess.DEVNULL, timeout=30, check=False)
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == "", "the fragment must be silent"
 
 

@@ -82,7 +82,7 @@ def _render(spec: Path, out: Path, home: Path, *extra_args: str) -> subprocess.C
         capture_output=True,
         text=True,
         env=env,
-        cwd=str(REPO_ROOT),
+        cwd=str(REPO_ROOT), check=False,
     )
 
 
@@ -714,7 +714,7 @@ def test_ac_osh_f63_4(tmp_path):
 
     for profile in COWORKER_PROFILES:
         policy = f"policy-{profile}.yaml"
-        ci, create = _find(["openshell", "sandbox", "create"], policy)
+        _, create = _find(["openshell", "sandbox", "create"], policy)
         name = _arg(create, "--name")
         # the create --name is the bare sandbox name `osh-f63-<profile>`; the
         # profile's rendered terminal.ssh_host must resolve to it via the
@@ -725,8 +725,8 @@ def test_ac_osh_f63_4(tmp_path):
         assert rendered_host == f"openshell-{name}", f"{profile}: rendered ssh_host {rendered_host!r} != the created sandbox's ssh-config alias openshell-{name}"
         assert _arg(create, "--policy") == policy, f"{profile}: create --policy {_arg(create, '--policy')!r} != {policy!r}"
         assert _arg(create, "--from") == spec_image, f"{profile}: create --from {_arg(create, '--from')!r} != spec sandbox_image {spec_image!r}"
-        si, ssh_cfg = _find(["openshell", "sandbox", "ssh-config"], name)
-        di, delete = _find(["openshell", "sandbox", "delete"], name)
+        _, ssh_cfg = _find(["openshell", "sandbox", "ssh-config"], name)
+        _, delete = _find(["openshell", "sandbox", "delete"], name)
         assert _positional(ssh_cfg, ["openshell", "sandbox", "ssh-config"]) == name, f"{profile}: ssh-config positional target {ssh_cfg!r} is not the created name {name!r}"
         assert _positional(delete, ["openshell", "sandbox", "delete"]) == name, f"{profile}: delete positional target {delete!r} is not the created name {name!r}"
     # No policy verbs appear in the plan: the broker op surface is

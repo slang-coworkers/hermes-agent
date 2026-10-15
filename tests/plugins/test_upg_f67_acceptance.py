@@ -569,7 +569,7 @@ def _oracle_world(root, delivery_id):
     proc = subprocess.run(
         [sys.executable, str(ORACLE), "--home", str(root), "--job-id", "job-1", "--nonce", nonce,
          "--kanban-db", str(kanban), "--baselines", str(baselines)],
-        capture_output=True, text=True, timeout=120)
+        capture_output=True, text=True, timeout=120, check=False)
     metrics = dict(re.findall(r"(\w+)=(\S+)", proc.stdout.splitlines()[0])) if proc.stdout else {}
     return proc, metrics
 
@@ -666,7 +666,7 @@ def test_ac_upg_f67_16(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
-    import tools.kanban_tools  # noqa: F401 - registers the kanban tools
+    import tools.kanban_tools  # registers the kanban tools
     from tools.registry import registry
 
     _root, home = _served_profile(tmp_path, monkeypatch, "orchestrator")

@@ -89,7 +89,7 @@ def _compose(spec, out, home, *extra):
     )
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(spec), "--out", str(out), *extra],
-        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
+        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False,
     )
 
 
@@ -122,8 +122,7 @@ def _fs(policy):
 def _endpoints(policy):
     out = []
     for np in (policy.get("network_policies") or {}).values():
-        for ep in (np or {}).get("endpoints") or []:
-            out.append(ep)
+        out.extend((np or {}).get("endpoints") or [])
     return out
 
 
@@ -819,7 +818,7 @@ def test_ac_fleet_f62_d_15():
 
 def _pick_base(script, repo, paths):
     return subprocess.run([sys.executable, str(script), "--repo", str(repo), *paths],
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=30, check=False)
 
 
 def test_ac_fleet_f62_d_16(tmp_path, rendered):

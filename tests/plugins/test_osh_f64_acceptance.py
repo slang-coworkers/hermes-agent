@@ -144,7 +144,7 @@ def _run_coworker(manager, argv: list[str]) -> str:
 def _run_script_dry_run(script: Path, spec: Path, ref: str, env: dict) -> str:
     proc = subprocess.run(
         ["bash", str(script), str(spec), "--ref", ref, "--dry-run"],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True, text=True, env=env, timeout=120, check=False,
     )
     assert proc.returncode == 0, f"install-into-sandbox.sh --dry-run failed: {proc.stderr}"
     return proc.stdout
@@ -393,7 +393,6 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
 
     lines = [ln.strip() for ln in t1.splitlines() if ln.strip()]
     joined = "\n".join(lines)
-    idx = {ln: i for i, ln in enumerate(lines)}
 
     vecs = [shlex.split(ln) for ln in lines]
     boot = [v for v in vecs if v[1:3] == ["plugins", "install"] and "-p" not in v]
@@ -1214,7 +1213,7 @@ def test_ac_osh_f64_11(tmp_path, monkeypatch):
 
 def test_onecli_registered_source_overrides_ambient(tmp_path, monkeypatch):
     """register(ctx) wires the rendered settings into the REGISTERED source; apply_all with override_existing replaces the inherited ambient proxy, preserving carve-outs."""
-    OneCLISecretSource, oneclient, _manager = _load_onecli(
+    _, oneclient, _manager = _load_onecli(
         tmp_path, monkeypatch,
         settings={"proxy_rewrite": "127.0.0.1:18255", "ca_bundle": "/etc/osh-lane/ca-bundle.pem"},
     )

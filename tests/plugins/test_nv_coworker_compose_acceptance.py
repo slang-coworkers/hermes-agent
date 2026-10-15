@@ -537,9 +537,9 @@ def test_plugin_load_leaves_gateway_config_unimported(tmp_path, monkeypatch):
     env = dict(os.environ)
     env["HERMES_ENABLE_PROJECT_PLUGINS"] = "0"
     # A fresh interpreter: this test process has gateway.config imported already.
-    proc = subprocess.run(  # noqa: S603 - fixed argv, test-controlled paths
+    proc = subprocess.run(  # fixed argv, test-controlled paths
         [sys.executable, "-c", _LOAD_PROBE],
-        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300,
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300, check=False,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     result = json.loads(proc.stdout.strip().splitlines()[-1])

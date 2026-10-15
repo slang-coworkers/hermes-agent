@@ -54,7 +54,7 @@ def _render(tmp_path, monkeypatch):
     plugin_src = _fork_root() / "plugins" / PLUGIN_KEY
     shutil.copytree(plugin_src, hermes_home / "plugins" / PLUGIN_KEY)
     (hermes_home / "config.yaml").write_text(
-        "plugins:\n  enabled: [%s]\n" % PLUGIN_KEY, encoding="utf-8"
+        f"plugins:\n  enabled: [{PLUGIN_KEY}]\n", encoding="utf-8"
     )
     empty_bundled = tmp_path / "bundled"
     empty_bundled.mkdir()
@@ -284,7 +284,7 @@ def test_ac_loop_f40_2(tmp_path, monkeypatch):
     simultaneously against the same head both terminate and leave exactly one card."""
     import threading
 
-    rendered, default_dir = _render(tmp_path, monkeypatch)
+    _, default_dir = _render(tmp_path, monkeypatch)
     gate_db = str(tmp_path / "gate.db")
     kanban_db = str(tmp_path / "kanban.db")
     gate = _load_script(default_dir, "pr_ci_gate.py")
@@ -337,7 +337,7 @@ def test_ac_loop_f40_3(tmp_path, monkeypatch):
     arriving before its pull_request event still ends with the head's card ready; a green
     invalidated by a later authoritative failure (success->failure->PR) leaves the card
     blocked; and independent PRs keep independent pr_gate rows."""
-    rendered, default_dir = _render(tmp_path, monkeypatch)
+    _, default_dir = _render(tmp_path, monkeypatch)
     gate_db = str(tmp_path / "gate.db")
     kanban_db = str(tmp_path / "kanban.db")
     gate = _load_script(default_dir, "pr_ci_gate.py")
@@ -478,7 +478,7 @@ def test_ac_loop_f40_4(tmp_path, monkeypatch):
     plain issue (no issue.pull_request), or a boundary near-miss handle."""
     from gateway.platforms.webhook_filters import WebhookRouteProcessor
 
-    rendered, default_dir = _render(tmp_path, monkeypatch)
+    _, default_dir = _render(tmp_path, monkeypatch)
     invite = _routes(default_dir)["gh-pr-review-invite"]
     processor = WebhookRouteProcessor()
 
@@ -504,7 +504,7 @@ def test_pr_ci_gate_subprocess_contract(tmp_path, monkeypatch):
     import subprocess
     import sys
 
-    rendered, default_dir = _render(tmp_path, monkeypatch)
+    _, default_dir = _render(tmp_path, monkeypatch)
     script = default_dir / "scripts" / "pr_ci_gate.py"
     assert script.is_file()
 
@@ -518,7 +518,7 @@ def test_pr_ci_gate_subprocess_contract(tmp_path, monkeypatch):
         capture_output=True,
         text=True,
         env=env,
-        timeout=60,
+        timeout=60, check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[SILENT]"

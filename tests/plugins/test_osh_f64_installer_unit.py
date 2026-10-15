@@ -185,7 +185,7 @@ def test_collect_home_state_reads_shared_metadata_revision():
         (home / "plugins" / name).mkdir()
     (home / "plugins" / ".install-metadata.json").write_text(
         json.dumps({n: {"revision": SHA, "pinned": True, "source": "x"} for n in enabled}), encoding="utf-8")
-    (home / "config.yaml").write_text("plugins:\n  enabled: [%s]\n" % ", ".join(enabled), encoding="utf-8")
+    (home / "config.yaml").write_text(f"plugins:\n  enabled: [{', '.join(enabled)}]\n", encoding="utf-8")
     spec = yaml.safe_load(_spec_path().read_text(encoding="utf-8"))
     state = inst.collect_home_state(spec, str(_spec_path()))
     for name in enabled:
@@ -392,7 +392,7 @@ def test_phase_a_snapshots_bootstrap_plugin_before_force(tmp_path, monkeypatch):
         (home / "plugins" / name).mkdir()
     (home / "plugins" / ".install-metadata.json").write_text(
         json.dumps({n: {"revision": "b" * 40, "pinned": True} for n in enabled}), encoding="utf-8")
-    (home / "config.yaml").write_text("plugins:\n  enabled: [%s]\n" % ", ".join(enabled), encoding="utf-8")
+    (home / "config.yaml").write_text(f"plugins:\n  enabled: [{', '.join(enabled)}]\n", encoding="utf-8")
     ran = []
     monkeypatch.setattr(inst, "_execute_step", lambda step, ctx: ran.append((step.tag, getattr(step, "data", None))))
     inst.phase_a(str(_spec_path()), SHA)
@@ -534,7 +534,7 @@ def test_install_into_sandbox_dry_run_forwards_policy_root(tmp_path, monkeypatch
     def _create_policies(extra):
         proc = subprocess.run(
             ["bash", str(script), str(_spec_path()), "--ref", SHA, "--dry-run", *extra],
-            capture_output=True, text=True, env=env, timeout=120,
+            capture_output=True, text=True, env=env, timeout=120, check=False,
         )
         assert proc.returncode == 0, f"dry-run failed: {proc.stderr}"
         out = {}

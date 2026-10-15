@@ -186,7 +186,7 @@ def test_unpriced_boundary_is_failclosed_and_idempotent(tmp_path, monkeypatch):
     """An unknown-priced call reaching a boundary is a fail-closed breach, recorded once."""
     from agent import estop
 
-    hermes_home, manager, loaded = _load(
+    _, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
     )
     usage = {"input_tokens": 10, "output_tokens": 5, "request_count": 1}
@@ -233,7 +233,7 @@ def test_immortal_platform_enum_never_stops(tmp_path, monkeypatch):
     from agent import estop
     from gateway.config import Platform
 
-    hermes_home, manager, loaded = _load(
+    hermes_home, manager, _ = _load(
         tmp_path, monkeypatch,
         settings={"profile_ceiling_usd": 1.0, "immortal_platforms": ["slack"]},
     )

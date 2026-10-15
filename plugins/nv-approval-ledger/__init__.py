@@ -398,7 +398,7 @@ def _on_gateway_dispatch(event=None, **kwargs):
                 "repo=%s pr=%s sha=%s delivery_id=%s — dropped after webhook 202, no redelivery",
                 status, repo, pr, commit_sha, delivery_id,
             )
-    except Exception:  # noqa: BLE001 - the dispatch seam must never raise into the gateway
+    except Exception:  # the dispatch seam must never raise into the gateway
         logger.warning("nv-approval-ledger pre_gateway_dispatch callback failed", exc_info=True)
     return
 

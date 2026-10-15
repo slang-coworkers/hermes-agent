@@ -1076,7 +1076,7 @@ def test_real_notifier_advances_cursor_only_on_persist_ack(tmp_path, monkeypatch
     """(iii) via the REAL durable notifier: a non-persisted turn leaves the cursor
     unmoved (event redelivered); a persist-confirmed turn advances it. Exactly one
     real owner turn persists across the two attempts."""
-    from gateway.wake import deliver_wake  # noqa: F401 - ensure real (unmocked)
+    from gateway.wake import deliver_wake  # ensure real (unmocked)
 
     state = {"persist": False, "calls": []}
     adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)

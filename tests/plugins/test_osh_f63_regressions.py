@@ -57,7 +57,7 @@ def _render(spec: Path, out: Path, home: Path, *extra_args: str) -> subprocess.C
         capture_output=True,
         text=True,
         env=env,
-        cwd=str(REPO_ROOT),
+        cwd=str(REPO_ROOT), check=False,
     )
 
 

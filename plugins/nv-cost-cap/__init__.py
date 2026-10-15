@@ -33,7 +33,7 @@ from datetime import datetime, timezone, UTC
 from types import SimpleNamespace
 
 from . import policy, resume, store
-from .escalation import (  # noqa: F401  (re-exported as the plugin's public COST-F30 API)
+from .escalation import (  # re-exported as the plugin's public COST-F30 API
     handle_cost_command,
     principal_from_event,
     principal_from_request,

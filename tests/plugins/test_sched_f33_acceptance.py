@@ -322,7 +322,7 @@ def test_ac_sched_f33_5(agent_env, monkeypatch):
     _install_agent_stubs(monkeypatch, observed)
     _write_script(agent_env, "gate.py", 'print(\'{"wakeAgent": false}\')\n')
     job = create_job(prompt="do it", schedule="every 5m", script="gate.py", deliver="local")
-    success, doc, final, error = run_job(job)
+    _, _, final, _ = run_job(job)
     assert final == SILENT_MARKER
     assert observed["agent_runs"] == 0
 
@@ -349,7 +349,7 @@ def test_ac_sched_f33_6(agent_env, monkeypatch):
     observed = {}
     _install_agent_stubs(monkeypatch, observed)
     job = create_job(prompt="analyze the feed", schedule="every 5m", script="fail.py", deliver="local")
-    success, doc, final, error = run_job(job)
+    _, _, final, _ = run_job(job)
     assert final != SILENT_MARKER
     assert observed["agent_runs"] == 1
     assert "## Script Error" in observed["prompts"][0]
@@ -369,7 +369,7 @@ def test_ac_sched_f33_7(agent_env, monkeypatch):
     run_job(get_job(job["id"]) or job)
     assert observed["agent_runs"] == 1
 
-    success, doc, final, error = run_job(get_job(job["id"]) or job)
+    _, _, final, _ = run_job(get_job(job["id"]) or job)
     assert final == SILENT_MARKER
     assert observed["agent_runs"] == 1
 

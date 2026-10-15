@@ -150,7 +150,7 @@ def _render_spec(spec, out, home, *extra):
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose",
          str(spec), "--out", str(out), *extra],
-        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
+        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False,
     )
 
 
@@ -354,7 +354,7 @@ def test_ac_fleet_f62_c_2(tmp_path):
         return subprocess.run(
             [sys.executable, "-m", "hermes_cli.main", "profile", "install",
              str(dist), "--name", name, "-y"],
-            capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
+            capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False,
         )
 
     for role in COWORKERS:
@@ -460,7 +460,7 @@ def test_ac_fleet_f62_c_4(tmp_path):
 
     def _wire(*args):
         return subprocess.run([sys.executable, "-m", "hermes_cli.main", "wire", *args],
-                              capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                              capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False)
 
     for _hermes, _wire_v, _add, a, b in commands:
         proc = _wire("add", a, b)
@@ -531,7 +531,7 @@ def test_ac_fleet_f62_c_6(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "coworker", "compose",
          str(missing), "--out", str(out)],
-        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT),
+        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False,
     )
     assert proc.returncode != 0, "compose must fail when the fleet spec dir is absent"
     assert not out.exists(), "compose must leave no output tree for a missing spec"

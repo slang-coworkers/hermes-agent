@@ -73,7 +73,7 @@ def test_rendered_base_helper_runs_from_the_synced_skill_tree(tmp_path):
                HERMES_BUNDLED_PLUGINS=str(tmp_path / "empty-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     out = tmp_path / "out"
     proc = subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(SPEC), "--out", str(out)],
-                          capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                          capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), check=False)
     assert proc.returncode == 0, proc.stderr[-2000:]
     remote_skills = tmp_path / "remote" / ".hermes" / "skills"
     shutil.copytree(out / "fixer" / "skills", remote_skills)
@@ -83,5 +83,5 @@ def test_rendered_base_helper_runs_from_the_synced_skill_tree(tmp_path):
     (checkout / ".github" / "nv-path-guard" / "nv-docs.txt").write_text("docs/**\n", encoding="utf-8")
     script = remote_skills / "nv-path-guard-base" / "scripts" / "pick_base.py"
     got = subprocess.run([sys.executable, str(script), "--repo", ".", "src/a.ts"],
-                         capture_output=True, text=True, cwd=str(checkout), timeout=30)
+                         capture_output=True, text=True, cwd=str(checkout), timeout=30, check=False)
     assert got.returncode == 0 and got.stdout.strip() == "nv-main", (got.returncode, got.stdout, got.stderr)

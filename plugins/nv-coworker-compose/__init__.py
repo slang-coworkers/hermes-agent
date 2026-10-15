@@ -598,7 +598,7 @@ def apply_capture_env(profile_home: str | Path) -> None:
 
         managed_dir = managed_scope.get_managed_dir()
         managed_system = get_managed_system()
-    except Exception as exc:  # noqa: BLE001 — refuse the write rather than guess policy
+    except Exception as exc:  # refuse the write rather than guess policy
         raise CaptureEnvManagedError(
             f"cannot verify managed policy for {CAPTURE_KEY}; refusing to modify {env_path}"
         ) from exc
@@ -773,7 +773,7 @@ def _resume_onboarded_cron(new_jobs: dict[str, dict[str, str]]) -> dict[str, lis
             with use_cron_store(e["home"]):
                 pause_job(e["id"], reason="onboard could not resume every allowlisted job")
         raise
-    strip = lambda rows: [{k: r[k] for k in ("profile", "name", "id")} for r in rows]  # noqa: E731
+    strip = lambda rows: [{k: r[k] for k in ("profile", "name", "id")} for r in rows]
     return {"resumed_cron_jobs": strip(resume), "kept_paused_cron_jobs": strip(kept)}
 
 

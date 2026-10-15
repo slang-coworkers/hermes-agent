@@ -247,7 +247,7 @@ async def test_ac_rt_f05_6():
 async def test_ac_rt_f05_7(store):
     """Accepted difference: the triggering message is never captured for replay — routing the marked DM drops it and its body is retained neither in the pending record nor, after approval, in the approved record or the approval return."""
     config = GatewayConfig(platforms={Platform.WHATSAPP: PlatformConfig(enabled=True)})
-    runner, adapter = _handle_runner(Platform.WHATSAPP, config, pairing_store=store)
+    runner, _ = _handle_runner(Platform.WHATSAPP, config, pairing_store=store)
     marker = "REPLAY-MARKER-9f3c2a"
     result = await runner._handle_message(
         _make_event(
