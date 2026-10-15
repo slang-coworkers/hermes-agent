@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -445,7 +446,8 @@ def test_ac_fleet_f62_4(rendered, tmp_path, monkeypatch):
     assert isinstance(wd, int) and wd >= 30, f"DEFAULT config must carry a >=30 watchdog (the force-writer), got {wd!r}"
     assert f"WatchdogSec={wd}s" in unit, "the unit's WatchdogSec must reflect the rendered >=30 value"
     execstart = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
-    assert execstart.rstrip().endswith("gateway run") and "--profile" not in execstart
+    argv = shlex.split(execstart.split("=", 1)[1])
+    assert argv[-2:] == ["gateway", "run"] and "--profile" not in execstart
 
     scandir = tmp_path / "gw-state"
     scandir.mkdir()

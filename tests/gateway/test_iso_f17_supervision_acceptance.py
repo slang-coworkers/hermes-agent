@@ -543,10 +543,12 @@ def test_ac_iso_f17_7(tmp_path, monkeypatch):
     retained."""
     import hermes_state
     from hermes_state import SessionDB
+    from hermes_state_pidns import holder_namespace_token
 
     db = SessionDB(tmp_path / "state.db")
     db.create_session("shared", source="test")
-    dead_holder = "pid=424242:turn=dead:platform=test"
+    # Same-namespace stamp, as real holders carry: an unstamped pid= is never probed (TTL only).
+    dead_holder = f"pid=424242{holder_namespace_token()}:turn=dead:platform=test"
     assert (
         db.try_acquire_session_turn_lease("shared", dead_holder, ttl_seconds=300)
         is True
@@ -585,7 +587,7 @@ def test_ac_iso_f17_7(tmp_path, monkeypatch):
     monkeypatch.setattr(
         hermes_state, "psutil", SimpleNamespace(pid_exists=lambda pid: pid == live_pid)
     )
-    nonself_holder = f"pid={live_pid}:turn=live:platform=test"
+    nonself_holder = f"pid={live_pid}{holder_namespace_token()}:turn=live:platform=test"
     assert (
         db.try_acquire_session_turn_lease("nonself-sess", nonself_holder, ttl_seconds=300)
         is True

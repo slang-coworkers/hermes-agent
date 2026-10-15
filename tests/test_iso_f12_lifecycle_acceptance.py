@@ -52,6 +52,9 @@ class _FakeEvent:
     def __init__(self):
         self.source = _FakeSource()
 
+    def get_command(self):
+        return None  # plain text, not a slash command (MessageEvent.get_command contract)
+
 
 @pytest.fixture
 def kanban_conn(tmp_path, monkeypatch):
