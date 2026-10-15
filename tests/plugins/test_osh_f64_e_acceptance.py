@@ -475,8 +475,22 @@ def test_ac_osh_f64_e_9(loaded, tmp_path):
     assert "gw" in configs, "managed mode has no gateway line, so a type named gw must still render"
 
 
+def _renders_into(loaded, tmp_path, name, source, role, mutate, host, port):
+    root = tmp_path / name
+    shutil.copytree(source.parent, root / "spec")
+    path = root / "spec" / "coworker-types.yaml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    mutate(cfg)
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    policies, _, _ = _render(loaded, path, root / "out")
+    eps = [e for e in _endpoints(policies[f"policy-{role}"])
+           if e.get("host") == host and int(e.get("port")) == port]
+    assert eps, f"{name}: {host}:{port} must render into policy-{role}"
+    _plan(loaded, source, mutate)
+
+
 def test_ac_osh_f64_e_10(loaded, tmp_path):
-    """(derived) In direct mode, an egress.anonymous_reads target or a worker-opted-in provider endpoint whose canonical host is the managed inference host (inference.local on any port, including case and trailing-dot variants) raises CompositionError before any config.yaml is written, so no worker policy can name inference.local; the provision plan refuses the same input; without inference_provider the same input still renders."""
+    """(derived) In direct mode, an egress.anonymous_reads target or a worker-opted-in provider endpoint whose canonical host is the managed inference host (inference.local on any port, including case and trailing-dot variants) raises CompositionError before any config.yaml is written, so no worker policy can name inference.local; the provision plan refuses the same input; managed mode and a spec without inference_provider still render the same input, and a direct-mode provider on an unrelated host still renders."""
     cases = [
         ("direct-anon-managed-variant", lambda c: _anon_read(c, "architect", "Inference.Local.:443"),
          "anonymous_reads"),
@@ -494,17 +508,18 @@ def test_ac_osh_f64_e_10(loaded, tmp_path):
         with pytest.raises(loaded.module.CompositionError, match=match):
             _plan(loaded, DIRECT_SPEC, mutate)
 
-    # The ban is direct-mode only: with no inference_provider an anonymous read or provider endpoint on
-    # inference.local renders as before, so the guard cannot have become a global host ban.
-    for name, mutate in (("noip-anon-managed", lambda c: _anon_read(c, "approver", "inference.local:8443")),
-                         ("noip-provider-managed",
-                          lambda c: _opt_in(c, "approver", "managed-probe", endpoint="inference.local:8443"))):
-        root = tmp_path / name
-        shutil.copytree(F62C_OPENSHELL_SPEC.parent, root / "spec")
-        path = root / "spec" / "coworker-types.yaml"
-        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
-        mutate(cfg)
-        path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        policies, _, _ = _render(loaded, path, root / "out")
-        assert any(e.get("host") == "inference.local" for e in _endpoints(policies["policy-approver"])), (
-            f"{name}: without inference_provider the direct-mode ban must not apply")
+    controls = [
+        ("managed-anon-other-port", MANAGED_SPEC, "architect",
+         lambda c: _anon_read(c, "architect", "inference.local:8443"), "inference.local", 8443),
+        ("managed-provider-other-port", MANAGED_SPEC, "architect",
+         lambda c: _opt_in(c, "architect", "managed-probe", endpoint="inference.local:8443"), "inference.local", 8443),
+        ("direct-provider-unrelated", DIRECT_SPEC, "architect",
+         lambda c: _opt_in(c, "architect", "unrelated-probe", endpoint="registry.example.org:443"),
+         "registry.example.org", 443),
+        ("noip-anon-managed", F62C_OPENSHELL_SPEC, "approver",
+         lambda c: _anon_read(c, "approver", "inference.local:8443"), "inference.local", 8443),
+        ("noip-provider-managed", F62C_OPENSHELL_SPEC, "approver",
+         lambda c: _opt_in(c, "approver", "managed-probe", endpoint="inference.local:8443"), "inference.local", 8443),
+    ]
+    for name, source, role, mutate, host, port in controls:
+        _renders_into(loaded, tmp_path, name, source, role, mutate, host, port)
