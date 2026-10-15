@@ -1,4 +1,21 @@
 status	path	surface	class	origin	authority	locators	post_c1
+M	.github/workflows/desktop-bundle-smoke.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/desktop-bundled-release.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/docker.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/e2e-desktop-core.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/e2e-desktop-update.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/e2e-desktop.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/install-e2e-windows-run.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/js-tests.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/nix.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/pm-bundle.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/rust-tests.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/sandbox-image.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/tests-os.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/tests.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
+M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	agent/session_persistence.py	core	M	H5	GOV-F25		
 M	agent/session_persistence.py#SessionPersistenceMixin._persist_session	core	replay	H5	GOV-F25		
 M	agent/turn_facade.py	core	M	H5	GOV-F25		
@@ -474,7 +491,7 @@ A	tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch	in-surface	R	H5
 A	tests/e2e-scenarios/UPG-F68/conflicts.md	in-surface	post-C1	new			new,item-3
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-3,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new,item-3,item-5
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L564	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L625	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			

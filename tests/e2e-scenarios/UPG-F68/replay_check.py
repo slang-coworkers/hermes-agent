@@ -16,6 +16,9 @@ commits. Checks, each named after ADR §Merge gate 2:
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point.
+  (g) fork-ci (user ruling, operator msg 596): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]`` commits,
+      only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped to
+      standard runners; no workflow line outside a comment still names a 32-core label at the head.
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
 """
@@ -81,7 +84,17 @@ E2_ALLOW = (
 )
 HEALTH_ALLOW = re.compile(r"^# health: allow ([A-Z0-9_, ]+) -- .+$")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
-ITEM = re.compile(r"\[UPG-F68 (\d+)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
+ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
+FORK_CI = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+FORK_CI_AUTHORITY = "msg-596"
+FORK_CI_RUNNERS = {
+    "ubuntu-latest-32-core": "ubuntu-latest",
+    "ubuntu-latest-32-arm-core": "ubuntu-24.04-arm",
+    "windows-latest-32-core": "windows-latest",
+    "windows-latest-32-arm-core": "windows-11-arm",
+}
+RUNNER_LABEL = re.compile(r"\b(?:ubuntu|windows)-latest-32-(?:arm-)?core\b")
+RUNNER_KEY = re.compile(r"^\s*(?:-\s+)?(?:runs-on|runner):")
 CHERRY = re.compile(r"^\(cherry picked from commit ([0-9a-f]{40})\)$", re.MULTILINE)
 LOCATOR = re.compile(r"^(tag|H5|C1|HEAD|[0-9a-f]{10,40}):([^:]+):(\d+)-(\d+)$")
 IMPORT_LINE = re.compile(r"^(import\b|export\s.*\sfrom\s|\}\s*from\s|.*\brequire\()")
@@ -145,6 +158,8 @@ def is_core(path, h5_paths):
 
 
 def surface_of(path, h5_paths):
+    if FORK_CI.match(path) and path not in h5_paths:
+        return "fork-ci"
     if is_core(path, h5_paths):
         return "core"
     return "old-gated" if path.startswith("apps/desktop/e2e/") and not SURFACE.match(path) else "in-surface"
@@ -341,7 +356,8 @@ def commits_after(repo, base, head):
         msg = git(repo, "log", "-1", "--format=%B", sha)
         src = CHERRY.findall(msg)
         item = ITEM.search(msg.splitlines()[0] if msg else "")
-        out.append((sha, src[-1] if src else None, int(item.group(1)) if item else None))
+        tag = item.group(1) if item else None
+        out.append((sha, src[-1] if src else None, int(tag) if tag and tag.isdigit() else tag))
     return out
 
 
@@ -486,9 +502,50 @@ def added_allows(repo, c1, head, path):
     return out
 
 
+def _label_mapping(repo, a, b, path, where):
+    """Fails unless ``path`` at ``b`` is ``path`` at ``a`` with runner labels mapped on runs-on/runner lines only."""
+    old, new = text_at(repo, a, path).splitlines(keepends=True), text_at(repo, b, path).splitlines(keepends=True)
+    if len(old) != len(new):
+        return [f"FORK-CI: {path}: line count differs {where} (a label mapping keeps every line)"], 0
+    fails, mapped = [], 0
+    for n, (was, now) in enumerate(zip(old, new), 1):
+        if was == now:
+            continue
+        if RUNNER_KEY.match(was) and RUNNER_LABEL.sub(lambda m: FORK_CI_RUNNERS[m.group(0)], was) == now:
+            mapped += 1
+        else:
+            fails.append(f"FORK-CI: {path}:{n}: not a runner-label mapping {where}: {now.strip()[:100]!r}")
+    return fails, mapped
+
+
+def check_fork_ci(repo, c1, head, after_c1):
+    """(g): workflow files change only in fork-ci commits, only by the runner-label mapping, judged per commit (so an
+    edit undone by a later commit is still seen) and from C1 to the head. Returns (fails, lines mapped since C1)."""
+    fails = []
+    for sha, _src, item in after_c1:
+        for p in name_status(repo, f"{sha}^", sha):
+            if not FORK_CI.match(p):
+                continue
+            if item != "fork-ci":
+                fails.append(f"FORK-CI: {sha[:10]} changes {p} outside a [UPG-F68 fork-ci] commit")
+            fails.extend(_label_mapping(repo, f"{sha}^", sha, p, f"in {sha[:10]}")[0])
+    mapped = 0
+    for path in sorted(p for p in name_status(repo, c1, head) if FORK_CI.match(p)):
+        f_m, n_m = _label_mapping(repo, c1, head, path, "from C1")
+        fails.extend(f_m)
+        mapped += n_m
+    for path in git(repo, "ls-tree", "-r", "--name-only", head, ".github/workflows/").split():
+        for n, ln in enumerate(text_at(repo, head, path).splitlines(), 1):
+            if RUNNER_LABEL.search(ln) and not ln.lstrip().startswith("#"):
+                fails.append(f"FORK-CI: {path}:{n} still names a 32-core runner label")
+    return fails, mapped
+
+
 def origin_of(sha, src, item, picks):
     if src:
         return "#" + {"b41d14df02": "78", "1fb4d74ccb": "77", "35767fe243": "80", "0615c1e7a0": "82"}.get(src[:10], src[:10])
+    if item == "fork-ci":
+        return item
     return "new" if item == 1 else (f"item-{item}" if item else "untagged")
 
 
@@ -522,6 +579,8 @@ def check_inventory(path, observed, core_rows, post_origins, needs_locators, rep
             fails.append(f"INVENTORY: {p} post_c1 says {got[6]!r}, checker found {','.join(post_origins.get(p, []))!r}")
         base = p.split("#")[0]
         names = {a for a in got[4].split(",") if a}
+        if w[1] == "fork-ci" and got[4] != FORK_CI_AUTHORITY:
+            fails.append(f"INVENTORY: fork-ci row {p} names authority {got[4]!r}, want {FORK_CI_AUTHORITY}")
         if w[1] == "core":
             if not names:
                 fails.append(f"INVENTORY: core row {p} names no authority")
@@ -554,6 +613,8 @@ def write_inventory(path, observed, core_rows, post_origins):
         auth, locs = keep.get(p, ("", ""))
         if not auth and w[1] == "core" and len(w) > 4:
             auth = w[4]
+        if not auth and w[1] == "fork-ci":
+            auth = FORK_CI_AUTHORITY
         rows.append([w[0], p, w[1], w[2], w[3], auth, locs, ",".join(post_origins.get(p, []))])
     with open(path, "w", encoding="utf-8", newline="") as fh:
         wr = csv.writer(fh, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
@@ -619,7 +680,7 @@ def main():
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
-        if is_core(path, h5_paths):
+        if surface_of(path, h5_paths) == "core":
             f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
             fails.extend(f_e)
             e2_allowed.extend(found)
@@ -649,12 +710,15 @@ def main():
                 post_origins[p].append(o)
             if o == "untagged":
                 fails.append(f"COMMIT {sha[:10]}: neither a -x pick nor tagged [UPG-F68 <item>]")
+    f_g, fork_ci_lines = check_fork_ci(repo, revs["c1"], revs["head"], after_c1)
+    fails.extend(f_g)
     observed_all = dict(observed)
     for p in post:
         if p not in h5_paths:
             st = "A" if blob(repo, revs["c1"], p) is None else "M"
             st = st if blob(repo, revs["head"], p) else "D"
-            observed_all[p] = (st, surface_of(p, h5_paths), "post-C1", post_origins.get(p, ["?"])[0])
+            surf = surface_of(p, h5_paths)
+            observed_all[p] = (st, surf, "fork-ci" if surf == "fork-ci" else "post-C1", post_origins.get(p, ["?"])[0])
     auth_of = {(f, r): auth for f, r, _c, auth in E2_ALLOW}
     allow_rows = {}
     for path in sorted(p for p in post if p.endswith(".py") and blob(repo, revs["head"], p)):
@@ -691,12 +755,14 @@ def main():
     print(f"## health allows added after C1 in fork code: {len(fork_allows)}")
     for k in fork_allows:
         print(f"  {k}")
+    print(f"## (g) fork-ci runner-label lines mapped after C1: {fork_ci_lines}")
     print(f"## inventory mismatches: {len(inv)}")
     if fails:
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; no core after C1 beyond the 2(e') allows; inventory matches")
+          " sources; no core after C1 beyond the 2(e') allows; fork-ci is the runner-label mapping only; inventory"
+          " matches")
     return 0
 
 
