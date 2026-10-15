@@ -1,0 +1,89 @@
+# ADR UPG-F68 §Design D2 / SF-2: recorded PyYAML-side run of the byte-parity claim (not executed by pytest).
+# tree: 8398385f7511a65040c9609bfb5ac91bb38f5970 (+ worktree edits of this commit)
+# interpreter: 3.14.7; PyYAML 6.0.3; ruamel.yaml 0.18.16
+# probe: reports/hermes-UPG-F68/probe-yaml-regression.py sha256 55ee9e1c4cf5f593 (architect), run on FLEET-F62.c/fixtures/openshell:
+home len 2: 23/23 identical
+home len 103: 23/23 identical
+long space-free scalar (a home path) identical: True
+KNOWN DIVERGENCE multi-word scalar > 80 cols: bytes identical=False, loaded value identical=True
+# fork-wide: every tracked tests/e2e-scenarios YAML; 'pyyaml-emitted' = PyYAML safe_dump(sort_keys=False) reproduces it.
+tracked fixture YAMLs: 153
+pyyaml-emitted fixtures: 76
+home len 2: helper == PyYAML == file for 76/76
+home len 103: helper == PyYAML == file for 76/76
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/policy-approver.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skill-bundles/approver.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/policy-fixer.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skill-bundles/fixer.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/managed/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/policy-orchestrator.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skill-bundles/orchestrator.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/policy-reviewer.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skill-bundles/reviewer.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/config.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/policy-triager.yaml
+  tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skill-bundles/triager.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/skill-bundles/architect.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/skill-bundles/builder.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/skill-bundles/orchestrator.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/skill-bundles/reviewer.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/config.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/distribution.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/skill-bundles/tester.yaml
+  tests/e2e-scenarios/FLEET-F62/fixtures/podman/managed/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/managed/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-architect/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-architect/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-architect/policy-architect.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-architect/skill-bundles/architect.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-builder/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-builder/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-builder/policy-builder.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-builder/skill-bundles/builder.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-default/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-default/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-orchestrator/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-orchestrator/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-orchestrator/policy-orchestrator.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-orchestrator/skill-bundles/orchestrator.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-reviewer/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-reviewer/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-reviewer/policy-reviewer.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-reviewer/skill-bundles/reviewer.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-tester/config.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-tester/distribution.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-tester/policy-tester.yaml
+  tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-tester/skill-bundles/tester.yaml
+  tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-worker-architect/distribution.yaml
+  tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-worker-builder/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/osh-f64-worker-architect/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/osh-f64-worker-builder/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/osh-f64-worker-orchestrator/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/osh-f64-worker-reviewer/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/osh-f64-worker-tester/distribution.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/policy-architect.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/policy-builder.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/policy-orchestrator.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/policy-reviewer.yaml
+  tests/e2e-scenarios/OSH-F64/fixtures/policy-tester.yaml

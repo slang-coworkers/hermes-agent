@@ -1217,6 +1217,9 @@ and the scope it was measured against (`across its lineage` or
 `hermes sessions export` still works for such sessions; its JSON/JSONL
 backup needs each session to stay under `max_export_messages`.
 
+Fleets that must retain every transcript on disk pin `sessions.auto_prune: false`
+and prune deliberately — see the [Fleet transcript retention runbook](./fleet-transcript-retention.md).
+
 ### Manual Cleanup
 
 ```bash

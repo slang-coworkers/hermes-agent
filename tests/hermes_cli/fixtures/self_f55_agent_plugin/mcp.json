@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "f55travel": {
+      "type": "stdio",
+      "command": "echo",
+      "args": [
+        "--root",
+        "${PLUGIN_ROOT}/bin/server",
+        "--data",
+        "${PLUGIN_DATA}/state.json"
+      ]
+    }
+  }
+}

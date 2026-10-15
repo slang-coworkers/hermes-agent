@@ -142,6 +142,7 @@ Notes:
 - `git worktree remove` will refuse to remove a worktree with uncommitted changes unless you force it.
 - Removing a worktree does **not** automatically delete the branch; you can delete or keep the branch using normal `git branch` commands.
 - Hermes checkpoint data under `~/.hermes/checkpoints/` is not automatically pruned when you remove a worktree, but it is usually very small.
+- To reap **accumulated** worktrees safely in bulk, `hermes worktree prune` audits every tree and removes only the disposable ones — it never reaps a tree with uncommitted tracked changes or unique unpushed commits, and archives any untracked scratch before removing a reapable tree. See [Fleet issue supervision and worktree reaping](./features/fleet-issue-supervision.md).
 
 ## Best Practices
 

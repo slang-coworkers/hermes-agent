@@ -1,0 +1,34 @@
+identity: "OSH-F64.b fleet base (single-authority inference)"
+config:
+  model:
+    provider: compatible-endpoint
+    default: aws/anthropic/bedrock-claude-opus-5-5
+  providers:
+    # The OpenShell single-authority inference provider. base_url carries /v1 so the OpenAI
+    # SDK posts {base_url}/chat/completions → the policy-allowed /v1/chat/completions. The
+    # api_key is the FIXED rewrite-trigger placeholder (identical across profiles): it fires
+    # the OpenShell L7 credential rewrite, which reads the real key (COMPATIBLE_API_KEY) on
+    # the OpenShell side — never in the sandbox. The render adds the per-profile
+    # X-Hermes-Profile attribution header on top of this baseline.
+    compatible-endpoint:
+      base_url: https://inference.local/v1
+      api_mode: chat_completions
+      api_key: sk-OPENSHELL-PROXY-REWRITE
+      default_model: aws/anthropic/bedrock-claude-opus-5-5
+  timezone: Asia/Kolkata
+  secrets:
+    onecli:
+      enabled: false
+  plugins:
+    enabled:
+      - nv-coworker-compose
+      - nv-fleet-gates
+    entries:
+      nv-fleet-gates:
+        settings:
+          enforce_sandbox: true
+          edges_db_path: /tmp/hermes-fleet/edges.db
+          admin_tools:
+            - onboard_coworker
+            - onboard_project
+            - create_agent
