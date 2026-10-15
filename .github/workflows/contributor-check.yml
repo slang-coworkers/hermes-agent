@@ -31,7 +31,7 @@ jobs:
         id: check-emails
         run: |
           # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          MERGE_BASE=$(git merge-base origin/${{ github.event_name == 'pull_request' && github.base_ref || 'main' }} HEAD)
 
           # Find any new author emails in this PR's commits
           NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
