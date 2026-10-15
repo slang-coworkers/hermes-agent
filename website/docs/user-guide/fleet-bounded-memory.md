@@ -21,7 +21,7 @@ this row configures.
 
 ## The curator — skills-index hygiene
 
-The [curator](/user-guide/features/curator) is Hermes' auxiliary-model maintenance
+The [curator](./features/curator.md) is Hermes' auxiliary-model maintenance
 pass over the **agent-created skills** index — the part of always-loaded context
 that grows as the self-improvement loop saves new skills. It maps directly onto
 OKF synthesis: it runs on a per-role schedule, applies deterministic
@@ -131,5 +131,5 @@ not required for the skills-index leg to work per profile.
 
 ## See also
 
-- [Curator](/user-guide/features/curator) — the skills-index maintenance pass this fleet enables
-- [Memory](/user-guide/features/memory) — how the always-loaded memory files and background review work
+- [Curator](./features/curator.md) — the skills-index maintenance pass this fleet enables
+- [Memory](./features/memory.md) — how the always-loaded memory files and background review work

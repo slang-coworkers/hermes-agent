@@ -34,9 +34,9 @@ text must be shortened (or another entry removed) to fit.
 :::
 
 :::tip Running a fleet of agents?
-When several coworkers run as [profiles](/user-guide/profiles) of one gateway, each
+When several coworkers run as [profiles](../profiles.md) of one gateway, each
 profile's `MEMORY.md`/`USER.md` and its `SOUL.md` persona are isolated by Hermes home.
-See [Per-agent file memory & persona](/user-guide/fleet-per-agent-memory) for the
+See [Per-agent file memory & persona](../fleet-per-agent-memory.md) for the
 OKF→native mapping, the one-time migration runbook, and how the fleet render raises
 each profile's memory limits and leaves `write_approval` off for unattended bots.
 :::

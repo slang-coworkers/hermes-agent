@@ -427,7 +427,7 @@ Paths support `~` expansion and `${VAR}` environment variable substitution.
 - **Full integration**: External skills appear in the system prompt index, `skills_list`, `skill_view`, and as `/skill-name` slash commands — no different from local skills.
 - **Non-existent paths are silently skipped**: If a configured directory doesn't exist, Hermes ignores it without errors. Useful for optional shared directories that may not be present on every machine.
 
-For a fleet of coworker profiles that share one learnings store and synthesise it into a wiki, see [Shared learnings & the learnings wiki](/user-guide/fleet-shared-learnings), which builds on external skill directories.
+For a fleet of coworker profiles that share one learnings store and synthesise it into a wiki, see [Shared learnings & the learnings wiki](../fleet-shared-learnings.md), which builds on external skill directories.
 
 ### Example
 
@@ -504,7 +504,7 @@ if (SHARED / ".git").is_dir():
     subprocess.run(["git", "-C", str(SHARED), "pull", "--ff-only"], check=True)
 ```
 
-See [Script-Only Cron Jobs](/guides/cron-script-only) for the full no-agent contract.
+See [Script-Only Cron Jobs](../../guides/cron-script-only.md) for the full no-agent contract.
 
 :::warning Point it only at a trusted source
 Skills in an external directory are loaded as trusted local content — unlike Skills Hub installs and project skills, they are **not** run through the install security scanner or the scan-time quarantine. An hourly `git pull` therefore distributes whatever is on the tracked branch to every profile that lists the directory, with no review gate in between. Mirror only a repository and branch whose write access is controlled and whose changes are reviewed before they land.

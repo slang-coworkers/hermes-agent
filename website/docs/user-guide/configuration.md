@@ -2838,7 +2838,7 @@ The agent clock, cron schedules and time-aware tools follow this zone on every O
 
 ### Per-profile timezone
 
-Each [profile](/user-guide/profiles) has its own `config.yaml`, so each profile can set its own `timezone`. When `HERMES_TIMEZONE` is unset, resolution is keyed to the active profile's config path, so a process that multiplexes profiles — a [multi-profile gateway](/user-guide/multi-profile-gateways), or the desktop app running several bots — does not reuse one profile's cached zone for another. A process-level `HERMES_TIMEZONE` takes precedence over every profile in that process; see the warning below.
+Each [profile](./profiles.md) has its own `config.yaml`, so each profile can set its own `timezone`. When `HERMES_TIMEZONE` is unset, resolution is keyed to the active profile's config path, so a process that multiplexes profiles — a [multi-profile gateway](./multi-profile-gateways.md), or the desktop app running several bots — does not reuse one profile's cached zone for another. A process-level `HERMES_TIMEZONE` takes precedence over every profile in that process; see the warning below.
 
 **Resolution precedence** (first match wins):
 
@@ -2862,7 +2862,7 @@ An invalid IANA value (a typo, an unknown zone) logs a warning and falls back to
 - `hermes cron list` and status print the stored timestamp verbatim, so a job's time shows there in that job's own (profile) zone — a persisted value, not a re-render.
 
 :::warning Multiplexed gateways: leave the default profile's timezone empty
-A [multi-profile gateway](/user-guide/multi-profile-gateways) bridges the **launch (default) profile's** `timezone` into the process-global `HERMES_TIMEZONE` environment variable once at startup, and `HERMES_TIMEZONE` has the **highest** precedence for every profile in that process. For per-profile overrides to take effect:
+A [multi-profile gateway](./multi-profile-gateways.md) bridges the **launch (default) profile's** `timezone` into the process-global `HERMES_TIMEZONE` environment variable once at startup, and `HERMES_TIMEZONE` has the **highest** precedence for every profile in that process. For per-profile overrides to take effect:
 
 - leave the **default / multiplexer profile's** `timezone` **empty** (`""`), and
 - start the gateway process with **no** `HERMES_TIMEZONE` already set in its environment.
@@ -2872,9 +2872,9 @@ If either is non-empty, that single zone pins every profile in the process and p
 
 Related:
 
-- Provisioning tooling — for example a [profile distribution](/user-guide/profile-distributions) — can write the `timezone` key into each profile's `config.yaml`.
+- Provisioning tooling — for example a [profile distribution](./profile-distributions.md) — can write the `timezone` key into each profile's `config.yaml`.
 - Sandboxes do not read the active profile's `config.yaml` timezone directly. Hermes's built-in code-execution bridge sets the child `TZ` only from the process-global `HERMES_TIMEZONE` (which must stay unset for per-profile multiplexing), so provisioning must launch each profile's sandbox with `TZ` set from the same timezone value where matching shell timestamps matter.
-- An agent-initiated write to `config.yaml` is a dangerous command requiring human [approval](/user-guide/cli), so a bot cannot silently change its own timezone.
+- An agent-initiated write to `config.yaml` is a dangerous command requiring human [approval](./cli.md), so a bot cannot silently change its own timezone.
 
 ## Discord
 
