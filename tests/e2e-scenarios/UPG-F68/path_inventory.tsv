@@ -37,8 +37,8 @@ M	gateway/platforms/api_server.py#APIServerAdapter.run_internal_session_turn	cor
 M	gateway/platforms/api_server.py#_IdempotencyCache.get_or_set	core	replay	H5	GOV-F25		
 M	gateway/platforms/api_server.py#_IdempotencyCache.get_or_set._compute_and_store	core	replay	H5	GOV-F25		
 A	gateway/platforms/api_server.py#allow:L1	core	E2-allow	item-5	GOV-F25.b,WP-D1		
-A	gateway/platforms/api_server.py#allow:L1027	core	E2-allow	item-5	GOV-F25.b		
-M	gateway/platforms/api_server_openai_routes.py	core	M-conflict	H5	GOV-F25,GOV-F25.b	tag:gateway/platforms/api_server_openai_routes.py:843-845 H5:gateway/platforms/api_server_openai_routes.py:803-805 C1:gateway/platforms/api_server_openai_routes.py:874-876	
+A	gateway/platforms/api_server.py#allow:L926	core	E2-allow	item-5	GOV-F25.b		
+M	gateway/platforms/api_server_openai_routes.py	core	M-conflict	H5	GOV-F25,GOV-F25.b	tag:gateway/platforms/api_server_openai_routes.py:1013-1015 H5:gateway/platforms/api_server_openai_routes.py:803-805 C1:gateway/platforms/api_server_openai_routes.py:1044-1046 tag:gateway/platforms/api_server_openai_routes.py:660-726 H5:gateway/platforms/api_server_openai_routes.py:524-534 C1:gateway/platforms/api_server_openai_routes.py:660-737	
 M	gateway/platforms/api_server_openai_routes.py#OpenAICompatRoutesMixin._handle_chat_completions	core	replay	H5	GOV-F25		
 M	gateway/platforms/api_server_openai_routes.py#OpenAICompatRoutesMixin._run_idempotent	core	replay	H5	GOV-F25		
 M	gateway/platforms/api_server_openai_routes.py#_cache_if_persisted	core	replay	H5	GOV-F25		
@@ -98,7 +98,7 @@ A	plugins/nv-coworker-compose/openshell/__init__.py	in-surface	R	H5
 A	plugins/nv-coworker-compose/openshell/dockerfile_lint.py	in-surface	R	H5			item-5
 A	plugins/nv-coworker-compose/openshell/dockerfile_lint.py#allow:L83	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/openshell/install-into-sandbox.sh	in-surface	R	H5			item-2
-A	plugins/nv-coworker-compose/openshell/installer.py	in-surface	R	H5		H5:plugins/nv-coworker-compose/openshell/installer.py:675-707 1fb4d74ccb:plugins/nv-coworker-compose/openshell/installer.py:729-737 4602b13a71:plugins/nv-coworker-compose/openshell/installer.py:746-789	item-2,#77,#80,item-5
+A	plugins/nv-coworker-compose/openshell/installer.py	in-surface	R	H5		H5:plugins/nv-coworker-compose/openshell/installer.py:675-707 1fb4d74ccb:plugins/nv-coworker-compose/openshell/installer.py:729-737 0fe9652863:plugins/nv-coworker-compose/openshell/installer.py:746-789	item-2,#77,#80,item-5
 A	plugins/nv-coworker-compose/openshell/installer.py#allow:L1197	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/openshell/installer.py#allow:L1217	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/openshell/installer.py#allow:L561	in-surface	health-allow	item-5			
@@ -499,7 +499,7 @@ A	tests/gateway/test_ch_f50_acceptance.py	in-surface	R	H5			item-5
 A	tests/gateway/test_gov_f25b_hardening.py	in-surface	R	H5			
 A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	R	H5			item-5
-M	tests/gateway/test_plugin_message_injection.py	in-surface	M	H5			item-5
+M	tests/gateway/test_plugin_message_injection.py	in-surface	M-conflict	H5		tag:tests/gateway/test_plugin_message_injection.py:459-484 H5:tests/gateway/test_plugin_message_injection.py:458-1195 C1:tests/gateway/test_plugin_message_injection.py:459-1225	item-5
 A	tests/gateway/test_rt_f05_admission_acceptance.py	in-surface	R	H5			item-5
 A	tests/gateway/test_rt_f07_outbound_addressing_acceptance.py	in-surface	R	H5			
 M	tests/gateway/test_wake_delivery.py	in-surface	R	H5			
@@ -531,7 +531,7 @@ A	tests/hermes_cli/test_iso_f10_doc_contract.py	in-surface	R	H5
 A	tests/hermes_cli/test_iso_f16_config_acceptance.py	in-surface	R	H5			item-2
 A	tests/hermes_cli/test_iso_f17_doc_contract.py	in-surface	R	H5			
 M	tests/hermes_cli/test_kanban_db_init.py	in-surface	R	H5			
-M	tests/hermes_cli/test_kanban_notify.py	in-surface	M-conflict	H5		tag:tests/hermes_cli/test_kanban_notify.py:1-1180 H5:tests/hermes_cli/test_kanban_notify.py:1215-1431 C1:tests/hermes_cli/test_kanban_notify.py:1182-1398	
+M	tests/hermes_cli/test_kanban_notify.py	in-surface	M-conflict	H5		tag:tests/hermes_cli/test_kanban_notify.py:1-1180 H5:tests/hermes_cli/test_kanban_notify.py:1215-1431 C1:tests/hermes_cli/test_kanban_notify.py:1183-1399	
 A	tests/hermes_cli/test_loop_f36_doc_contract.py	in-surface	R	H5			
 A	tests/hermes_cli/test_loop_f39_compose_cron_fields.py	in-surface	R	H5			
 A	tests/hermes_cli/test_loop_f39_supervise_reaping_acceptance.py	in-surface	R	H5			item-5

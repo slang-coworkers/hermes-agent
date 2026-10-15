@@ -45,6 +45,7 @@ WP_D1_SCOPES = {
 A1 = ("gateway/kanban_watchers.py", "GatewayKanbanWatchersMixin._kanban_sub_op")
 A2 = ("gateway/platforms/api_server_openai_routes.py", "OpenAICompatRoutesMixin._run_idempotent")
 C1_CONFLICTS = ("gateway/kanban_watchers.py", "gateway/platforms/api_server_openai_routes.py",
+                "tests/gateway/test_plugin_message_injection.py",
                 "tests/hermes_cli/test_config_read_guard.py", "tests/hermes_cli/test_kanban_notify.py",
                 "website/docs/user-guide/configuration.md")
 PICK_CONFLICTS = {("1fb4d74ccb", "plugins/nv-coworker-compose/openshell/installer.py")}
@@ -564,7 +565,7 @@ def write_inventory(path, observed, core_rows, post_origins):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=".")
-    ap.add_argument("--tag", default="e06df9c2eae6901f4c88f464e0ae6e753c0428b8")
+    ap.add_argument("--tag", default="297552a9d646119871391d202509822cd86330df")  # v0.22.1
     ap.add_argument("--h5", default="a2afed6dfa21cb0be1fd60930c917f3f3060d0d3")
     ap.add_argument("--c1", required=True, help="the carry commit, parent = tag")
     ap.add_argument("--head", required=True, help="the candidate head")
