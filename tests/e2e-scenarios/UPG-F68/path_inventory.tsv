@@ -82,8 +82,8 @@ A	plugins/nv-cost-cap/store.py	in-surface	R	H5			#78
 A	plugins/nv-coworker-compose/__init__.py	in-surface	R	H5			#80
 A	plugins/nv-coworker-compose/_yaml_compat.py	in-surface	post-C1	item-2			item-2
 A	plugins/nv-coworker-compose/cli.py	in-surface	R	H5			#80
-A	plugins/nv-coworker-compose/compose.py	in-surface	R	H5			item-2,#77,#80
-A	plugins/nv-coworker-compose/openshell/Dockerfile.worker	in-surface	R	H5			#77
+A	plugins/nv-coworker-compose/compose.py	in-surface	R	H5			item-2,#77,#80,item-5
+A	plugins/nv-coworker-compose/openshell/Dockerfile.worker	in-surface	R	H5			#77,item-6
 A	plugins/nv-coworker-compose/openshell/__init__.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/openshell/dockerfile_lint.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/openshell/install-into-sandbox.sh	in-surface	R	H5			item-2
@@ -448,7 +448,7 @@ A	tests/e2e-scenarios/UPG-F67/replay_check.py	in-surface	R	H5
 A	tests/e2e-scenarios/UPG-F67/replay_ledger.tsv	in-surface	R	H5			
 A	tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch	in-surface	R	H5			
 A	tests/e2e-scenarios/UPG-F68/conflicts.md	in-surface	post-C1	new			new,item-3
-A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-3
+A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-3,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new,item-3
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
@@ -474,7 +474,7 @@ A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	R	H5
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_gov_f25b_hardening.py	in-surface	R	H5			
 A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	R	H5			
-A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	R	H5			
+A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	R	H5			item-5
 M	tests/gateway/test_plugin_message_injection.py	in-surface	M	H5			
 A	tests/gateway/test_rt_f05_admission_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_rt_f07_outbound_addressing_acceptance.py	in-surface	R	H5			
@@ -514,10 +514,10 @@ A	tests/hermes_cli/test_loop_f39_supervise_reaping_acceptance.py	in-surface	R	H5
 A	tests/hermes_cli/test_obs_f45_dashboard_acceptance.py	in-surface	R	H5			item-2
 A	tests/hermes_cli/test_obs_f47_transcript_viewing_acceptance.py	in-surface	R	H5			
 A	tests/hermes_cli/test_ops_f58_acceptance.py	in-surface	R	H5			
-A	tests/hermes_cli/test_ops_f58a_acceptance.py	in-surface	R	H5			item-2
+A	tests/hermes_cli/test_ops_f58a_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/hermes_cli/test_router_seams_acceptance.py	in-surface	R	H5			item-2
 A	tests/hermes_cli/test_rt_f09_doc_contract.py	in-surface	R	H5			
-A	tests/hermes_cli/test_self_f55_agent_templates_acceptance.py	in-surface	R	H5			item-2
+A	tests/hermes_cli/test_self_f55_agent_templates_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/hermes_cli/test_self_f57_acceptance.py	in-surface	R	H5			
 A	tests/hermes_state/test_cost_f31_acceptance.py	in-surface	R	H5			
 A	tests/plugins/fixtures/ch-f52/coworker-types.yaml	in-surface	R	H5			
@@ -594,9 +594,9 @@ A	tests/plugins/fixtures/sched-f33/workflows/.gitkeep	in-surface	R	H5
 A	tests/plugins/test_a2a_f18_wired_messaging_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_a2a_f19_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_ch_f51_acceptance.py	in-surface	R	H5			item-2
-A	tests/plugins/test_ch_f52_github_routing_acceptance.py	in-surface	R	H5			item-2
+A	tests/plugins/test_ch_f52_github_routing_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_channel_adapter_registry_acceptance.py	in-surface	R	H5			item-2
-A	tests/plugins/test_fleet_f62_acceptance.py	in-surface	R	H5			item-2
+A	tests/plugins/test_fleet_f62_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_fleet_f62_c_acceptance.py	in-surface	R	H5			item-2,#77
 A	tests/plugins/test_fleet_f62_d_acceptance.py	in-surface	post-C1	#77			#77,item-3
 A	tests/plugins/test_fleet_f62_d_credential_map_unit.py	in-surface	post-C1	#77			#77,item-3
@@ -610,12 +610,12 @@ A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f23_managed_guard.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f26_fleet_admin_scope_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f26a_managed_admin_immutability_acceptance.py	in-surface	R	H5			item-2
-A	tests/plugins/test_gov_f27_mcp_scope_acceptance.py	in-surface	R	H5			item-2
+A	tests/plugins/test_gov_f27_mcp_scope_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_gov_f27_mcp_scope_unit.py	in-surface	R	H5			item-2
 A	tests/plugins/test_hello_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_loop_f38_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_loop_f40_acceptance.py	in-surface	R	H5			item-2
-A	tests/plugins/test_mem_f41_memory_persona_acceptance.py	in-surface	R	H5			item-2
+A	tests/plugins/test_mem_f41_memory_persona_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_mem_f42_curator_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_mem_f42_curator_unit.py	in-surface	R	H5			item-2
 A	tests/plugins/test_mem_f43_shared_learnings_acceptance.py	in-surface	R	H5			item-2
@@ -668,7 +668,8 @@ A	tests/plugins/test_self_f54_doc_contract.py	in-surface	R	H5
 A	tests/plugins/test_self_f56_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	R	H5			
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	R	H5			item-2
-A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			
+A	tests/plugins/test_upg_f68_acceptance.py	in-surface	post-C1	item-5			item-5
+A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			
 A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	R	H5			
 A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5			
