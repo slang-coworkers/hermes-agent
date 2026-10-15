@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- retry_policy must be declared in the notify_subs DDL and copied by _inherit_notify_subs in this module, or a child task silently drops a durable subscription
 """SQLite-backed Kanban board shared across profiles (the cross-profile coordination primitive).
 
 Lives under the shared Hermes root: ``default`` board DB at ``<root>/kanban.db`` (pre-boards
