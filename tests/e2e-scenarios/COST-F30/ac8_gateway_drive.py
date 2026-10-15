@@ -228,7 +228,7 @@ async def _run(args) -> int:
     before = _state(mod, session_id)
     principal = mod.principal_from_event(event)
     hook_result = mod._pre_gateway_dispatch(event=event, gateway=gw, session_store=ss)
-    await asyncio.sleep(0.05)  # let the scheduled _deliver_platform_notice run
+    await asyncio.sleep(0.05)  # health: allow HX013 -- lets the scheduled _deliver_platform_notice run; no notice is a valid outcome, so there is no condition to wait for
     after = _state(mod, session_id)
     # "Does the session's NEXT turn run now?" — the plugin's OWN honest predicate against the REAL
     # on-disk state: session_resumes() = own-runnability AND NOT estop.is_engaged(). It is FALSE while

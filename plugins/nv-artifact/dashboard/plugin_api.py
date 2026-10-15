@@ -8,9 +8,12 @@ aggregates.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 try:
     from hermes_constants import get_hermes_home
@@ -32,6 +35,8 @@ except ImportError:  # pragma: no cover - lets local unit tests import without c
 try:
     from fastapi import APIRouter
 except Exception:  # pragma: no cover - allows import without dashboard deps
+    logger.debug("fastapi import failed", exc_info=True)
+
     class APIRouter:  # type: ignore
         def get(self, *_args, **_kwargs):
             return lambda fn: fn
@@ -48,6 +53,7 @@ def _settings() -> dict[str, Any]:
 
         cfg = load_config() or {}
     except Exception:
+        logger.debug("_settings failed", exc_info=True)
         cfg = {}
     entries = ((cfg.get("plugins") or {}).get("entries") or {}).get("nv-artifact") or {}
     settings = entries.get("settings") or {}
@@ -60,6 +66,7 @@ def _active_profile() -> Optional[str]:
 
         return get_active_profile_name()
     except Exception:
+        logger.debug("_active_profile failed", exc_info=True)
         return None
 
 
@@ -75,6 +82,7 @@ def _ledger_path() -> Path:
 
         home = Path(get_profile_dir(ledger_profile))
     except Exception:
+        logger.debug("_ledger_path failed", exc_info=True)
         home = Path(get_hermes_home())
     return home / "plugin-data" / "nv-artifact" / "data.db"
 

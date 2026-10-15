@@ -141,6 +141,7 @@ def _current_profile() -> str:
     try:
         return Path(get_hermes_home()).name
     except Exception:
+        logger.debug("_current_profile failed", exc_info=True)
         return ""
 
 
@@ -573,6 +574,7 @@ def register(ctx) -> None:
             stores.record_critique(session_id, stage)
             return json.dumps({"ok": True, "session_id": session_id, "stage": stage, "verdict": verdict})
         except Exception as exc:
+            logger.debug("register._slash_codex_critique failed", exc_info=True)
             return json.dumps({"ok": False, "error": str(exc)})
         finally:
             # Consume the request-local hint even on failure so it can't leak.

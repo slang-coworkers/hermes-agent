@@ -185,6 +185,7 @@ def _current_profile_name() -> str:
 
         return get_active_profile_name()
     except Exception:
+        logger.debug("_current_profile_name failed", exc_info=True)
         return "default"
 
 

@@ -576,7 +576,7 @@ def claim_resolution(
         try:
             conn.execute("ROLLBACK")
         except Exception:
-            pass
+            logger.debug("claim_resolution failed", exc_info=True)
         raise
     finally:
         conn.close()
@@ -683,7 +683,7 @@ def apply_effect(episode_id: str) -> str:
         try:
             conn.execute("ROLLBACK")
         except Exception:
-            pass
+            logger.debug("apply_effect failed", exc_info=True)
         conn.close()
         raise
     conn.close()
@@ -761,7 +761,7 @@ def _finalize_ceiling_unblock(episode_id, session_id, claimed_gen, amount_usd):
         try:
             conn.execute("ROLLBACK")
         except Exception:
-            pass
+            logger.debug("_finalize_ceiling_unblock failed", exc_info=True)
         conn.close()
         raise
     conn.close()
@@ -977,6 +977,7 @@ def ceiling_setting_is_managed() -> bool:
             f"plugins.entries.{PLUGIN_KEY}.settings.profile_ceiling_usd"
         )
     except Exception:
+        logger.debug("ceiling_setting_is_managed failed", exc_info=True)
         return False
 
 
@@ -1049,7 +1050,7 @@ def finalise_closed_unresolved() -> int:
         try:
             conn.execute("ROLLBACK")
         except Exception:
-            pass
+            logger.debug("finalise_closed_unresolved failed", exc_info=True)
         raise
     finally:
         conn.close()
@@ -1276,7 +1277,7 @@ def _in_tx(fn):
         try:
             conn.execute("ROLLBACK")
         except Exception:
-            pass
+            logger.debug("_in_tx failed", exc_info=True)
         raise
     finally:
         conn.close()

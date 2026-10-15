@@ -60,6 +60,7 @@ def _at(buf: bytes, i: int) -> int:
     return buf[i] if 0 <= i < len(buf) else 0
 
 
+# health: allow CC -- a port of git's wildmatch dowild(); keeping its branch structure is what makes this matcher agree with check-ignore
 def _dowild(p: bytes, pi: int, t: bytes, ti: int, pathname: bool) -> int:
     start = pi
     while pi < len(p):
@@ -134,6 +135,7 @@ def _dowild(p: bytes, pi: int, t: bytes, ti: int, pathname: bool) -> int:
     return _NOMATCH if ti < len(t) else _MATCH
 
 
+# health: allow CC -- a port of git's bracket-expression parser (wildmatch.c); its branches are the POSIX class and range cases git accepts
 def _bracket(p: bytes, pi: int, t_ch: int, pathname: bool):
     """Parse the bracket expression opening at ``p[pi]``. Returns ``(matched, end)`` with
     ``end`` the index of its closing ``]``, or None when it is malformed (git aborts)."""

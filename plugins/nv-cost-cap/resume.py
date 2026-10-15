@@ -243,6 +243,7 @@ def _drain_current_profile() -> int:
             try:
                 error = _send_error(_send(row["target"], row["body"]))
             except Exception as exc:
+                logger.debug("_drain_current_profile failed", exc_info=True)
                 error = f"{type(exc).__name__}: {exc}"
         if error is None:
             store.finish_outbox_row(row["id"], "sent", None, sent_at=_clock())
@@ -526,6 +527,7 @@ def approve_resume(card_id, principal) -> dict:
         try:
             lifted = estop.disengage()
         except Exception as exc:
+            logger.debug("approve_resume failed", exc_info=True)
             _decide(card, _CLAIMED, "resume-failed", "resume-failed", principal, snap=snap1,
                     outcome={"error": type(exc).__name__})
             return _result(False, "resume-failed", card_id)

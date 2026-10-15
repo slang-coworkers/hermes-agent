@@ -240,7 +240,7 @@ async def test_ac_iso_f12_6(monkeypatch):
     assert runner.request_restart(detached=False, via_service=True) is True
     assert runner._draining is True
 
-    await asyncio.sleep(0.25)
+    await asyncio.sleep(0.25)  # health: allow HX013 -- the assert below is that stop() was never awaited, which no event signals; the window lets a wrongly scheduled stop run first
     runner.stop.assert_not_awaited()
 
     del runner._running_agents[session_key]

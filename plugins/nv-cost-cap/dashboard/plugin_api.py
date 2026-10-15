@@ -101,6 +101,7 @@ async def resolve_escalation_route(episode_id: str, request: Request, profile: s
     try:
         body = await request.json()
     except Exception:
+        log.debug("resolve_escalation_route failed", exc_info=True)
         body = {}
     if not isinstance(body, dict):
         body = {}

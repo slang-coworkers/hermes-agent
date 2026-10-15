@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- the renderer is loaded standalone by file path (tests, the openshell installer's compose run), so its helpers cannot live in sibling modules it imports relatively
 """Offline renderer for nv-coworker-compose.
 
 Resolves a ``coworker-types.yaml`` lego spec (identity leaf-wins;
@@ -898,6 +899,7 @@ def _assert_extra_args_egress_safe(extra: list[Any], params: dict[str, Any],
         i += 2 if _consumes_next_extra_arg(tok) else 1
 
 
+# health: allow CC -- one ordered fail-closed check per egress key, each type check before its membership test, all before Phase B writes anything
 def _assert_egress_safe(config: dict[str, Any], params: dict[str, Any], profile_name: str,
                         descriptor: _SubstrateDescriptor) -> None:
     """Fail-closed pre-pass (ISO-F14): refuse a resolved profile whose merged
@@ -2266,6 +2268,7 @@ def _reject_disallowed_extra_args(extra_args: list[str], profile_name: str) -> N
         i += 1
 
 
+# health: allow CC -- the closed mount set is decided in one place: workspace root, shared-learnings clone and install surfaces are each policed against the others
 def _enforce_mount_composition(
     config: dict[str, Any],
     profile_name: str,
@@ -3439,6 +3442,7 @@ def _normalize_monitor(name: str, decl: dict[str, Any]) -> tuple[Optional[str], 
     return _clean(explicit_script, "monitor_script"), _clean(explicit_url, "monitor_url")
 
 
+# health: allow CC -- mirrors cron.jobs._validate_job_mode_invariants branch for branch, so a rendered job is never a shape the scheduler auto-pauses
 def _build_cron_job(profile: str, decl: Any) -> dict[str, Any]:
     """Render one declared cron job into the persisted record ``cron.jobs`` loads.
 
@@ -4151,6 +4155,7 @@ def _render_mcp_scope(
     _mcp_write_scope(default_config, full_scope)
 
 
+# health: allow CC FUNC_LINES -- Phase A resolves and validates every profile before Phase B writes any, so a late refusal leaves no partial fleet; the phases share one resolved state
 def compose(spec: str, out: str) -> dict[str, str]:
     """Render each coworker type + the DEFAULT profile into ``out``.
 
