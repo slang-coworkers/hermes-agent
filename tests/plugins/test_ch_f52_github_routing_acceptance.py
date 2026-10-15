@@ -409,7 +409,7 @@ async def test_ac_ch_f52_7(tmp_path, monkeypatch, caplog):
             assert resp.status == 403
             await asyncio.sleep(0.05)
     assert captured_c == []
-    assert any("has no HMAC secret" in r.getMessage() for r in caplog.records)
+    assert any("HMAC secret is missing, blank, or not a string" in r.getMessage() for r in caplog.records)
 
 
 # ─────────────────────────── AC-CH-F52-8 ───────────────────────────
