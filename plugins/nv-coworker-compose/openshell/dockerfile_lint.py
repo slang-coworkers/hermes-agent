@@ -81,7 +81,7 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
 
 
 def lint(path) -> LintResult:
-    text = Path(path).read_text(encoding="utf-8")
+    text = Path(path).read_text(encoding="utf-8-sig")
     instrs = _logical_lines(text)
     findings: list[tuple[str, str, str, int]] = []
 

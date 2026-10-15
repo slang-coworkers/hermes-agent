@@ -185,7 +185,7 @@ def derive_bundle(live: str, merge: Iterable[str], dest: Path) -> None:
         p = Path(path)
         if not p.is_file():
             raise TrustError(f"{path} is missing or not a regular file")
-        text = p.read_text(encoding="utf-8", errors="replace").strip()
+        text = p.read_text(encoding="utf-8-sig", errors="replace").strip()
         if not text:
             raise TrustError(f"{path} is empty")
         texts.append(text)

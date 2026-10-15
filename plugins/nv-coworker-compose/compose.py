@@ -352,7 +352,7 @@ def _safe_join(root: Path, *parts: str) -> Path:
 
 def load_spec(spec: str) -> dict[str, Any]:
     """Parse a coworker-types.yaml spec file into a plain dict."""
-    return yaml.safe_load(Path(spec).read_text(encoding="utf-8")) or {}
+    return yaml.safe_load(Path(spec).read_text(encoding="utf-8-sig")) or {}
 
 
 def _dedup(items: list[Any]) -> list[Any]:
@@ -1999,7 +1999,7 @@ def _enforce_openshell_policy(
                                            extra_read_only, extra_read_write,
                                            anonymous_reads))
     dist_path = pdir / "distribution.yaml"
-    dist = yaml.safe_load(dist_path.read_text(encoding="utf-8")) or {}
+    dist = yaml.safe_load(dist_path.read_text(encoding="utf-8-sig")) or {}
     owned = dist.get("distribution_owned")
     if isinstance(owned, list) and policy_name not in owned:
         owned.append(policy_name)
@@ -3669,7 +3669,7 @@ def _load_overlays(names: list[Any], overlays_root: Path) -> list[dict[str, Any]
     for name in names:
         src = _safe_join(overlays_root, f"{_safe_name('overlay', name)}.yaml")
         if src.is_file():
-            out.append(yaml.safe_load(src.read_text(encoding="utf-8")) or {})
+            out.append(yaml.safe_load(src.read_text(encoding="utf-8-sig")) or {})
     return out
 
 
@@ -3714,7 +3714,8 @@ def _render_coworker(pdir: Path, tname: str, resolved: dict[str, Any],
             raise CompositionError(f"{tname}: skill {skill!r} has no SKILL.md at {src}")
         dest = skills_dir / skill
         dest.mkdir(exist_ok=True)
-        (dest / "SKILL.md").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        body = src.read_text(encoding="utf-8-sig")
+        (dest / "SKILL.md").write_text(body, encoding="utf-8")
         _copy_skill_files(src.parent, dest, tname, skill)
 
     overlays = _load_overlays(resolved["overlays"], overlays_root)
@@ -3723,7 +3724,7 @@ def _render_coworker(pdir: Path, tname: str, resolved: dict[str, Any],
         src = _safe_join(workflows_root, workflow, "SKILL.md")
         if not src.is_file():
             raise CompositionError(f"{tname}: workflow {workflow!r} has no SKILL.md at {src}")
-        body = _splice_overlays(src.read_text(encoding="utf-8"), workflow, tname, overlays)
+        body = _splice_overlays(src.read_text(encoding="utf-8-sig"), workflow, tname, overlays)
         dest = skills_dir / workflow
         dest.mkdir(exist_ok=True)
         (dest / "SKILL.md").write_text(body, encoding="utf-8")
@@ -3767,9 +3768,8 @@ def _render_route_scripts(pdir: Path) -> None:
     scripts_dir = pdir / "scripts"
     scripts_dir.mkdir(exist_ok=True)
     for script in _ROUTE_SCRIPTS:
-        (scripts_dir / script).write_text(
-            (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        text = (src_dir / script).read_text(encoding="utf-8-sig")
+        (scripts_dir / script).write_text(text, encoding="utf-8")
 
 
 def _render_bound_route_scripts(out_root: Path, default_config: dict[str, Any],
@@ -3792,9 +3792,8 @@ def _render_bound_route_scripts(out_root: Path, default_config: dict[str, Any],
             continue
         scripts_dir = out_root / profile / "scripts"
         scripts_dir.mkdir(exist_ok=True)
-        (scripts_dir / script).write_text(
-            (src_dir / script).read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        text = (src_dir / script).read_text(encoding="utf-8-sig")
+        (scripts_dir / script).write_text(text, encoding="utf-8")
 
 
 def _render_default(pdir: Path, name: str, config: dict[str, Any]) -> None:
@@ -4183,7 +4182,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
         if not source:
             raise CompositionError(f"spine {sname!r} has no source")
         src = _safe_join(spec_dir, str(source))
-        spines[sname] = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+        spines[sname] = yaml.safe_load(src.read_text(encoding="utf-8-sig")) or {}
 
     orchestrator_profile = _safe_name("profile", data.get("orchestrator_profile", "orchestrator"))
     default_profile = _safe_name("profile", data.get("default_profile", "default"))
