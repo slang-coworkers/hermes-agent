@@ -214,11 +214,25 @@ def is_plan_path(path) -> bool:
     return bool(_PLAN_RE.search(path.replace("\\", "/")))
 
 
+def _resolve_fail_closed(path: Path) -> Path:
+    """``Path.resolve()`` that raises when the path cannot be shown to resolve: on 3.14 the
+    non-strict resolve returns a symlink loop unresolved instead of raising RuntimeError
+    (3.11/3.12), so the deepest existing ancestor of the unresolved path is re-resolved
+    strictly (a loop -> ELOOP, a dangling link -> FileNotFoundError). A loop link reports
+    ``exists() == False``, hence ``is_symlink()`` in the walk."""
+    path = Path(path)
+    probe = path
+    while not (probe.exists() or probe.is_symlink()) and probe != probe.parent:
+        probe = probe.parent
+    probe.resolve(strict=True)
+    return path.resolve()
+
+
 def within(child: Path, parent: Path) -> bool:
     """True if *child* is *parent* or lives under it (symlinks resolved)."""
     try:
-        child = Path(child).resolve()
-        parent = Path(parent).resolve()
+        child = _resolve_fail_closed(child)
+        parent = _resolve_fail_closed(parent)
     except (OSError, RuntimeError):
         return False
     return child == parent or parent in child.parents
