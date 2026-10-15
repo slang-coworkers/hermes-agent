@@ -529,6 +529,9 @@ def test_install_into_sandbox_dry_run_forwards_policy_root(tmp_path, monkeypatch
     env = os.environ.copy()
     env["HERMES_HOME"] = str(home)
     env["HERMES_PYTHON"] = sys.executable  # deterministic interpreter selection (has PyYAML under the runner)
+    # installer.py runs with its own dir on sys.path[0]; a test interpreter without the project
+    # installed (CI's test environment) resolves hermes_yaml only through PYTHONPATH.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(root), env.get("PYTHONPATH")) if p)
     host_root = "/tmp/osh-f64-policy-root"
 
     def _create_policies(extra):

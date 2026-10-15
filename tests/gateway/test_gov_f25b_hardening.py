@@ -16,6 +16,10 @@ import pytest
 
 OWNER_SESS = "gov-f25b-owner-sess-0"
 OWNER_PROFILE = "gov-f25b-owner"
+# Hang guard for AC-1's event waits, sized for a CPU-starved CI runner. Drainer A's first event
+# parses the i18n catalog on the loop once per (HERMES_HOME, lang), and each test has a fresh home:
+# ~0.5 s idle, up to ~18 s under 24 busy loops on 4 cores. The waits stay event-driven.
+_LOADED_RUNNER_BOUND_S = 60
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +150,7 @@ async def test_ac_gov_f25_b_1(monkeypatch):
             # Hold the first drainer inside delivery — its claim taken, cursor not yet
             # advanced — while the competing drainer attempts the same event.
             a_in_delivery.set()
-            await asyncio.wait_for(release_a.wait(), timeout=5)
+            await asyncio.wait_for(release_a.wait(), timeout=_LOADED_RUNNER_BOUND_S)
 
     monkeypatch.setattr("gateway.wake.deliver_wake", _deliver)
 
@@ -157,11 +161,11 @@ async def test_ac_gov_f25_b_1(monkeypatch):
 
     task_a = asyncio.create_task(
         _durable_runner()._deliver_durable_notifications(d_a))
-    await asyncio.wait_for(a_in_delivery.wait(), timeout=5)
+    await asyncio.wait_for(a_in_delivery.wait(), timeout=_LOADED_RUNNER_BOUND_S)
     # Drainer B competes for the same event while A still holds it undelivered.
     await _durable_runner()._deliver_durable_notifications(d_b)
     release_a.set()
-    await asyncio.wait_for(task_a, timeout=5)
+    await asyncio.wait_for(task_a, timeout=_LOADED_RUNNER_BOUND_S)
 
     assert calls == ["o/r#41:D1"], (
         f"exactly one delivery expected across two concurrent drainers; got {calls}"

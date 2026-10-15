@@ -4086,7 +4086,7 @@ def _render_mcp_scope(
     union: dict[str, dict[str, Any]] = {}
     sanitized_servers: dict[str, str] = {}
     # Fleet-wide map from the full model-facing name to its (server, kind, tool)
-    # owner. The mcp__<server>__<tool> delimiter is ambiguous when a component
+    # owner. The mcp__{server}__{tool} delimiter is ambiguous when a component
     # contains "__" ((a, b__c) and (a__b, c) both yield mcp__a__b__c), and a
     # native tool can clash with a generated resource/prompt utility; either
     # would let one profile's scope key match another's registered tool, so a

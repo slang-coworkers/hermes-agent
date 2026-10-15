@@ -512,6 +512,10 @@ def test_pr_ci_gate_subprocess_contract(tmp_path, monkeypatch):
     env = dict(os.environ)
     env["HERMES_HOME"] = str(tmp_path / "home")  # gate DB resolves under plugin-data here
     env["HERMES_KANBAN_DB"] = str(kanban_db)     # kanban resolver honours this pin first
+    # The script child's sys.path[0] is its own dir; a test interpreter without the project
+    # installed (CI's test environment) resolves hermes_cli only through PYTHONPATH.
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (repo_root, env.get("PYTHONPATH")) if p)
     proc = subprocess.run(
         [sys.executable, str(script)],
         input=_json.dumps(_pr_event("opened", SHA_A)),

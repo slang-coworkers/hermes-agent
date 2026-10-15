@@ -383,8 +383,12 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     script = repo_openshell / "install-into-sandbox.sh"
     sha = "a" * 40
     before_home, before_managed = _tree_fingerprint(home), _tree_fingerprint(managed)
-    t1 = _run_script_dry_run(script, spec, sha, os.environ.copy())
-    t2 = _run_script_dry_run(script, spec, sha, os.environ.copy())
+    # installer.py runs with its own dir on sys.path[0]; a test interpreter without the project
+    # installed (CI's test environment) resolves hermes_yaml only through PYTHONPATH.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(root), env.get("PYTHONPATH")) if p)
+    t1 = _run_script_dry_run(script, spec, sha, env)
+    t2 = _run_script_dry_run(script, spec, sha, env)
     assert t1 == t2, "dry-run must be byte-identical across runs (determinism)"
     assert _tree_fingerprint(home) == before_home and _tree_fingerprint(managed) == before_managed, \
         "dry-run must not mutate home or managed dir"
