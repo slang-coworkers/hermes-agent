@@ -1,0 +1,5 @@
+# path	import_before	import_after	reason
+apps/desktop/e2e/fleet-f62-ac10.helpers.ts	  writeEnvFile,		TS2459 at v0.22.1/v0.22.2: apps/desktop/e2e/fixtures.ts imports writeEnvFile/writeMockProviderConfig from tests-js/scripts/mock-provider-config (:39, :90) and no longer exports them; architect msg 80 ruled the re-point (5a)
+apps/desktop/e2e/fleet-f62-ac10.helpers.ts	  writeMockProviderConfig		same: drop the two names from the './fixtures' import
+apps/desktop/e2e/fleet-f62-ac10.helpers.ts	  waitForAppReady,	  waitForAppReady	same: the import list's last name loses its trailing comma (prettier trailingComma none)
+apps/desktop/e2e/fleet-f62-ac10.helpers.ts		import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'	same: import the two helpers from their 0.22 module

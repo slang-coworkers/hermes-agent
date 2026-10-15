@@ -10,10 +10,9 @@ import {
   type MockBackendFixture,
   REPO_ROOT,
   type Sandbox,
-  waitForAppReady,
-  writeEnvFile,
-  writeMockProviderConfig
+  waitForAppReady
 } from './fixtures'
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { startMockServer } from '../../../tests-js/scripts/mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
