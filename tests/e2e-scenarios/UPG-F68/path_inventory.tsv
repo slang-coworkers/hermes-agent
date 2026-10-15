@@ -719,29 +719,29 @@ M	website/docs/developer-guide/gateway-internals.md	in-surface	M	H5
 A	website/docs/developer-guide/plugins/nv-cost-cap.md	in-surface	R	H5			#78
 A	website/docs/developer-guide/plugins/nv-fleet-gates.md	in-surface	R	H5			
 A	website/docs/developer-guide/plugins/nv-workflow-modes.md	in-surface	R	H5			
-A	website/docs/developer-guide/plugins/router-seams.md	in-surface	R	H5			
+A	website/docs/developer-guide/plugins/router-seams.md	in-surface	R	H5			item-5
 A	website/docs/developer-guide/podman-onecli-plugin.md	in-surface	R	H5			
 M	website/docs/user-guide/bot-mode.md	in-surface	M	H5			
-M	website/docs/user-guide/configuration.md	in-surface	M-conflict	H5		tag:website/docs/user-guide/configuration.md:2795-2795 H5:website/docs/user-guide/configuration.md:2800-2800 C1:website/docs/user-guide/configuration.md:2827-2827	
+M	website/docs/user-guide/configuration.md	in-surface	M-conflict	H5		tag:website/docs/user-guide/configuration.md:2795-2795 H5:website/docs/user-guide/configuration.md:2800-2800 C1:website/docs/user-guide/configuration.md:2827-2827	item-5
 A	website/docs/user-guide/cross-session-context.md	in-surface	R	H5			
 M	website/docs/user-guide/docker.md	in-surface	M	H5			
 M	website/docs/user-guide/features/built-in-plugins.md	in-surface	M	H5			
 A	website/docs/user-guide/features/cost-accounting.md	in-surface	R	H5			
 A	website/docs/user-guide/features/coworker-fleet-dashboard.md	in-surface	R	H5			
 M	website/docs/user-guide/features/cron.md	in-surface	M	H5			
-M	website/docs/user-guide/features/curator.md	in-surface	M	H5			
+M	website/docs/user-guide/features/curator.md	in-surface	M	H5			item-5
 A	website/docs/user-guide/features/fleet-issue-supervision.md	in-surface	R	H5			
 M	website/docs/user-guide/features/hooks.md	in-surface	M	H5			
 A	website/docs/user-guide/features/idempotent-lifecycle.md	in-surface	R	H5			
 A	website/docs/user-guide/features/interactive-operations.md	in-surface	R	H5			
-M	website/docs/user-guide/features/memory.md	in-surface	M	H5			
+M	website/docs/user-guide/features/memory.md	in-surface	M	H5			item-5
 A	website/docs/user-guide/features/outbound-destination-acl-and-delivery.md	in-surface	R	H5			
-M	website/docs/user-guide/features/skills.md	in-surface	M	H5			
+M	website/docs/user-guide/features/skills.md	in-surface	M	H5			item-5
 M	website/docs/user-guide/features/web-dashboard.md	in-surface	M	H5			
 A	website/docs/user-guide/fleet-admin-inventory.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-admin-scope.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-approvals-policy.md	in-surface	R	H5			item-2
-A	website/docs/user-guide/fleet-bounded-memory.md	in-surface	R	H5			
+A	website/docs/user-guide/fleet-bounded-memory.md	in-surface	R	H5			item-5
 A	website/docs/user-guide/fleet-deployment.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-engage-modes.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-entity-model.md	in-surface	R	H5			
@@ -752,7 +752,7 @@ A	website/docs/user-guide/fleet-metrics.md	in-surface	R	H5
 A	website/docs/user-guide/fleet-mount-composition.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-nanoclaw-base-port.md	in-surface	R	H5			#77
 A	website/docs/user-guide/fleet-openshell.md	in-surface	R	H5			#77,#80
-A	website/docs/user-guide/fleet-per-agent-memory.md	in-surface	R	H5			
+A	website/docs/user-guide/fleet-per-agent-memory.md	in-surface	R	H5			item-5
 A	website/docs/user-guide/fleet-raw-request-capture.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-session-driver.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet-session-modes.md	in-surface	R	H5			
@@ -760,7 +760,7 @@ A	website/docs/user-guide/fleet-shared-learnings.md	in-surface	R	H5
 A	website/docs/user-guide/fleet-transcript-retention.md	in-surface	R	H5			
 A	website/docs/user-guide/fleet/egress-lockdown.md	in-surface	R	H5			
 M	website/docs/user-guide/git-worktrees.md	in-surface	M	H5			
-M	website/docs/user-guide/messaging/index.md	in-surface	M	H5			
+M	website/docs/user-guide/messaging/index.md	in-surface	M	H5			item-5
 M	website/docs/user-guide/multi-profile-gateways.md	in-surface	M	H5			
 A	website/docs/user-guide/ncl-to-hermes-admin-cli.md	in-surface	R	H5			
 A	website/docs/user-guide/onboarding-projects-and-coworkers.md	in-surface	R	H5			
