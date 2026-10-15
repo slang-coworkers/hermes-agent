@@ -16,9 +16,10 @@ commits. Checks, each named after ADR §Merge gate 2:
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point.
-  (g) fork-ci (user ruling, operator msg 596): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]`` commits,
-      only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped to
-      standard runners; no workflow line outside a comment still names a 32-core label at the head.
+  (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
+      commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
+      to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
+      timed out on a standard runner); no workflow line outside a comment still names a 32-core label at the head.
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
 """
@@ -87,6 +88,10 @@ SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac
 ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
 FORK_CI = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 FORK_CI_AUTHORITY = "msg-596"
+# (workflow, job) -> raised timeout-minutes. Msg 602: a Python test slice that timed out on a standard runner.
+FORK_CI_TIMEOUTS = {(".github/workflows/tests.yml", "test"): 90}
+TIMEOUT_LINE = re.compile(r"^(\s+timeout-minutes: )\d+(\s*)$")
+JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 FORK_CI_RUNNERS = {
     "ubuntu-latest-32-core": "ubuntu-latest",
     "ubuntu-latest-32-arm-core": "ubuntu-24.04-arm",
@@ -502,8 +507,26 @@ def added_allows(repo, c1, head, path):
     return out
 
 
+def fork_ci_authority(path):
+    return FORK_CI_AUTHORITY + (",msg-602" if any(f == path for f, _job in FORK_CI_TIMEOUTS) else "")
+
+
+def _job_of(lines, n):
+    """The ``jobs.<id>`` key whose block holds 1-based line ``n`` (the nearest two-space-indented key above it)."""
+    return next((m.group(1) for ln in reversed(lines[:n - 1]) if (m := JOB_KEY.match(ln))), None)
+
+
+def _fork_ci_line(path, old, n, was, now):
+    """A changed workflow line is a runner-label mapping on a runs-on/runner key or a FORK_CI_TIMEOUTS raise."""
+    if RUNNER_KEY.match(was) and RUNNER_LABEL.sub(lambda m: FORK_CI_RUNNERS[m.group(0)], was) == now:
+        return True
+    m, raised = TIMEOUT_LINE.match(was), FORK_CI_TIMEOUTS.get((path, _job_of(old, n)))
+    return bool(m and raised and now == f"{m.group(1)}{raised}{m.group(2)}")
+
+
 def _label_mapping(repo, a, b, path, where):
-    """Fails unless ``path`` at ``b`` is ``path`` at ``a`` with runner labels mapped on runs-on/runner lines only."""
+    """Fails unless ``path`` at ``b`` is ``path`` at ``a`` with runner labels mapped on runs-on/runner lines and the
+    FORK_CI_TIMEOUTS raises, and nothing else."""
     old, new = text_at(repo, a, path).splitlines(keepends=True), text_at(repo, b, path).splitlines(keepends=True)
     if len(old) != len(new):
         return [f"FORK-CI: {path}: line count differs {where} (a label mapping keeps every line)"], 0
@@ -511,7 +534,7 @@ def _label_mapping(repo, a, b, path, where):
     for n, (was, now) in enumerate(zip(old, new), 1):
         if was == now:
             continue
-        if RUNNER_KEY.match(was) and RUNNER_LABEL.sub(lambda m: FORK_CI_RUNNERS[m.group(0)], was) == now:
+        if _fork_ci_line(path, old, n, was, now):
             mapped += 1
         else:
             fails.append(f"FORK-CI: {path}:{n}: not a runner-label mapping {where}: {now.strip()[:100]!r}")
@@ -579,8 +602,8 @@ def check_inventory(path, observed, core_rows, post_origins, needs_locators, rep
             fails.append(f"INVENTORY: {p} post_c1 says {got[6]!r}, checker found {','.join(post_origins.get(p, []))!r}")
         base = p.split("#")[0]
         names = {a for a in got[4].split(",") if a}
-        if w[1] == "fork-ci" and got[4] != FORK_CI_AUTHORITY:
-            fails.append(f"INVENTORY: fork-ci row {p} names authority {got[4]!r}, want {FORK_CI_AUTHORITY}")
+        if w[1] == "fork-ci" and got[4] != fork_ci_authority(p):
+            fails.append(f"INVENTORY: fork-ci row {p} names authority {got[4]!r}, want {fork_ci_authority(p)}")
         if w[1] == "core":
             if not names:
                 fails.append(f"INVENTORY: core row {p} names no authority")
@@ -613,8 +636,8 @@ def write_inventory(path, observed, core_rows, post_origins):
         auth, locs = keep.get(p, ("", ""))
         if not auth and w[1] == "core" and len(w) > 4:
             auth = w[4]
-        if not auth and w[1] == "fork-ci":
-            auth = FORK_CI_AUTHORITY
+        if w[1] == "fork-ci":
+            auth = fork_ci_authority(p)
         rows.append([w[0], p, w[1], w[2], w[3], auth, locs, ",".join(post_origins.get(p, []))])
     with open(path, "w", encoding="utf-8", newline="") as fh:
         wr = csv.writer(fh, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
@@ -755,13 +778,13 @@ def main():
     print(f"## health allows added after C1 in fork code: {len(fork_allows)}")
     for k in fork_allows:
         print(f"  {k}")
-    print(f"## (g) fork-ci runner-label lines mapped after C1: {fork_ci_lines}")
+    print(f"## (g) fork-ci lines after C1 (runner labels + FORK_CI_TIMEOUTS): {fork_ci_lines}")
     print(f"## inventory mismatches: {len(inv)}")
     if fails:
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; no core after C1 beyond the 2(e') allows; fork-ci is the runner-label mapping only; inventory"
+          " sources; no core after C1 beyond the 2(e') allows; fork-ci is the runner-label mapping plus the FORK_CI_TIMEOUTS raises only; inventory"
           " matches")
     return 0
 
