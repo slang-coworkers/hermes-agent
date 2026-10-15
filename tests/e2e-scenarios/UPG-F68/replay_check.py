@@ -12,7 +12,9 @@ commits. Checks, each named after ADR §Merge gate 2:
       decomposed into the GOV-F25 re-home (9.24..C2_F67), WP-D1 (C2_F67..WP_D1_F67, equal to the approved patch
       bytes) and nothing else; MSG-DELIV is E and F62.g HELD (tools/bot_mode_dm.py equals the tag).
   (d) the A1 union rule for ``_kanban_sub_op`` (the same equation over the whole function), with its three locators.
-  (e) no core path changes after C1 (item 4, the only later core, is not in this candidate).
+  (e) no core path changes after C1 (item 4, the only later core, is not in this candidate), except
+  (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
+       at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point.
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
@@ -23,8 +25,10 @@ import csv
 import hashlib
 import os
 import re
+import io
 import subprocess
 import sys
+import tokenize
 from collections import Counter
 
 NINE24 = "f97608f178d1ffeca59860195ab7da295f7c8e5f"
@@ -65,8 +69,18 @@ RETAINED = {
     "tools/bot_mode_dm.py#F62.g": ("tools/bot_mode_dm.py", "HELD", "F62.g"),
 }
 U_DEL = ()
+# Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
+# None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
+# table survives a re-carry onto another tag.
+E2_ALLOW = (
+    ("gateway/kanban_watchers.py", "BLE001", "except Exception as exc:", "GOV-F25"),
+    ("gateway/platforms/api_server.py", "BLE001", "except Exception:", "GOV-F25.b"),
+    ("gateway/platforms/api_server.py", "FILE_LINES", None, "GOV-F25.b,WP-D1"),
+    ("hermes_cli/kanban_db.py", "FILE_LINES", None, "GOV-F25"),
+)
+HEALTH_ALLOW = re.compile(r"^# health: allow ([A-Z0-9_, ]+) -- .+$")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
-ITEM = re.compile(r"\[UPG-F68 (\d+)\]")
+ITEM = re.compile(r"\[UPG-F68 (\d+)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
 CHERRY = re.compile(r"^\(cherry picked from commit ([0-9a-f]{40})\)$", re.MULTILINE)
 LOCATOR = re.compile(r"^(tag|H5|C1|HEAD|[0-9a-f]{10,40}):([^:]+):(\d+)-(\d+)$")
 IMPORT_LINE = re.compile(r"^(import\b|export\s.*\sfrom\s|\}\s*from\s|.*\brequire\()")
@@ -411,6 +425,66 @@ def check_picks(repo, picks, after_c1):
     return fails
 
 
+def check_e2_allow(repo, c1, head, path):
+    """2(e'): ``path`` changes from C1 to the head only by added ``# health: allow`` comments at its E2_ALLOW sites, and
+    its AST is identical (comments and line positions are not in ``ast.dump``). Returns (fails, allowed sites)."""
+    sites = [(rule, code) for f, rule, code, _auth in E2_ALLOW if f == path]
+    if not sites:
+        return [f"CORE-AFTER-C1: {path} (no later core is authorized in this candidate)"], []
+    old, new = text_at(repo, c1, path), text_at(repo, head, path)
+    fails, found = [], []
+    if ast.dump(ast.parse(old)) != ast.dump(ast.parse(new)):
+        fails.append(f"E2-ALLOW: {path}: the AST differs between C1 and the head")
+    plus, minus = diff_lines(repo, c1, head, path)
+    new_lines = new.splitlines()
+    by_new = dict(plus)
+    removed = {ln for _n, ln in minus}
+    for n, ln in plus:
+        code, sep, comment = ln.partition("  # health: allow ")
+        if not ln.lstrip().startswith("#") and sep:
+            match, rest = HEALTH_ALLOW.match("# health: allow " + comment), code.strip()
+            if code not in removed:
+                fails.append(f"E2-ALLOW: {path}:{n}: the waiver's code line is not an existing line at C1")
+        elif ln.startswith("# health: allow ") and n == 1:
+            match, rest = HEALTH_ALLOW.match(ln), None
+        else:
+            fails.append(f"E2-ALLOW: {path}:{n}: not a comment-only waiver line: {ln.strip()[:100]!r}")
+            continue
+        if not match:
+            fails.append(f"E2-ALLOW: {path}:{n}: waiver does not match `# health: allow <RULE> -- <why>`")
+            continue
+        rules = {r for r in re.split(r"[,\s]+", match.group(1).strip()) if r}
+        hit = [(r, c) for r, c in sites if r in rules and c == rest]
+        if len(rules) != 1 or not hit:
+            fails.append(f"E2-ALLOW: {path}:{n}: {sorted(rules)} on {rest!r} is not an E2_ALLOW site")
+            continue
+        sites.remove(hit[0])
+        found.append((path, n, hit[0][0], (by_new.get(n) or new_lines[n - 1]).strip()[:60]))
+    if len(minus) != sum(1 for _n, ln in plus if not ln.startswith("# health: allow ")):
+        fails.append(f"E2-ALLOW: {path}: a removed line is not paired with its waiver-carrying replacement")
+    fails.extend(f"E2-ALLOW: {path}: site {r} on {c!r} has no waiver at the head" for r, c in sites)
+    return fails, found
+
+
+def added_allows(repo, c1, head, path):
+    """``(line, rules)`` of each ``# health: allow`` comment token at the head that C1 does not already carry."""
+    def comments(text):
+        try:
+            toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        except (tokenize.TokenError, SyntaxError):
+            return []
+        return [(t.start[0], t.string) for t in toks if t.type == tokenize.COMMENT and "health: allow" in t.string]
+    before = Counter(c for _n, c in comments(text_at(repo, c1, path)))
+    out = []
+    for n, c in comments(text_at(repo, head, path)):
+        if before[c]:
+            before[c] -= 1
+            continue
+        m = HEALTH_ALLOW.match(c)
+        out.append((n, ",".join(r for r in re.split(r"[,\s]+", m.group(1).strip()) if r) if m else "?"))
+    return out
+
+
 def origin_of(sha, src, item, picks):
     if src:
         return "#" + {"b41d14df02": "78", "1fb4d74ccb": "77", "35767fe243": "80", "0615c1e7a0": "82"}.get(src[:10], src[:10])
@@ -454,7 +528,7 @@ def check_inventory(path, observed, core_rows, post_origins, needs_locators, rep
                 fails.append(f"INVENTORY: {p} names authority {got[4]!r}, allowed {sorted(CORE_AUTHORITY[base])}")
             elif len(w) > 4 and w[4] is not None:
                 found = set(w[4].split(","))
-                mapped = {"GOV-F25" if a.startswith("GOV-F25") else a for a in names}
+                mapped = names if w[2] == "E2-allow" else {"GOV-F25" if a.startswith("GOV-F25") else a for a in names}
                 if mapped != found:
                     fails.append(f"INVENTORY: {p} authority {got[4]!r} does not match the replayed parts {sorted(found)}")
         if p in needs_locators:
@@ -486,6 +560,7 @@ def write_inventory(path, observed, core_rows, post_origins):
         wr.writerows(rows)
 
 
+# health: allow CC -- each merge-gate check is a step of one linear verdict over the same candidate history, so the steps share its parsed state
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=".")
@@ -541,9 +616,12 @@ def main():
     after_c1 = commits_after(repo, revs["c1"], revs["head"])
     fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()], after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
-    for path in sorted(post):
+    e2_allowed = []
+    for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
         if is_core(path, h5_paths):
-            fails.append(f"CORE-AFTER-C1: {path} (no later core is authorized in this candidate)")
+            f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
+            fails.extend(f_e)
+            e2_allowed.extend(found)
     rec = {}
     if a.repoints:
         with open(a.repoints, encoding="utf-8", newline="") as fh:
@@ -576,6 +654,18 @@ def main():
             st = "A" if blob(repo, revs["c1"], p) is None else "M"
             st = st if blob(repo, revs["head"], p) else "D"
             observed_all[p] = (st, surface_of(p, h5_paths), "post-C1", post_origins.get(p, ["?"])[0])
+    auth_of = {(f, r): auth for f, r, _c, auth in E2_ALLOW}
+    allow_rows = {}
+    for path in sorted(p for p in post if p.endswith(".py") and blob(repo, revs["head"], p)):
+        core = is_core(path, h5_paths)
+        for n, rules in added_allows(repo, revs["c1"], revs["head"], path):
+            if rules == "?":
+                fails.append(f"HEALTH-ALLOW: {path}:{n}: not of the form `# health: allow <RULE> -- <why>`")
+            if core:
+                allow_rows[f"{path}#allow:L{n}"] = ("A", "core", "E2-allow", "item-5", auth_of.get((path, rules), ""))
+            else:
+                allow_rows[f"{path}#allow:L{n}"] = ("A", surface_of(path, h5_paths), "health-allow", "item-5")
+    observed_all.update(allow_rows)
     landed = {src[:10] for _sha, src, _i in after_c1 if src}
     needs = set(C1_CONFLICTS) | {f for src, f in PICK_CONFLICTS if src in landed}
     if a.write_inventory:
@@ -593,12 +683,19 @@ def main():
     print(f"## unaccounted H5-added lines: {len(flagged)} path(s)")
     for path, n, first in flagged:
         print(f"  {path}: {n}, first: {first!r}")
+    print(f"## 2(e') E2 allows after C1 (core, AST identical): {len(e2_allowed)}")
+    for path, n, rule, line in e2_allowed:
+        print(f"  {path}:{n} {rule}  {line}")
+    fork_allows = sorted(k for k, v in allow_rows.items() if v[2] == "health-allow")
+    print(f"## health allows added after C1 in fork code: {len(fork_allows)}")
+    for k in fork_allows:
+        print(f"  {k}")
     print(f"## inventory mismatches: {len(inv)}")
     if fails:
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; no core after C1; inventory matches")
+          " sources; no core after C1 beyond the 2(e') allows; inventory matches")
     return 0
 
 
