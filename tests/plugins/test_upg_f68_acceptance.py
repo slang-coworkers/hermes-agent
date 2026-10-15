@@ -1,4 +1,4 @@
-"""UPG-F68 acceptance: re-pin the fork to Hermes v0.22.0 (tag commit e06df9c2), carrying UPG-F67's #79 forward.
+"""UPG-F68 acceptance: the fork on Hermes v0.22.2 (tag commit d923a5eb) with UPG-F67's carried contracts.
 
 Ships as tests/plugins/test_upg_f68_acceptance.py. One test per `pytest:` row of the ADR's `## Acceptance criteria`
 (reports/upg-f68.md), in id order; docstring line 1 is the criterion. Runs on Python 3.14 in the dev-group venv with no
@@ -39,8 +39,8 @@ F62C_GOLDEN = F62C / "fixtures" / "openshell"
 OSH_F64_SPEC = REPO / "tests" / "e2e-scenarios" / "OSH-F64" / "spec" / "coworker-types.yaml"
 HOME_TOKEN = "@HERMES_HOME@"
 SHA40 = "a" * 40
-# The selected tag v0.22.0 (ADR header); an ancestor of every candidate head, so present in any full clone.
-TAG_COMMIT = "e06df9c2eae6901f4c88f464e0ae6e753c0428b8"
+# v0.22.2: an ancestor of every candidate head, so present in any full clone.
+TAG_COMMIT = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
 TRUST_SOURCE = "openshell_trust"
 CA_ENV_NAMES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "HERMES_CA_BUNDLE",
                 "DENO_CERT")
