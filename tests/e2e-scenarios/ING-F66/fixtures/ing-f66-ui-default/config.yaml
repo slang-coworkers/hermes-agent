@@ -1,0 +1,35 @@
+# ING-F66 AC-21: the DEFAULT multiplexer's ingress block, merged into the testbed
+# home's config.yaml during Setup. The DEFAULT home is never a `profile install`
+# target. The port is a placeholder that Setup replaces with a free loopback port;
+# the model block is the tester's stub.
+gateway:
+  multiplex_profiles: true
+  multiplex_profile_allowlist:
+  - ing-f66-ui-owner
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      host: 127.0.0.1
+      port: 0
+      routes:
+        ingress:
+          secret: INSECURE_NO_AUTH
+          script: ingress_stage.py
+          events:
+          - ingress.v1
+          profile: default
+plugins:
+  enabled:
+  - nv-ingress
+  entries:
+    nv-ingress:
+      settings:
+        route: ingress
+        orchestrator_profile: orchestrator
+        issue_labels:
+        - fleet
+        self_logins: []
+        per_pr_hourly_budget: 30
+        drain_interval_seconds: 2
+        webhook_guard: true
