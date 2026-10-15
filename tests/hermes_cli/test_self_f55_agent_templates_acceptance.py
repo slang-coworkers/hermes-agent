@@ -51,7 +51,22 @@ def _hermes_home(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(empty_bundled))
     monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    _pin_satisfying_hermes_version(monkeypatch)
     return home
+
+
+def _pin_satisfying_hermes_version(monkeypatch) -> None:
+    # tests/conftest.py seeds get_version_info() with base_version "unknown" (a stampless shallow
+    # checkout), which plan_install's hermes_requires gate cannot parse; report exactly the
+    # fixture's own floor so the gate is satisfied without naming a Hermes version here.
+    import dataclasses
+
+    from hermes_cli import version_info
+
+    spec = yaml.safe_load((DIST_FIXTURE / "distribution.yaml").read_text(encoding="utf-8"))["hermes_requires"]
+    floor = re.sub(r"^\s*(>=|==)?\s*", "", str(spec)).strip()
+    pinned = dataclasses.replace(version_info.get_version_info(), base_version=floor)
+    monkeypatch.setattr(version_info, "get_version_info", lambda: pinned)
 
 
 def _write_config_enabled(home: Path, enabled: list[str]) -> None:

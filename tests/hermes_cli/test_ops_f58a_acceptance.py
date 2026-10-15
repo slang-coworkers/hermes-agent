@@ -118,6 +118,8 @@ def test_ac_ops_f58_a_3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys)
     for p in sentinels:
         p.write_text("sentinel", encoding="utf-8")
 
+    # A .git marks a removable source checkout; a sealed (no .git) tree is refused before the plan.
+    (tmp_path / "project" / ".git").mkdir(parents=True)
     monkeypatch.setattr(uninstall, "get_hermes_home", lambda: home)
     monkeypatch.setattr(uninstall, "get_project_root", lambda: tmp_path / "project")
     monkeypatch.setattr(uninstall, "_is_default_hermes_home", lambda *a, **k: True)
@@ -247,7 +249,7 @@ def test_ac_ops_f58_a_6() -> None:
 
 
 def test_ac_ops_f58_a_7(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, isolated_update_runtime
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, isolated_source_completion
 ) -> None:
     """Fleet-wide config migration upgrades installed sibling profiles.
 
@@ -263,10 +265,10 @@ def test_ac_ops_f58_a_7(
     import hermes_cli.main_install_repair as main_install_repair
     import hermes_cli.main_web_build as main_web_build
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_deps as update_cmd_deps
     import hermes_cli.update_cmd_fleet as update_cmd_fleet
     import hermes_cli.update_cmd_maint as update_cmd_maint
-    from hermes_cli import managed_uv
+    from hermes_cli import config as hermes_config
+    from hermes_cli import gateway, managed_uv, update_inventory, update_receipt
     from hermes_cli.config import DEFAULT_CONFIG, check_config_version, load_config
     from hermes_cli.config_migrations import SUPPORT_FLOOR_VERSION
     from hermes_constants import (
@@ -312,13 +314,26 @@ def test_ac_ops_f58_a_7(
     monkeypatch.setenv("HERMES_HOME", str(active))
 
     checks: list[tuple[str | None, str]] = []
-    real_check = update_cmd._run_config_check_fresh
+    real_check = hermes_config.check_config_version
 
-    def _spy_check():
+    # The post-swap completion imports check_config_version lazily, so the reader itself is spied.
+    def _spy_check(*a, **k):
         checks.append((get_hermes_home_override(), _git(checkout, "rev-parse", "HEAD")))
-        return real_check()
+        return real_check(*a, **k)
 
-    monkeypatch.setattr(update_cmd, "_run_config_check_fresh", _spy_check)
+    monkeypatch.setattr(hermes_config, "check_config_version", _spy_check)
+    # Keep the updater off the host's real gateways, services and fleet inventory.
+    monkeypatch.setattr(gateway, "find_gateway_pids", lambda *a, **k: [])
+    monkeypatch.setattr(gateway, "find_profile_gateway_processes", lambda *a, **k: [])
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda *a, **k: set())
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(hermes_main, "_pause_windows_gateways_for_update", lambda: None)
+    monkeypatch.setattr(hermes_main, "_resume_windows_gateways_after_update", lambda *a, **k: None)
+    monkeypatch.setattr(hermes_main, "_detect_venv_python_processes", lambda: [])
+    monkeypatch.setattr(update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None)
+    monkeypatch.setattr(update_cmd_fleet, "_restart_macos_launchd_gateways", lambda *a, **k: None)
+    monkeypatch.setattr(update_inventory, "collect_runtime_inventory", lambda: None)
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda *a, **k: [])
 
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", checkout)
     monkeypatch.setattr(hermes_main, "_resolve_update_branch", lambda args: "main")
@@ -331,7 +346,6 @@ def test_ac_ops_f58_a_7(
     monkeypatch.setattr(update_cmd, "_is_fork", lambda *a, **k: False)
     monkeypatch.setattr(hermes_main, "_run_pre_update_backup", lambda *a, **k: None)
     monkeypatch.setattr(hermes_main, "_capture_active_lazy_features", lambda: [])
-    monkeypatch.setattr(hermes_main, "_capture_active_tool_dependencies", lambda: [])
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
     monkeypatch.setattr(hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None)
     monkeypatch.setattr(main_web_build, "_record_bytecode_fingerprint", lambda *a, **k: None)
@@ -339,15 +353,15 @@ def test_ac_ops_f58_a_7(
     monkeypatch.setattr(main_web_build, "_build_web_ui", lambda *a, **k: None)
     # The fake checkout has no package to install: dependency, Node and Desktop
     # syncs would otherwise run against this test's own venv.
-    monkeypatch.setattr(update_cmd, "_sync_python_dependencies_after_pull", lambda *a, **k: None)
     monkeypatch.setattr(update_cmd, "_update_node_dependencies", lambda: [])
-    monkeypatch.setattr(update_cmd_deps, "_update_node_dependencies", lambda: [])
     monkeypatch.setattr(update_cmd, "_rebuild_desktop_after_update", lambda *a, **k: True)
     monkeypatch.setattr(update_cmd_maint, "_sync_profiles_after_update", lambda: None)
     monkeypatch.setattr(update_cmd, "_post_update_sqlite_runtime_status", lambda: (True, None))
     monkeypatch.setattr(update_cmd_fleet, "_force_kill_stuck_gateways", lambda *a, **k: None)
     monkeypatch.setattr(managed_uv, "update_managed_uv", lambda **kw: None)
 
+    # The test venv belongs to the worktree, not to this fake checkout: do not re-exec there.
+    monkeypatch.setattr("hermes_cli.update_owning_install.retarget_to_owning_install", lambda *_: None)
     hermes_main.cmd_update(SimpleNamespace(branch=None, yes=False, force=False, force_venv=False))
     out = capsys.readouterr().out
 
