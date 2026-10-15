@@ -1,0 +1,1157 @@
+"""nv-coworker-compose — render Hermes coworker-type profile distributions from a
+coworker-types.yaml lego spec and onboard them into a Bot-Mode gateway.
+
+The onboarding functions and the gateway transport they use are defined together
+in this package module so the transport is a single swappable surface: every
+gateway effect (profiles.create / profiles.configure / session.* / groups.*)
+flows through the one ``_dispatch_rpc`` seam, and the read-only liveness check
+through ``_gateway_preflight`` → ``_ws_probe``. That keeps the coupling to
+``tui_gateway.server`` (an internal callable, not documented PluginContext API)
+confined to a single function that can be replaced if that surface moves.
+
+``_dispatch_rpc`` chooses the transport: only the in-process gateway TOOL calls
+``tui_gateway.server.handle_request`` directly; the standalone CLI verb carries
+an explicit ``--gateway-url`` option, while the ``/onboard-coworker`` slash
+command takes the equivalent positional URL (?token/?ticket credential). Both
+route to an authenticated WebSocket bound once, after a read-only liveness
+preflight, and reused for the whole onboarding so a single-use ticket is not
+spent twice.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import itertools
+import json
+import logging
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import parse_qs, urlparse, urlunparse
+
+from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+from utils import is_truthy_value
+
+from .compose import (
+    WIKI_MOUNT,
+    _SELF_PLUGIN,
+    CompositionError,
+    _resolve_substrate,
+    _safe_name,
+    build_provision_plan,
+    compose,
+    load_spec,
+    park_non_fleet_profiles,
+)
+from .tools import CREATE_AGENT_SCHEMA, ONBOARD_COWORKER_SCHEMA, ONBOARD_PROJECT_SCHEMA
+
+logger = logging.getLogger(__name__)
+
+# Canonical Bot Chat session title (tools/bot_mode_probe.py:41).
+BOT_CHAT_TITLE = "Bot Chat"
+
+_TOOLSET = "coworker_admin"
+_CLONE_PREFIX = "nv_onboard_clone_"
+
+# tui_gateway hosted-room error code for an absent room (tui_gateway/methods_groups.py:559).
+_ROOM_NOT_FOUND_CODE = 4114
+
+_rpc_ids = itertools.count(1)
+
+# Bound {"url", "requester"} while a URL (CLI or slash) onboarding is active;
+# None for the in-process gateway-tool path. Both this and _pending_ws_requester
+# are ContextVars so concurrent onboards (e.g. two slash calls dispatched via
+# asyncio.to_thread) never exchange authenticated connections or tickets.
+_standalone_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "nv_coworker_standalone_ctx", default=None
+)
+
+# A WebSocket requester opened by the preflight probe, handed to the onboarding
+# call so the authenticated connection (and any single-use ticket) is reused.
+_pending_ws_requester: contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], Any]]] = contextvars.ContextVar(
+    "nv_coworker_pending_ws_requester", default=None
+)
+
+
+class RpcError(Exception):
+    """A JSON-RPC error returned by the gateway; carries the structured code."""
+
+    def __init__(self, error: Any):
+        self.code: Optional[int] = None
+        self.data: Any = None
+        message = str(error)
+        if isinstance(error, dict):
+            self.code = error.get("code")
+            self.data = error.get("data")
+            message = str(error.get("message") or error)
+        super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# Gateway URL credential form + read-only liveness preflight
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def validate_gateway_url(url: str) -> Tuple[bool, str]:
+    """Local credential-form + destination check, before any transport.
+
+    Enforces a ``ws``/``wss`` scheme and the ``/api/ws`` path, rejects a
+    ``?internal`` URL (the process-lifetime credential reserved for WS clients
+    the server spawns itself), and requires a credential. A ``?token`` (a live
+    session credential) is accepted only on a loopback host so it cannot be sent
+    to an arbitrary remote; a single-use ``?ticket`` is accepted on loopback or a
+    remote ``wss`` endpoint.
+    """
+    try:
+        parsed = urlparse(url or "")
+    except (ValueError, TypeError):
+        return (False, "invalid_url")
+    if parsed.scheme not in ("ws", "wss"):
+        return (False, "bad_scheme")
+    if parsed.path != "/api/ws":
+        return (False, "bad_path")
+    if not parsed.hostname:
+        return (False, "bad_host")
+    # keep_blank_values so a valueless ``?internal=`` is still caught.
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "internal" in query:
+        return (False, "forbidden_internal")
+
+    def _has_cred(name: str) -> bool:
+        return any(v for v in query.get(name, []))
+
+    is_loopback = parsed.hostname.lower() in _LOOPBACK_HOSTS
+    if _has_cred("token"):
+        return (True, "ok") if is_loopback else (False, "non_loopback")
+    if _has_cred("ticket"):
+        if is_loopback or parsed.scheme == "wss":
+            return (True, "ok")
+        return (False, "non_loopback")
+    return (False, "no_credential")
+
+
+def _ws_connect(url: str):
+    """Open a raw WebSocket connection (lazy import); replaceable in tests."""
+    from websockets.sync.client import connect  # pragma: no cover - runtime-only path
+
+    return connect(url, open_timeout=5)
+
+
+def _drain_ready(conn) -> bool:
+    """Consume the unsolicited ``gateway.ready`` event sent on connection accept
+    (tui_gateway/ws.py:369-374). Returns False when the first frame reports a
+    JSON-RPC error instead (a rejected credential)."""
+    raw = conn.recv(timeout=10)
+    frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    return not (isinstance(frame, dict) and frame.get("error"))
+
+
+def _open_ws_requester(url: str) -> Callable[[Dict[str, Any]], Any]:
+    """Open an authenticated WebSocket, consume ``gateway.ready``, and return a
+    request->envelope callable that correlates responses by JSON-RPC ``id``
+    (ignoring unsolicited event frames). Secondary (standalone-CLI) transport."""
+    conn = _ws_connect(url)
+    _drain_ready(conn)
+
+    def _request(request: Dict[str, Any]) -> Any:
+        conn.send(json.dumps(request))
+        while True:
+            raw = conn.recv(timeout=30)
+            frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if isinstance(frame, dict) and frame.get("id") == request.get("id"):
+                return frame
+            # A frame without the matching id is an unsolicited event/broadcast.
+
+    _request._conn = conn  # type: ignore[attr-defined]
+    return _request
+
+
+def _handshake_status(exc: Exception) -> Optional[int]:
+    """Best-effort HTTP status from a websockets handshake-rejection exception
+    (InvalidStatus carries ``.response.status_code``; older InvalidStatusCode
+    carries ``.status_code``)."""
+    resp = getattr(exc, "response", None)
+    for obj, attr in ((resp, "status_code"), (exc, "status_code"), (exc, "status")):
+        val = getattr(obj, attr, None) if obj is not None else None
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _safe_close(conn) -> None:
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("ws close failed", exc_info=True)
+
+
+def _ws_probe(url: str) -> Dict[str, Any]:
+    """Read-only liveness probe: open the connection, consume ``gateway.ready``,
+    and retain the requester (in a ContextVar) for the onboarding call so the
+    socket (and its single-use ticket) is not spent twice. Raises
+    ``ConnectionError``/``OSError`` when the gateway is unreachable;
+    ``{"authed": False}`` on a rejected credential (including a 401/403 handshake
+    rejection). Any socket opened before a failure is closed."""
+    conn = None
+    try:
+        conn = _ws_connect(url)
+        authed = _drain_ready(conn)
+    except (ConnectionError, OSError):
+        _safe_close(conn)
+        raise
+    except Exception as exc:
+        _safe_close(conn)
+        # A handshake rejected at the HTTP upgrade (401/403) is an auth failure,
+        # not a connectivity failure — map it so the preflight refuses cleanly.
+        if _handshake_status(exc) in (401, 403):
+            return {"authed": False, "reason": "auth_rejected"}
+        raise ConnectionError(str(exc)) from exc
+    if not authed:
+        _safe_close(conn)
+        return {"authed": False, "reason": "auth_rejected"}
+
+    def _request(request: Dict[str, Any]) -> Any:
+        conn.send(json.dumps(request))
+        while True:
+            raw = conn.recv(timeout=30)
+            frame = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if isinstance(frame, dict) and frame.get("id") == request.get("id"):
+                return frame
+
+    _request._conn = conn  # type: ignore[attr-defined]
+    _pending_ws_requester.set(_request)
+    return {"authed": True}
+
+
+def _gateway_preflight(url: str) -> Tuple[bool, str]:
+    """Refuse before any mutation: credential-form check, then a liveness probe."""
+    ok, reason = validate_gateway_url(url)
+    if not ok:
+        return (False, reason)
+    try:
+        resp = _ws_probe(url)
+    except (ConnectionError, OSError):
+        return (False, "connection_refused")
+    if not isinstance(resp, dict) or not resp.get("authed"):
+        return (False, "auth_rejected")
+    return (True, "ok")
+
+
+# ---------------------------------------------------------------------------
+# RPC transport — one seam, two transports, wire adaptation
+# ---------------------------------------------------------------------------
+
+def _unwrap_rpc_envelope(resp: Any) -> Any:
+    """Normalize a JSON-RPC response: raise on error, return the result body."""
+    if resp is None:
+        return None
+    if isinstance(resp, dict):
+        if resp.get("error"):
+            raise RpcError(resp["error"])
+        if "result" in resp:
+            return resp["result"]
+    return resp
+
+
+def _room_exists(resp: Any) -> bool:
+    """True when a groups.state response reports an existing room. Tolerates the
+    absent-shape ``{"exists": False}`` and the present-shape ``{"room": {...}}``."""
+    if not isinstance(resp, dict):
+        return False
+    return bool(resp.get("exists")) or isinstance(resp.get("room"), dict)
+
+
+def _member_object(member: Any) -> Dict[str, Any]:
+    """Adapt a member name to the object hosted rooms require (each member must be
+    an object — gateway/hosted_rooms.py:343-344)."""
+    if isinstance(member, dict):
+        return member
+    name = str(member)
+    return {"member_id": name, "profile": name, "handle": name}
+
+
+def _gateway_handle_request(request: Dict[str, Any]) -> Any:
+    """In-process dispatch to the running gateway (lazy import); replaceable in tests."""
+    from tui_gateway import server  # pragma: no cover - runtime-only path
+
+    return server.handle_request(request)
+
+
+def _dispatch_rpc(method: str, params: Dict[str, Any]) -> Any:
+    """Dispatch one JSON-RPC method and return its normalized result body.
+
+    Routes to the standalone authenticated WS requester when the standalone
+    context is bound, otherwise to the in-process gateway handler. Adapts the
+    wire shape the real gateway expects — ``groups.create`` members become
+    member objects, and an absent-room ``groups.state`` (error 4114) is
+    normalized to ``{"exists": False}`` rather than raised — while the logical
+    call sites keep working with profile-name strings.
+    """
+    wire = dict(params)
+    if method == "groups.create" and isinstance(wire.get("members"), list):
+        wire["members"] = [_member_object(m) for m in wire["members"]]
+
+    request = {"jsonrpc": "2.0", "id": next(_rpc_ids), "method": method, "params": wire}
+    ctx = _standalone_ctx.get()
+    if ctx is not None:
+        if ctx.get("requester") is None:
+            ctx["requester"] = _open_ws_requester(ctx["url"])
+        envelope = ctx["requester"](request)
+    else:
+        envelope = _gateway_handle_request(request)
+
+    try:
+        return _unwrap_rpc_envelope(envelope)
+    except RpcError as exc:
+        if method == "groups.state" and exc.code == _ROOM_NOT_FOUND_CODE:
+            return {"exists": False}
+        raise
+
+
+def _close_standalone(token) -> None:
+    ctx = _standalone_ctx.get()
+    if ctx is not None:
+        requester = ctx.get("requester")
+        conn = getattr(requester, "_conn", None)
+        if conn is not None:
+            try:  # pragma: no cover - runtime-only path
+                conn.close()
+            except Exception:  # pragma: no cover
+                logger.debug("standalone WS close failed", exc_info=True)
+    _standalone_ctx.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# Project onboarding
+# ---------------------------------------------------------------------------
+
+def _looks_like_url(source: str) -> bool:
+    s = (source or "").strip()
+    return s.startswith(("http://", "https://", "git@", "ssh://", "git://")) or s.endswith(".git")
+
+
+def _redact_url(url: str) -> str:
+    """Drop userinfo (``user:token@``) and query from a URL so a credential-bearing
+    clone URL is safe to put in an error message or a log line."""
+    try:
+        p = urlparse(url or "")
+        host = p.hostname or ""
+        netloc = f"{host}:{p.port}" if p.port else host
+        return urlunparse((p.scheme, netloc, p.path, "", "", ""))
+    except (ValueError, TypeError):
+        return "<redacted-url>"
+
+
+def _clone_repo(url: str) -> str:
+    """Shallow-clone a git URL into a temp dir; return its path.
+
+    Never lets a credential-bearing URL reach an error string or the logs: the
+    raised message is built only from the redacted URL and the exit code, and the
+    underlying exception (whose command/stderr may echo the raw URL) is not
+    chained (``from None``) so ``exc_info`` logging cannot surface it."""
+    import subprocess
+
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git executable not found on PATH")
+    dest = tempfile.mkdtemp(prefix=_CLONE_PREFIX)
+    try:
+        subprocess.run(
+            [git, "clone", "--depth", "1", url, dest],
+            check=True, capture_output=True, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise RuntimeError(f"clone failed for {_redact_url(url)} (exit {exc.returncode})") from None
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise RuntimeError(f"clone failed for {_redact_url(url)}") from None
+    return dest
+
+
+def _is_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            chunk = fh.read(4096)
+    except OSError:
+        return True
+    if b"\x00" in chunk:
+        return True
+    try:
+        chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _is_sensitive_file(name: str) -> bool:
+    """A dotenv-style credential file whose contents must never be copied into a
+    model-facing scaffold (``.env``, ``.env.<anything>``, ``.envrc``)."""
+    return name == ".env" or name.startswith(".env.") or name == ".envrc"
+
+
+def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
+    """Return up to ``max_files`` (relpath, text) eligible source files, filtering
+    symlinks, VCS/dependency dirs, secret files, and binaries FIRST, then
+    sorting, then taking the bound — so an excluded file never consumes a slot."""
+    skip_dirs = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
+    candidates: List[Tuple[str, Path]] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(root)
+        if any(part in skip_dirs for part in rel.parts):
+            continue
+        if _is_sensitive_file(path.name):
+            continue
+        if _is_binary(path):
+            continue
+        candidates.append((str(rel), path))
+    candidates.sort(key=lambda pair: pair[0])
+    picked = candidates[: max(0, int(max_files))]
+    return [(rel, path.read_text(encoding="utf-8", errors="ignore")) for rel, path in picked]
+
+
+def _write_project_scaffold(scaffold: Path, project: str, files: List[Tuple[str, str]]) -> None:
+    scaffold.mkdir(parents=True, exist_ok=True)
+    (scaffold / "distribution.yaml").write_text(
+        json.dumps({
+            "name": project or "project",
+            "version": "0.1.0",
+            "description": f"Scaffolded Hermes project distribution: {project}",
+            "distribution_owned": ["SOUL.md", "config.yaml", "mcp.json", "skills", "distribution.yaml"],
+        }),
+        encoding="utf-8",
+    )
+    (scaffold / "SOUL.md").write_text(f"# {project or 'project'}\n\nProject spine scaffolded by nv-coworker-compose.\n", encoding="utf-8")
+    (scaffold / "mcp.json").write_text(json.dumps({"mcpServers": {}}, indent=2) + "\n", encoding="utf-8")
+    skills_dir = scaffold / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    for idx, (_rel, text) in enumerate(files):
+        cap = skills_dir / f"capability-{idx}"
+        cap.mkdir(exist_ok=True)
+        (cap / "SKILL.md").write_text(
+            f"---\nname: capability-{idx}\ndescription: Capability derived from a scanned source file.\n---\n{text}\n",
+            encoding="utf-8",
+        )
+
+
+def onboard_project(source: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Scaffold a project distribution from a local path or a git URL."""
+    settings = settings or {}
+    max_files = int(settings.get("max_files", 64))
+    out = settings.get("out")
+
+    cloned: Optional[Path] = None
+    if _looks_like_url(source):
+        src_path = Path(_clone_repo(source))
+        cloned = src_path
+    else:
+        src_path = Path(source)
+    if not src_path.exists():
+        return {"ok": False, "error": f"source not found: {source}"}
+
+    try:
+        files = _scan_source_files(src_path, max_files)
+        scaffold = Path(out) if out else src_path.parent / f"{src_path.name}-dist"
+        _write_project_scaffold(scaffold, src_path.name, files)
+    finally:
+        # Clean only a dir WE cloned (our temp prefix) — never a caller's path.
+        if cloned is not None and cloned.name.startswith(_CLONE_PREFIX):
+            shutil.rmtree(cloned, ignore_errors=True)
+
+    return {"ok": True, "distribution": str(scaffold)}
+
+
+# ---------------------------------------------------------------------------
+# Coworker onboarding — Bot-Mode identity, canonical Bot Chat, standing rooms
+# ---------------------------------------------------------------------------
+
+def _profile_revisions() -> Dict[str, Dict[str, int]]:
+    resp = _dispatch_rpc("profiles.list", {})
+    out: Dict[str, Dict[str, int]] = {}
+    if isinstance(resp, dict):
+        for profile in (resp.get("profiles") or []):
+            if isinstance(profile, dict) and profile.get("name"):
+                out[profile["name"]] = profile.get("ui_meta_revisions") or {}
+    return out
+
+
+def _has_bot_chat(rows: Any) -> bool:
+    if not isinstance(rows, dict):
+        return False
+    for session in (rows.get("sessions") or []):
+        if isinstance(session, dict) and session.get("title") == BOT_CHAT_TITLE:
+            return True
+    return False
+
+
+def _ensure_canonical_bot_chat(profile: str) -> bool:
+    """Materialise the profile's canonical Bot Chat: lookup exact title -> adopt
+    existing -> else create + title to materialise the durable row -> re-consult
+    + adopt on a uniqueness/title race. Returns True only when confirmed; a
+    session hiccup is logged and reported (never aborts onboarding)."""
+    try:
+        listed = _dispatch_rpc("session.list", {"profile": profile, "title": BOT_CHAT_TITLE, "include_hidden": True})
+        if _has_bot_chat(listed):
+            return True
+        created = _dispatch_rpc(
+            "session.create",
+            {"profile": profile, "title": BOT_CHAT_TITLE, "hidden": True, "follow_profile_config": True},
+        )
+        sid = None
+        if isinstance(created, dict):
+            sid = created.get("session_id") or created.get("stored_session_id")
+        if not sid:
+            relisted = _dispatch_rpc("session.list", {"profile": profile, "title": BOT_CHAT_TITLE, "include_hidden": True})
+            return _has_bot_chat(relisted)
+        try:
+            _dispatch_rpc("session.title", {"profile": profile, "session_id": sid, "title": BOT_CHAT_TITLE})
+            return True
+        except RpcError:
+            relisted = _dispatch_rpc("session.list", {"profile": profile, "title": BOT_CHAT_TITLE, "include_hidden": True})
+            return _has_bot_chat(relisted)
+    except Exception:
+        logger.warning("canonical Bot Chat for %s not confirmed", profile, exc_info=True)
+        return False
+
+
+# Fleet raw-request-capture toggle (OBS-F46). Read process-global via
+# env_var_enabled -> os.getenv at agent/conversation_loop.py, so it must reach a
+# process's os.environ; a coworker's ACTIVE .env is the file a spawned
+# `hermes -p <bot> chat` loads at startup, so install upserts it there.
+CAPTURE_KEY = "HERMES_DUMP_REQUESTS"
+CAPTURE_VALUE = "true"
+
+
+class CaptureEnvManagedError(Exception):
+    """Machine policy governs HERMES_DUMP_REQUESTS, so it is an explicit operator
+    action rather than a silent local override. Raised instead of writing the
+    profile .env when a managed scope pins the key falsy, when a package-managed
+    install owns the environment, or when managed policy cannot be read."""
+
+
+def _upsert_env_var(env_path: Union[str, Path], key: str, value: str) -> None:
+    """Atomically write exactly one ``key=value`` into a dotenv file.
+
+    Collapses every prior assignment of ``key`` — plain, leading-whitespace, or
+    ``export KEY=`` with whitespace around ``=`` — to a single canonical
+    ``key=value`` line, preserves all other lines verbatim and the file's mode,
+    and never mutates ``os.environ`` (unlike ``hermes_cli.config.save_env_value``,
+    which writes ``os.environ`` and would leak the toggle into the shared gateway
+    process). The write goes to a same-directory tempfile then ``os.replace`` so a
+    concurrent reader never sees a truncated file. ``os.replace`` is atomic on
+    every OS and ``\\n`` is the dotenv line ending on all platforms.
+    """
+    env_path = Path(env_path)
+    assign_re = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
+
+    existing_mode: Optional[int] = None
+    kept: List[str] = []
+    if env_path.exists():
+        existing_mode = stat.S_IMODE(env_path.stat().st_mode)
+        kept = [
+            line for line in env_path.read_text(encoding="utf-8").splitlines()
+            if not assign_re.match(line)
+        ]
+    kept.append(f"{key}={value}")
+    body = "\n".join(kept) + "\n"
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(env_path.parent), prefix=".env_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        if existing_mode is not None:
+            os.chmod(tmp_name, existing_mode)
+        os.replace(tmp_name, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def apply_capture_env(profile_home: Union[str, Path]) -> None:
+    """Idempotently enable ``HERMES_DUMP_REQUESTS`` in a profile's active ``.env``.
+
+    Respects machine-global managed policy: a managed value already truthy is a
+    no-op success; a managed value pinned falsy, or a package-managed install, is
+    surfaced as an explicit operator action instead of a silent local override.
+    Fails closed — if managed policy cannot be read, it raises rather than write a
+    value that might defy administrative policy. ``managed_scope.get_managed_dir()``
+    is ``None`` under pytest, so this guard is inert in the hermetic tests.
+    """
+    env_path = Path(profile_home) / ".env"
+    try:
+        from hermes_cli import managed_scope
+        from hermes_cli.config import get_managed_system
+
+        managed_dir = managed_scope.get_managed_dir()
+        managed_system = get_managed_system()
+    except Exception as exc:  # noqa: BLE001 — refuse the write rather than guess policy
+        raise CaptureEnvManagedError(
+            f"cannot verify managed policy for {CAPTURE_KEY}; refusing to modify {env_path}"
+        ) from exc
+
+    # load_managed_env() fails OPEN — managed_scope._cached_read swallows a read or
+    # decode error and returns {} — so probe the managed .env directly first: an
+    # unreadable managed policy must fail CLOSED here, never silently permit a local
+    # write that might defy it. An absent managed .env is the normal no-scope case.
+    if managed_dir is not None:
+        managed_env_path = managed_dir / ".env"
+        try:
+            managed_env_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read managed policy {managed_env_path}; refusing to modify {env_path}"
+            ) from exc
+
+    managed_values = managed_scope.load_managed_env()
+
+    if CAPTURE_KEY in managed_values:
+        if is_truthy_value(managed_values[CAPTURE_KEY]):
+            return
+        source = (managed_dir / ".env") if managed_dir else "the managed scope"
+        raise CaptureEnvManagedError(
+            f"{CAPTURE_KEY} is managed as {managed_values[CAPTURE_KEY]!r} by {source}; "
+            "set it to true there and re-run onboarding."
+        )
+    if managed_system is not None:
+        raise CaptureEnvManagedError(
+            f"Hermes is managed by {managed_system}; set {CAPTURE_KEY}=true in the "
+            "package-managed environment (service-unit env or /etc/hermes/.env)."
+        )
+
+    _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
+
+
+WIKI_JOB_NAME = "shared-learnings-wiki-fold"
+_WIKI_FOLD_PROMPT = (
+    "Synthesise the fleet's shared-learnings clone into a navigable wiki with the "
+    f"llm-wiki skill. WIKI_PATH is set to {WIKI_MOUNT} (the clone's read-write container "
+    f"mount) in this profile's .env; read the learnings under {WIKI_MOUNT} and write the "
+    f"wiki (sources -> concepts -> index) back into {WIKI_MOUNT}. Do not push — the "
+    "orchestrator promotes the clone by PR."
+)
+
+
+def activate_shared_learnings(profile_homes: Dict[str, str], orchestrator: str, clone: str) -> None:
+    """Activate (not stage) the orchestrator-only wiki fold over the shared-learnings
+    clone (MEM-F43). Touches ONLY the orchestrator profile home: upserts
+    ``WIKI_PATH=<container mount>`` into its ``.env`` (the value the sandbox resolves
+    through the ``terminal.env_passthrough`` allowlist the render added), seeds the
+    bundled ``llm-wiki`` skill into it, and creates exactly one enabled, recurring
+    ``llm-wiki`` agent cron job. Every worker profile and the DEFAULT gateway root are
+    left untouched. Idempotent: a second call finds the named job already present and
+    creates nothing, and the ``.env`` upsert collapses any duplicate ``WIKI_PATH`` lines.
+
+    The Hermes-home override wraps BOTH ``sync_skills`` and ``create_job`` so the cron
+    job's provider/model snapshot is taken from the orchestrator profile, not the launch
+    home. ``clone`` (the host clone path) is the render's mount SOURCE; the fold reads it
+    through the container mount, so only ``WIKI_MOUNT`` is written into the ``.env``."""
+    from cron.jobs import create_job, load_jobs, use_cron_store
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.skills_sync import sync_skills
+
+    orch_home = profile_homes.get(orchestrator)
+    if not orch_home:
+        return
+    orch_home = Path(orch_home)
+
+    _upsert_env_var(orch_home / ".env", "WIKI_PATH", WIKI_MOUNT)
+
+    token = set_hermes_home_override(str(orch_home))
+    try:
+        sync_skills(quiet=True)
+        with use_cron_store(str(orch_home)):
+            if not any(job.get("name") == WIKI_JOB_NAME for job in load_jobs()):
+                create_job(
+                    prompt=_WIKI_FOLD_PROMPT,
+                    schedule="1d",
+                    name=WIKI_JOB_NAME,
+                    skills=["llm-wiki"],
+                )
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _install(rendered_dir: str, name: str) -> str:
+    from hermes_cli.profile_distribution import install_distribution
+    plan = install_distribution(str(rendered_dir), name=name, force=True)
+    installed_home = plan.target_dir
+    apply_capture_env(installed_home)
+    return str(installed_home)
+
+
+def _profile_cron_jobs(home: Path) -> Dict[str, str]:
+    """Job id -> name in *home*'s cron store, paused ones included."""
+    if not home.is_dir():
+        return {}
+    from cron.jobs import list_jobs, use_cron_store
+
+    with use_cron_store(home):
+        return {str(j["id"]): str(j.get("name") or "") for j in list_jobs(include_disabled=True) if j.get("id")}
+
+
+def _shipped_cron_jobs(rendered_dir: str) -> Dict[str, str]:
+    """Job id -> name for the jobs the rendered distribution ships in ``cron/jobs.json``."""
+    store = Path(rendered_dir) / "cron" / "jobs.json"
+    if not store.is_file():
+        return {}
+    data = json.loads(store.read_text(encoding="utf-8"))
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    return {str(j["id"]): str(j.get("name") or "") for j in jobs if isinstance(j, dict) and j.get("id")}
+
+
+_RESUME_CRON_DEFAULT = ["orchestrator/supervise-issues"]
+
+
+def _resume_cron_allowlist() -> List[str]:
+    """``plugins.entries.nv-coworker-compose.settings.onboard_resume_cron_jobs``:
+    ``<profile>/<job-name>`` entries the onboard may resume. A malformed value resumes nothing."""
+    from hermes_cli.config import load_config_readonly
+
+    entry = (((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {}).get(_SELF_PLUGIN) or {}
+    value = (entry.get("settings") or {}).get("onboard_resume_cron_jobs", _RESUME_CRON_DEFAULT)
+    def _valid(entry: Any) -> bool:
+        if not isinstance(entry, str):
+            return False
+        profile, sep, name = entry.partition("/")
+        try:
+            _safe_name("profile", profile)
+        except CompositionError:
+            return False
+        return bool(sep) and bool(name.strip())
+
+    if not isinstance(value, list) or not all(_valid(v) for v in value):
+        logger.warning("nv-coworker-compose: onboard_resume_cron_jobs is not a list of "
+                       "'<profile>/<job-name>' strings; resuming no cron job")
+        return []
+    return list(value)
+
+
+def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+    """Resume the allowlisted jobs this onboard installed (profile home -> {job id: name}).
+
+    The tag imports distribution cron jobs paused for operator review; the allowlist is
+    that review, made ahead of time. A job that existed before the onboard is never in
+    *new_jobs*, so an operator's pause survives a re-onboard. All-or-nothing: if one
+    resume fails, the ones already resumed are paused again before the error propagates."""
+    from cron.jobs import pause_job, resume_job, use_cron_store
+
+    allow = set(_resume_cron_allowlist())
+    resume: List[Dict[str, str]] = []
+    kept: List[Dict[str, str]] = []
+    for home, jobs in new_jobs.items():
+        profile = Path(home).name
+        for job_id, name in sorted(jobs.items()):
+            entry = {"profile": profile, "name": name, "id": job_id, "home": home}
+            (resume if f"{profile}/{name}" in allow else kept).append(entry)
+    print(f"nv-coworker-compose: onboard_resume_cron_jobs = {sorted(allow)}; "
+          f"resuming {[e['profile'] + '/' + e['name'] for e in resume]}", file=sys.stderr)
+    done: List[Dict[str, str]] = []
+    try:
+        for e in resume:
+            with use_cron_store(e["home"]):
+                if resume_job(e["id"]) is None:
+                    raise RuntimeError(f"cron job {e['profile']}/{e['name']} ({e['id']}) not found")
+            done.append(e)
+    except Exception:
+        for e in reversed(done):
+            with use_cron_store(e["home"]):
+                pause_job(e["id"], reason="onboard could not resume every allowlisted job")
+        raise
+    strip = lambda rows: [{k: r[k] for k in ("profile", "name", "id")} for r in rows]  # noqa: E731
+    return {"resumed_cron_jobs": strip(resume), "kept_paused_cron_jobs": strip(kept)}
+
+
+def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
+    """Write ui_meta['hermes-bots'] via per-key CAS, retrying once on a stale
+    revision. profiles.configure signals a CAS conflict as a *successful*
+    result (applied.ui_meta False + applied.ui_meta_conflicts), not an RpcError,
+    and echoes the current revisions in applied.ui_meta_revisions; the retry
+    re-arms its expected revision from those. Returns True once the write
+    applies."""
+    for attempt in range(2):
+        current = int((revisions.get(profile) or {}).get("hermes-bots", 0))
+        try:
+            result = _dispatch_rpc("profiles.configure", {
+                "name": profile,
+                "ui_meta": {"hermes-bots": ui_meta},
+                "ui_meta_expected_revisions": {"hermes-bots": current},
+            })
+        except RpcError:
+            if attempt == 0:
+                revisions[profile] = _profile_revisions().get(profile) or {}
+                continue
+            return False
+        applied = result.get("applied") if isinstance(result, dict) else None
+        if not isinstance(applied, dict):
+            return True
+        new_rev = applied.get("ui_meta_revisions")
+        if not isinstance(new_rev, dict) and isinstance(result, dict):
+            new_rev = result.get("ui_meta_revisions")
+        if isinstance(new_rev, dict):
+            revisions[profile] = {
+                str(k): int(v) for k, v in new_rev.items()
+                if isinstance(v, int) and not isinstance(v, bool)
+            }
+        if applied.get("ui_meta") is not False:
+            return True
+        if applied.get("ui_meta_conflicts") and attempt == 0:
+            continue
+        return False
+    return False
+
+
+def _run_onboard(spec: str) -> Dict[str, Any]:
+    data = load_spec(spec)
+    types = data.get("types") or {}
+    failures: List[str] = []
+
+    with tempfile.TemporaryDirectory(prefix="nv_coworker_onboard_") as tmp:
+        rendered = compose(spec, tmp)
+        # Install only the coworker TYPE profiles. The rendered DEFAULT artifact
+        # is not installed here: install_distribution rejects the reserved name
+        # "default"; the DEFAULT profile is the gateway root itself.
+        new_cron: Dict[str, Dict[str, str]] = {}
+        for tname in types:
+            try:
+                home = get_profile_dir(tname)
+                before = set(_profile_cron_jobs(home))
+                _install(rendered[tname], tname)
+                shipped = _shipped_cron_jobs(rendered[tname])
+                # New and rendered are separate checks: another writer's job added during
+                # the install is new but not this render's, and must not be resumed.
+                new_cron[str(home)] = {
+                    jid: name for jid, name in _profile_cron_jobs(home).items()
+                    if jid not in before and shipped.get(jid) == name
+                }
+            except Exception as exc:
+                failures.append(f"install {tname}: {exc}")
+
+        revisions = _profile_revisions()
+        for tname, tinfo in types.items():
+            ui_meta = (tinfo or {}).get("ui_meta") or {}
+            if not _configure_bot_meta(tname, ui_meta, revisions):
+                failures.append(f"ui_meta configure failed for {tname}")
+            if not _ensure_canonical_bot_chat(tname):
+                failures.append(f"bot chat not confirmed for {tname}")
+
+        for room_id, room in (data.get("rooms") or {}).items():
+            members = (room or {}).get("members") or []
+            try:
+                state = _dispatch_rpc("groups.state", {"room_id": room_id})
+                exists = _room_exists(state)
+            except RpcError as exc:
+                failures.append(f"groups.state {room_id}: {exc}")
+                exists = True  # don't attempt a create we can't verify
+            if not exists:
+                try:
+                    _dispatch_rpc("groups.create", {
+                        "room_id": room_id,
+                        "name": (room or {}).get("name", room_id),
+                        "members": members,
+                    })
+                except RpcError as exc:
+                    failures.append(f"groups.create {room_id}: {exc}")
+
+    # Activate the shared-learnings wiki fold LAST — only when every install /
+    # metadata / room step succeeded, so a partial onboard never leaves a recurring
+    # orchestrator cron behind. Skipped entirely for a fleet without a clone.
+    clone = data.get("shared_learnings_root")
+    if not failures and clone:
+        orchestrator_profile = _safe_name("profile", data.get("orchestrator_profile", "orchestrator"))
+        default_profile = _safe_name("profile", data.get("default_profile", "default"))
+        coworker_names = [_safe_name("type", name) for name in types]
+        try:
+            profile_homes = {
+                name: str(get_profile_dir(name))
+                for name in dict.fromkeys([*coworker_names, default_profile])
+            }
+            activate_shared_learnings(
+                profile_homes=profile_homes,
+                orchestrator=orchestrator_profile,
+                clone=str(clone),
+            )
+        except Exception as exc:
+            failures.append(f"shared learnings activation: {exc}")
+
+    # The multiplexer serves every live, unparked named profile; parking the rest
+    # is what scopes the gateway to this fleet. Any onboard failure leaves the fleet
+    # incomplete, so nothing else is taken offline in that case.
+    if not failures:
+        try:
+            park_non_fleet_profiles(list(types))
+        except Exception as exc:
+            failures.append(f"park non-fleet profiles: {exc}")
+    cron_outcome: Dict[str, List[Dict[str, str]]] = {}
+    if not failures:
+        try:
+            cron_outcome = _resume_onboarded_cron(new_cron)
+        except Exception as exc:
+            failures.append(f"resume onboarded cron jobs: {exc}")
+    outcome = {"resumed_cron_jobs": [], "kept_paused_cron_jobs": [], **cron_outcome}
+    if failures:
+        return {"ok": False, "error": "; ".join(failures), "warnings": failures, **outcome}
+    return {"ok": True, **outcome}
+
+
+def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Render + install coworker distributions and write their Bot-Mode identity.
+
+    Standalone path (``settings['gateway_url']`` present): a read-only liveness
+    preflight runs FIRST and, on failure, the onboard refuses with zero profile
+    mutations. In-process path (``settings['in_process']`` — the gateway tool,
+    which imports the server and dispatches in-process): no URL, no preflight.
+    A call with neither refuses before any render/install: a standalone onboard
+    without a loopback gateway URL cannot preflight, so it must not mutate."""
+    settings = settings or {}
+    url = settings.get("gateway_url")
+    # A supplied URL always preflights first, so it can never bypass the
+    # zero-mutation guard even if an in-process flag were also set.
+    if url:
+        _pending_ws_requester.set(None)
+        ok, reason = _gateway_preflight(url)
+        if not ok:
+            return {"ok": False, "error": f"gateway preflight failed: {reason}"}
+        requester = _pending_ws_requester.get()
+        _pending_ws_requester.set(None)
+        token = _standalone_ctx.set({"url": url, "requester": requester})
+        try:
+            return _run_onboard(spec)
+        finally:
+            _close_standalone(token)
+    if settings.get("in_process") is True:
+        return _run_onboard(spec)
+    return {"ok": False, "error": "requires_gateway_url: standalone onboard coworker needs a loopback ?token/?ticket gateway URL"}
+
+
+# ---------------------------------------------------------------------------
+# Gateway tool handlers (JSON-string returning; orchestrator-gated; never raise)
+# ---------------------------------------------------------------------------
+
+def _tool_onboard_coworker(args: Dict[str, Any], **_kwargs) -> str:
+    try:
+        spec = args.get("spec") or args.get("coworker_types")
+        if not spec:
+            return json.dumps({"ok": False, "error": "missing 'spec'"})
+        # The tool runs inside the gateway process (imports tui_gateway.server),
+        # so it dispatches in-process — no URL/credential/preflight.
+        return json.dumps(onboard_coworker(spec, settings={"in_process": True}))
+    except Exception as exc:
+        logger.warning("onboard_coworker tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
+
+
+def _tool_onboard_project(args: Dict[str, Any], **_kwargs) -> str:
+    try:
+        source = args.get("source") or args.get("src")
+        if not source:
+            return json.dumps({"ok": False, "error": "missing 'source'"})
+        return json.dumps(onboard_project(source, settings=dict(args)))
+    except Exception as exc:
+        logger.warning("onboard_project tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
+
+
+def _tool_create_agent(args: Dict[str, Any], **_kwargs) -> str:
+    try:
+        _dispatch_rpc("profiles.create", dict(args))
+        return json.dumps({"ok": True, "created": args.get("name")})
+    except Exception as exc:
+        logger.warning("create_agent tool failed", exc_info=True)
+        return json.dumps({"ok": False, "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Slash-command + CLI handlers
+# ---------------------------------------------------------------------------
+
+async def _slash_onboard_coworker(args: str = "", **_kwargs) -> str:
+    parts = (args or "").split()
+    if len(parts) < 2:
+        return "usage: /onboard-coworker <coworker-types.yaml> <loopback-gateway-ws-url>"
+    spec, url = parts[0], parts[1]
+    # The slash verb targets the local gateway, so it is loopback-only — stricter
+    # than the CLI verb, which may carry a remote wss ticket. Refuse before any
+    # mutation if the URL is not a valid loopback credential URL.
+    ok, reason = validate_gateway_url(url)
+    if ok and (urlparse(url).hostname or "").lower() not in _LOOPBACK_HOSTS:
+        ok, reason = False, "non_loopback"
+    if not ok:
+        return json.dumps({"ok": False, "error": f"gateway preflight failed: {reason}"})
+    result = await asyncio.to_thread(onboard_coworker, spec, {"gateway_url": url})
+    return json.dumps(result)
+
+
+async def _slash_onboard_project(args: str = "", **_kwargs) -> str:
+    source = (args or "").strip()
+    if not source:
+        return "usage: /onboard-project <path|url>"
+    result = await asyncio.to_thread(onboard_project, source, {})
+    return json.dumps(result)
+
+
+def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_root=None) -> None:
+    """Run the openshell install with the standalone gateway context bound (as
+    ``onboard_coworker`` does), so the room ``groups.state``/``groups.create`` calls the
+    plan makes reach the LIVE gateway over the authenticated WS requester — a standalone
+    ``hermes coworker install-openshell`` process has no in-process hosted-room service, so
+    without this binding ``_dispatch_rpc`` would fall through to the local handler and room
+    creation would fail. The preflight refuses before any mutation."""
+    def _room_present(room_id):
+        return _room_exists(_dispatch_rpc("groups.state", {"room_id": room_id}))
+
+    def _room_creator(room_id, name, members):
+        # The plan already drops present rooms; this existence check is race protection.
+        if _room_present(room_id):
+            return
+        _dispatch_rpc("groups.create", {"room_id": room_id, "name": name, "members": members})
+
+    _pending_ws_requester.set(None)
+    ok, reason = _gateway_preflight(gateway_url)
+    if not ok:
+        raise RuntimeError(f"gateway preflight failed: {reason}")
+    requester = _pending_ws_requester.get()
+    _pending_ws_requester.set(None)
+    token = _standalone_ctx.set({"url": gateway_url, "requester": requester})
+    try:
+        installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present,
+                        parker=park_non_fleet_profiles, policy_root=policy_root)
+    finally:
+        _close_standalone(token)
+
+
+def _cli_coworker(args, **_kwargs) -> int:
+    if getattr(args, "coworker_command", None) == "compose":
+        out = getattr(args, "out", None) or "coworkers-out"
+        rendered = compose(args.spec, out)
+        if getattr(args, "provision_dry_run", False):
+            # Deterministic, spec-derived provisioning plan ONLY — no rendered --out
+            # path is printed, so two runs of the same spec are byte-identical.
+            data = load_spec(args.spec)
+            plan = build_provision_plan(data, _resolve_substrate(data))
+            print("\n".join(plan))
+        else:
+            print(json.dumps({"ok": True, "rendered": rendered}, indent=2))
+        return 0
+    if getattr(args, "coworker_command", None) == "install-openshell":
+        # The pure planner lives in openshell/installer.py; loading it by path lets the same
+        # code produce the dry-run transcript and drive the real apply, so they cannot diverge.
+        import importlib.util
+        installer_path = Path(__file__).resolve().parent / "openshell" / "installer.py"
+        ispec = importlib.util.spec_from_file_location("_osh_f64_installer", installer_path)
+        installer = importlib.util.module_from_spec(ispec)
+        ispec.loader.exec_module(installer)
+        if not installer.SHA40.match(args.ref or ""):
+            print(json.dumps({"ok": False, "error": "--ref must be a full 40-character commit SHA"}))
+            return 2
+        try:
+            installer._require_openshell(installer.load_spec(args.spec) or {})
+        except ValueError as exc:
+            # Refuse before the real run's gateway preflight, which spends a single-use ticket.
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            return 2
+        if getattr(args, "dry_run", False):
+            print(installer.plan_text(args.spec, args.ref, policy_root=getattr(args, "policy_root", None)), end="")
+        else:
+            gateway_url = getattr(args, "gateway_url", None)
+            if not gateway_url:
+                print(json.dumps({"ok": False, "error": "install-openshell (real run) requires --gateway-url "
+                                  "(a loopback ?token/?ticket gateway URL) to probe and create the fleet rooms "
+                                  "against the live gateway"}))
+                return 2
+            _apply_openshell(installer, args.spec, args.ref, gateway_url, policy_root=getattr(args, "policy_root", None))
+        return 0
+    print("usage: hermes coworker {compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]"
+          " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--policy-root <dir>] [--dry-run]}")
+    return 2
+
+
+def _cli_onboard(args, **_kwargs) -> int:
+    sub = getattr(args, "onboard_command", None)
+    if sub == "project":
+        settings = {"out": getattr(args, "out", None), "max_files": getattr(args, "max_files", 64)}
+        result = onboard_project(args.src, settings=settings)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if sub == "coworker":
+        settings = {"gateway_url": getattr(args, "gateway_url", None)}
+        result = onboard_coworker(args.spec, settings=settings)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    print("usage: hermes onboard {project <path|url>|coworker <coworker-types.yaml>}")
+    return 2
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+def register(ctx) -> None:
+    from .cli import setup_coworker, setup_onboard
+
+    # Plugin-relative key: get_config reads plugins.entries.nv-coworker-compose.settings.<key>.
+    orchestrator_profile = ctx.get_config("orchestrator_profile", "orchestrator")
+
+    def _check_orchestrator_only(*_a, **_k) -> bool:
+        return get_active_profile_name() == orchestrator_profile
+
+    ctx.register_tool(
+        name="onboard_coworker", toolset=_TOOLSET, schema=ONBOARD_COWORKER_SCHEMA,
+        handler=_tool_onboard_coworker, check_fn=_check_orchestrator_only,
+    )
+    ctx.register_tool(
+        name="onboard_project", toolset=_TOOLSET, schema=ONBOARD_PROJECT_SCHEMA,
+        handler=_tool_onboard_project, check_fn=_check_orchestrator_only,
+    )
+    ctx.register_tool(
+        name="create_agent", toolset=_TOOLSET, schema=CREATE_AGENT_SCHEMA,
+        handler=_tool_create_agent, check_fn=_check_orchestrator_only,
+    )
+
+    ctx.register_cli_command(
+        name="coworker",
+        help="Compose Hermes coworker profile distributions from a lego spec",
+        setup_fn=setup_coworker, handler_fn=_cli_coworker,
+        description="Render per-coworker-type Hermes profile distributions from a coworker-types.yaml spec.",
+    )
+    ctx.register_cli_command(
+        name="onboard",
+        help="Onboard a project or coworker roster into the fleet",
+        setup_fn=setup_onboard, handler_fn=_cli_onboard,
+        description="Scaffold a project distribution, or render+onboard coworker profiles into a gateway.",
+    )
+
+    ctx.register_command(
+        name="onboard-project", handler=_slash_onboard_project,
+        description="Scaffold a Hermes project distribution from a path or git URL.",
+        args_hint="<path|url>",
+    )
+    ctx.register_command(
+        name="onboard-coworker", handler=_slash_onboard_coworker,
+        description="Render + onboard coworker profiles into the gateway.",
+        args_hint="<coworker-types.yaml> <loopback-gateway-ws-url>",
+    )
+
+
+__all__ = [
+    "compose", "load_spec", "CompositionError", "park_non_fleet_profiles",
+    "onboard_coworker", "onboard_project",
+    "activate_shared_learnings",
+    "validate_gateway_url", "_gateway_preflight", "_ws_probe",
+    "_dispatch_rpc", "_clone_repo", "register",
+]
