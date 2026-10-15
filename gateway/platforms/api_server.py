@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- the opt-in cache_if branch and the persist-receipt return live inside the existing get_or_set and wake-wrapper units, which callers bind on this module
 """OpenAI-compatible API server platform adapter (aiohttp).
 
 Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, /api/sessions,
@@ -1023,7 +1024,7 @@ class _IdempotencyCache:
                 if cache_if is not None:
                     try:
                         should_cache = bool(cache_if(resp))
-                    except Exception:
+                    except Exception:  # health: allow BLE001 -- cache_if is caller-supplied and may raise any exception type; a predicate error must never cache the result
                         # A predicate error must not poison the cache with a
                         # possibly-bad result — fail toward re-running.
                         should_cache = False

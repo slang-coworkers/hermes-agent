@@ -383,7 +383,7 @@ class GatewayKanbanWatchersMixin:
                         idempotency_key=key,
                         require_persist_ack=True,
                     )
-            except Exception as exc:
+            except Exception as exc:  # health: allow BLE001 -- adapter delivery can fail with any exception type; every failure must release the lease and leave the cursor unmoved
                 # Delivery unconfirmed: release the lease immediately (do NOT
                 # wait for expiry) so the next tick re-delivers, leave the
                 # cursor unmoved, back off, and NEVER drop the durable sub.
