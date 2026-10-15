@@ -177,17 +177,21 @@ so a concurrent reader never sees a truncated file:
 
 ```bash
 MANAGED="${HERMES_MANAGED_DIR:-/etc/hermes}"   # get_managed_dir() resolution
-PYTHON="$(command -v python3)"
+# The Hermes install's own interpreter: hermes_yaml ships with Hermes, not with a
+# system python3. On the official image that is /opt/hermes/.venv/bin/python; on
+# any other install, use the python in the same venv as the `hermes` entry point.
+PYTHON=/opt/hermes/.venv/bin/python
 # sudo because the default managed dir (/etc/hermes) is root-owned; drop sudo
 # only when $HERMES_MANAGED_DIR points at a dir you already own.
 sudo "$PYTHON" - "$MANAGED/config.yaml" ./fleet-out/managed/config.yaml <<'PY'
-import os, sys, tempfile, yaml
+import os, sys, tempfile
+import hermes_yaml
 target, fragment = sys.argv[1], sys.argv[2]
 existing = {}
 if os.path.exists(target):
     with open(target, encoding="utf-8") as fh:
-        existing = yaml.safe_load(fh) or {}
-frag = yaml.safe_load(open(fragment, encoding="utf-8")) or {}
+        existing = hermes_yaml.safe_load(fh) or {}
+frag = hermes_yaml.safe_load(open(fragment, encoding="utf-8")) or {}
 # recursive deep-merge: the fragment's eight keys win per leaf; every
 # unrelated managed key already in the file is preserved.
 def merge(base, over):
@@ -202,7 +206,7 @@ d = os.path.dirname(target) or "."
 os.makedirs(d, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=d, prefix=".config.", suffix=".yaml")
 with os.fdopen(fd, "w", encoding="utf-8") as fh:
-    yaml.safe_dump(merged, fh, sort_keys=False)
+    hermes_yaml.safe_dump(merged, fh, sort_keys=False)
 os.replace(tmp, target)      # atomic on every OS
 PY
 # then root-own it so a coworker cannot edit it (see below):
