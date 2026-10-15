@@ -11,7 +11,7 @@ import os
 import textwrap
 from pathlib import Path
 
-import tools.skills_tool as skills_tool
+from tools import skills_tool
 from tools.skills_tool import _find_all_skills
 from agent.skill_utils import _external_dirs_cache_clear
 
@@ -156,7 +156,7 @@ def test_ac_self_f57_b_4(tmp_path, monkeypatch):
     with no agent constructed and provider credentials scrubbed from the subprocess env, and
     the SKILL.md the script writes into the shared external dir becomes discoverable.
     """
-    import cron.scheduler as scheduler
+    from cron import scheduler
     from cron.jobs import create_job, get_job, use_cron_store
     from hermes_cli.subcommands.cron import build_cron_parser
 

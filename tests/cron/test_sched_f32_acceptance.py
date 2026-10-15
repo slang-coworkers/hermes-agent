@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
-import cron.executions as executions
+from cron import executions
 from cron.jobs import (
     advance_next_run,
     compute_next_run,
@@ -30,7 +30,7 @@ def test_ac_sched_f32_1(tmp_path, monkeypatch):
 
     # Anchor everything in the future so a past one-shot never reads as already-fired and
     # the re-arm comparisons are deterministic regardless of the wall clock at test time.
-    base = (datetime.now(timezone.utc) + timedelta(days=2)).replace(second=0, microsecond=0)
+    base = (datetime.now(UTC) + timedelta(days=2)).replace(second=0, microsecond=0)
     iso_once = parse_schedule((base + timedelta(hours=1)).replace(tzinfo=None).isoformat())
     assert iso_once["kind"] == "once"
 

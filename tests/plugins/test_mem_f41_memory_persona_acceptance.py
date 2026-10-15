@@ -43,7 +43,7 @@ DOC_LINK_FROM = (
 )
 
 
-def _write_home(tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> Path:
+def _write_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import shutil
 
     home = tmp_path / "hermes-home"
@@ -87,7 +87,7 @@ def _dig(cfg: dict, dotted: str):
     return (True, node)
 
 
-def _render_both(tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> dict:
+def _render_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     _write_home(tmp_path, monkeypatch)
     loaded = _load()
     out = {}

@@ -61,7 +61,7 @@ def remove_edge(db_path: str, a: str, b: str) -> None:
         conn.close()
 
 
-def list_edges(db_path: str) -> List[Tuple[str, str, bool]]:
+def list_edges(db_path: str) -> list[tuple[str, str, bool]]:
     conn = _connect(db_path)
     try:
         rows = conn.execute(
@@ -85,7 +85,7 @@ def lookup(db_path: str, frm: str, to: str) -> Optional[dict]:
     return {"from": frm, "to": to, "gated": bool(row[0])}
 
 
-def wired_teammates(db_path: str, frm: str) -> List[str]:
+def wired_teammates(db_path: str, frm: str) -> list[str]:
     conn = _connect(db_path)
     try:
         rows = conn.execute(

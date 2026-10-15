@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import hermes_yaml as yaml
 import pytest
 
-import hermes_cli.lifecycle as lifecycle
+from hermes_cli import lifecycle
 import hermes_cli.plugins as plugins_mod
 from hermes_cli.plugins import PluginManager
 from hermes_cli.plugin_dev import doctor_plugin

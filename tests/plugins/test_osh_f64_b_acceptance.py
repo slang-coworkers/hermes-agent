@@ -332,7 +332,7 @@ def test_ac_osh_f64_b_5(loaded):
     assert "onecli-onboard --profile" not in low, (
         "AC-5: obsolete OneCLI per-profile grant instructions remain"
     )
-    for block in re.findall(r"```ya?ml[^\n]*\n(.*?)```", doc, flags=re.I | re.S):
+    for block in re.findall(r"```ya?ml[^\n]*\n(.*?)```", doc, flags=re.IGNORECASE | re.DOTALL):
         example = yaml.safe_load(block)
         if not isinstance(example, dict):
             continue

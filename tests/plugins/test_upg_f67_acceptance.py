@@ -436,7 +436,7 @@ class _RunsSelf:
 
 def test_ac_upg_f67_9():
     """The in-process served-profile wake returns the turn's persistence receipt all the way out: `api_server_runs.run_internal_session_turn` returns `True` only when the `_run_agent` result's `turn_persisted` is exactly `True` (a truthy non-bool such as `"false"` returns `False`), and the `APIServerAdapter.run_internal_session_turn` wrapper returns that same value."""
-    import gateway.platforms.api_server as api_server
+    from gateway.platforms import api_server
     from gateway.platforms import api_server_runs
 
     async def run():

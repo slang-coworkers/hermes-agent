@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover - allows import without dashboard deps
 router = APIRouter()
 
 
-def _settings() -> Dict[str, Any]:
+def _settings() -> dict[str, Any]:
     try:
         from hermes_cli.config import load_config
 
@@ -79,7 +79,7 @@ def _ledger_path() -> Path:
     return home / "plugin-data" / "nv-artifact" / "data.db"
 
 
-def _rows() -> List[Tuple[Optional[str], float]]:
+def _rows() -> list[tuple[Optional[str], float]]:
     db = _ledger_path()
     if not db.exists():
         return []
@@ -95,11 +95,11 @@ def _rows() -> List[Tuple[Optional[str], float]]:
         conn.close()
 
 
-def _aggregates() -> Dict[str, Any]:
+def _aggregates() -> dict[str, Any]:
     rows = _rows()
     total = len(rows)
     merged = [r for r in rows if r[0] == "merged"]
-    funnel: Dict[str, int] = {}
+    funnel: dict[str, int] = {}
     for outcome, _cost in rows:
         key = outcome or "unknown"
         funnel[key] = funnel.get(key, 0) + 1
@@ -116,7 +116,7 @@ def _aggregates() -> Dict[str, Any]:
 
 
 @router.get("/outcomes")
-def outcomes() -> Dict[str, Any]:
+def outcomes() -> dict[str, Any]:
     """Return the outcome funnel / win-rate / cost-per-merge for the operator."""
     if not _authorized():
         return {"authorized": False, "status": "refused",

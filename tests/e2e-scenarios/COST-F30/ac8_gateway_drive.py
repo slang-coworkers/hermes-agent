@@ -48,7 +48,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 
 def _state(mod, session_id):
@@ -127,7 +127,7 @@ async def _run(args) -> int:
             print(json.dumps({"error": "--seed-priced-breach requires --session"}))
             return 2
         session_id = args.session
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         platform_value = Platform(args.platform).value
         # Part B runs estop_on_breach=false so the priced breach blocks IN-BAND without engaging a
         # sentinel; persist it to config.yaml AND stub _CTX (which _cfg_bool reads) to False for the

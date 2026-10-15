@@ -310,10 +310,10 @@ def test_ac_ops_f58_6() -> None:
         assert "gap" in disp or "p8" in disp, f"{res!r} must be dispositioned GAP/P8: {disp!r}"
 
     # The room-administration P8 gap boundary, asserted ONLY within its own section.
-    hm = re.search(r"^##+ .*(room-administration gap|p8 upstream ask)", text, re.I | re.M)
+    hm = re.search(r"^##+ .*(room-administration gap|p8 upstream ask)", text, re.IGNORECASE | re.MULTILINE)
     assert hm, "doc lacks the '## No native analog — the room-administration gap (P8 upstream ask)' section"
     after = text[hm.end():]
-    nxt = re.search(r"^##+ ", after, re.M)
+    nxt = re.search(r"^##+ ", after, re.MULTILINE)
     gap = (text[hm.start(): hm.end() + nxt.start()] if nxt else text[hm.start():]).lower()
     assert "groups.create" in gap or "groups.*" in gap, "gap section must name the groups.* RPC"
     assert "gateway" in gap, "gap section must state the room service is gateway-hosted"

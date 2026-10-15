@@ -65,7 +65,7 @@ def _fresh_skills_cache(monkeypatch, hermes_home):
     monkeypatch.setattr(st, "_skills_dir", lambda: hermes_home / "skills")
     monkeypatch.setattr(st, "_get_disabled_skill_names", lambda: set())
     monkeypatch.setattr(
-        "agent.skill_utils.get_project_skills_dirs", lambda: [], raising=False
+        "agent.skill_utils.get_project_skills_dirs", list, raising=False
     )
     yield
     st._SKILLS_CACHE.clear()

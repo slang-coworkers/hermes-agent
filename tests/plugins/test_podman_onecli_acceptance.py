@@ -79,7 +79,7 @@ class _FakeTransport:
             return 200, [{"identifier": i, "id": f"uuid-{i}"} for i in sorted(self.existing)]
         if method == "PUT" and path.startswith("/api/agents/") and path.endswith("/secrets"):
             uuid = path[len("/api/agents/"):-len("/secrets")]
-            ident = uuid[len("uuid-"):] if uuid.startswith("uuid-") else uuid
+            ident = uuid.removeprefix("uuid-")
             self.calls.append(("set_secrets", ident))
             self.secrets[ident] = list((json or {}).get("secretIds", []))
             return 200, {}

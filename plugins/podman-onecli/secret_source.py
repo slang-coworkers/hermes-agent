@@ -69,7 +69,7 @@ class OneCLISecretSource(SecretSource):
         self._proxy_rewrite = proxy_rewrite or None
         self._ca_bundle = ca_bundle or None
 
-    def protected_env_vars(self, cfg: dict) -> FrozenSet[str]:
+    def protected_env_vars(self, cfg: dict) -> frozenset[str]:
         # The OneCLI control-plane bootstrap key must never be overwritten by any
         # source (agent/secret_sources/base.py:186).
         return frozenset({self._api_key_env})

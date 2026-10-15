@@ -31,7 +31,7 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # Transport contract: (method, path, *, json=None) -> (status: int, body: dict | None)
-Transport = Callable[..., Tuple[int, Any]]
+Transport = Callable[..., tuple[int, Any]]
 
 _TRANSPORT: Optional[Transport] = None
 _GATEWAY_API_BASE_URL: Optional[str] = None
@@ -39,7 +39,7 @@ _API_KEY_ENV: str = "ONECLI_API_KEY"
 # Exact `host:port` origins allowed to use http:// WHEN no bootstrap key is set
 # (FLEET-F62). Empty by default, so the TLS requirement is unchanged unless an
 # operator opts a specific keyless endpoint in.
-_INSECURE_NO_AUTH_ORIGINS: Tuple[str, ...] = ()
+_INSECURE_NO_AUTH_ORIGINS: tuple[str, ...] = ()
 
 
 class OneCLIError(RuntimeError):
@@ -128,14 +128,14 @@ def _api_key() -> str:
     return get_source_environment().get(_API_KEY_ENV, "")
 
 
-def _request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any]:
+def _request(method: str, path: str, *, json: Any = None) -> tuple[int, Any]:
     fn = _TRANSPORT
     if fn is not None:
         return fn(method, path, json=json)
     return _real_request(method, path, json=json)
 
 
-def _real_request(method: str, path: str, *, json: Any = None) -> Tuple[int, Any]:
+def _real_request(method: str, path: str, *, json: Any = None) -> tuple[int, Any]:
     base = _GATEWAY_API_BASE_URL
     if not base:
         raise OneCLIError("gateway_api_base_url is not configured for the OneCLI client")

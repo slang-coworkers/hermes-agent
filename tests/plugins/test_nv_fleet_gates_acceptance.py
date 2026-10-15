@@ -139,7 +139,7 @@ def _relink(target, link):
 
 def _run_critique(monkeypatch, session_id, verdict="approve"):
     """Run the real codex_critique tool with a stubbed plugin-LLM lane."""
-    import agent.plugin_llm as plugin_llm
+    from agent import plugin_llm
     calls = {"n": 0}
 
     async def _fake(self, **kw):

@@ -269,8 +269,8 @@ def test_ac_sched_f33_2(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ac_sched_f33_3(monkeypatch):
     """The scheduler honors the rendered cron.script_timeout_seconds: with no module or env override, script-timeout resolution returns the configured value (30) and falls back to 3600 when the key is absent."""
-    import cron.scheduler as scheduler
-    import cron.scheduler_script as scheduler_script
+    from cron import scheduler
+    from cron import scheduler_script
 
     # skip the higher-precedence module-override and env branches so config wins
     monkeypatch.setattr(scheduler, "_SCRIPT_TIMEOUT", scheduler._DEFAULT_SCRIPT_TIMEOUT)
@@ -284,7 +284,7 @@ def test_ac_sched_f33_3(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ac_sched_f33_4(monkeypatch):
     """The scheduler fires the failure-streak review nudge at the rendered cron.failure_nudge_threshold: a recurring job whose prospective streak reaches the threshold gets an advisory nudge; below threshold, one-shot jobs, and threshold <= 0 get none."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     # a non-default threshold (5) proves config drives it, not the hardcoded default of 3
     monkeypatch.setattr(scheduler, "load_config", lambda: {"cron": {"failure_nudge_threshold": 5}})
@@ -304,7 +304,7 @@ def test_ac_sched_f33_4(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ac_sched_f33_5(agent_env, monkeypatch):
     """A pre-task script gate skips the agent run entirely (silent marker, no LLM, no delivery) only when its last non-empty stdout line is JSON {"wakeAgent": false}; any other last line (missing key, true, non-JSON, non-dict) wakes it."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     assert scheduler._parse_wake_gate('{"wakeAgent": false}') is False
     assert scheduler._parse_wake_gate('{"wakeAgent": true}') is True
@@ -335,7 +335,7 @@ def test_ac_sched_f33_5(agent_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ac_sched_f33_6(agent_env, monkeypatch):
     """A pre-task script that exits nonzero does NOT gate the run — its failure is surfaced as ## Script Error context and the agent still runs (the NanoClaw-parity difference: only wakeAgent:false gates)."""
-    import cron.scheduler_script as scheduler_script
+    from cron import scheduler_script
 
     _write_script(agent_env, "fail.py", "import sys\nsys.stderr.write('boom')\nsys.exit(3)\n")
     ok, output = scheduler_script._run_job_script("fail.py")

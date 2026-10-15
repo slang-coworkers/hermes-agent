@@ -39,7 +39,7 @@ DERIVED_BUNDLE = ("plugin-data", PLUGIN_KEY, "openshell-trust", "ca-bundle.pem")
 _BRIDGE_HOSTS = ("172.17.0.1", "host.docker.internal")
 # The broker and OneCLI hops plus the bare hosts: a token that bypasses the proxy for any of
 # these under the release matchers is a bridge entry.
-_BRIDGE_PROBES: Tuple[Tuple[str, Optional[int]], ...] = (
+_BRIDGE_PROBES: tuple[tuple[str, Optional[int]], ...] = (
     ("172.17.0.1", 18777),
     ("172.17.0.1", 18255),
     ("172.17.0.1", None),
@@ -53,7 +53,7 @@ class TrustError(ValueError):
     """A malformed ``egress.openshell_trust`` or an unusable bundle input."""
 
 
-def _split_host_port(value: str) -> Tuple[str, Optional[int]]:
+def _split_host_port(value: str) -> tuple[str, Optional[int]]:
     # Mirrors gateway.platforms.base._split_host_port at the pinned release.
     raw = str(value or "").strip()
     if not raw:
@@ -145,11 +145,11 @@ def is_bridge_entry(entry: str) -> bool:
     )
 
 
-def _tokens(value: str) -> List[str]:
+def _tokens(value: str) -> list[str]:
     return [t for t in _TOKEN_SPLIT.split(value or "") if t]
 
 
-def bridge_entries(value: Any) -> List[str]:
+def bridge_entries(value: Any) -> list[str]:
     """The bridge tokens of a NO_PROXY value, in order."""
     if value is None:
         return []
@@ -166,11 +166,11 @@ def strip_bridge_no_proxy(value: str) -> str:
     return ",".join(kept) or LOOPBACK_NO_PROXY
 
 
-def claim_no_proxy(environ: Mapping[str, str]) -> Dict[str, str]:
+def claim_no_proxy(environ: Mapping[str, str]) -> dict[str, str]:
     """Both NO_PROXY spellings as the trust source claims them: each spelling's own value
     stripped, else the other spelling's, else the loopback default."""
     upper, lower = environ.get("NO_PROXY") or "", environ.get("no_proxy") or ""
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for name, own, other in (("NO_PROXY", upper, lower), ("no_proxy", lower, upper)):
         raw = own or other
         out[name] = strip_bridge_no_proxy(raw) if raw.strip() else LOOPBACK_NO_PROXY
@@ -217,7 +217,7 @@ def _abs_path(value: Any, field: str) -> str:
     return path
 
 
-def parse_trust(value: Any) -> Dict[str, Any]:
+def parse_trust(value: Any) -> dict[str, Any]:
     """Validate a PRESENT ``egress.openshell_trust`` into ``{bundle[, merge]}``."""
     if not isinstance(value, dict):
         raise TrustError(f"{SPEC_KEY} must be a mapping with a bundle path, got {type(value).__name__}")
@@ -226,7 +226,7 @@ def parse_trust(value: Any) -> Dict[str, Any]:
         raise TrustError(f"{SPEC_KEY} has unknown key(s) {unknown}; allowed: bundle, merge")
     if "bundle" not in value:
         raise TrustError(f"{SPEC_KEY}.bundle is required (the live OpenShell bundle path)")
-    out: Dict[str, Any] = {"bundle": _abs_path(value["bundle"], "bundle")}
+    out: dict[str, Any] = {"bundle": _abs_path(value["bundle"], "bundle")}
     if "merge" in value:
         merge = value["merge"]
         if not isinstance(merge, list) or not merge:
@@ -235,7 +235,7 @@ def parse_trust(value: Any) -> Dict[str, Any]:
     return out
 
 
-def trust_from_spec(spec: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def trust_from_spec(spec: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     """The validated trust mapping of an openshell spec, or None when the key is absent."""
     egress = spec.get("egress")
     if not isinstance(egress, dict) or SOURCE_NAME not in egress:
@@ -243,24 +243,24 @@ def trust_from_spec(spec: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return parse_trust(egress[SOURCE_NAME])
 
 
-def trust_block(trust: Mapping[str, Any]) -> Dict[str, Any]:
+def trust_block(trust: Mapping[str, Any]) -> dict[str, Any]:
     """The ``secrets.openshell_trust`` section the source reads as its config."""
-    block: Dict[str, Any] = {"enabled": True, "override_existing": True, "bundle": trust["bundle"]}
+    block: dict[str, Any] = {"enabled": True, "override_existing": True, "bundle": trust["bundle"]}
     if trust.get("merge"):
         block["merge"] = list(trust["merge"])
     return block
 
 
-def with_trust_source(sources: Any) -> List[Any]:
+def with_trust_source(sources: Any) -> list[Any]:
     """``secrets.sources`` with ``openshell_trust`` first and the rest kept, de-duplicated."""
-    rest: List[Any] = []
+    rest: list[Any] = []
     for name in sources if isinstance(sources, list) else []:
         if name != SOURCE_NAME and name not in rest:
             rest.append(name)
     return [SOURCE_NAME, *rest]
 
 
-def preserved_trust_names(secrets_cfg: Any) -> List[str]:
+def preserved_trust_names(secrets_cfg: Any) -> list[str]:
     """CA names and NO_PROXY spellings a ``secrets.preserve_existing`` carves out (they would
     outrank the trust source's override)."""
     preserved = secrets_cfg.get("preserve_existing") if isinstance(secrets_cfg, dict) else None
@@ -270,7 +270,7 @@ def preserved_trust_names(secrets_cfg: Any) -> List[str]:
     return sorted({v.strip() for v in preserved if isinstance(v, str) and v.strip() in guarded})
 
 
-def config_bridge_no_proxy(config: Any) -> List[Tuple[str, List[str]]]:
+def config_bridge_no_proxy(config: Any) -> list[tuple[str, list[str]]]:
     """``[(spelling, bridge entries)]`` for each top-level NO_PROXY scalar that lists the bridge."""
     if not isinstance(config, dict):
         return []
@@ -289,7 +289,7 @@ def _env_text_as_loaded(raw: bytes) -> Optional[str]:
     import codecs
     import io
 
-    def _lines(encoding: str, errors: str) -> List[str]:
+    def _lines(encoding: str, errors: str) -> list[str]:
         # Universal newlines (\n, \r\n, \r only), as the release sanitizer's readlines() splits;
         # str.splitlines() would also split on U+2028 and similar, which the runtime keeps in a value.
         with io.TextIOWrapper(io.BytesIO(raw), encoding=encoding, errors=errors, newline=None) as fh:
@@ -325,7 +325,7 @@ def _env_text_as_loaded(raw: bytes) -> Optional[str]:
     return text.removeprefix("\ufeff") if rewritten else text
 
 
-def _env_file_assignments(path: Path) -> Dict[str, Optional[str]]:
+def _env_file_assignments(path: Path) -> dict[str, Optional[str]]:
     """A dotenv file parsed the way a Hermes reload loads it (release pre-sanitize, then
     python-dotenv), so quoting, inline comments, ``export`` and stray NULs read as at runtime."""
     import io
@@ -342,7 +342,7 @@ def _env_file_assignments(path: Path) -> Dict[str, Optional[str]]:
     return dict(dotenv_values(stream=io.StringIO(text)))
 
 
-def env_file_clashes(path: Path, *, keyed: bool) -> List[str]:
+def env_file_clashes(path: Path, *, keyed: bool) -> list[str]:
     """Variables an env file sets that outrank the start-time guards: a bridge-listing NO_PROXY
     spelling always, any assignment of a CA name when the fleet declares the trust key."""
     assigned = _env_file_assignments(path)
@@ -358,7 +358,7 @@ def preflight_install(config: Any, home: Optional[Path], managed_dir: Optional[P
     installed into: the managed-scope ``.env`` (applied after every source), the home ``.env``
     (reloaded with override after the once-per-home source apply), a top-level NO_PROXY scalar
     (bridged into the env) and, for a keyed install, a preserved CA or NO_PROXY name."""
-    problems: List[str] = []
+    problems: list[str] = []
     if managed_dir is not None:
         managed_env = Path(managed_dir) / ".env"
         for name in env_file_clashes(managed_env, keyed=keyed):
@@ -389,7 +389,7 @@ def is_openshell_fleet_config(cfg: Any) -> bool:
     if not isinstance(entries, dict):
         return False
 
-    def _settings(key: str) -> Dict[str, Any]:
+    def _settings(key: str) -> dict[str, Any]:
         entry = entries.get(key)
         settings = entry.get("settings") if isinstance(entry, dict) else None
         return settings if isinstance(settings, dict) else {}
@@ -416,7 +416,7 @@ def guards_no_proxy(cfg: Any) -> bool:
                for name, section in secrets.items())
 
 
-def strip_inherited_no_proxy(environ: MutableMapping[str, str], cfg: Any) -> List[str]:
+def strip_inherited_no_proxy(environ: MutableMapping[str, str], cfg: Any) -> list[str]:
     """On an openshell fleet home, drop bridge entries from the inherited NO_PROXY spellings.
     Returns the spellings rewritten; a non-fleet home or a clean value is left untouched."""
     if not is_openshell_fleet_config(cfg):

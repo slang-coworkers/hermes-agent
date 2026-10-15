@@ -32,7 +32,7 @@ class _FallbackAdapter(BasePlatformAdapter):
     name = "fallback"
 
     def __init__(self) -> None:
-        self.sent: List[Dict[str, Any]] = []
+        self.sent: list[dict[str, Any]] = []
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         return True
@@ -40,7 +40,7 @@ class _FallbackAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         return None
 
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"chat_id": chat_id}
 
     async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:

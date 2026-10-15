@@ -4,7 +4,7 @@ tool calls in the plugin's durable storage under
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 from hermes_cli.profiles import get_active_profile_name
 from plugins.plugin_storage import plugin_data_dir
@@ -24,7 +24,7 @@ def _record_tool_call(
     # **kwargs an ERROR (plugin_dev.py:391-400), which would fail --ci.
     line = json.dumps(
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "tool_name": tool_name,
             "task_id": task_id,
             "session_id": session_id,

@@ -184,7 +184,7 @@ def test_boundary_no_double_count(tmp_path, monkeypatch):
 
 def test_unpriced_boundary_is_failclosed_and_idempotent(tmp_path, monkeypatch):
     """An unknown-priced call reaching a boundary is a fail-closed breach, recorded once."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0},
@@ -230,7 +230,7 @@ def test_set_state_cannot_undo_atomic_effective_bump(tmp_path, monkeypatch):
 
 def test_immortal_platform_enum_never_stops(tmp_path, monkeypatch):
     """A platform-immortal session (Platform enum, not str) is never skipped, blocked, refused, or ESTOP'd."""
-    import agent.estop as estop
+    from agent import estop
     from gateway.config import Platform
 
     hermes_home, manager, loaded = _load(
@@ -322,7 +322,7 @@ def test_moa_unpriced_remains_fail_closed(tmp_path, monkeypatch):
 
 def test_new_day_first_fire_crosses(tmp_path, monkeypatch):
     """An immortal session that crosses the ceiling on the new day's first boundary records a day-two episode."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch,
@@ -409,7 +409,7 @@ def test_lineage_unknown_legacy_schema_is_false_and_crash_safe(tmp_path, monkeyp
 
 def test_authoritative_unknown_boundary_failclosed_idempotent(tmp_path, monkeypatch):
     """A reconcile-only unknown row ($0, cost_status='unknown') on a descendant is a fail-closed breach, recorded once across repeated boundaries."""
-    import agent.estop as estop
+    from agent import estop
 
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0},

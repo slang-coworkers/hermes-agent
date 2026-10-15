@@ -319,16 +319,16 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, status=None,
     try:
         ctx = _CTX
         if ctx is None or tool_name not in ("terminal", "execute_code"):
-            return None
+            return
         if status not in ("ok", None):
-            return None
+            return
         args = args or {}
         invocation = args.get("command") if tool_name == "terminal" else args.get("code")
         if not _CREATE_INTENT_RE.search(str(invocation or "")):
-            return None
+            return
         m = _PR_URL_RE.search(str(result or ""))
         if not m:
-            return None
+            return
         repo, pr = m.group(1), int(m.group(2))
 
         # Ensure a real owning card and bind the calling session onto it. The
@@ -362,7 +362,7 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, status=None,
         )
     except Exception:
         logger.warning("nv-artifact post_tool_call claim failed", exc_info=True)
-    return None
+    return
 
 
 # ---------------------------------------------------------------------------
@@ -609,12 +609,12 @@ def _on_kanban_task_completed(task_id=None, **kwargs):
     try:
         ctx = _CTX
         if ctx is None or not task_id:
-            return None
+            return
         for artifact, profile in _artifacts_for_task(ctx, task_id):
             _upsert_outcome(artifact, terminal_outcome="completed", profile=profile)
     except Exception:
         logger.warning("nv-artifact kanban_task_completed failed", exc_info=True)
-    return None
+    return
 
 
 def _on_session_end(session_id=None, task_id=None, **kwargs):
@@ -625,13 +625,13 @@ def _on_session_end(session_id=None, task_id=None, **kwargs):
     try:
         ctx = _CTX
         if ctx is None or not session_id:
-            return None
+            return
         cost = _session_cost(session_id)
         for artifact, profile in _artifacts_for_session(ctx, task_id, session_id):
             _upsert_outcome(artifact, cost_usd=cost, profile=profile)
     except Exception:
         logger.warning("nv-artifact on_session_end failed", exc_info=True)
-    return None
+    return
 
 
 # ---------------------------------------------------------------------------

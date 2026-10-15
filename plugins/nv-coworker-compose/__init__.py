@@ -68,13 +68,13 @@ _rpc_ids = itertools.count(1)
 # None for the in-process gateway-tool path. Both this and _pending_ws_requester
 # are ContextVars so concurrent onboards (e.g. two slash calls dispatched via
 # asyncio.to_thread) never exchange authenticated connections or tickets.
-_standalone_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+_standalone_ctx: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar(
     "nv_coworker_standalone_ctx", default=None
 )
 
 # A WebSocket requester opened by the preflight probe, handed to the onboarding
 # call so the authenticated connection (and any single-use ticket) is reused.
-_pending_ws_requester: contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], Any]]] = contextvars.ContextVar(
+_pending_ws_requester: contextvars.ContextVar[Optional[Callable[[dict[str, Any]], Any]]] = contextvars.ContextVar(
     "nv_coworker_pending_ws_requester", default=None
 )
 
@@ -100,7 +100,7 @@ class RpcError(Exception):
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
-def validate_gateway_url(url: str) -> Tuple[bool, str]:
+def validate_gateway_url(url: str) -> tuple[bool, str]:
     """Local credential-form + destination check, before any transport.
 
     Enforces a ``ws``/``wss`` scheme and the ``/api/ws`` path, rejects a
@@ -154,14 +154,14 @@ def _drain_ready(conn) -> bool:
     return not (isinstance(frame, dict) and frame.get("error"))
 
 
-def _open_ws_requester(url: str) -> Callable[[Dict[str, Any]], Any]:
+def _open_ws_requester(url: str) -> Callable[[dict[str, Any]], Any]:
     """Open an authenticated WebSocket, consume ``gateway.ready``, and return a
     request->envelope callable that correlates responses by JSON-RPC ``id``
     (ignoring unsolicited event frames). Secondary (standalone-CLI) transport."""
     conn = _ws_connect(url)
     _drain_ready(conn)
 
-    def _request(request: Dict[str, Any]) -> Any:
+    def _request(request: dict[str, Any]) -> Any:
         conn.send(json.dumps(request))
         while True:
             raw = conn.recv(timeout=30)
@@ -194,7 +194,7 @@ def _safe_close(conn) -> None:
             logger.debug("ws close failed", exc_info=True)
 
 
-def _ws_probe(url: str) -> Dict[str, Any]:
+def _ws_probe(url: str) -> dict[str, Any]:
     """Read-only liveness probe: open the connection, consume ``gateway.ready``,
     and retain the requester (in a ContextVar) for the onboarding call so the
     socket (and its single-use ticket) is not spent twice. Raises
@@ -219,7 +219,7 @@ def _ws_probe(url: str) -> Dict[str, Any]:
         _safe_close(conn)
         return {"authed": False, "reason": "auth_rejected"}
 
-    def _request(request: Dict[str, Any]) -> Any:
+    def _request(request: dict[str, Any]) -> Any:
         conn.send(json.dumps(request))
         while True:
             raw = conn.recv(timeout=30)
@@ -232,7 +232,7 @@ def _ws_probe(url: str) -> Dict[str, Any]:
     return {"authed": True}
 
 
-def _gateway_preflight(url: str) -> Tuple[bool, str]:
+def _gateway_preflight(url: str) -> tuple[bool, str]:
     """Refuse before any mutation: credential-form check, then a liveness probe."""
     ok, reason = validate_gateway_url(url)
     if not ok:
@@ -270,7 +270,7 @@ def _room_exists(resp: Any) -> bool:
     return bool(resp.get("exists")) or isinstance(resp.get("room"), dict)
 
 
-def _member_object(member: Any) -> Dict[str, Any]:
+def _member_object(member: Any) -> dict[str, Any]:
     """Adapt a member name to the object hosted rooms require (each member must be
     an object — gateway/hosted_rooms.py:343-344)."""
     if isinstance(member, dict):
@@ -279,14 +279,14 @@ def _member_object(member: Any) -> Dict[str, Any]:
     return {"member_id": name, "profile": name, "handle": name}
 
 
-def _gateway_handle_request(request: Dict[str, Any]) -> Any:
+def _gateway_handle_request(request: dict[str, Any]) -> Any:
     """In-process dispatch to the running gateway (lazy import); replaceable in tests."""
     from tui_gateway import server  # pragma: no cover - runtime-only path
 
     return server.handle_request(request)
 
 
-def _dispatch_rpc(method: str, params: Dict[str, Any]) -> Any:
+def _dispatch_rpc(method: str, params: dict[str, Any]) -> Any:
     """Dispatch one JSON-RPC method and return its normalized result body.
 
     Routes to the standalone authenticated WS requester when the standalone
@@ -399,12 +399,12 @@ def _is_sensitive_file(name: str) -> bool:
     return name == ".env" or name.startswith(".env.") or name == ".envrc"
 
 
-def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
+def _scan_source_files(root: Path, max_files: int) -> list[tuple[str, str]]:
     """Return up to ``max_files`` (relpath, text) eligible source files, filtering
     symlinks, VCS/dependency dirs, secret files, and binaries FIRST, then
     sorting, then taking the bound — so an excluded file never consumes a slot."""
     skip_dirs = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
-    candidates: List[Tuple[str, Path]] = []
+    candidates: list[tuple[str, Path]] = []
     for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
             continue
@@ -421,7 +421,7 @@ def _scan_source_files(root: Path, max_files: int) -> List[Tuple[str, str]]:
     return [(rel, path.read_text(encoding="utf-8", errors="ignore")) for rel, path in picked]
 
 
-def _write_project_scaffold(scaffold: Path, project: str, files: List[Tuple[str, str]]) -> None:
+def _write_project_scaffold(scaffold: Path, project: str, files: list[tuple[str, str]]) -> None:
     scaffold.mkdir(parents=True, exist_ok=True)
     (scaffold / "distribution.yaml").write_text(
         json.dumps({
@@ -445,7 +445,7 @@ def _write_project_scaffold(scaffold: Path, project: str, files: List[Tuple[str,
         )
 
 
-def onboard_project(source: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def onboard_project(source: str, settings: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Scaffold a project distribution from a local path or a git URL."""
     settings = settings or {}
     max_files = int(settings.get("max_files", 64))
@@ -476,9 +476,9 @@ def onboard_project(source: str, settings: Optional[Dict[str, Any]] = None) -> D
 # Coworker onboarding — Bot-Mode identity, canonical Bot Chat, standing rooms
 # ---------------------------------------------------------------------------
 
-def _profile_revisions() -> Dict[str, Dict[str, int]]:
+def _profile_revisions() -> dict[str, dict[str, int]]:
     resp = _dispatch_rpc("profiles.list", {})
-    out: Dict[str, Dict[str, int]] = {}
+    out: dict[str, dict[str, int]] = {}
     if isinstance(resp, dict):
         for profile in (resp.get("profiles") or []):
             if isinstance(profile, dict) and profile.get("name"):
@@ -540,7 +540,7 @@ class CaptureEnvManagedError(Exception):
     install owns the environment, or when managed policy cannot be read."""
 
 
-def _upsert_env_var(env_path: Union[str, Path], key: str, value: str) -> None:
+def _upsert_env_var(env_path: str | Path, key: str, value: str) -> None:
     """Atomically write exactly one ``key=value`` into a dotenv file.
 
     Collapses every prior assignment of ``key`` — plain, leading-whitespace, or
@@ -556,7 +556,7 @@ def _upsert_env_var(env_path: Union[str, Path], key: str, value: str) -> None:
     assign_re = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
 
     existing_mode: Optional[int] = None
-    kept: List[str] = []
+    kept: list[str] = []
     if env_path.exists():
         existing_mode = stat.S_IMODE(env_path.stat().st_mode)
         kept = [
@@ -581,7 +581,7 @@ def _upsert_env_var(env_path: Union[str, Path], key: str, value: str) -> None:
         raise
 
 
-def apply_capture_env(profile_home: Union[str, Path]) -> None:
+def apply_capture_env(profile_home: str | Path) -> None:
     """Idempotently enable ``HERMES_DUMP_REQUESTS`` in a profile's active ``.env``.
 
     Respects machine-global managed policy: a managed value already truthy is a
@@ -647,7 +647,7 @@ _WIKI_FOLD_PROMPT = (
 )
 
 
-def activate_shared_learnings(profile_homes: Dict[str, str], orchestrator: str, clone: str) -> None:
+def activate_shared_learnings(profile_homes: dict[str, str], orchestrator: str, clone: str) -> None:
     """Activate (not stage) the orchestrator-only wiki fold over the shared-learnings
     clone (MEM-F43). Touches ONLY the orchestrator profile home: upserts
     ``WIKI_PATH=<container mount>`` into its ``.env`` (the value the sandbox resolves
@@ -695,7 +695,7 @@ def _install(rendered_dir: str, name: str) -> str:
     return str(installed_home)
 
 
-def _profile_cron_jobs(home: Path) -> Dict[str, str]:
+def _profile_cron_jobs(home: Path) -> dict[str, str]:
     """Job id -> name in *home*'s cron store, paused ones included."""
     if not home.is_dir():
         return {}
@@ -705,7 +705,7 @@ def _profile_cron_jobs(home: Path) -> Dict[str, str]:
         return {str(j["id"]): str(j.get("name") or "") for j in list_jobs(include_disabled=True) if j.get("id")}
 
 
-def _shipped_cron_jobs(rendered_dir: str) -> Dict[str, str]:
+def _shipped_cron_jobs(rendered_dir: str) -> dict[str, str]:
     """Job id -> name for the jobs the rendered distribution ships in ``cron/jobs.json``."""
     store = Path(rendered_dir) / "cron" / "jobs.json"
     if not store.is_file():
@@ -718,7 +718,7 @@ def _shipped_cron_jobs(rendered_dir: str) -> Dict[str, str]:
 _RESUME_CRON_DEFAULT = ["orchestrator/supervise-issues"]
 
 
-def _resume_cron_allowlist() -> List[str]:
+def _resume_cron_allowlist() -> list[str]:
     """``plugins.entries.nv-coworker-compose.settings.onboard_resume_cron_jobs``:
     ``<profile>/<job-name>`` entries the onboard may resume. A malformed value resumes nothing."""
     from hermes_cli.config import load_config_readonly
@@ -742,7 +742,7 @@ def _resume_cron_allowlist() -> List[str]:
     return list(value)
 
 
-def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+def _resume_onboarded_cron(new_jobs: dict[str, dict[str, str]]) -> dict[str, list[dict[str, str]]]:
     """Resume the allowlisted jobs this onboard installed (profile home -> {job id: name}).
 
     The tag imports distribution cron jobs paused for operator review; the allowlist is
@@ -752,8 +752,8 @@ def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, Lis
     from cron.jobs import pause_job, resume_job, use_cron_store
 
     allow = set(_resume_cron_allowlist())
-    resume: List[Dict[str, str]] = []
-    kept: List[Dict[str, str]] = []
+    resume: list[dict[str, str]] = []
+    kept: list[dict[str, str]] = []
     for home, jobs in new_jobs.items():
         profile = Path(home).name
         for job_id, name in sorted(jobs.items()):
@@ -761,7 +761,7 @@ def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, Lis
             (resume if f"{profile}/{name}" in allow else kept).append(entry)
     print(f"nv-coworker-compose: onboard_resume_cron_jobs = {sorted(allow)}; "
           f"resuming {[e['profile'] + '/' + e['name'] for e in resume]}", file=sys.stderr)
-    done: List[Dict[str, str]] = []
+    done: list[dict[str, str]] = []
     try:
         for e in resume:
             with use_cron_store(e["home"]):
@@ -777,7 +777,7 @@ def _resume_onboarded_cron(new_jobs: Dict[str, Dict[str, str]]) -> Dict[str, Lis
     return {"resumed_cron_jobs": strip(resume), "kept_paused_cron_jobs": strip(kept)}
 
 
-def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[str, Dict[str, int]]) -> bool:
+def _configure_bot_meta(profile: str, ui_meta: dict[str, Any], revisions: dict[str, dict[str, int]]) -> bool:
     """Write ui_meta['hermes-bots'] via per-key CAS, retrying once on a stale
     revision. profiles.configure signals a CAS conflict as a *successful*
     result (applied.ui_meta False + applied.ui_meta_conflicts), not an RpcError,
@@ -816,17 +816,17 @@ def _configure_bot_meta(profile: str, ui_meta: Dict[str, Any], revisions: Dict[s
     return False
 
 
-def _run_onboard(spec: str) -> Dict[str, Any]:
+def _run_onboard(spec: str) -> dict[str, Any]:
     data = load_spec(spec)
     types = data.get("types") or {}
-    failures: List[str] = []
+    failures: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="nv_coworker_onboard_") as tmp:
         rendered = compose(spec, tmp)
         # Install only the coworker TYPE profiles. The rendered DEFAULT artifact
         # is not installed here: install_distribution rejects the reserved name
         # "default"; the DEFAULT profile is the gateway root itself.
-        new_cron: Dict[str, Dict[str, str]] = {}
+        new_cron: dict[str, dict[str, str]] = {}
         for tname in types:
             try:
                 home = get_profile_dir(tname)
@@ -897,7 +897,7 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
             park_non_fleet_profiles(list(types))
         except Exception as exc:
             failures.append(f"park non-fleet profiles: {exc}")
-    cron_outcome: Dict[str, List[Dict[str, str]]] = {}
+    cron_outcome: dict[str, list[dict[str, str]]] = {}
     if not failures:
         try:
             cron_outcome = _resume_onboarded_cron(new_cron)
@@ -909,7 +909,7 @@ def _run_onboard(spec: str) -> Dict[str, Any]:
     return {"ok": True, **outcome}
 
 
-def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def onboard_coworker(spec: str, settings: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Render + install coworker distributions and write their Bot-Mode identity.
 
     Standalone path (``settings['gateway_url']`` present): a read-only liveness
@@ -943,7 +943,7 @@ def onboard_coworker(spec: str, settings: Optional[Dict[str, Any]] = None) -> Di
 # Gateway tool handlers (JSON-string returning; orchestrator-gated; never raise)
 # ---------------------------------------------------------------------------
 
-def _tool_onboard_coworker(args: Dict[str, Any], **_kwargs) -> str:
+def _tool_onboard_coworker(args: dict[str, Any], **_kwargs) -> str:
     try:
         spec = args.get("spec") or args.get("coworker_types")
         if not spec:
@@ -956,7 +956,7 @@ def _tool_onboard_coworker(args: Dict[str, Any], **_kwargs) -> str:
         return json.dumps({"ok": False, "error": str(exc)})
 
 
-def _tool_onboard_project(args: Dict[str, Any], **_kwargs) -> str:
+def _tool_onboard_project(args: dict[str, Any], **_kwargs) -> str:
     try:
         source = args.get("source") or args.get("src")
         if not source:
@@ -967,7 +967,7 @@ def _tool_onboard_project(args: Dict[str, Any], **_kwargs) -> str:
         return json.dumps({"ok": False, "error": str(exc)})
 
 
-def _tool_create_agent(args: Dict[str, Any], **_kwargs) -> str:
+def _tool_create_agent(args: dict[str, Any], **_kwargs) -> str:
     try:
         _dispatch_rpc("profiles.create", dict(args))
         return json.dumps({"ok": True, "created": args.get("name")})
@@ -1180,9 +1180,17 @@ def register(ctx) -> None:
 
 
 __all__ = [
-    "compose", "load_spec", "CompositionError", "park_non_fleet_profiles",
-    "onboard_coworker", "onboard_project",
+    "CompositionError",
+    "_clone_repo",
+    "_dispatch_rpc",
+    "_gateway_preflight",
+    "_ws_probe",
     "activate_shared_learnings",
-    "validate_gateway_url", "_gateway_preflight", "_ws_probe",
-    "_dispatch_rpc", "_clone_repo", "register",
+    "compose",
+    "load_spec",
+    "onboard_coworker",
+    "onboard_project",
+    "park_non_fleet_profiles",
+    "register",
+    "validate_gateway_url",
 ]
