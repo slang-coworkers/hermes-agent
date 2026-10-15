@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shlex
 import uuid
@@ -2156,6 +2157,21 @@ def _require_abs_mount_path(value: Any, label: str, profile_name: str) -> Path:
     return path
 
 
+def _resolve_fail_closed(path: Path) -> Path:
+    """``Path.resolve()`` that still raises on a symlink loop: on 3.14 the non-strict resolve
+    returns a looping path unresolved instead of raising RuntimeError (3.11/3.12), so the
+    deepest existing ancestor is re-resolved strictly (ELOOP -> OSError)."""
+    resolved = path.resolve()
+    probe = resolved
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    try:
+        probe.resolve(strict=True)
+    except FileNotFoundError:
+        pass  # a dangling link resolves non-strictly on every version; only ELOOP fails closed
+    return resolved
+
+
 def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
     """True when the resolved ``host_path`` equals ``protected_root``, lies under it,
     or is an ancestor of it — any of which exposes the protected subtree. The fleet
@@ -2166,8 +2182,8 @@ def _mount_conflicts(host_path: Path, protected_root: Path) -> bool:
     and reimplemented locally to keep the offline renderer free of a core import. An
     unresolvable path fails closed."""
     try:
-        resolved = host_path.resolve()
-        root = protected_root.resolve()
+        resolved = _resolve_fail_closed(host_path)
+        root = _resolve_fail_closed(protected_root)
     except (OSError, RuntimeError, ValueError):
         # RuntimeError: symlink loop (3.11/3.12); ValueError: embedded NUL. Fail closed.
         return True
