@@ -1462,7 +1462,12 @@ def _validate_openshell_egress(egress: Any) -> Dict[str, Any]:
                         f"egress.anonymous_reads.{role} target {target!r} is the inference route "
                         f"or the dropped OneCLI 18255 hop; under single-authority inference "
                         f"neither is a worker endpoint")
-    binaries = (_validate_openshell_binaries(egress["binaries"])
+                if (inference_provider["mode"] == "direct"
+                        and _is_managed_inference_host(_openshell_hostport(target)[0])):
+                    raise CompositionError(
+                        f"egress.anonymous_reads.{role} target {target!r} is the managed host "
+                        f"{_OSH_F64E_MANAGED_HOST}, which a direct-mode render never names")
+    binaries =(_validate_openshell_binaries(egress["binaries"])
                 if "binaries" in egress else None)
     # tls:skip toggle (OpenShell 0.0.72). The raw hops are the OneCLI proxy hops a worker
     # CONNECT-tunnels through: a protocol:rest L7 parser rejects an opaque tunnel (invalid
@@ -1860,7 +1865,8 @@ def _refuse_worker_credential_provider(
 ) -> None:
     """OSH-F64.e §D1/§D4: in direct mode only the gateway sandbox may hold the inference
     credential, so a worker type opting into ``credential_provider`` fails closed — the plan would
-    otherwise give that worker the attached credential."""
+    otherwise give that worker the attached credential. Nor may an opted-in provider endpoint name
+    the managed host: a direct-mode render never names it (E4)."""
     if not inference_provider or inference_provider.get("mode") != "direct":
         return
     cred = inference_provider["credential_provider"]
@@ -1869,6 +1875,12 @@ def _refuse_worker_credential_provider(
             raise CompositionError(
                 f"{tname}: provider {cred!r} is the direct-mode inference credential provider; "
                 f"it attaches to the gateway sandbox only, never to a worker")
+        for pname, pspec in provs:
+            for ep in pspec.get("endpoints") or []:
+                if _is_managed_inference_host(_openshell_hostport(ep)[0]):
+                    raise CompositionError(
+                        f"{tname}: provider {pname!r} endpoint {ep!r} is the managed host "
+                        f"{_OSH_F64E_MANAGED_HOST}, which a direct-mode render never names")
 
 
 def _refuse_gateway_type_collision(type_names: Iterable[str],
