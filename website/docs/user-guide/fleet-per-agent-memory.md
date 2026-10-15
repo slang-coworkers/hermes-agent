@@ -6,14 +6,14 @@ description: "How a fleet of Hermes coworkers keeps per-profile memory and perso
 
 # Per-Agent File Memory & Persona
 
-When you run a fleet of coworkers as [profiles](/user-guide/profiles) of one gateway
-(see [Bot Mode](/user-guide/bot-mode)), each coworker needs its own identity, its own
+When you run a fleet of coworkers as [profiles](./profiles.md) of one gateway
+(see [Bot Mode](./bot-mode.md)), each coworker needs its own identity, its own
 standing instructions, and its own curated volatile memory — with no leakage between
 profiles. Hermes already provides every store this needs; the fleet does not introduce
 a new memory system. This page maps the file-based memory layout some agents carry as an
 **OKF** (`memory/index.md`, `memory/system/definition.md`, dossiers, a persona prepend)
 onto Hermes' native per-profile homes, gives the one-time migration runbook, and
-records how the [`nv-coworker-compose`](/user-guide/fleet-entity-model) render keeps the
+records how the [`nv-coworker-compose`](./fleet-entity-model.md) render keeps the
 memory configuration safe for unattended bots.
 
 ## How isolation works
@@ -22,7 +22,7 @@ Every store below resolves under the profile's **Hermes home** (`HERMES_HOME`):
 `MEMORY.md` and `USER.md` live in `<home>/memories/`, and the persona `SOUL.md` lives at
 `<home>/SOUL.md`. Two profiles with distinct homes never share a file, so a memory
 written under profile A's home is invisible to profile B. This is the same per-profile
-scoping described in [Persistent Memory](/user-guide/features/memory) — the fleet simply
+scoping described in [Persistent Memory](./features/memory.md) — the fleet simply
 gives every coworker its own home.
 
 ## OKF → native mapping
@@ -32,7 +32,7 @@ An OKF `memory/` bundle is one Markdown concept per file, opened from a root
 
 | OKF source | Native home | Notes |
 |---|---|---|
-| Persona prepend / agent identity | `SOUL.md` | Loaded as the slot-#1 stable identity, per profile, and [security-scanned](/user-guide/features/memory#security-scanning) before it reaches the prompt — an injection payload is blocked, not appended. |
+| Persona prepend / agent identity | `SOUL.md` | Loaded as the slot-#1 stable identity, per profile, and [security-scanned](./features/memory.md#security-scanning) before it reaches the prompt — an injection payload is blocked, not appended. |
 | `memory/index.md` and role-scoped dossiers | `AGENTS.md` chain | Standing, role-scoped instructions belong in the git-versioned workspace `AGENTS.md` chain, not a private memory tree — they are reviewable and travel with the repo. |
 | `memory/system/definition.md` (how memory behaves) | `MEMORY.md` + `USER.md` semantics | The OKF "how memory works" definition maps onto Hermes' built-in memory tool and its two curated files; there is no separate definition file to carry over. |
 | Curated volatile agent notes | `MEMORY.md` | The agent's personal notes — environment facts, conventions, lessons — one per profile. |
@@ -53,7 +53,7 @@ coworker type can never silently ship the cramped stock configuration:
   higher value keeps it, per key and never clamped down.
 - `memory.write_approval` is forced **off**. Coworkers and the multiplexer are
   unattended: a memory write must not stall waiting for a human approval prompt. (For an
-  attended, single-user agent, see [Controlling memory writes](/user-guide/features/memory#controlling-memory-writes-write_approval).)
+  attended, single-user agent, see [Controlling memory writes](./features/memory.md#controlling-memory-writes-write_approval).)
 
 These keys are read by the memory store and the write-approval gate at runtime, and they
 are written explicitly rather than left to defaults.
@@ -94,9 +94,9 @@ maintains `MEMORY.md` / `USER.md` itself.
 
 ## See also
 
-- [Persistent Memory](/user-guide/features/memory) — the per-profile `MEMORY.md` /
+- [Persistent Memory](./features/memory.md) — the per-profile `MEMORY.md` /
   `USER.md` stores and the `memory` tool.
-- [External Memory Providers](/user-guide/features/memory-providers) — the escape hatch
+- [External Memory Providers](./features/memory-providers.md) — the escape hatch
   when file memory is not enough.
-- [Profiles](/user-guide/profiles) and [Bot Mode](/user-guide/bot-mode) — how a fleet of
+- [Profiles](./profiles.md) and [Bot Mode](./bot-mode.md) — how a fleet of
   coworkers runs as profiles of one gateway.
