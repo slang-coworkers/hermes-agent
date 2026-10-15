@@ -140,6 +140,7 @@ def _resolve_immortal(session_id, platform=None) -> bool:
     try:
         state = store.get_state(session_id)
     except Exception:
+        logger.debug("_resolve_immortal failed", exc_info=True)
         state = None
     stored_platform = state["platform"] if state else None
     effective_platform = _platform_value(platform) or stored_platform
@@ -203,12 +204,13 @@ def _unpriced_signal(session_id) -> int:
     try:
         count = store.unpriced_count(session_id)
     except Exception:
+        logger.debug("_unpriced_signal failed", exc_info=True)
         count = 0
     try:
         if store.get_state(session_id)["recon_unpriced"]:
             count += 1
     except Exception:
-        pass
+        logger.debug("_unpriced_signal failed", exc_info=True)
     return count
 
 
@@ -592,6 +594,7 @@ def _resolve_recovery_command(event):
             if resolve_command(command) is not None:
                 return command
     except Exception:
+        logger.debug("_resolve_recovery_command failed", exc_info=True)
         return None
     return None
 
@@ -629,6 +632,7 @@ def _cost_command_text(event):
             args = (get_args() if callable(get_args) else "") or ""
             return f"/cost {args}".rstrip()
         except Exception:
+            logger.debug("_cost_command_text failed", exc_info=True)
             return None
     text = str(getattr(event, "text", "") or "").strip()
     if not text:

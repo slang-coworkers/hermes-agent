@@ -7,7 +7,7 @@ plugin as loaded on a stock tree.
 
 import pathlib
 
-from tests.plugins.test_nv_cost_cap_resume_card_acceptance import (  # env is a fixture
+from tests.plugins.test_nv_cost_cap_resume_card_acceptance import (
     NOTICE_TAIL,
     _approve,
     _card,
@@ -15,8 +15,11 @@ from tests.plugins.test_nv_cost_cap_resume_card_acceptance import (  # env is a 
     _messages,
     _new_stop,
     _own_sp,
-    env,
 )
+
+# The acceptance module's `env` fixture, registered by module rather than imported by name: an
+# imported fixture is shadowed by every test parameter that requests it.
+pytest_plugins = ["tests.plugins.test_nv_cost_cap_resume_card_acceptance"]
 
 
 def test_money_read_unavailable_keeps_stop(env):

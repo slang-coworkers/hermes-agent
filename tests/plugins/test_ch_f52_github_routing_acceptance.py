@@ -344,7 +344,7 @@ async def test_ac_ch_f52_6_gated(tmp_path, monkeypatch, name, event, action, con
         else:
             assert resp.status == 200
             assert (await resp.json()).get("status") == "ignored"
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
             assert captured == []
     if not expect_dispatch:
         # "ignored" is also what a missing script yields, so prove the script ran: it parked the
@@ -382,7 +382,7 @@ async def test_ac_ch_f52_7(tmp_path, monkeypatch, caplog):
                          "X-GitHub-Delivery": "d-bad", "X-Hub-Signature-256": "sha256=deadbeef"},
             )
             assert resp.status == 401
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured == []
     assert any("Invalid signature for route" in r.getMessage() for r in caplog.records)
 
@@ -392,7 +392,7 @@ async def test_ac_ch_f52_7(tmp_path, monkeypatch, caplog):
         async with TestClient(TestServer(app_b)) as cli:
             resp = await _post(cli, f"/p/orchestrator/webhooks/{name}", body, "issues", delivery="d-ns", signed=False)
             assert resp.status == 401
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured_b == []
     assert any("Invalid signature for route" in r.getMessage() for r in caplog.records)
 
@@ -407,7 +407,7 @@ async def test_ac_ch_f52_7(tmp_path, monkeypatch, caplog):
                          "X-GitHub-Delivery": "d-nosec"},
             )
             assert resp.status == 403
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured_c == []
     assert any("HMAC secret is missing, blank, or not a string" in r.getMessage() for r in caplog.records)
 
@@ -428,7 +428,7 @@ async def test_ac_ch_f52_8(tmp_path, monkeypatch):
         body = json.dumps({"action": "opened"}).encode()
         resp = await _post(cli, f"/p/orchestrator/webhooks/{name}", body, "ping", secret, delivery="d-ev")
         assert resp.status == 200 and (await resp.json()).get("status") == "ignored"
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured == []
 
     app_b, captured_b = _multiplex_app(monkeypatch, tmp_path, routes)
@@ -436,7 +436,7 @@ async def test_ac_ch_f52_8(tmp_path, monkeypatch):
         body = json.dumps({"action": "closed", "issue": {"number": 9, "title": "z"}}).encode()
         resp = await _post(cli, f"/p/orchestrator/webhooks/{name}", body, "issues", secret, delivery="d-act")
         assert resp.status == 200 and (await resp.json()).get("status") == "ignored"
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured_b == []
 
     app_c, captured_c = _multiplex_app(monkeypatch, tmp_path, routes)
@@ -444,7 +444,7 @@ async def test_ac_ch_f52_8(tmp_path, monkeypatch):
         body = json.dumps({"action": "opened", "issue": {"number": 9, "title": "z"}}).encode()
         resp = await _post(cli, f"/p/reviewer/webhooks/{name}", body, "issues", secret, delivery="d-prof")
         assert resp.status == 404
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured_c == []
 
     app_d, captured_d = _multiplex_app(monkeypatch, tmp_path, routes)
@@ -452,7 +452,7 @@ async def test_ac_ch_f52_8(tmp_path, monkeypatch):
         body = json.dumps({"action": "opened", "issue": {"number": 9, "title": "z"}}).encode()
         resp = await _post(cli, f"/webhooks/{name}", body, "issues", secret, delivery="d-bare")
         assert resp.status == 404
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured_d == []
 
 
@@ -478,7 +478,7 @@ async def test_ac_ch_f52_9(tmp_path, monkeypatch):
                            "issue": {"number": 5, "title": "t"}, "repository": {"full_name": sentinel}}).encode()
         resp = await _post(cli, f"/p/{profile}/webhooks/{name}", body, "issue_comment", route["secret"], delivery="c-1")
         assert resp.status == 200 and (await resp.json()).get("status") == "ignored"
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # health: allow HX013 -- the assert below is that nothing was dispatched, which no event signals; the window lets a wrongly scheduled dispatch land first
     assert captured == []
 
     app_b, captured_b = _multiplex_app(monkeypatch, tmp_path, routes)

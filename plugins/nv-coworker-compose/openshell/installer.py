@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import logging
 import os
 import re
 import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def _load_yaml_compat():
@@ -114,6 +117,7 @@ def _require_home() -> Path:
             from hermes_constants import get_hermes_home
             return get_hermes_home()
         except Exception:
+            logger.debug("_require_home failed", exc_info=True)
             return Path(os.environ["HERMES_HOME"].strip())
     try:
         from hermes_constants import get_hermes_home_override
@@ -121,7 +125,7 @@ def _require_home() -> Path:
         if override:
             return Path(override)
     except Exception:
-        pass
+        logger.debug("_require_home failed", exc_info=True)
     raise ValueError("HERMES_HOME is not set; the installer refuses to resolve paths to the wrong home")
 
 
@@ -135,7 +139,7 @@ def _managed_dir() -> Optional[str]:
         if resolved is not None:
             return str(resolved)
     except Exception:
-        pass
+        logger.debug("_managed_dir failed", exc_info=True)
     return os.environ.get("HERMES_MANAGED_DIR", "").strip() or None
 
 
@@ -554,6 +558,7 @@ def _profile_drifted(role: str, digests: dict[str, Any]) -> bool:
     return cur is not None and want is not None and cur != want
 
 
+# health: allow CC -- one ordered, state-aware plan: backups first, then each step only when the home state says it is missing, so a fully-installed home plans no mutation
 def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root: Optional[str] = None) -> list[Step]:
     """The full ordered, state-aware install plan. Backups come FIRST (before any
     ``plugins install/enable`` rewrites config.yaml). A fully-installed home plans no
@@ -774,6 +779,7 @@ def _install_metadata(home: Path) -> dict[str, Any]:
     try:
         return json.loads(meta.read_text(encoding="utf-8-sig")) or {}
     except Exception:
+        logger.debug("_install_metadata failed", exc_info=True)
         return {}
 
 
@@ -797,6 +803,7 @@ def _collect_wires(default_config: dict[str, Any]) -> Optional[list[list[str]]]:
         finally:
             conn.close()
     except Exception:
+        logger.debug("_collect_wires failed", exc_info=True)
         return None
 
 
@@ -832,6 +839,7 @@ def _unparked_non_fleet(home: Path, roles: list[str]) -> list[str]:
         try:
             gw = ((yaml.safe_load(cfg.read_text(encoding="utf-8-sig")) or {}).get("gateway") or {}) if cfg.is_file() else {}
         except Exception:
+            logger.debug("_unparked_non_fleet failed", exc_info=True)
             gw = {}
         standalone = gw.get("standalone") if isinstance(gw, dict) else None
         if (standalone.strip().lower() in ("1", "true", "yes", "on") if isinstance(standalone, str)
@@ -952,7 +960,7 @@ def _run(cmd: list[str], env: Optional[dict[str, str]] = None) -> None:
     import subprocess
     # stdin is closed: these are non-interactive hermes/openshell invocations, and a child left
     # attached to the parent's stdin can consume the apply driver's input (subprocess-stdin guard).
-    subprocess.run(cmd, check=True, env=env, stdin=subprocess.DEVNULL)
+    subprocess.run(cmd, check=True, env=env, stdin=subprocess.DEVNULL)  # health: allow HX006 -- the install's own long steps (sandbox image pull, plugin install, fleet render) have no bounded duration; check=True halts apply on a failed step
 
 
 _REFUSED_ENV_NAMES = ("HERMES_DASHBOARD_SESSION_TOKEN", "API_SERVER_KEY")
@@ -984,7 +992,8 @@ def _sandbox_exists(name: str) -> bool:
     # so apply halts on an unknown broker state rather than creating over a live sandbox.
     import subprocess
     proc = subprocess.run(
-        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True
+        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True,
+        timeout=_CAPTURE_TIMEOUT_S,
     )
     for line in proc.stdout.splitlines():
         parts = line.split()
@@ -1139,7 +1148,7 @@ def _restart_gateway_detached(cmd: list[str], home: Path) -> None:
     with open(log_path, "ab") as log:
         if shutil.which("setsid", path=env.get("PATH")):
             subprocess.run(["setsid", "-f", *cmd], check=True, stdin=subprocess.DEVNULL,
-                           stdout=log, stderr=subprocess.STDOUT, env=env)
+                           stdout=log, stderr=subprocess.STDOUT, env=env, timeout=_CAPTURE_TIMEOUT_S)
         else:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              env=env, start_new_session=True)
@@ -1185,6 +1194,7 @@ def _migrate_legacy_snapshots(snapshots: list[str]) -> None:
         shutil.move(str(src), str(dest))
 
 
+# health: allow CC -- one executor per plan step tag; each branch re-reads its file and writes it atomically, and the tag set is the planner's closed vocabulary
 def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
     tag = step.tag
     if isinstance(step.command, (list, tuple)):
@@ -1204,7 +1214,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         return
     home = Path(ctx["home"])
     managed_dir = ctx.get("managed_dir") or ""
-    if tag == "backup":
+    if tag == "backup":  # health: allow HX011 -- the tag set is the planner's closed step vocabulary; each branch re-reads its file and writes it atomically
         import shutil
         home_cfg = home / "config.yaml"
         home_bak = home_cfg.with_suffix(home_cfg.suffix + _BACKUP_SUFFIX)
@@ -1320,6 +1330,7 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
         try:
             state["profile_digests"] = _compute_profile_digests(spec_path, ref, state)
         except Exception as exc:  # a failed drift probe must not abort a valid install
+            logger.debug("drift probe failed", exc_info=True)
             sys.stderr.write(f"[osh-f64] drift probe skipped: {exc}\n")
     if room_exists is not None:
         spec_rooms = list((spec.get("rooms") or {}).keys())

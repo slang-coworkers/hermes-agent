@@ -94,6 +94,7 @@ def _active_profile() -> str:
 
         return get_active_profile_name()
     except Exception:
+        logger.debug("_active_profile failed", exc_info=True)
         return "default"
 
 

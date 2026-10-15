@@ -351,6 +351,10 @@ def _redact_url(url: str) -> str:
         return "<redacted-url>"
 
 
+# The default ceiling `hermes plugins install` gives its own git clone (plugins.clone_timeout_seconds).
+_CLONE_TIMEOUT_S = 300
+
+
 def _clone_repo(url: str) -> str:
     """Shallow-clone a git URL into a temp dir; return its path.
 
@@ -367,12 +371,12 @@ def _clone_repo(url: str) -> str:
     try:
         subprocess.run(
             [git, "clone", "--depth", "1", url, dest],
-            check=True, capture_output=True, stdin=subprocess.DEVNULL,
+            check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=_CLONE_TIMEOUT_S,
         )
     except subprocess.CalledProcessError as exc:
         shutil.rmtree(dest, ignore_errors=True)
         raise RuntimeError(f"clone failed for {_redact_url(url)} (exit {exc.returncode})") from None
-    except Exception:
+    except Exception:  # health: allow BLE001 -- the underlying error may echo the credential-bearing URL, so it is replaced by a redacted RuntimeError and never logged
         shutil.rmtree(dest, ignore_errors=True)
         raise RuntimeError(f"clone failed for {_redact_url(url)}") from None
     return dest
@@ -840,6 +844,7 @@ def _run_onboard(spec: str) -> dict[str, Any]:
                     if jid not in before and shipped.get(jid) == name
                 }
             except Exception as exc:
+                logger.debug("_run_onboard failed", exc_info=True)
                 failures.append(f"install {tname}: {exc}")
 
         revisions = _profile_revisions()
@@ -887,6 +892,7 @@ def _run_onboard(spec: str) -> dict[str, Any]:
                 clone=str(clone),
             )
         except Exception as exc:
+            logger.debug("_run_onboard failed", exc_info=True)
             failures.append(f"shared learnings activation: {exc}")
 
     # The multiplexer serves every live, unparked named profile; parking the rest
@@ -896,12 +902,14 @@ def _run_onboard(spec: str) -> dict[str, Any]:
         try:
             park_non_fleet_profiles(list(types))
         except Exception as exc:
+            logger.debug("_run_onboard failed", exc_info=True)
             failures.append(f"park non-fleet profiles: {exc}")
     cron_outcome: dict[str, list[dict[str, str]]] = {}
     if not failures:
         try:
             cron_outcome = _resume_onboarded_cron(new_cron)
         except Exception as exc:
+            logger.debug("_run_onboard failed", exc_info=True)
             failures.append(f"resume onboarded cron jobs: {exc}")
     outcome = {"resumed_cron_jobs": [], "kept_paused_cron_jobs": [], **cron_outcome}
     if failures:

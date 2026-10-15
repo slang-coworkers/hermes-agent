@@ -69,7 +69,7 @@ def _run_check(cfg: dict, chk: dict, home: Path, name: str) -> None:
     key = chk["key"]
     val = _dig(cfg, key)
     op = chk["op"]
-    if op == "equals":
+    if op == "equals":  # health: allow HX011 -- one branch per meta.json check op, each asserting with its own message naming the failing key
         assert val == chk["value"], f"{name}: {key} must equal {chk['value']!r}, got {val!r}"
     elif op == "is_bool":
         assert isinstance(val, bool), f"{name}: {key} must be rendered as an explicit bool, got {val!r}"

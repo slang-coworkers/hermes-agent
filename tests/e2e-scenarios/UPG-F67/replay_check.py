@@ -226,6 +226,7 @@ def check_inventory(path, observed):
     return fails
 
 
+# health: allow CC -- each merge-gate check is a step of one linear verdict over the same candidate history, so the steps share its parsed state
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=".")

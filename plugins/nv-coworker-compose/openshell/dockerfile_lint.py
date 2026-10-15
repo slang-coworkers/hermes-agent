@@ -80,6 +80,7 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
+# health: allow CC NESTING -- one pass over the Dockerfile's instructions with each rule a branch on the instruction keyword; the ruleset is fixed and sorted so the report is deterministic
 def lint(path) -> LintResult:
     text = Path(path).read_text(encoding="utf-8-sig")
     instrs = _logical_lines(text)
