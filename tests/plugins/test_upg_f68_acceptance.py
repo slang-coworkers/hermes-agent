@@ -40,7 +40,7 @@ OSH_F64_SPEC = REPO / "tests" / "e2e-scenarios" / "OSH-F64" / "spec" / "coworker
 HOME_TOKEN = "@HERMES_HOME@"
 SHA40 = "a" * 40
 # The selected tag v0.22.0 (ADR header); an ancestor of every candidate head, so present in any full clone.
-TAG_COMMIT = "e06df9c2eae6901f4c88f464e0ae6e753c0428b8"
+TAG_COMMIT = "297552a9d646119871391d202509822cd86330df"
 TRUST_SOURCE = "openshell_trust"
 CA_ENV_NAMES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "HERMES_CA_BUNDLE",
                 "DENO_CERT")
