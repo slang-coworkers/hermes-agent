@@ -168,7 +168,8 @@ A	tests/e2e-scenarios/FLEET-F62.a/fixtures/orchestrator/distribution.yaml	in-sur
 A	tests/e2e-scenarios/FLEET-F62.a/fixtures/worker/SOUL.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.a/fixtures/worker/config.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.a/fixtures/worker/distribution.yaml	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.a/oracle.py	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.a/oracle.py	in-surface	R	H5			item-5
+A	tests/e2e-scenarios/FLEET-F62.a/oracle.py#allow:L71	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/SOUL.md	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/config.yaml	in-surface	R	H5			#80
