@@ -918,6 +918,8 @@ def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
     elif case == "core_cancelled":
         live_owner.release()                             # the owner vanishes while core's runner still waits
         _wait_runner_done(fleet, ack["process_id"], timeout=30.0)
+        # exited is set before the completion is queued (tools/process_registry.py:641, :1610-1616)
+        assert fleet.until(fleet.registry.get(ack["process_id"])._completion_event.is_set, ticks=False, timeout=30.0)
         out = json.loads(_completion_output(fleet, ack["process_id"]))
         assert (out.get("status"), out.get("reason")) == ("cancelled", RUNTIME_OFFLINE), out
         receipt = mailbox.read_delivery_result(home, did)
