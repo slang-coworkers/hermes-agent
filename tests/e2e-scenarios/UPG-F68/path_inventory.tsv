@@ -13,7 +13,7 @@ M	.github/workflows/pm-bundle.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/rust-tests.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/sandbox-image.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/tests-os.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-208,msg-226,msg-232		fork-ci
-M	.github/workflows/tests.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-602,msg-208,msg-226,msg-232		fork-ci
+M	.github/workflows/tests.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-602,msg-208,msg-226,msg-232,msg-252		fork-ci
 M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
@@ -491,11 +491,18 @@ A	tests/e2e-scenarios/UPG-F67/replay_check.py	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/UPG-F67/replay_check.py#allow:L229	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F67/replay_ledger.tsv	in-surface	R	H5			
 A	tests/e2e-scenarios/UPG-F67/wp_d1_approved.patch	in-surface	R	H5			
+A	tests/e2e-scenarios/UPG-F68/AC-UPG-F68-17.md	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/conflicts.md	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/UPG-F68/desktop_repoints.tsv	in-surface	post-C1	item-5			item-5
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-a/SOUL.md	in-surface	post-C1	item-4			item-4
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-a/config.yaml	in-surface	post-C1	item-4			item-4
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-a/distribution.yaml	in-surface	post-C1	item-4			item-4
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/SOUL.md	in-surface	post-C1	item-4			item-4
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post-C1	item-4			item-4
+A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L826	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L852	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
