@@ -993,7 +993,7 @@ def _sandbox_exists(name: str) -> bool:
     import subprocess
     proc = subprocess.run(
         ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True,
-        timeout=_CAPTURE_TIMEOUT_S,
+        stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S,
     )
     for line in proc.stdout.splitlines():
         parts = line.split()
