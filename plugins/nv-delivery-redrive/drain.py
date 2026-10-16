@@ -115,9 +115,11 @@ def classify(outcome: Any) -> str:
     payload = _last_json(out)
     if payload and payload.get("status") and payload.get("delivery_id"):
         return "live"
-    if rc is None or rc < 0 or 128 < rc <= 192 or not _clean(out):
+    if rc is None or rc < 0 or 128 < rc <= 192:
         return "none"
-    return "exit0" if rc == 0 else "failed"
+    if rc == 0:
+        return "exit0"
+    return "failed" if _clean(out) else "none"
 
 
 # --- spawning ---------------------------------------------------------------------------------------------------
@@ -200,6 +202,9 @@ def _reconcile(procs, ticket: dict[str, Any]) -> None:
         if attempt["state"] == "over":
             continue
         alive = probe.writer_pid(procs, attempt.get("dm_path"))
+        if alive is None:
+            # The tick's scan can predate an attempt committed while the tick ran: confirm before closing.
+            alive = probe.writer_pid(probe.scan_processes(), attempt.get("dm_path"))
         if alive is not None:
             if attempt["state"] == "launching":
                 store.update_attempt(ticket["delivery_id"], attempt["n"], state="running",
@@ -514,16 +519,18 @@ def _late_check(ticket: dict[str, Any], procs) -> None:
         ats = store.attempts(ticket["delivery_id"])
         if any(a["state"] != "over" for a in ats):
             return
-        origins = probe.matching_origins(ticket["target_home"], ticket["content"], db_seen=bool(ticket["db_seen"]))
-        if origins == probe.UNKNOWN:
+        verdict = verdict_for(ticket)
+        if verdict == "live":
             return
-        claimed = {t["matched_row_id"] for t in store.tickets_for_pair(ticket["sender_home"], ticket["target_home"])
-                   if t["matched_row_id"] is not None}
-        hits = [o for o in origins if o not in claimed and any(
-            a["baseline"] is not None and a["over_row"] is not None and a["baseline"] < o <= a["over_row"] for a in ats)]
-        if hits:
-            late = {"state": "settled", "reason": None, "matched_row_id": hits[0],
-                    "reply": probe.first_assistant_after(ticket["target_home"], hits[0]), "error": ""}
+        if verdict == "unknown" and probe.matching_origins(
+                ticket["target_home"], ticket["content"], db_seen=bool(ticket["db_seen"])) == probe.UNKNOWN:
+            return
+        if isinstance(verdict, tuple):
+            late = {"state": "settled", "reason": None, "matched_row_id": verdict[1],
+                    "reply": probe.first_assistant_after(ticket["target_home"], verdict[1]), "error": ""}
+        elif verdict in ("unknown", "undecidable"):
+            late = {"state": "ambiguous", "reason": "unknown", "reply": "",
+                    "error": "the attempt that was still open at the bound ended; its row cannot be attributed"}
         elif classify(attempt_outcome(ticket, ats[-1])) == "exit0":
             late = {"state": "ambiguous", "reason": "unknown", "reply": "", "error": "", "unverified": 1}
         else:
