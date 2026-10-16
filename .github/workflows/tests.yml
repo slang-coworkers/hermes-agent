@@ -77,6 +77,11 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
+      - name: Install the project into the test environment
+        # Route-script children import hermes_cli by module path, and run_tests.sh's env -i drops
+        # PYTHONPATH, so the project is installed into the venv itself. --no-deps: the locked set is unchanged.
+        run: uv pip install --python "$HERMES_PYTHON" --no-deps -e .
+
       - name: Check SQLite runs WAL
         # Hermes picks DELETE journal mode on a SQLite with the WAL-reset
         # bug. If the PM-pinned interpreter links one, every WAL test silently
