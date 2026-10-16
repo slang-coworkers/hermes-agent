@@ -77,10 +77,23 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
-      - name: Install the project into the test environment
-        # Route-script children import hermes_cli by module path, and run_tests.sh's env -i drops
-        # PYTHONPATH, so the project is installed into the venv itself. --no-deps: the locked set is unchanged.
-        run: uv pip install --python "$HERMES_PYTHON" --no-deps -e .
+      - name: Put the checkout on the test environment's import path
+        # Route-script children import hermes_cli by module path, and run_tests.sh's env -i drops PYTHONPATH. Minted -I
+        # launchers and child trees that are their own whole sys.path must still resolve only their own files, so the
+        # finder serves the project's top-level names, after every other finder, and never under -I.
+        run: |
+          "$HERMES_PYTHON" - "$GITHUB_WORKSPACE" <<'PY'
+          import pathlib, sys, sysconfig, tomllib
+          root = pathlib.Path(sys.argv[1])
+          found = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["packages"]["find"]
+          names = sorted({p.split(".")[0] for p in found["include"]} | {f.stem for f in root.glob("*.py") if f.name != "setup.py"})
+          finder = ("import sys, importlib.machinery; sys.flags.isolated or 'HermesCheckoutFinder' in "
+                    "[getattr(f, '__name__', '') for f in sys.meta_path] or sys.meta_path.append(type("
+                    "'HermesCheckoutFinder', (), {'find_spec': staticmethod(lambda name, path=None, target=None, "
+                    "_f=importlib.machinery.PathFinder, _n=frozenset(%r): _f.find_spec(name, [%r]) "
+                    "if path is None and name in _n else None)}))\n")
+          pathlib.Path(sysconfig.get_paths()["purelib"], "hermes-checkout.pth").write_text(finder % (names, str(root)), encoding="utf-8")
+          PY
 
       - name: Check SQLite runs WAL
         # Hermes picks DELETE journal mode on a SQLite with the WAL-reset
