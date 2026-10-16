@@ -1,0 +1,15 @@
+name: fleet-f62-h-bot-b
+version: "0.1.0"
+description: "FLEET-F62.h AC-16 fixture: bot B, the busy target whose turn lock the scenario holds."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - profile.yaml
+  - distribution.yaml
+env_requires:
+  # Written post-install by the harness; the OneCLI egress proxy substitutes the real credential per request
+  # for inference-api.nvidia.com. A real key never touches the fixture.
+  - name: ANTHROPIC_API_KEY
+    description: "Dummy key for the coworkers-live provider; the OneCLI egress proxy substitutes the real credential."
+    required: false
