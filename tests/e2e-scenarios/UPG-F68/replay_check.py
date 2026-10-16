@@ -20,8 +20,8 @@ commits. Checks, each named after ADR §Merge gate 2:
   (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
       commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
       to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
-      timed out on a standard runner) and the FORK_CI_LINES substitutions (msg 990: check-attribution measures from the
-      PR's base branch); no workflow line outside a comment still names a 32-core label at the head; and the only
+      timed out on a standard runner) and the FORK_CI_LINES substitutions, each admitted once under its recorded
+      authority; no workflow line outside a comment still names a 32-core label at the head; and the only
       ``contributors/`` change is adding the FORK_CI_CONTRIBUTORS files with exactly their recorded content (msg 990).
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
@@ -92,12 +92,20 @@ FORK_CI = re.compile(r"^(\.github/workflows/[^/]+\.ya?ml|contributors/.+)$")
 FORK_CI_AUTHORITY = "msg-596"
 # (workflow, job) -> raised timeout-minutes. Msg 602: a Python test slice that timed out on a standard runner.
 FORK_CI_TIMEOUTS = {(".github/workflows/tests.yml", "test"): 90}
-# (workflow, exact line at C1) -> its fork-ci replacement. Msg 990: on pull_request the attribution check takes its
-# merge base from the PR's base branch, not origin/main.
+# (workflow, exact line at C1) -> (replacement, authority). Attribution must use the PR base branch on pull_request,
+# not origin/main.
 FORK_CI_LINES = {
     (".github/workflows/contributor-check.yml", "          MERGE_BASE=$(git merge-base origin/main HEAD)\n"):
-        "          MERGE_BASE=$(git merge-base origin/${{ github.event_name == 'pull_request' && github.base_ref"
-        " || 'main' }} HEAD)\n",
+        ("          MERGE_BASE=$(git merge-base origin/${{ github.event_name == 'pull_request' && github.base_ref"
+         " || 'main' }} HEAD)\n", "msg-990"),
+    (".github/workflows/tests.yml", "          HERMES_TEST_WORKERS: 32\n"):
+        ("          HERMES_TEST_WORKERS: 4\n", "msg-208"),
+    (".github/workflows/tests.yml", "          HERMES_TEST_FILE_TIMEOUT: 600\n"):
+        ("          HERMES_TEST_FILE_TIMEOUT: 1800\n", "msg-208"),
+    (".github/workflows/tests-os.yml",
+     "          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}\n"):
+        ("          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '4' || '4') || '' }}\n",
+         "msg-208"),
 }
 FORK_CI_CONTRIBUTORS = {
     "contributors/emails/harsh1492@gmail.com": "szihs\n",
@@ -550,9 +558,13 @@ def added_allows(repo, c1, head, path):
 
 
 def fork_ci_authority(path):
-    if path in FORK_CI_CONTRIBUTORS or any(f == path for f, _line in FORK_CI_LINES):
+    """The attribution files carry msg-990 alone (no runner label in them); a workflow file carries msg-596, plus
+    msg-602 for a FORK_CI_TIMEOUTS raise and the authority of each of its FORK_CI_LINES."""
+    lines = list(dict.fromkeys(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path))
+    if path in FORK_CI_CONTRIBUTORS or lines == ["msg-990"]:
         return "msg-990"
-    return FORK_CI_AUTHORITY + (",msg-602" if any(f == path for f, _job in FORK_CI_TIMEOUTS) else "")
+    timeout = ["msg-602"] if any(f == path for f, _job in FORK_CI_TIMEOUTS) else []
+    return ",".join([FORK_CI_AUTHORITY, *timeout, *lines])
 
 
 def _job_of(lines, n):
@@ -560,11 +572,13 @@ def _job_of(lines, n):
     return next((m.group(1) for ln in reversed(lines[:n - 1]) if (m := JOB_KEY.match(ln))), None)
 
 
-def _fork_ci_line(path, old, n, was, now):
-    """A changed workflow line is a runner-label mapping on a runs-on/runner key or a FORK_CI_TIMEOUTS raise."""
+def _fork_ci_line(path, old, n, was, now, used):
+    """A changed workflow line is a runner-label mapping on a runs-on/runner key, a FORK_CI_LINES substitution (each
+    admitted once per file, so a second copy of a ruled line elsewhere is not) or a FORK_CI_TIMEOUTS raise."""
     if RUNNER_KEY.match(was) and RUNNER_LABEL.sub(lambda m: FORK_CI_RUNNERS[m.group(0)], was) == now:
         return True
-    if FORK_CI_LINES.get((path, was)) == now:
+    if (path, was) not in used and FORK_CI_LINES.get((path, was), (None,))[0] == now:
+        used.add((path, was))
         return True
     m, raised = TIMEOUT_LINE.match(was), FORK_CI_TIMEOUTS.get((path, _job_of(old, n)))
     return bool(m and raised and now == f"{m.group(1)}{raised}{m.group(2)}")
@@ -583,11 +597,11 @@ def _label_mapping(repo, a, b, path, where):
     old, new = text_at(repo, a, path).splitlines(keepends=True), text_at(repo, b, path).splitlines(keepends=True)
     if len(old) != len(new):
         return [f"FORK-CI: {path}: line count differs {where} (a label mapping keeps every line)"], 0
-    fails, mapped = [], 0
+    fails, mapped, used = [], 0, set()
     for n, (was, now) in enumerate(zip(old, new), 1):
         if was == now:
             continue
-        if _fork_ci_line(path, old, n, was, now):
+        if _fork_ci_line(path, old, n, was, now, used):
             mapped += 1
         else:
             fails.append(f"FORK-CI: {path}:{n}: not a runner-label mapping {where}: {now.strip()[:100]!r}")
