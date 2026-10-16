@@ -1,0 +1,20 @@
+# OSH-F64.e live-scenario gateway/default seed. Direct-mode inference: the provider holds ONLY
+# OpenShell's resolve placeholder for NV_INFERENCE_KEY; the credential lives in the
+# OpenShell generic provider f64e-inference (attached to the gateway sandbox at create)
+# and is resolved at the L7 relay, never committed here. No OneCLI, no 18255 hop.
+model:
+  provider: direct-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
+providers:
+  direct-endpoint:
+    base_url: https://inference-api.nvidia.com/v1
+    api_mode: chat_completions
+    api_key: openshell:resolve:env:NV_INFERENCE_KEY
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+secrets:
+  onecli:
+    enabled: false
+plugins:
+  enabled:
+    - nv-coworker-compose
+    - nv-fleet-gates

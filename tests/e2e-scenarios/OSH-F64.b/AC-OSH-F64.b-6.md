@@ -80,12 +80,19 @@ force — those are removed by OSH-F64.b.
    a shared-credential gateway, ESCALATE (§Gating item 2) — never a silent pass.
 
 ## Pass
-The served coworker's turn returns 200 through the OpenShell provider, the sandbox held only the fixed
+_Amended to the operator ruling 05:22Z, §Gating 2 option 3 (waiver applied) as adjudicated in OSH-F64.b ADR 5367ee0d; the carried half is in `tests/e2e-scenarios/OSH-F64.e/`._
+
+the served coworker's turn returns 200 through the OpenShell provider, the sandbox held only the fixed
 placeholder trigger (`sk-OPENSHELL-PROXY-REWRITE`, never `COMPATIBLE_API_KEY` or any raw key), the
-wrapper env guard passed unchanged, AND the two profiles' turns resolve to two DISTINCT CORRECT-PROFILE
-records in the OpenShell/inference logs (A→A, B→B) via the per-request `X-Hermes-Profile` header (or an
-operator-confirmed equivalent). If no per-profile-attributable non-secret field exists for the
-shared-credential gateway, AC-6 is BLOCKED and escalated — recording an escalation is NOT a pass.
+wrapper env guard passed unchanged, AND step 5 passes on TWO DISTINCT Hermes-native
+`session_model_usage` records (D5) resolving to the CORRECT profiles (architect turn → architect,
+builder turn → builder). The OpenShell-log attribution half (two distinct correct-profile records in
+the OpenShell/inference logs via request-tag/per-sandbox correlation) is WAIVED for this row and
+CARRIED to OSH-F64.e (UA-37); `X-Hermes-Profile` remains the design-level carrier but is not the pass
+bar (OpenShell does not log it). The frozen scenario file is adjudicated under this ADR's ruling.
+(Pre-ruling bar, now the carried half: a run whose turns cannot be shown to resolve to the correct
+profile does not pass — but the proof-of-record is now the `session_model_usage` pair, not the
+OpenShell log.)
 
 ## Evidence
 - `scenario-AC-OSH-F64.b-6/evidence.txt`: the two 200-turn transcripts, the placeholder-only config/env
