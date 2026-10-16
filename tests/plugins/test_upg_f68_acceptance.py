@@ -566,3 +566,495 @@ def test_ac_upg_f68_15(tmp_path, monkeypatch):
     assert Path(env["HERMES_HOME"]).resolve() == home.resolve(), f"child HERMES_HOME: {env.get('HERMES_HOME')}"
     assert "-p" not in argv and "--profile" not in argv, f"a served profile's own delivery takes no -p: {argv}"
     assert {k: env.get(k) for k in _EGRESS_ENV} == _EGRESS_ENV, "the child must keep the proxy and CA variables"
+
+
+_BOT = "researcher"
+_DM_BODY = "status? PAYLOAD_R8 " + "x" * 400 + " TAIL_R8"
+_LAUNCHER = '''#!{python}
+import sys
+sys.path.insert(0, {repo!r})
+from hermes_cli.main import main
+sys.exit(main())
+'''
+
+
+class _ModelStub:
+    """An OpenAI-compatible loopback endpoint. Each request blocks on `gate` and answers `reply`."""
+
+    def __init__(self, reply):
+        self.reply, self.gate, self.served, self.requests = reply, threading.Event(), threading.Event(), []
+        stub = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                stub.requests.append(request)
+                stub.gate.wait(120)
+                message = {"role": "assistant", "content": stub.reply}
+                body = {"id": "chatcmpl-r8", "object": "chat.completion", "created": 1, "model": "test-model",
+                        "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+                kind = "application/json"
+                if request.get("stream"):
+                    body["object"] = "chat.completion.chunk"
+                    body["choices"][0]["delta"] = body["choices"][0].pop("message")
+                    raw, kind = ("data: " + json.dumps(body) + "\n\ndata: [DONE]\n\n").encode(), "text/event-stream"
+                else:
+                    raw = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                stub.served.set()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/v1"
+
+    def close(self):
+        self.gate.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class _SenderTranscript:
+    """The sender's session store: a Bot Chat, recording every appended row."""
+
+    def __init__(self):
+        self.rows = []
+
+    def get_session(self, session_id):
+        return {"id": session_id, "title": "Bot Chat"}
+
+    def get_session_title(self, session_id):
+        return "Bot Chat"
+
+    def append_message(self, session_id, role, content=None, **kwargs):
+        self.rows.append({"session_id": session_id, "role": role, "content": content, **kwargs})
+
+
+def _bot_sender():
+    return SimpleNamespace(_session_db=_SenderTranscript(), session_id="sess-r8-sender", _session_title_hint=None,
+                           _bot_mode_protocol=True, tools=[], valid_tool_names=set())
+
+
+@pytest.fixture
+def bot_world(tmp_path, monkeypatch):
+    """A Bot-Mode-managed root: the sender is the root profile, the target is the teammate `researcher`, whose `hermes`
+    launcher is this checkout's real CLI. The DM dir lives under the test's temp root; teardown stops every runner."""
+    import tempfile
+
+    from tools import bot_relay
+    from tools import bot_mode_probe
+    from tools.process_registry import process_registry
+
+    root = tmp_path / ".hermes"
+    target = root / "profiles" / _BOT
+    target.mkdir(parents=True)
+    (target / "profile.yaml").write_text("description: teammate\nui_meta:\n  hermes-bots:\n    shape: cloud\n",
+                                         encoding="utf-8")
+    (tmp_path / "os-home").mkdir()
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "os-home"))
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    launcher = tmp_path / "bin" / "hermes"
+    launcher.parent.mkdir()
+    launcher.write_text(_LAUNCHER.format(python=sys.executable, repo=str(REPO)), encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: str(launcher))
+    monkeypatch.setattr(process_registry, "pending_watchers", [])
+    bot_mode_probe._reset_cache_for_tests()
+    world = SimpleNamespace(root=root, target=target, stop=threading.Event(), closers=[])
+    yield world
+    world.stop.set()
+    process_registry.kill_all(consume_output=True)
+    for close in reversed(world.closers):
+        close()
+    bot_mode_probe._reset_cache_for_tests()
+
+
+def _target_db(world):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=world.target / "state.db")
+    world.closers.append(db.close)
+    return db
+
+
+def _model_for_target(world, reply):
+    """The target profile's model is a loopback stub held on its gate; no credential, nothing beyond 127.0.0.1."""
+    stub = _ModelStub(reply)
+    world.closers.append(stub.close)
+    (world.target / "config.yaml").write_text(
+        f"model:\n  provider: custom\n  base_url: {stub.url}\n  api_mode: chat_completions\n  default: test-model\n"
+        "memory:\n  memory_enabled: false\n  user_profile_enabled: false\n"
+        "terminal:\n  env: local\n", encoding="utf-8")
+    (world.target / ".env").write_text(f"OPENAI_API_KEY=local-test-only\nOPENAI_BASE_URL={stub.url}\n", encoding="utf-8")
+    return stub
+
+
+def _live_owner(world, db, session_id, reply, *, outcome=None, persist_row=True):
+    """A Desktop-shaped live owner of `session_id`: a real lease advertised as a delivery consumer, polled by the real
+    `_poll_bot_live_delivery_once`. Its turn body appends the turn's user row to the claimed session (as the live turn
+    persists it; with `persist_row` false it writes nothing, a target-side storage failure the turn survives), then
+    settles the receipt with `reply` (or ends it with `outcome`) once `gate` is set."""
+    from hermes_cli.active_sessions import try_acquire_active_session
+    from tui_gateway import session_notifications
+    from tui_gateway.method_ctx import rebind
+    from tui_gateway.session_lifecycle import _session_turn_admission
+
+    lease, refusal = try_acquire_active_session(
+        session_id=session_id, surface="desktop", config={}, registry_home=world.target,
+        metadata={"live_session_id": "live-r8", "bot_live_delivery_consumer": True})
+    assert refusal is None, refusal
+    world.closers.append(lease.release)
+    owner = SimpleNamespace(gate=threading.Event(), claims=[])
+
+    def submit(rid, sid, session, text, **kwargs):
+        owner.claims.append(text)
+        if persist_row:
+            db.append_message(session["session_key"], "user", content=text)
+
+        def finish():
+            owner.gate.wait(120)
+            kwargs["terminal_callback"](outcome or {"status": "settled", "text": reply})
+            session["running"] = False
+
+        threading.Thread(target=finish, daemon=True).start()
+        return True
+
+    poll = rebind(session_notifications._poll_bot_live_delivery_once, {
+        "_session_home": lambda session: world.target,
+        "_session_turn_admission": _session_turn_admission,
+        "_run_prompt_submit": submit,
+        "_notif_release_turn": lambda session: session.update(running=False),
+    })
+    session = {"history_lock": threading.RLock(), "agent": object(), "session_key": session_id,
+               "active_session_lease": lease}
+
+    def loop():
+        while not world.stop.wait(0.05):
+            if not session.get("running"):
+                poll("live-r8", session)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return owner
+
+
+def _resumed_bot_chat(db):
+    """The session `chat -c 'Bot Chat'` resumes: the CLI's own resolver, projected to the compression tip."""
+    sid = db.resolve_session_by_title("Bot Chat")
+    return (db.get_compression_tip(sid) or sid) if sid else None
+
+
+def _is_full(row):
+    content = (row.get("content") or "").strip()
+    return row.get("role") == "user" and content.startswith("Message from ") and content.endswith(_DM_BODY)
+
+
+def _full_rows(db, sid):
+    return [m for m in db.get_messages(sid) if _is_full(m)] if sid else []
+
+
+def _seed_shape(db, shape):
+    """Arrange the target transcript for one AC-21 shape. Returns (the session the delivery must land in, or None for
+    the one `--create-if-missing` mints; the sessions that must never receive it)."""
+    if shape == "fresh":
+        return None, []
+    db.create_session("bc-root", source="cli")
+    db.set_session_title("bc-root", "Bot Chat")
+    if shape == "continuation":
+        db.create_session("bc-2", source="cli")
+        db.set_session_title("bc-2", "Bot Chat #2")  # a numbered sibling is not the Bot Mode chat (hermes_state_titles.py:197-205)
+        return "bc-root", ["bc-2"]
+    if shape == "compressed":
+        db.end_session("bc-root", "compression")
+        db.create_session("bc-tip", source="cli", parent_session_id="bc-root")
+        return "bc-tip", ["bc-root"]
+    if shape == "duplicate":
+        db.append_message("bc-root", "user", content=_delivered())
+    return "bc-root", []  # prefix_collision: its prefix-only row is written after the send (the test body)
+
+
+def _delivered():
+    return f"Message from 🤖 hermes (@hermes): {_DM_BODY}"
+
+
+def _send(agent, task_id):
+    from tools import bot_mode_dm
+
+    return json.loads(bot_mode_dm.message_agent_tool(target=f"@{_BOT}", message=_DM_BODY, task_id=task_id,
+                                                     agent=agent))
+
+
+def _wait_for(predicate, why, timeout=90):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError(why)
+
+
+def _completions(registry, proc_id, *, timeout=120):
+    """Wait for the runner to exit, then drain its completion events (others are put back) and return them."""
+    import queue
+    import time
+
+    assert registry.get(proc_id)._completion_event.wait(timeout=timeout), "the delivery runner never exited"
+    mine, others = [], []
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            evt = registry.completion_queue.get(timeout=0.2)
+        except queue.Empty:
+            if mine:
+                break
+            continue
+        (mine if evt.get("session_id") == proc_id and evt.get("type", "completion") == "completion" else others).append(evt)
+    for evt in others:
+        registry.completion_queue.put(evt)
+    return mine
+
+
+def _settled_completion(evt):
+    """A live delivery's success: exit 0 AND a `settled` outcome. The runner also exits 0 on a still-pending `queued` /
+    `claimed` receipt (`_wait_live_dm`), which is not a success."""
+    if evt.get("exit_code") != 0:
+        return False
+    try:
+        return json.loads((evt.get("output") or "").strip().splitlines()[-1]).get("status") == "settled"
+    except (ValueError, IndexError):
+        return False
+
+
+def _queued_completion(registry, proc_id):
+    return [e for e in list(registry.completion_queue.queue) if e.get("session_id") == proc_id]
+
+
+
+@pytest.mark.platforms("posix")
+def test_ac_upg_f68_19(bot_world):
+    """(R4 re-spec of AC-FLEET-F62.g-11) A pending local delivery survives its sender process and a killed runner, because a durable owner holds it. If the target exits before accepting, exits 0 without persisting, or its runner is killed, the delivery ends in a re-attempt on the same `delivery_id` or in one typed final failure in the sender's session. Before target acceptance, no success completion and no target transcript row exist. If a re-attempt then succeeds, exactly one target row and one final outcome exist.
+
+    Proves the sender-turn-end half (E6.4): the ack is `queued` with a `delivery_id`, and the runner survives the
+    sender's lifecycle sweeps (`agent_close`, `gateway_turn_timeout`, `kill_all`) while an explicit stop still ends it.
+    The process-exit and killed-runner halves are AC-FLEET-F62.h-5 / -11 (carried)."""
+    from tools.process_registry import process_registry
+
+    db = _target_db(bot_world)
+    db.create_session("bc-live", source="desktop")
+    db.set_session_title("bc-live", "Bot Chat")
+    _live_owner(bot_world, db, "bc-live", "REPLY_R8_19")
+    out = _send(_bot_sender(), "turn-ac19")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id = out["process_id"]
+    for source in ("agent_close", "gateway_turn_timeout", "kill_all"):
+        process_registry.kill_all("turn-ac19", source=source)
+        assert process_registry.get(proc_id).exited is False, f"the runner died in the {source} sweep"
+    process_registry.kill_process(proc_id, source="process.kill")
+    assert process_registry.get(proc_id).exited is True
+
+_AC21_SHAPES = ("fresh", "continuation", "compressed", "duplicate", "prefix_collision")
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize(("shape", "path"), [
+    *((shape, path) for path in ("cli_fallback", "live_owner") for shape in _AC21_SHAPES),
+    ("fresh", "live_owner_unpersisted"),
+])
+def test_ac_upg_f68_21(bot_world, shape, path):
+    """(R4 re-spec of AC-FLEET-F62.g-13) A delivery's success outcome is reported only once the target's resumed Bot Chat holds a `role='user'` row with the entire delivered attributed content, newer than the delivery's baseline. The resumed Bot Chat is the latest continuation, taken at its compression tip. An earlier identical message never yields that outcome, and neither does a newer row holding only a prefix (cases: fresh / continuation / compressed / duplicate / prefix_collision).
+
+    At v0.22.2 the success outcome is the runner's one exit-0 completion carrying the reply, `settled` on the live path (E6.3). Both 0.22.2
+    paths: `cli_fallback` (no live owner: a real `hermes -p researcher chat -c 'Bot Chat'` turn under the turn lock,
+    its loopback model held until the test releases it) and `live_owner` (a real consumer lease, the real mailbox poll
+    and claim; only the owner's turn body is stood in). `fresh` on `live_owner` has no chat to own, so its owner holds
+    a Bot Chat with no prior rows. `live_owner_unpersisted`: the owner's turn completes but its user row never lands
+    (both turn-start and turn-end persists log and continue, `agent/turn_context.py:508-524`,
+    `agent/turn_finalizer.py:635-637`); no success outcome may follow."""
+    from tools.process_registry import process_registry
+
+    db = _target_db(bot_world)
+    landing, never = _seed_shape(db, shape)
+    if path.startswith("live_owner") and landing is None:
+        db.create_session("bc-live", source="desktop")
+        db.set_session_title("bc-live", "Bot Chat")
+        landing = "bc-live"
+    baseline = len(_full_rows(db, landing))
+    reply = f"REPLY_R8_21_{shape}"
+    if path == "cli_fallback":
+        gate = _model_for_target(bot_world, reply).gate
+    else:
+        gate = _live_owner(bot_world, db, landing, reply, persist_row=path == "live_owner").gate
+
+    out = _send(_bot_sender(), f"turn-ac21-{shape}-{path}")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id = out["process_id"]
+    if path == "live_owner_unpersisted":
+        gate.set()
+        mine = _completions(process_registry, proc_id)
+        assert _full_rows(db, landing) == [] and not [e for e in mine if _settled_completion(e)], (
+            "a success outcome while the resumed Bot Chat holds no row with the delivered content", mine)
+        return
+    if shape == "prefix_collision":
+        db.append_message(landing, "user", content=_delivered()[: len(_delivered()) // 2])
+    _wait_for(lambda: len(_full_rows(db, landing or _resumed_bot_chat(db))) > baseline,
+              "the target turn never persisted the delivered row")
+    assert not process_registry.get(proc_id).exited and not _queued_completion(process_registry, proc_id), (
+        "a success outcome before the target turn finished")
+
+    gate.set()
+    mine = _completions(process_registry, proc_id)
+    assert len(mine) == 1 and mine[0].get("exit_code") == 0 and reply in (mine[0].get("output") or ""), mine
+    if path == "live_owner":
+        assert _settled_completion(mine[0]), mine[0]
+    target = _resumed_bot_chat(db)
+    assert target == (landing or target) and target is not None, (target, landing)
+    rows = _full_rows(db, target)
+    assert len(rows) == baseline + 1, db.get_messages(target)
+    for sid in never:
+        assert not [m for m in db.get_messages(sid) if "TAIL_R8" in (m.get("content") or "")], sid
+
+
+def test_ac_upg_f68_22(bot_world):
+    """(R4 re-spec of AC-FLEET-F62.g-15) The DM-cache sweep covers every delivery-state file kind: aged `*.signal` and `*.signal.tmp` sidecars and aged DM files are removed, and so is any delivery-state file kind the item-4 port adds. A fresh file of each kind is kept, and the durable state of a delivery that is still pending is never removed (F62.g-15's cases, `test_fleet_f62_g_acceptance.py:660-671` @0615c1e7, kept)."""
+    from tools import bot_live_delivery as live
+    from tools import bot_mode_dm
+
+    dm_dir = bot_mode_dm._dm_dir()
+    now = 2_000_000_000.0
+    kinds = ("a.txt", "a.txt.live.json", "a.txt.signal", "a.txt.signal.tmp")
+    for name in kinds:
+        for age, prefix in ((48 * 3600, "old-"), (60, "new-")):
+            path = dm_dir / f"{prefix}{name}"
+            path.write_text("x", encoding="utf-8")
+            os.utime(path, (now - age, now - age))
+    pending = live._root(bot_world.target) / ("a" * 32 + ".json")
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text('{"status": "queued"}', encoding="utf-8")
+    os.utime(pending, (now - 48 * 3600, now - 48 * 3600))
+
+    bot_mode_dm.cleanup_bot_dm_cache(now=now)
+
+    left = {p.name for p in dm_dir.iterdir()}
+    assert not any(n.startswith("old-") for n in left), left
+    assert {f"new-{n}" for n in kinds} <= left, left
+    assert pending.exists(), "a pending delivery's durable receipt must never be swept"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("outcome", ["reply", "typed_failure"])
+@pytest.mark.parametrize("sender", ["stateless", "kanban_worker"])
+def test_ac_upg_f68_23(bot_world, monkeypatch, sender, outcome):
+    """(R4 re-spec of AC-FLEET-F62.g-16; narrowed by user ruling, operator msg 1356) A sender whose session cannot receive an async completion (a stateless channel or a kanban worker) gets the queued ack with `reply_delivery: "poll"`. For a sender still running when the delivery settles, the delivery's final outcome, a reply or a typed failure, is persisted as a delivery row in that sender's transcript; for a sender that exits first, that row is explicitly waived. For both stateless-channel and kanban senders, no sender-session async completion watcher is armed, `notify_on_complete` remains false, and the one-shot linger does not wait on the runner."""
+    import contextvars
+
+    import gateway.session_context as sc
+    from tools.process_registry import process_registry
+
+    db = _target_db(bot_world)
+    db.create_session("bc-live", source="desktop")
+    db.set_session_title("bc-live", "Bot Chat")
+    failure = {"status": "failed", "error": "Error code: 429 - rate limit exceeded", "text": ""}
+    owner = _live_owner(bot_world, db, "bc-live", "REPLY_R8_23", outcome=failure if outcome == "typed_failure" else None)
+    agent = _bot_sender()
+    if sender == "kanban_worker":
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_ac23")
+        out = _send(agent, f"turn-ac23-{sender}")
+    else:
+        def stateless_turn():
+            sc.declare_stateless_channel()
+            return _send(agent, f"turn-ac23-{sender}")
+
+        out = contextvars.copy_context().run(stateless_turn)
+    assert out.get("status") == "queued" and out.get("reply_delivery") == "poll", out
+    proc_id = out["process_id"]
+    session = process_registry.get(proc_id)
+    assert session.notify_on_complete is False
+    assert not [w for w in process_registry.pending_watchers if w.get("session_id") == proc_id]
+    lingered = process_registry.wait_for_pending_completions(timeout=1, poll_interval=0.1)
+    assert proc_id not in lingered.get("waited", []), lingered
+    owner.gate.set()
+    assert session._completion_event.wait(timeout=120), "the delivery runner never exited"
+    _wait_for(lambda: agent._session_db.rows, "no delivery row in the sender's transcript", timeout=10)
+    rows = agent._session_db.rows
+    assert len(rows) == 1 and rows[0]["display_kind"] == "process_complete", rows
+    assert rows[0]["session_id"] == "sess-r8-sender" and rows[0]["role"] == "user"
+    expect = "REPLY_R8_23" if outcome == "reply" else "provider_rate_limit"
+    assert expect in (rows[0]["content"] or ""), "the delivery row carries the outcome, not just a marker"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("arming", ["normal", "delayed", "gateway"])
+def test_ac_fleet_f62_g_14(bot_world, monkeypatch, arming):
+    """(regression) An accepted delivery stays asynchronous: message_agent returns while the target turn is still running (or holding), and the target's reply arrives afterwards as exactly one unconsumed completion notification carrying the reply text, also when the target replies before the sender has armed notification. A gateway-hosted sender gets exactly one `pending_watchers` entry for the process, carrying its routing fields.
+
+    At v0.22.2 (E6.3), on the spawn item 4 marks `persist_on_release`: the ack is `queued` + `delivery_id` +
+    `reply_delivery: "notification"` (R4), not F62.g's `sent`. The target is a live owner that settles from the real
+    mailbox. `delayed`: the owner settles inside the admission, before the runner is spawned and notification armed."""
+    import contextvars
+
+    import gateway.session_context as sc
+    import tools.terminal_tool_background as background
+    from tools import bot_live_delivery as live
+    from tools.process_registry import process_registry
+
+    db = _target_db(bot_world)
+    db.create_session("bc-live", source="desktop")
+    db.set_session_title("bc-live", "Bot Chat")
+    reply = "REPLY_SENTINEL_14"
+    owner = _live_owner(bot_world, db, "bc-live", reply)
+    if arming == "delayed":
+        owner.gate.set()
+        real_arm, armed_after_reply = background._apply_async_support, []
+
+        def arm(*a, **k):
+            _wait_for(lambda: any((live._read(p) or {}).get("status") == "settled"
+                                  for p in live._root(bot_world.target).glob("*.json")), "the owner never settled")
+            armed_after_reply.append(True)
+            return real_arm(*a, **k)
+
+        monkeypatch.setattr(background, "_apply_async_support", arm)
+    route = {"platform": "telegram", "chat_id": "chat-77", "thread_id": "th-9", "user_id": "u-1", "user_name": "op",
+             "message_id": "m-5", "session_id": "sess-db-42", "session_key": "gw:chat-77"}
+    agent = _bot_sender()
+    if arming == "gateway":
+        monkeypatch.setattr(sc, "_session_context_engaged", sc._session_context_engaged)
+
+        def in_gateway_turn():
+            sc.set_session_vars(**route)
+            return _send(agent, "turn-f62g14")
+
+        out = contextvars.copy_context().run(in_gateway_turn)  # the bound vars never leak into later tests
+    else:
+        out = _send(agent, "turn-f62g14")
+    assert out.get("status") == "queued" and out.get("delivery_id") and out.get("reply_delivery") == "notification", out
+    proc_id = out["process_id"]
+    session = process_registry.get(proc_id)
+    assert session.persist_on_release is True, "item 4: the delivery runner must survive the sender's lifecycle sweeps"
+    if arming == "delayed":
+        assert armed_after_reply == [True], "the target must have replied before notification was armed"
+    else:
+        assert not session.exited and owner.gate.is_set() is False, "message_agent must not wait for the reply"
+    if arming == "gateway":
+        mine = [w for w in process_registry.pending_watchers if w.get("session_id") == proc_id]
+        assert len(mine) == 1, process_registry.pending_watchers
+        w = mine[0]
+        assert (w["platform"], w["chat_id"], w["thread_id"], w["user_id"], w["user_name"], w["message_id"]) == (
+            "telegram", "chat-77", "th-9", "u-1", "op", "m-5")
+        assert w["notify_on_complete"] is True and w["parent_session_id"] == "sess-db-42"
+        assert w["session_key"] == session.session_key and w["check_interval"] == 5
+        assert session.watcher_platform == "telegram"
+    owner.gate.set()
+    completions = _completions(process_registry, proc_id)
+    assert len(completions) == 1, completions
+    assert reply in (completions[0].get("output") or ""), completions[0]
+    assert not process_registry.is_completion_consumed(proc_id)
