@@ -123,6 +123,25 @@ _INSTALL_STEP = r'''
         # PYTHONPATH, so the project is installed into the venv itself. --no-deps: the locked set is unchanged.
         run: uv pip install --python "$HERMES_PYTHON" --no-deps -e .
 '''
+_PTH_STEP = r'''
+      - name: Put the checkout on the test environment's import path
+        # Route-script children import hermes_cli by module path, and run_tests.sh's env -i drops PYTHONPATH. Minted -I
+        # launchers and child trees that are their own whole sys.path must still resolve only their own files, so the
+        # finder serves the project's top-level names, after every other finder, and never under -I.
+        run: |
+          "$HERMES_PYTHON" - "$GITHUB_WORKSPACE" <<'PY'
+          import pathlib, sys, sysconfig, tomllib
+          root = pathlib.Path(sys.argv[1])
+          found = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["packages"]["find"]
+          names = sorted({p.split(".")[0] for p in found["include"]} | {f.stem for f in root.glob("*.py") if f.name != "setup.py"})
+          finder = ("import sys, importlib.machinery; sys.flags.isolated or 'HermesCheckoutFinder' in "
+                    "[getattr(f, '__name__', '') for f in sys.meta_path] or sys.meta_path.append(type("
+                    "'HermesCheckoutFinder', (), {'find_spec': staticmethod(lambda name, path=None, target=None, "
+                    "_f=importlib.machinery.PathFinder, _n=frozenset(%r): _f.find_spec(name, [%r]) "
+                    "if path is None and name in _n else None)}))\n")
+          pathlib.Path(sysconfig.get_paths()["purelib"], "hermes-checkout.pth").write_text(finder % (names, str(root)), encoding="utf-8")
+          PY
+'''
 _GIT_DIAG_STEP = r'''
       - name: Diagnose git-core candidates (read-only)
         # Read-only: for each path _locate_real_git accepts, whether it exists, its direct --version,
@@ -156,18 +175,23 @@ _GIT_DIAG_STEP = r'''
           print(f"_locate_real_git()={update_cmd._locate_real_git()!r}")
           PY
 '''
-# (workflow, job, exact line at C1 it follows) -> (inserted block, authority, removable). Msg 226: AC-UPG-F68-12 needs
-# the tag commit in the test job's clone, and the Windows rows need a per-file bound above the runner's 300 s default.
-# Msg 232: route-script children need the project importable under run_tests.sh's env -i, and a read-only Windows
-# git-core diagnostic that a later fork-ci commit removes (the only removable block).
+# (workflow, job, exact line at C1 it follows [, discriminator]) -> (inserted block, authority, removable). A
+# discriminator tells apart blocks that share an anchor; only a removable block may disappear later.
 FORK_CI_INSERTS = {
     (".github/workflows/tests.yml", "test", "          ref: ${{ inputs.commit }}\n"):
         ("          fetch-depth: 0\n", "msg-226", False),
     (".github/workflows/tests-os.yml", "os-tests", "          HERMES_TEST_SLICE: ${{ matrix.slice || '' }}\n"):
         ("          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '1800' || '' }}\n", "msg-226", False),
-    (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n"): (_INSTALL_STEP, "msg-232", False),
+    (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n"): (_INSTALL_STEP, "msg-232", True),
+    (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n", "msg-252"): (_PTH_STEP, "msg-252", False),
     (".github/workflows/tests-os.yml", "os-tests", "          prune-python-cache: true\n"): (_GIT_DIAG_STEP, "msg-232", True),
 }
+# Blocks that never coexist at one revision: the install makes hermes_bootstrap importable under -I, which is what
+# the .pth exists to avoid (a minted launcher then skips the closure repair).
+FORK_CI_EXCLUSIVE = (
+    ((".github/workflows/tests.yml", "test", "          prune-python-cache: true\n"),
+     (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n", "msg-252")),
+)
 FORK_CI_CONTRIBUTORS = {
     "contributors/emails/harsh1492@gmail.com": "szihs\n",
     "contributors/emails/hermes-builder@slang-coworkers.local":
@@ -641,7 +665,7 @@ def fork_ci_authority(path):
     """The attribution files carry msg-990 alone (no runner label in them); a workflow file carries msg-596, plus
     msg-602 for a FORK_CI_TIMEOUTS raise and the authority of each of its FORK_CI_LINES."""
     lines = list(dict.fromkeys([*(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path),
-                                *(auth for (f, _job, _after), (_blk, auth, _rm) in FORK_CI_INSERTS.items() if f == path)]))
+                                *(auth for k, (_blk, auth, _rm) in FORK_CI_INSERTS.items() if k[0] == path)]))
     if path in FORK_CI_CONTRIBUTORS or lines == ["msg-990"]:
         return "msg-990"
     timeout = ["msg-602"] if any(f == path for f, _job in FORK_CI_TIMEOUTS) else []
@@ -689,6 +713,8 @@ def _drop_fork_ci_inserts(path, old, new):
     new, has = _strip_fork_ci_inserts(path, new)
     fails = [f"FORK-CI: {path}: the inserted block after {k[2].strip()!r} is removed but is not removable"
              for k in sorted(had - has) if not FORK_CI_INSERTS[k][2]]
+    fails += [f"FORK-CI: {path}: the {FORK_CI_INSERTS[a][1]} and {FORK_CI_INSERTS[b][1]} blocks after "
+              f"{a[2].strip()!r} are both present" for a, b in FORK_CI_EXCLUSIVE if a in has and b in has]
     return old, new, len(has ^ had), fails
 
 
