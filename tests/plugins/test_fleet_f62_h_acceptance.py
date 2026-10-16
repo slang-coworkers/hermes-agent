@@ -39,7 +39,7 @@ import hermes_yaml as yaml
 
 PLUGIN_KEY = "nv-delivery-redrive"
 _REPO = next(p for c in Path(__file__).resolve().parents for p in (c, c / "hermes-agent")
-             if (p / "hermes_cli").is_dir())
+             if (p / "hermes_cli" / "plugins.py").is_file())
 PLUGIN_SRC = _REPO / "plugins" / PLUGIN_KEY
 TARGET = "researcher"
 ORCH = "orchestrator"
