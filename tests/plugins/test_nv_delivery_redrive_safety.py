@@ -1,4 +1,4 @@
-"""Regression tests for nv-delivery-redrive's CODE_REVIEW findings (FLEET-F62.h): a re-targeted call, a stale tick
+"""Safety regression tests for nv-delivery-redrive: a re-targeted call, a stale tick
 snapshot, a late identical sibling and a silent exit 0. Each loads the plugin through the acceptance test's ``fleet``
 fixture (real discovery, real executor, real delivery runner, fake target CLI) and asserts one outcome.
 """
