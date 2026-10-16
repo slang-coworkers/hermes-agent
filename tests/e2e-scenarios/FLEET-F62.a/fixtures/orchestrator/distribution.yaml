@@ -1,0 +1,6 @@
+name: orchestrator
+version: 0.1.0
+description: "FLEET-F62.a AC-LOOP-F39-6 live scenario — orchestrator profile. Runs the rendered supervise-issues 12h --deliver bot-chat cron; carries the live provider block that Setup re-applies as a post-onboard merge (the onboard force-installs a spine-minimal config)."
+distribution_owned:
+  - config.yaml
+  - distribution.yaml

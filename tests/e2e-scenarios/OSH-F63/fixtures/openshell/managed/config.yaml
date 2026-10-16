@@ -1,0 +1,27 @@
+approvals:
+  mode: smart
+  timeout: 300
+  cron_mode: deny
+  single_query_mode: deny
+  unattended_mode: deny
+  denial_breaker_threshold: 3
+security:
+  approval:
+    transport: builtin
+    transport_fallback: deny
+plugins:
+  entries:
+    nv-fleet-gates:
+      settings:
+        profile_roles:
+          orchestrator: orchestrator
+          architect: worker
+          builder: worker
+          tester: worker
+          reviewer: worker
+        expected_ssh_host:
+          orchestrator: openshell-osh-f63-orchestrator
+          architect: openshell-osh-f63-architect
+          builder: openshell-osh-f63-builder
+          tester: openshell-osh-f63-tester
+          reviewer: openshell-osh-f63-reviewer

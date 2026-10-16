@@ -1,0 +1,15 @@
+# The inline dummy api_key survives message_agent's delivery child, which strips ANTHROPIC_*
+# (tools/environments/local.py _HERMES_PROVIDER_ENV_BLOCKLIST); the remote host routes through the OneCLI
+# egress proxy, which injects the real credential. The literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-upg-f68-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+sessions:
+  auto_prune: false

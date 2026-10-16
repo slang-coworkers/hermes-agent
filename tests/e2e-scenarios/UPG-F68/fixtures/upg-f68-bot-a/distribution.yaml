@@ -1,0 +1,8 @@
+name: upg-f68-bot-a
+version: 0.1.0
+description: "UPG-F68 AC-UPG-F68-17 live scenario — bot A (the sender). Asks upg-f68-bot-b for a word through message_agent and relays the reply that arrives as the delivery's completion."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml

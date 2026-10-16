@@ -71,12 +71,21 @@ async function freePort(): Promise<number> {
   })
 }
 
-/** Seed `<home>/profiles/<name>/` so the backend's /api/profiles lists it. */
-function seedProfiles(home: string, names: string[]): void {
+/** Seed `<home>/profiles/<name>/` so the backend's /api/profiles lists it. Each
+ *  profile also gets a `profile.yaml`; `meta[name]` (when supplied) is written into
+ *  it so a caller can seed a top-level `display_name` / `ui_meta` block that the
+ *  roster renders. An absent entry writes `{}`, which `read_profile_meta` treats
+ *  identically to no file, so the existing string-array callers are unchanged. */
+function seedProfiles(
+  home: string,
+  names: string[],
+  meta: Record<string, Record<string, unknown>> = {}
+): void {
   for (const name of names) {
     const dir = path.join(home, 'profiles', name)
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'config.yaml'), '', 'utf8')
+    fs.writeFileSync(path.join(dir, 'profile.yaml'), JSON.stringify(meta[name] ?? {}), 'utf8')
   }
 }
 

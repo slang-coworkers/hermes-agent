@@ -1,0 +1,7 @@
+name: worker
+version: 0.1.0
+description: "FLEET-F62.a AC-LOOP-F39-6 live scenario — worker profile (the silent card assignee). Receives the orchestrator's message_agent nudge for card A in its Bot Chat and never replies; carries the live provider block re-applied post-onboard."
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
