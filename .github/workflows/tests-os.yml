@@ -121,38 +121,6 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
-      - name: Diagnose git-core candidates (read-only)
-        # Read-only: for each path _locate_real_git accepts, whether it exists, its direct --version,
-        # and the fork-bomb probe; plus PATH git. Removed on the next push.
-        if: matrix.marker == 'windows' && runner.arch == 'X64'
-        shell: bash
-        run: |
-          "$HERMES_PYTHON" - <<'PY'
-          import shutil, subprocess
-          from pathlib import Path
-          from hermes_cli import update_cmd, update_cmd_git
-          def version(argv):
-              try:
-                  r = subprocess.run([*argv, "--version"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-                  return f"rc={r.returncode} out={r.stdout.strip()!r} err={r.stderr.strip()[:200]!r}"
-              except Exception as exc:
-                  return f"error={exc!r}"
-          candidates = [Path(b) / "Git" / a / "libexec" / "git-core" / "git.exe"
-                        for b in (r"C:\Program Files", r"C:\Program Files (x86)") for a in ("clangarm64", "mingw64", "mingw32")]
-          candidates += update_cmd_git._portable_git_candidates()
-          for c in candidates:
-              print(f"candidate {c}: exists={c.exists()}")
-              if c.exists():
-                  print(f"  --version {version([str(c)])}")
-                  print(f"  _probe_fork_bomb={update_cmd_git._probe_fork_bomb([str(c)])!r}")
-          path_git = shutil.which("git")
-          print(f"PATH git: {path_git!r}")
-          if path_git:
-              print(f"  --version {version([path_git])}")
-              print(f"  _probe_fork_bomb={update_cmd_git._probe_fork_bomb([path_git])!r}")
-          print(f"_locate_real_git()={update_cmd._locate_real_git()!r}")
-          PY
-
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other
         # lane: per-file subprocess isolation (run_tests_parallel.py). It
