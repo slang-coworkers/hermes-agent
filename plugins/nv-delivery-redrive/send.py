@@ -175,6 +175,13 @@ def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: 
     if not did or ack.get("status") not in ("queued", "claimed", "settled"):
         return out
     dm_path, content, pid, create_time = _capture(ack)
+    if ack.get("process_id"):
+        from tools.process_registry import process_registry
+
+        # A pre_tool_call ``modify`` may have re-targeted the call after this middleware resolved it.
+        session = process_registry.get(str(ack["process_id"]))
+        if dm_path is None or session is None or _runner_target(session.command or "") != target:
+            return out
     path = "cli"
     if not ack.get("process_id"):
         receipt = bot_live_delivery.read_delivery_result(target_home, did)
