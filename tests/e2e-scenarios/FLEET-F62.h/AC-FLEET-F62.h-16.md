@@ -20,7 +20,7 @@ In the run-3 shape on one gateway, while bot B has no canonical live Bot Chat ow
 is the tracked `target_busy` → `status: queued` shape, and once B's lock is released the plugin re-drives the
 message: exactly one PING row in B's Bot Chat and the ticket `settled`, with no manual relay or resend.
 
-The section below is the ADR's scenario outline (spec r3.2.1, ADR `1ec196b7`, lines 149-208), copied verbatim. The
+The section below is the ADR's scenario outline (spec r3.3, ADR `978348d2`, lines 152-211), copied verbatim. The
 tester installs the `fixtures:` list itself; `## Setup` steps after that are post-install only. `<root>` is the
 testbed `HERMES_HOME`. Both fixtures already list `nv-delivery-redrive` in `plugins.enabled`; the root config edits
 below are the scenario's own.
@@ -34,7 +34,7 @@ per-bot proof). Run with the gateway's interpreter; it prints `True True`:
 python3 -c "import hermes_yaml as y; from pathlib import Path; r=Path('<root>'); print(*(isinstance(((y.safe_load((r/'profiles'/b/'profile.yaml').read_text(encoding='utf-8')) or {}).get('ui_meta') or {}).get('hermes-bots'), dict) for b in ('fleet-f62-h-bot-a','fleet-f62-h-bot-b')))"
 ```
 
-## Scenario outline (verbatim, ADR :149-208)
+## Scenario outline (verbatim, ADR :152-211)
 
 ### AC-FLEET-F62.h-16 (live, model: live, timeout_s: 600)
 - **Ships as:** tests/e2e-scenarios/FLEET-F62.h/AC-FLEET-F62.h-16.md
