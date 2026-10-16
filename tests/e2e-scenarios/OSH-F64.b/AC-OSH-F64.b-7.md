@@ -63,11 +63,16 @@ msg 112; PROVIDER READY in place). The gateway sandbox carries the served profil
    PROVIDER-READY finding to ESCALATE to the operator, never a silent pass.
 
 ## Pass
-Both off-policy hosts are refused and logged as APF policy denials (worker→github, gateway→npmjs); with
-`POST /v1/chat/completions` omitted from the render's gateway policy, that supported (operator-verified)
-path is refused by an APF denial (step 4), and once the full rendered policy is restored the same
-request returns 200 — so APF, not the managed route, governs destination, method AND path; a badge
-cannot supersede it.
+_Amended to the operator ruling 05:22Z, §Gating 1 option 3 (accept) as adjudicated in OSH-F64.b ADR 5367ee0d; the carried half is in `tests/e2e-scenarios/OSH-F64.e/`._
+
+AC-7 passes on steps 1-3 — both off-policy hosts are refused and logged as APF policy denials
+(worker→github, gateway→npmjs), and the inference control `GET /v1/models` succeeds. Step 4's
+path-level APF denial (the `/v1/chat/completions`-omitted probe) is NOT required here: OpenShell
+0.0.72 has no setting that governs path rules on the managed inference route, so the live finding
+(omitted path still 200, no APF denial) is the ACCEPTED behaviour and step 4 is CARRIED to OSH-F64.e
+(UA-36). DESTINATION + CREDENTIAL remain OpenShell-enforced; the badge never supersedes OpenShell/APF.
+The render's four-path allow-set remains proven by AC-2 (rendered policy), which is NOT a claim of
+runtime path enforcement. The frozen scenario file is adjudicated under this ADR's ruling.
 
 ## Evidence
 - `scenario-AC-OSH-F64.b-7/openshell.log`: the two host-denial lines with their `--source`, the

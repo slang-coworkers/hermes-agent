@@ -442,8 +442,18 @@ def _install_default(tmp_path, monkeypatch, spec_path: Path):
     module = manager._plugins[COMPOSE_KEY].module
     installer = importlib.import_module(module.__name__ + ".openshell.installer")
     monkeypatch.setattr(installer, "_STATUS_POLL_INTERVAL_S", 0.0)
+    # ADR erratum E1 D12.4: only the detached `hermes gateway restart` (blocked by the conftest
+    # live-system guard) is recorded; every other step of apply() runs for real.
+    restarts: list[list[str]] = []
+    monkeypatch.setattr(installer, "_restart_gateway_detached", lambda cmd, _home: restarts.append(list(cmd)))
+    executed: list[str] = []
+    real_execute = installer._execute_step
+    monkeypatch.setattr(installer, "_execute_step",
+                        lambda step, ctx: (executed.append(step.tag), real_execute(step, ctx))[1])
     backup_path, _, _ = installer.default_config_diff(copy.deepcopy(seed), str(spec_path))
     installer.apply(str(spec_path), "a" * 40, room_exists=lambda _room: True)
+    if "restart" in executed:
+        assert restarts == [["hermes", "gateway", "restart"]], "the plan's restart step ran"
     installed = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     calls = [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
     assert any(c[:1] == ["openshell"] for c in calls), "precondition: the full plan ran (sandbox steps included)"
