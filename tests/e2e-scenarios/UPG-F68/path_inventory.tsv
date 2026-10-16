@@ -12,8 +12,8 @@ M	.github/workflows/nix.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/pm-bundle.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/rust-tests.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/sandbox-image.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
-M	.github/workflows/tests-os.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-208		fork-ci
-M	.github/workflows/tests.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-602,msg-208		fork-ci
+M	.github/workflows/tests-os.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-208,msg-226		fork-ci
+M	.github/workflows/tests.yml	fork-ci	fork-ci	fork-ci	msg-596,msg-602,msg-208,msg-226		fork-ci
 M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
 M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	fork-ci	msg-596		fork-ci
@@ -130,7 +130,7 @@ A	plugins/nv-coworker-compose/plugin.yaml	in-surface	R	H5
 A	plugins/nv-coworker-compose/route_scripts/check_gate.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/route_scripts/pr_ci_gate.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/tools.py	in-surface	R	H5			
-A	plugins/nv-fleet-gates/__init__.py	in-surface	R	H5			item-5
+A	plugins/nv-fleet-gates/__init__.py	in-surface	R	H5			item-5,item-4
 A	plugins/nv-fleet-gates/aliases.py	in-surface	R	H5			
 A	plugins/nv-fleet-gates/cli.py	in-surface	R	H5			
 A	plugins/nv-fleet-gates/edges.py	in-surface	R	H5			item-5
@@ -199,7 +199,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/mcp.json	in-surfac
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/policy-approver.yaml	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skill-bundles/approver.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/SOUL.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/config.yaml	in-surface	R	H5			#80
@@ -216,7 +216,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/mcp.json	in-surface	R
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/policy-fixer.yaml	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skill-bundles/fixer.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/implement/SKILL.md	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/nv-gitconfig/gitconfig-github	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/nv-path-guard-base/SKILL.md	in-surface	post-C1	#77			#77
@@ -233,7 +233,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/mcp.json	in-su
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/policy-orchestrator.yaml	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skill-bundles/orchestrator.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skills/supervise-issues/SKILL.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/provision.dry-run.txt	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/.env.template	in-surface	R	H5			
@@ -245,7 +245,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/mcp.json	in-surfac
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/policy-reviewer.yaml	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skill-bundles/reviewer.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/nv-gitconfig/gitconfig-github	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/plan/SKILL.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/.env.template	in-surface	R	H5			
@@ -257,7 +257,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/mcp.json	in-surface
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/policy-triager.yaml	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skill-bundles/triager.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/nv-gitconfig/gitconfig-github	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/nv-path-guard-base/SKILL.md	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/nv-path-guard-base/scripts/pick_base.py	in-surface	post-C1	#77			#77,item-5
@@ -266,7 +266,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/nv-path-guar
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/skills/triage-issue/SKILL.md	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/coworker-types.yaml	in-surface	R	H5			#77,#80
 A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/base-nanoclaw/SKILL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/codex-critique/SKILL.md	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/nv-path-guard-base/SKILL.md	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/nv-path-guard-base/scripts/pick_base.py	in-surface	post-C1	#77			#77,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/skills/nv-path-guard-base/scripts/pick_base.py#allow:L138	in-surface	health-allow	item-5			
@@ -495,7 +495,7 @@ A	tests/e2e-scenarios/UPG-F68/conflicts.md	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/UPG-F68/desktop_repoints.tsv	in-surface	post-C1	item-5			item-5
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L715	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L770	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
@@ -660,6 +660,7 @@ A	tests/plugins/test_fleet_f62_d_gates_unit.py	in-surface	post-C1	#77			#77
 A	tests/plugins/test_fleet_f62_d_installer_unit.py	in-surface	post-C1	#77			#77,item-3,item-5
 A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	post-C1	#77			#77,item-3,item-5
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	post-C1	#80			#80,item-3,item-5
+A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	post-C1	item-4			item-4
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	post-C1	#80			#80,item-3,item-5
 A	tests/plugins/test_gov_f22_guard_catalog_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	R	H5			item-2
@@ -694,7 +695,7 @@ A	tests/plugins/test_nv_coworker_compose_session_driver_acceptance.py	in-surface
 A	tests/plugins/test_nv_coworker_compose_session_modes_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_nv_coworker_compose_transport.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_nv_coworker_compose_yaml_compat_unit.py	in-surface	post-C1	item-2			item-2
-A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	R	H5			item-2,item-5
+A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	R	H5			item-2,item-5,item-4
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_nv_fleet_gates_unit.py	in-surface	post-C1	item-5			item-5
@@ -732,14 +733,16 @@ A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
 M	tests/test_tests_tree_layout.py	in-surface	post-C1	item-5			item-5
 A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	R	H5			
 A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5			
+A	tests/tools/test_dm_spawn_persists.py	in-surface	post-C1	item-4			item-4
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	R	H5			
 A	tests/tools/test_rt_f08_doc_contract.py	in-surface	R	H5			
-(retained)	tools/bot_mode_dm.py#F62.g	core	HELD	retained	F62.g		
+M	tools/bot_mode_dm.py	core	post-C1	item-4	F62.g		item-4
+(retained)	tools/bot_mode_dm.py#F62.g	core	item-4	retained	F62.g		
 (retained)	tools/bot_mode_dm.py#MSG-DELIV	core	E	retained	MSG-DELIV		
 M	website/docs/developer-guide/adding-platform-adapters.md	in-surface	M	H5			
 M	website/docs/developer-guide/gateway-internals.md	in-surface	M	H5			
 A	website/docs/developer-guide/plugins/nv-cost-cap.md	in-surface	R	H5			#78
-A	website/docs/developer-guide/plugins/nv-fleet-gates.md	in-surface	R	H5			
+A	website/docs/developer-guide/plugins/nv-fleet-gates.md	in-surface	R	H5			item-4
 A	website/docs/developer-guide/plugins/nv-workflow-modes.md	in-surface	R	H5			
 A	website/docs/developer-guide/plugins/router-seams.md	in-surface	R	H5			item-5
 A	website/docs/developer-guide/podman-onecli-plugin.md	in-surface	R	H5			

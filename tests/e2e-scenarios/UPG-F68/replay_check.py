@@ -10,9 +10,10 @@ commits. Checks, each named after ADR §Merge gate 2:
   (c) per-function replay of every H5 core file: in each scope the H5 diff touches, for every stripped line L,
       count@C1(L) == count@tag(L) + count@H5(L) - count@9.24(L), less ledgered translations. The H5 core delta is
       decomposed into the GOV-F25 re-home (9.24..C2_F67), WP-D1 (C2_F67..WP_D1_F67, equal to the approved patch
-      bytes) and nothing else; MSG-DELIV is E and F62.g HELD (tools/bot_mode_dm.py equals the tag).
+      bytes) and nothing else; MSG-DELIV is E; F62.g is HELD while tools/bot_mode_dm.py equals the tag, and item-4
+      once it is the tag plus exactly the ITEM4 lines.
   (d) the A1 union rule for ``_kanban_sub_op`` (the same equation over the whole function), with its three locators.
-  (e) no core path changes after C1 (item 4, the only later core, is not in this candidate), except
+  (e) no core path changes after C1 except item 4 (ITEM4, only in ``[UPG-F68 4]`` commits) and
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point (--repoints): each recorded line is
@@ -20,8 +21,8 @@ commits. Checks, each named after ADR §Merge gate 2:
   (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
       commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
       to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
-      timed out on a standard runner) and the FORK_CI_LINES substitutions, each admitted once under its recorded
-      authority; no workflow line outside a comment still names a 32-core label at the head; and the only
+      timed out on a standard runner), the FORK_CI_LINES substitutions and the FORK_CI_INSERTS lines, each admitted
+      once under its recorded authority; no workflow line outside a comment still names a 32-core label at the head; and the only
       ``contributors/`` change is adding the FORK_CI_CONTRIBUTORS files with exactly their recorded content (msg 990).
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
@@ -70,11 +71,20 @@ CORE_AUTHORITY = {
     "hermes_cli/kanban_db_connect.py": {"GOV-F25", "GOV-F25.b"},
     "hermes_cli/kanban_db_notify.py": {"GOV-F25", "GOV-F25.b"},
 }
-# Retained core with no hunk at the candidate (ADR §CORE-CHANGE C/D): the path must equal the tag.
+# Retained core with no hunk at the candidate (ADR §CORE-CHANGE C/D): the path must equal the tag, or, for ITEM4's path,
+# the tag plus exactly ITEM4's lines.
 RETAINED = {
     "tools/bot_mode_dm.py#MSG-DELIV": ("tools/bot_mode_dm.py", "E", "MSG-DELIV"),
     "tools/bot_mode_dm.py#F62.g": ("tools/bot_mode_dm.py", "HELD", "F62.g"),
 }
+# Item 4 (ADR §CORE-CHANGE D, erratum E5.7): the core delta of tools/bot_mode_dm.py from the tag, as (enclosing
+# function, raw line) multisets of added and removed lines.
+ITEM4 = ("tools/bot_mode_dm.py", "F62.g", {
+    "+": (("cleanup_bot_dm_cache", '        locations += [(dm_dir, "*.signal"), (dm_dir, "*.signal.tmp")]'),
+          ("_spawn_delivery", "                            _completion_output_chars=REPLY_COMPLETION_CHARS,"),
+          ("_spawn_delivery", "                            persist_on_release=True)")),
+    "-": (("_spawn_delivery", "                            _completion_output_chars=REPLY_COMPLETION_CHARS)"),),
+})
 U_DEL = ()
 # Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
 # None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
@@ -106,6 +116,14 @@ FORK_CI_LINES = {
      "          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}\n"):
         ("          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '4' || '4') || '' }}\n",
          "msg-208"),
+}
+# (workflow, job, exact line at C1 it follows) -> (inserted line, authority). Msg 226: AC-UPG-F68-12 needs the tag
+# commit in the test job's clone, and the Windows rows need a per-file bound above the runner's 300 s default.
+FORK_CI_INSERTS = {
+    (".github/workflows/tests.yml", "test", "          ref: ${{ inputs.commit }}\n"):
+        ("          fetch-depth: 0\n", "msg-226"),
+    (".github/workflows/tests-os.yml", "os-tests", "          HERMES_TEST_SLICE: ${{ matrix.slice || '' }}\n"):
+        ("          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '1800' || '' }}\n", "msg-226"),
 }
 FORK_CI_CONTRIBUTORS = {
     "contributors/emails/harsh1492@gmail.com": "szihs\n",
@@ -497,6 +515,25 @@ def check_picks(repo, picks, after_c1):
     return fails
 
 
+def check_item4(repo, tag, head, after_c1):
+    """Item 4: ITEM4's path differs from the tag by exactly ITEM4's lines, each in its recorded function, and changes
+    after C1 only in ``[UPG-F68 4]`` commits. Returns fails."""
+    path, auth, want = ITEM4
+    fails = [f"{auth}: {sha[:10]} changes {path} outside a [UPG-F68 4] commit"
+             for sha, _src, item in after_c1 if item != 4 and path in name_status(repo, f"{sha}^", sha)]
+    plus, minus = diff_lines(repo, tag, head, path)
+    scopes = {"+": scope_map(text_at(repo, head, path)), "-": scope_map(text_at(repo, tag, path))}
+    got = {"+": Counter((scopes["+"].get(n, "<module>"), ln) for n, ln in plus),
+           "-": Counter((scopes["-"].get(n, "<module>"), ln) for n, ln in minus)}
+    for side in "+-":
+        if got[side] != Counter(want[side]):
+            extra = sorted((got[side] - Counter(want[side])).elements())
+            missing = sorted((Counter(want[side]) - got[side]).elements())
+            fails.append(f"{auth}: {path} {side} lines vs the tag differ from ITEM4 (extra {extra[:2]}, missing "
+                         f"{missing[:2]})")
+    return fails
+
+
 def check_e2_allow(repo, c1, head, path):
     """2(e'): ``path`` changes from C1 to the head only by added ``# health: allow`` comments at its E2_ALLOW sites, and
     its AST is identical (comments and line positions are not in ``ast.dump``). Returns (fails, allowed sites)."""
@@ -560,7 +597,8 @@ def added_allows(repo, c1, head, path):
 def fork_ci_authority(path):
     """The attribution files carry msg-990 alone (no runner label in them); a workflow file carries msg-596, plus
     msg-602 for a FORK_CI_TIMEOUTS raise and the authority of each of its FORK_CI_LINES."""
-    lines = list(dict.fromkeys(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path))
+    lines = list(dict.fromkeys([*(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path),
+                                *(auth for (f, _job, _after), (_ln, auth) in FORK_CI_INSERTS.items() if f == path)]))
     if path in FORK_CI_CONTRIBUTORS or lines == ["msg-990"]:
         return "msg-990"
     timeout = ["msg-602"] if any(f == path for f, _job in FORK_CI_TIMEOUTS) else []
@@ -584,6 +622,22 @@ def _fork_ci_line(path, old, n, was, now, used):
     return bool(m and raised and now == f"{m.group(1)}{raised}{m.group(2)}")
 
 
+def _drop_fork_ci_inserts(path, old, new):
+    """``new`` less each FORK_CI_INSERTS line that sits right after its anchor inside its job, at most once per
+    anchor, when ``old`` does not already hold it there; returns (remaining lines, inserts dropped)."""
+    out, dropped, used = [], 0, set()
+    for ln in new:
+        key = next((k for k in FORK_CI_INSERTS if k[0] == path and k not in used and out and out[-1] == k[2]
+                    and FORK_CI_INSERTS[k][0] == ln and _job_of(out + [ln], len(out) + 1) == k[1]), None)
+        at = len(out)
+        if key and not (at < len(old) and old[at] == ln and old[at - 1] == key[2]):
+            used.add(key)
+            dropped += 1
+            continue
+        out.append(ln)
+    return out, dropped
+
+
 def _label_mapping(repo, a, b, path, where):
     """Fails unless ``path`` at ``b`` is ``path`` at ``a`` with runner labels mapped on runs-on/runner lines, the
     FORK_CI_TIMEOUTS raises and the FORK_CI_LINES substitutions, and nothing else; a ``contributors/`` path must be a
@@ -595,6 +649,7 @@ def _label_mapping(repo, a, b, path, where):
             return [f"FORK-CI: {path}: must be added {where} with exactly its ruled content"], 0
         return [], 1
     old, new = text_at(repo, a, path).splitlines(keepends=True), text_at(repo, b, path).splitlines(keepends=True)
+    new, inserted = _drop_fork_ci_inserts(path, old, new)
     if len(old) != len(new):
         return [f"FORK-CI: {path}: line count differs {where} (a label mapping keeps every line)"], 0
     fails, mapped, used = [], 0, set()
@@ -605,7 +660,7 @@ def _label_mapping(repo, a, b, path, where):
             mapped += 1
         else:
             fails.append(f"FORK-CI: {path}:{n}: not a runner-label mapping {where}: {now.strip()[:100]!r}")
-    return fails, mapped
+    return fails, mapped + inserted
 
 
 def check_fork_ci(repo, c1, head, after_c1):
@@ -761,17 +816,22 @@ def main():
     f_a2, allowed = check_a2(repo, revs, out)
     f_c, core_rows = check_core(repo, revs, core_paths, allowed, out)
     fails.extend(f_a2 + f_c + check_a1(repo, revs, out))
+    after_c1 = commits_after(repo, revs["c1"], revs["head"])
+    item4_landed = blob(repo, revs["head"], ITEM4[0]) != blob(repo, revs["tag"], ITEM4[0])
     for key, (path, cls, auth) in RETAINED.items():
-        if blob(repo, revs["head"], path) != blob(repo, revs["tag"], path):
+        if path == ITEM4[0] and item4_landed:
+            cls = "item-4" if auth == ITEM4[1] else cls
+        elif blob(repo, revs["head"], path) != blob(repo, revs["tag"], path):
             fails.append(f"{auth}: {path} differs from the tag at the head ({cls} until item 4)")
         core_rows[key] = ("(retained)", "core", cls, "retained", auth)
+    if item4_landed:
+        fails.extend(check_item4(repo, revs["tag"], revs["head"], after_c1))
 
-    after_c1 = commits_after(repo, revs["c1"], revs["head"])
     fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()], after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
-        if surface_of(path, h5_paths) == "core":
+        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed):
             f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
             fails.extend(f_e)
             e2_allowed.extend(found)
@@ -848,14 +908,15 @@ def main():
     print(f"## health allows added after C1 in fork code: {len(fork_allows)}")
     for k in fork_allows:
         print(f"  {k}")
-    print(f"## (g) fork-ci edits after C1 (runner labels, FORK_CI_TIMEOUTS, FORK_CI_LINES, FORK_CI_CONTRIBUTORS): "
+    print(f"## (g) fork-ci edits after C1 (runner labels, FORK_CI_TIMEOUTS, FORK_CI_LINES, FORK_CI_INSERTS, "
+          f"FORK_CI_CONTRIBUTORS): "
           f"{fork_ci_lines}")
     print(f"## inventory mismatches: {len(inv)}")
     if fails:
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; no core after C1 beyond the 2(e') allows; fork-ci is only the ruled runner, timeout, line and contributor edits; inventory"
+          " sources; no core after C1 beyond item 4 and the 2(e') allows; fork-ci is only the ruled runner, timeout, line, insert and contributor edits; inventory"
           " matches")
     return 0
 
