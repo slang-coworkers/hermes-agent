@@ -1,0 +1,17 @@
+model:
+  default: aws/anthropic/bedrock-claude-opus-4-8
+  provider: coworkers-live
+providers:
+  # Non-canonical key so this endpoint, protocol and credential source stay authoritative over built-in provider
+  # resolution. A literal non-loopback host routes through the OneCLI egress proxy, which substitutes the dummy key.
+  coworkers-live:
+    api: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    key_env: ANTHROPIC_API_KEY
+    models:
+      aws/anthropic/bedrock-claude-opus-4-8: {}
+plugins:
+  enabled:
+    - nv-delivery-redrive
+sessions:
+  auto_prune: false
