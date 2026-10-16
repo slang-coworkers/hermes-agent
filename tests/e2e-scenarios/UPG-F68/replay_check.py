@@ -21,9 +21,9 @@ commits. Checks, each named after ADR §Merge gate 2:
   (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
       commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
       to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
-      timed out on a standard runner), the FORK_CI_LINES substitutions and the FORK_CI_INSERTS lines, each admitted
-      once under its recorded authority; no workflow line outside a comment still names a 32-core label at the head; and the only
-      ``contributors/`` change is adding the FORK_CI_CONTRIBUTORS files with exactly their recorded content (msg 990).
+      timed out on a standard runner), the FORK_CI_LINES substitutions and the FORK_CI_INSERTS blocks (only a removable
+      block may later be removed), each admitted once under its recorded authority; no workflow line outside a
+      comment still names a 32-core label at the head; and the only ``contributors/`` change is adding the FORK_CI_CONTRIBUTORS files with exactly their recorded content (msg 990).
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
 check's result, core rows name their authority, conflict rows carry locators that resolve.
 """
@@ -117,13 +117,56 @@ FORK_CI_LINES = {
         ("          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '4' || '4') || '' }}\n",
          "msg-208"),
 }
-# (workflow, job, exact line at C1 it follows) -> (inserted line, authority). Msg 226: AC-UPG-F68-12 needs the tag
-# commit in the test job's clone, and the Windows rows need a per-file bound above the runner's 300 s default.
+_INSTALL_STEP = r'''
+      - name: Install the project into the test environment
+        # Route-script children import hermes_cli by module path, and run_tests.sh's env -i drops
+        # PYTHONPATH, so the project is installed into the venv itself. --no-deps: the locked set is unchanged.
+        run: uv pip install --python "$HERMES_PYTHON" --no-deps -e .
+'''
+_GIT_DIAG_STEP = r'''
+      - name: Diagnose git-core candidates (read-only)
+        # Read-only: for each path _locate_real_git accepts, whether it exists, its direct --version,
+        # and the fork-bomb probe; plus PATH git. Removed on the next push.
+        if: matrix.marker == 'windows' && runner.arch == 'X64'
+        shell: bash
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import shutil, subprocess
+          from pathlib import Path
+          from hermes_cli import update_cmd, update_cmd_git
+          def version(argv):
+              try:
+                  r = subprocess.run([*argv, "--version"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+                  return f"rc={r.returncode} out={r.stdout.strip()!r} err={r.stderr.strip()[:200]!r}"
+              except Exception as exc:
+                  return f"error={exc!r}"
+          candidates = [Path(b) / "Git" / a / "libexec" / "git-core" / "git.exe"
+                        for b in (r"C:\Program Files", r"C:\Program Files (x86)") for a in ("clangarm64", "mingw64", "mingw32")]
+          candidates += update_cmd_git._portable_git_candidates()
+          for c in candidates:
+              print(f"candidate {c}: exists={c.exists()}")
+              if c.exists():
+                  print(f"  --version {version([str(c)])}")
+                  print(f"  _probe_fork_bomb={update_cmd_git._probe_fork_bomb([str(c)])!r}")
+          path_git = shutil.which("git")
+          print(f"PATH git: {path_git!r}")
+          if path_git:
+              print(f"  --version {version([path_git])}")
+              print(f"  _probe_fork_bomb={update_cmd_git._probe_fork_bomb([path_git])!r}")
+          print(f"_locate_real_git()={update_cmd._locate_real_git()!r}")
+          PY
+'''
+# (workflow, job, exact line at C1 it follows) -> (inserted block, authority, removable). Msg 226: AC-UPG-F68-12 needs
+# the tag commit in the test job's clone, and the Windows rows need a per-file bound above the runner's 300 s default.
+# Msg 232: route-script children need the project importable under run_tests.sh's env -i, and a read-only Windows
+# git-core diagnostic that a later fork-ci commit removes (the only removable block).
 FORK_CI_INSERTS = {
     (".github/workflows/tests.yml", "test", "          ref: ${{ inputs.commit }}\n"):
-        ("          fetch-depth: 0\n", "msg-226"),
+        ("          fetch-depth: 0\n", "msg-226", False),
     (".github/workflows/tests-os.yml", "os-tests", "          HERMES_TEST_SLICE: ${{ matrix.slice || '' }}\n"):
-        ("          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '1800' || '' }}\n", "msg-226"),
+        ("          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '1800' || '' }}\n", "msg-226", False),
+    (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n"): (_INSTALL_STEP, "msg-232", False),
+    (".github/workflows/tests-os.yml", "os-tests", "          prune-python-cache: true\n"): (_GIT_DIAG_STEP, "msg-232", True),
 }
 FORK_CI_CONTRIBUTORS = {
     "contributors/emails/harsh1492@gmail.com": "szihs\n",
@@ -598,7 +641,7 @@ def fork_ci_authority(path):
     """The attribution files carry msg-990 alone (no runner label in them); a workflow file carries msg-596, plus
     msg-602 for a FORK_CI_TIMEOUTS raise and the authority of each of its FORK_CI_LINES."""
     lines = list(dict.fromkeys([*(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path),
-                                *(auth for (f, _job, _after), (_ln, auth) in FORK_CI_INSERTS.items() if f == path)]))
+                                *(auth for (f, _job, _after), (_blk, auth, _rm) in FORK_CI_INSERTS.items() if f == path)]))
     if path in FORK_CI_CONTRIBUTORS or lines == ["msg-990"]:
         return "msg-990"
     timeout = ["msg-602"] if any(f == path for f, _job in FORK_CI_TIMEOUTS) else []
@@ -622,20 +665,31 @@ def _fork_ci_line(path, old, n, was, now, used):
     return bool(m and raised and now == f"{m.group(1)}{raised}{m.group(2)}")
 
 
-def _drop_fork_ci_inserts(path, old, new):
-    """``new`` less each FORK_CI_INSERTS line that sits right after its anchor inside its job, at most once per
-    anchor, when ``old`` does not already hold it there; returns (remaining lines, inserts dropped)."""
-    out, dropped, used = [], 0, set()
-    for ln in new:
-        key = next((k for k in FORK_CI_INSERTS if k[0] == path and k not in used and out and out[-1] == k[2]
-                    and FORK_CI_INSERTS[k][0] == ln and _job_of(out + [ln], len(out) + 1) == k[1]), None)
-        at = len(out)
-        if key and not (at < len(old) and old[at] == ln and old[at - 1] == key[2]):
-            used.add(key)
-            dropped += 1
+def _strip_fork_ci_inserts(path, lines):
+    """``lines`` less each FORK_CI_INSERTS block found right after its anchor inside its job, at most once per
+    anchor; returns (remaining lines, the keys of the blocks stripped)."""
+    out, found, i = [], set(), 0
+    while i < len(lines):
+        key = next((k for k, (blk, _auth, _rm) in FORK_CI_INSERTS.items() if k[0] == path and k not in found and out
+                    and out[-1] == k[2] and _job_of(out, len(out)) == k[1]
+                    and lines[i:i + len(blk.splitlines(keepends=True))] == blk.splitlines(keepends=True)), None)
+        if key:
+            found.add(key)
+            i += len(FORK_CI_INSERTS[key][0].splitlines(keepends=True))
             continue
-        out.append(ln)
-    return out, dropped
+        out.append(lines[i])
+        i += 1
+    return out, found
+
+
+def _drop_fork_ci_inserts(path, old, new):
+    """Both sides less their FORK_CI_INSERTS blocks. A block may appear between ``old`` and ``new``, and only a
+    removable one may disappear. Returns (old less blocks, new less blocks, blocks added or removed, fails)."""
+    old, had = _strip_fork_ci_inserts(path, old)
+    new, has = _strip_fork_ci_inserts(path, new)
+    fails = [f"FORK-CI: {path}: the inserted block after {k[2].strip()!r} is removed but is not removable"
+             for k in sorted(had - has) if not FORK_CI_INSERTS[k][2]]
+    return old, new, len(has ^ had), fails
 
 
 def _label_mapping(repo, a, b, path, where):
@@ -649,7 +703,9 @@ def _label_mapping(repo, a, b, path, where):
             return [f"FORK-CI: {path}: must be added {where} with exactly its ruled content"], 0
         return [], 1
     old, new = text_at(repo, a, path).splitlines(keepends=True), text_at(repo, b, path).splitlines(keepends=True)
-    new, inserted = _drop_fork_ci_inserts(path, old, new)
+    old, new, inserted, fails = _drop_fork_ci_inserts(path, old, new)
+    if fails:
+        return fails, 0
     if len(old) != len(new):
         return [f"FORK-CI: {path}: line count differs {where} (a label mapping keeps every line)"], 0
     fails, mapped, used = [], 0, set()
