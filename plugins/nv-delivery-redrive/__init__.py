@@ -28,7 +28,9 @@ _CORE_NAMES = {
     "tools.bot_failure_reasons": ("QUEUED_EXPIRED", "classify_agent_error"),
     "tools.process_registry": ("process_registry", "ProcessRegistry"),
 }
-_SESSION_FIELDS = ("_completion_event", "_reader_thread", "output_buffer", "detached", "exit_code")
+_SESSION_FIELDS = ("_completion_event", "_reader_thread", "output_buffer", "detached", "exit_code", "owner_task_id",
+                   "command")
+_REGISTRY_METHODS = ("get", "running_owned_by", "unread_completions_owned_by")
 
 
 def _missing_core_names() -> list[str]:
@@ -44,7 +46,9 @@ def _missing_core_names() -> list[str]:
             continue
         missing.extend(f"{module_name}.{name}" for name in names if not hasattr(module, name))
     try:
-        from tools.process_registry import ProcessSession
+        from tools.process_registry import ProcessRegistry, ProcessSession
+
+        missing.extend(f"ProcessRegistry.{name}" for name in _REGISTRY_METHODS if not hasattr(ProcessRegistry, name))
 
         fields = {f.name for f in dataclasses.fields(ProcessSession)}
         missing.extend(f"ProcessSession.{name}" for name in _SESSION_FIELDS if name not in fields)

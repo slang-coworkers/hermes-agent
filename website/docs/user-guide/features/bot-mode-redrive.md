@@ -38,11 +38,23 @@ Possible outcomes, all from the closed reason vocabulary:
 
 | outcome | meaning |
 |---|---|
-| `settled` | the message landed; the reply follows |
+| `settled` | the message landed: the target's Bot Chat holds it as a new user message; the reply follows |
 | `failed` / `queued_expired` | the target stayed busy for the whole window; the message was **not** delivered |
 | `failed` / `<reason>` | the target's turn ran and failed (provider error, …); not retried |
 | `cancelled` / `runtime_offline` | a live Bot Chat owner left before claiming it, and core cancelled the receipt |
 | `ambiguous` / `unknown` | the outcome cannot be proven (an attempt still running at the bound, an unreadable transcript); check the target's Bot Chat before resending |
+
+A target turn can report success without its message ever reaching the target's Bot Chat. A live owner settles from
+its turn status even when persisting the message failed, and a text-only CLI turn whose writes failed still prints
+its reply and exits 0. So a reported success counts as `settled` only once the target's Bot Chat holds this
+delivery's message, newer than the transcript as it stood when the delivery was sent. Otherwise the sender's
+completion is rewritten before it is published, and the notices read exactly:
+
+> Delivery `<id>` to @`<target>`: Could not verify your message in the target's Bot Chat; delivery outcome is
+> unknown. Do NOT resend. Check the target before considering another send.
+
+An identical earlier message never vouches for a later one. If the message turns up in the target's Bot Chat
+afterwards, while the ticket is still kept, the delivery turns `settled` and one more notice says so.
 
 Once a delivery reaches a live Bot Chat owner (Desktop or TUI), it is **followed, never re-sent**. The plugin watches
 the mailbox receipt past core's 30-minute runner limit and reports how it ends. Its one action on a receipt is at the
@@ -91,5 +103,11 @@ survives gateway restarts: re-drive runners run outside the process registry, so
   plugin's notice for it. A carried `settled` reply is never repeated.
 - **Publication gap.** If core fails to publish a completion after it has written the result, the sender's notice
   arrives only after the next gateway restart. The orchestrator still gets every non-`settled` outcome.
+- **Unverified success, three gaps.** The rewrite above is not universal:
+  - a sender that cannot receive completion notifications (an API server session, a one-shot run, a kanban worker)
+    first gets core's raw `settled` row, then the plugin's correction notice on a later tick;
+  - the rewrite runs inside a hook bounded by `plugins.hook_callback_timeout`. If the hook fails or runs out of time
+    first (a timeout below 10 s does), core's text passes unchanged;
+  - an untracked send (no fresh drainer heartbeat, no valid `orchestrator_profile`) is never rewritten.
 - **Durable work belongs on kanban.** The plugin re-delivers *messages* into the target's Bot Chat. Use
   [Kanban](./kanban.md) for work that must survive as a task.

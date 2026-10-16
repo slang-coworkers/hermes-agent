@@ -6,6 +6,7 @@ reaches core's complete authorization and core's own delivery. It only observes 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shlex
@@ -14,11 +15,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import probe, settings, store
+from .notify import UNVERIFIED
 
 logger = logging.getLogger(__name__)
 
 TOOL = "message_agent"
 REFUSAL_REASON = "target_busy"
+COMMIT_WAIT_SECONDS = 10.0
 
 
 def _sender(home: str) -> tuple[Path, str, dict[str, Path]]:
@@ -134,18 +137,32 @@ def middleware(tool_name: str = "", args: Any = None, next_call: Any = None, tas
         return next_call(args)
     target_home = roster[target]
     baseline_state, baseline = probe.max_row(target_home, db_seen=False)
+    inflight = None
+    try:
+        # D5a.1: core spawns the runner inside next_call, so its completion can reach the transform before the
+        # ticket below is committed; this row tells the transform to wait for that commit.
+        inflight = store.open_inflight(sender_session_id=session_id or "", task_id=task_id or "", target=target,
+                                       target_home=str(target_home), baseline=baseline)
+    except Exception:
+        logger.warning("nv-delivery-redrive: in-flight row not recorded", exc_info=True)
     out = next_call(args)
     try:
-        return _track(out, args, me=me, root=root, sender_home=Path(home), target=target, target_home=target_home,
-                      baseline_state=baseline_state, baseline=baseline, session_id=session_id)
+        tracked_out = _track(out, args, me=me, root=root, sender_home=Path(home), target=target,
+                             target_home=target_home, baseline_state=baseline_state, baseline=baseline,
+                             session_id=session_id, inflight=inflight)
     except Exception:
         logger.warning("nv-delivery-redrive: could not record a ticket; core's ack returned unchanged",
                        exc_info=True)
-        return out
+        tracked_out = out
+    if tracked_out is out:
+        with contextlib.suppress(Exception):
+            store.close_inflight(inflight, "untracked")
+    return tracked_out
 
 
 def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: Path, target: str,
-           target_home: Path, baseline_state: str, baseline: Optional[int], session_id: str) -> Any:
+           target_home: Path, baseline_state: str, baseline: Optional[int], session_id: str,
+           inflight: Optional[int] = None) -> Any:
     from tools import bot_live_delivery, bot_mode_dm
 
     if not isinstance(out, str):
@@ -185,7 +202,7 @@ def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: 
     }
     attempt = {"state": "running" if ack.get("process_id") else "over", "dm_path": dm_path, "pid": pid,
                "pid_create_time": create_time, "baseline": baseline, "spawned_at": now}
-    store.insert_ticket(fields, attempt)
+    store.commit_ticket(fields, attempt, inflight)
     ack["redrive"] = {"tracked": True, "delivery_id": did, "deadline": fields["deadline"]}
     return json.dumps(ack)
 
@@ -221,19 +238,116 @@ def clean_refusal(output: str) -> bool:
     return False
 
 
+def _runner_target(command: str) -> Optional[str]:
+    """The target profile of a ``--run-delivery`` command (its ``hermes -p <profile> …`` argv)."""
+    from tools.bot_mode_dm import _runner_argv
+
+    try:
+        parts = shlex.split(command)
+        parsed = _runner_argv(parts[parts.index("--run-delivery"):])
+    except ValueError:
+        return None
+    argv = parsed[3] if parsed else []
+    return argv[argv.index("-p") + 1] if "-p" in argv[:-1] else None
+
+
+def _runner_owned_by(task_id: str, command: str) -> bool:
+    from tools.process_registry import process_registry
+
+    if not task_id:
+        return False
+    sessions = [*process_registry.running_owned_by(task_id), *process_registry.unread_completions_owned_by(task_id)]
+    return any(s.command == command for s in sessions)
+
+
+def _await_ticket(dm_path: str, command: str) -> Any:
+    """D5a.2: the committed ticket for ``dm_path``; ``None`` when the send is untracked; ``probe.UNKNOWN`` when a
+    send that is still in flight did not commit within the wait (fail closed)."""
+    ticket = store.ticket_by_dm_path(dm_path)
+    if ticket is not None:
+        return ticket
+    target = _runner_target(command)
+    rows = [r for r in store.open_inflight_rows(target) if _runner_owned_by(r["task_id"], command)] if target else []
+    if not rows:
+        return None
+    ids = {r["id"] for r in rows}
+    deadline = time.monotonic() + COMMIT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        ticket = store.ticket_by_dm_path(dm_path)
+        if ticket is not None:
+            return ticket
+        if not any(r["id"] in ids for r in store.open_inflight_rows(target)):
+            return store.ticket_by_dm_path(dm_path)
+    return probe.UNKNOWN
+
+
+def _claims_row(ticket: dict[str, Any]) -> bool:
+    from . import drain
+
+    state, row = probe.max_row(ticket["target_home"], db_seen=bool(ticket["db_seen"]))
+    view = drain.NowView(ticket["delivery_id"], row if state != probe.UNKNOWN else None)
+    return isinstance(drain.verdict_for(ticket, view), tuple)
+
+
+def reported_success(output: str, returncode: Any) -> bool:
+    """A runner completion that reports the delivery as done: a live ``settled`` payload or a CLI exit-0 reply."""
+    from . import drain
+
+    payload = drain._last_json(output)
+    if payload and payload.get("delivery_id") and payload.get("status"):
+        return payload["status"] == "settled"
+    return drain.classify({"rc": returncode, "out": output}) == "exit0"
+
+
+def _gate(command: str, dm_path: str, output: str, returncode: Any) -> Optional[str]:
+    """D5a.2: core's success text passes only when this ticket claims its row; otherwise the completion says so."""
+    started = time.monotonic()
+    ticket = _await_ticket(dm_path, command)
+    if ticket is None:
+        return None
+    # Past core's own bound on this hook, core has already published its text unchanged (the waived fail-open):
+    # recording a status here would claim a publication that never happened.
+    record = time.monotonic() - started < settings.hook_timeout()
+    if ticket is not probe.UNKNOWN and _claims_row(ticket):
+        if record:
+            store.set_published(ticket["delivery_id"], "settled")
+        return None
+    if ticket is probe.UNKNOWN:
+        from tools.bot_mode_dm import _dm_delivery_id
+
+        did, target = _dm_delivery_id(dm_path), _runner_target(command) or ""
+        if record:
+            store.publish_unticketed(dm_path, "ambiguous")
+    else:
+        did, target = ticket["delivery_id"], ticket["target"]
+        if record:
+            store.set_published(did, "ambiguous")
+    return json.dumps({"status": "ambiguous", "reason": "unknown", "delivery_id": did, "to": f"@{target}",
+                       "detail": UNVERIFIED})
+
+
 def transform_terminal_output(command: str = "", output: str = "", returncode: Any = None, **kwargs: Any) -> Any:
-    """Record attempt 1's outcome; rewrite a tracked clean refusal into the truthful queued shape."""
+    """Record attempt 1's outcome; rewrite a tracked clean refusal into the truthful queued shape, and a reported
+    success whose row is unproven into the D5a unverified shape."""
     if "--run-delivery" not in str(command or "") or returncode is None:
         return None
     try:
         dm_path = _runner_dm_path(command)
         if not dm_path:
             return None
+        outcome = json.dumps({"rc": returncode, "out": output})
         attempt = store.attempt_by_dm_path(dm_path)
-        if attempt is None:
-            return None
-        store.record_attempt_outcome(attempt["delivery_id"], 1, json.dumps({"rc": returncode, "out": output}))
-        if not clean_refusal(output) or not settings.tracking_live(store.root()):
+        if attempt is not None:
+            store.record_attempt_outcome(attempt["delivery_id"], 1, outcome)
+        if reported_success(output, returncode):
+            if not settings.tracking_live(store.root()):
+                return None
+            gated = _gate(command, dm_path, output, returncode)
+            if attempt is None and (attempt := store.attempt_by_dm_path(dm_path)) is not None:
+                store.record_attempt_outcome(attempt["delivery_id"], 1, outcome)
+            return gated
+        if attempt is None or not clean_refusal(output) or not settings.tracking_live(store.root()):
             return None
         ticket = store.ticket(attempt["delivery_id"]) or {}
         did = attempt["delivery_id"]

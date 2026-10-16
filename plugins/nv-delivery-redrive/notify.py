@@ -20,13 +20,18 @@ SENDER = "sender"
 ORCHESTRATOR = "orchestrator"
 FINAL = "final"
 LATE = "late"
+VERIFIED = "verified"
 _META_KEY = "nv_delivery_redrive"
+UNVERIFIED = ("Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. "
+              "Check the target before considering another send.")
 
 
 def text_for(ticket: dict[str, Any], state: str, reason: Optional[str], reply: str, error: str, *,
              late: bool = False) -> str:
     did, target = ticket["delivery_id"], ticket["target"]
     head = "Late outcome: delivery" if late else "Delivery"
+    if state == "ambiguous" and ticket.get("unverified"):
+        return f"{head} {did} to @{target}: {UNVERIFIED}"
     if state == "settled":
         verdict, detail = "settled — reply follows", reply or "(empty reply)"
     elif state == "ambiguous":

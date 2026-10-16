@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS tickets (
     late_outcome TEXT,
     settled_by INTEGER,
     undecidable INTEGER NOT NULL DEFAULT 0,
+    published_status TEXT,
+    unverified INTEGER NOT NULL DEFAULT 0,
+    receipt_row INTEGER,
     UNIQUE (target_home, matched_row_id)
 );
 CREATE TABLE IF NOT EXISTS attempts (
@@ -76,7 +79,20 @@ CREATE TABLE IF NOT EXISTS notices (
     PRIMARY KEY (delivery_id, recipient, notice_kind)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS inflight (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_session_id TEXT,
+    task_id TEXT,
+    target TEXT NOT NULL,
+    target_home TEXT NOT NULL,
+    baseline INTEGER,
+    created_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    delivery_id TEXT
+);
+CREATE TABLE IF NOT EXISTS published (dm_path TEXT PRIMARY KEY, status TEXT NOT NULL, at REAL NOT NULL);
 """
+INFLIGHT_WAIT_SECONDS = 60.0
 
 _lock = threading.RLock()
 _conns: dict[str, sqlite3.Connection] = {}
@@ -164,13 +180,21 @@ def attempts(delivery_id: str) -> list[dict[str, Any]]:
 
 
 def open_tickets() -> list[dict[str, Any]]:
-    return _read("SELECT * FROM tickets WHERE state = 'pending' OR late_open = 1 ORDER BY seq")
+    """Pending tickets, tickets with an attempt still open after their bound, and D5a-unverified tickets (a later
+    row claimed for them still settles them until they are collected)."""
+    return _read("SELECT * FROM tickets WHERE state = 'pending' OR late_open = 1 OR (state = 'ambiguous' "
+                 "AND unverified = 1 AND matched_row_id IS NULL) ORDER BY seq")
+
+
+def ticket_by_dm_path(dm_path: str) -> Optional[dict[str, Any]]:
+    rows = _read("SELECT * FROM tickets WHERE dm_path = ? ORDER BY seq DESC LIMIT 1", (dm_path,))
+    return rows[0] if rows else None
 
 
 def cohort_peers(sender_home: str, target_home: str) -> list[dict[str, Any]]:
-    """Unmatched ``ambiguous`` CLI tickets of a pair: still part of their cohort for row attribution."""
+    """Unmatched ``ambiguous`` tickets of a pair: still part of their cohort for row attribution."""
     return _read("SELECT * FROM tickets WHERE sender_home = ? AND target_home = ? AND state = 'ambiguous' "
-                 "AND path = 'cli' AND matched_row_id IS NULL ORDER BY seq", (sender_home, target_home))
+                 "AND matched_row_id IS NULL ORDER BY seq", (sender_home, target_home))
 
 
 def undecided_notices(epoch: str) -> list[dict[str, Any]]:
@@ -190,14 +214,40 @@ def tickets_for_pair(sender_home: str, target_home: str) -> list[dict[str, Any]]
                  (sender_home, target_home))
 
 
-def insert_ticket(fields: dict[str, Any], attempt: Optional[dict[str, Any]]) -> None:
+def commit_ticket(fields: dict[str, Any], attempt: Optional[dict[str, Any]],
+                  inflight_id: Optional[int] = None) -> None:
+    """The D3.6 ticket insert: ticket + attempt 1 in one transaction. A completion the transform already failed
+    closed under this DM path (D5a.2) carries its ``published_status`` over; the in-flight row is closed."""
     with txn() as conn:
         seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM tickets").fetchone()[0]
         row = {**fields, "seq": seq}
+        if fields.get("dm_path"):
+            found = conn.execute("SELECT status FROM published WHERE dm_path = ?", (fields["dm_path"],)).fetchone()
+            if found is not None:
+                row["published_status"] = found[0]
+                conn.execute("DELETE FROM published WHERE dm_path = ?", (fields["dm_path"],))
         cols = ", ".join(row)
         conn.execute(f"INSERT INTO tickets ({cols}) VALUES ({', '.join('?' for _ in row)})", tuple(row.values()))
         if attempt is not None:
             _insert_attempt(conn, {**attempt, "delivery_id": fields["delivery_id"], "n": 1})
+        if inflight_id is not None:
+            conn.execute("UPDATE inflight SET state = 'committed', delivery_id = ? WHERE id = ?",
+                         (fields["delivery_id"], inflight_id))
+
+
+def set_published(delivery_id: str, status: str) -> None:
+    """What a transformed runner result told the sender. ``ambiguous`` is sticky: a later poll of the same runner
+    that passes core's text never un-says the rewrite the sender already read."""
+    with txn() as conn:
+        conn.execute("UPDATE tickets SET published_status = ? WHERE delivery_id = ? "
+                     "AND (published_status IS NULL OR ? = 'ambiguous')", (status, delivery_id, status))
+
+
+def publish_unticketed(dm_path: str, status: str) -> None:
+    """A fail-closed rewrite of a completion whose ticket is not committed yet (D5a.2)."""
+    with txn() as conn:
+        conn.execute("INSERT OR REPLACE INTO published (dm_path, status, at) VALUES (?, ?, ?)",
+                     (dm_path, status, time.time()))
 
 
 def update_ticket(delivery_id: str, conn: Optional[sqlite3.Connection] = None, **fields: Any) -> None:
@@ -221,6 +271,37 @@ def verify_content(delivery_id: str, content: str) -> None:
 def delete_ticket(conn: sqlite3.Connection, delivery_id: str) -> None:
     for table in ("attempts", "notices", "tickets"):
         conn.execute(f"DELETE FROM {table} WHERE delivery_id = ?", (delivery_id,))
+
+
+# --- in-flight sends (D5a.1) -------------------------------------------------------------------------------------
+def open_inflight(*, sender_session_id: str, task_id: str, target: str, target_home: str,
+                  baseline: Optional[int]) -> int:
+    with txn() as conn:
+        cur = conn.execute("INSERT INTO inflight (sender_session_id, task_id, target, target_home, baseline, "
+                           "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                           (sender_session_id, task_id, target, target_home, baseline, time.time()))
+        return int(cur.lastrowid)
+
+
+def close_inflight(inflight_id: Optional[int], state: str) -> None:
+    if inflight_id is None:
+        return
+    with txn() as conn:
+        conn.execute("UPDATE inflight SET state = ? WHERE id = ? AND state = 'open'", (state, inflight_id))
+
+
+def open_inflight_rows(target: str) -> list[dict[str, Any]]:
+    return _read("SELECT * FROM inflight WHERE state = 'open' AND target = ? AND created_at > ?",
+                 (target, time.time() - INFLIGHT_WAIT_SECONDS))
+
+
+def expire_inflight(now: float, keep_seconds: float) -> None:
+    """Open rows older than the wait are abandoned; closed rows are dropped once nothing can wait on them."""
+    with txn() as conn:
+        conn.execute("UPDATE inflight SET state = 'untracked' WHERE state = 'open' AND created_at <= ?",
+                     (now - INFLIGHT_WAIT_SECONDS,))
+        conn.execute("DELETE FROM inflight WHERE state != 'open' AND created_at <= ?", (now - keep_seconds,))
+        conn.execute("DELETE FROM published WHERE at <= ?", (now - keep_seconds,))
 
 
 # --- attempts ---------------------------------------------------------------------------------------------------

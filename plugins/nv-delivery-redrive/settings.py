@@ -74,3 +74,15 @@ def heartbeat_fresh(now: Optional[float] = None) -> bool:
 
 def tracking_live(root: Path) -> bool:
     return orchestrator(root) is not None and heartbeat_fresh()
+
+
+def hook_timeout() -> float:
+    """Core's bound on one hook callback (``plugins.hook_callback_timeout``, default 30 s; ``<= 0`` = unbounded)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        raw = ((load_config_readonly() or {}).get("plugins") or {}).get("hook_callback_timeout")
+        value = 30.0 if raw is None else float(raw)
+    except Exception:
+        return 30.0
+    return value if value > 0 else float("inf")
