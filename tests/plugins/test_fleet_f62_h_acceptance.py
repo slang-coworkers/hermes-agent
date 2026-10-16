@@ -3,7 +3,8 @@
 Ships as ``tests/plugins/test_fleet_f62_h_acceptance.py``, written against Hermes ``v0.22.2`` = ``d923a5eb`` (the
 0.22.0 delivery line: the per-profile turn flock, the ``target_busy`` refusal, the live-owner mailbox). There is one
 ``test_ac_fleet_f62_h_<n>`` per active ``pytest:`` row of the ADR ``reports/fleet-f62.h.md`` §Acceptance criteria
-(ids 1-14, same order). Id 15 is WITHDRAWN by user ruling A1 (no test def, id kept). Id 16 is a live scenario.
+(ids 1-14 and 17, same order). Id 15 is WITHDRAWN by user ruling A1 (no test def, id kept). Id 16 is a live
+scenario. Id 17 is erratum E5 (user ruling, orch msg 120).
 
 Loads ``plugins/nv-delivery-redrive`` through the real ``PluginManager().discover_and_load()`` from an isolated
 ``HERMES_HOME`` with an EMPTY bundled-plugin dir (shape of ``tests/hermes_cli/test_plugin_api_compat.py``). Every send
@@ -171,7 +172,7 @@ _RUNNER_SHIM = textwrap.dedent('''\
     from tools import bot_mode_dm
     overrides = Path({state_dir!r}) / "runner.json"
     if overrides.exists():
-        for key, value in json.loads(overrides.read_text(encoding="utf-8")).items():
+        for key, value in json.loads(overrides.read_text(encoding="utf-8-sig")).items():
             setattr(bot_mode_dm, key, value)
     raise SystemExit(bot_mode_dm._delivery_main(sys.argv[1:]))
 ''')
@@ -260,13 +261,13 @@ def fleet(tmp_path, monkeypatch):
         return manager, loaded
 
     def configure(profile="*", **spec):
-        data = json.loads(target_cfg.read_text(encoding="utf-8"))
+        data = json.loads(target_cfg.read_text(encoding="utf-8-sig"))
         data[profile] = spec
         target_cfg.write_text(json.dumps(data), encoding="utf-8")
 
     def settings_(**overrides):
         for home in homes.values():
-            data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+            data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig"))
             data["plugins"]["entries"][PLUGIN_KEY]["settings"].update(overrides)
             if "turn_wait_seconds" in overrides:
                 data["bot_mode"]["turn_wait_seconds"] = overrides["turn_wait_seconds"]
@@ -359,7 +360,7 @@ def _target_pids(fleet):
     """Every target CLI pid the fake ever logged (an orphaned one outlives its runner)."""
     if not fleet.pidlog.exists():
         return []
-    return [int(json.loads(line)["pid"]) for line in fleet.pidlog.read_text(encoding="utf-8").splitlines()]
+    return [int(json.loads(line)["pid"]) for line in fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()]
 
 
 def _alive(pid):
@@ -416,7 +417,7 @@ def _admissions(home, needle):
     found = []
     for path in sorted(root.glob("*.json")) if root.is_dir() else []:
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if needle in str(record.get("message") or ""):
@@ -517,6 +518,15 @@ def _append_target_row(fleet, content, *, message_uid=None):
         db.close()
 
 
+def _land_live_row(fleet, delivery_id):
+    """The live owner's turn persisted its user row, as a persisting owner does before it settles (E5, D5a)."""
+    from tools import bot_live_delivery as mailbox
+
+    record = mailbox.read_delivery_result(fleet.homes[TARGET], delivery_id)
+    assert record is not None and record.get("message"), record
+    return _append_target_row(fleet, record["message"])
+
+
 def _shape_not_a_new_acceptance(fleet, shape):
     """A post-baseline compaction clone of an older identical message, or a prefix-only row, never settles an
     attempt; a continuation tip is followed."""
@@ -542,6 +552,8 @@ def _shape_not_a_new_acceptance(fleet, shape):
     if shape == "compaction_clone_after_baseline":
         older = fleet.send(body)                          # an earlier identical message lands and settles
         assert fleet.until(lambda: fleet.ticket(older["delivery_id"])["state"] == "settled", timeout=30.0)
+    else:
+        _seed_bot_chat(fleet.homes[TARGET], "bc-r-prefix")  # the prefix row needs a Bot Chat to land in
     ack = _kill_before_row(fleet, body)
     did = ack["delivery_id"]
     if older is not None:
@@ -691,8 +703,8 @@ def _oneshot_send(fleet, tmp_path, body, name="oneshot_sender.py"):
         repo=str(_REPO), testdir=str(Path(__file__).resolve().parent), module=Path(__file__).stem,
         fake=str(fleet.fake), dm_dir=str(fleet.dm_dir), shim=str(fleet.shim), body=body, task=fleet.task_id),
         encoding="utf-8")
-    return subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            env={**os.environ, "HERMES_HOME": str(fleet.root)})
+    return subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", env={**os.environ, "HERMES_HOME": str(fleet.root)})
 
 
 def _ack_of(proc):
@@ -793,7 +805,7 @@ def test_ac_fleet_f62_h_7(fleet, case, monkeypatch):
     gate.mkdir(parents=True)
     (gate / "plugin.yaml").write_text(_GATE_YAML, encoding="utf-8")
     (gate / "__init__.py").write_text(_GATE_INIT, encoding="utf-8")
-    cfg = yaml.safe_load((fleet.root / "config.yaml").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((fleet.root / "config.yaml").read_text(encoding="utf-8-sig"))
     cfg["plugins"]["enabled"].append("f62h-test-gate")
     (fleet.root / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
     fleet.load()
@@ -852,7 +864,7 @@ def live_owner(fleet):
                                   "core_cancelled", "owner_gone_expired", "pending_restart",
                                   "runner_died_after_admission"])
 def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
-    """(R4 condition 3, ruling B1) A live-owner delivery whose core runner ended (or never started) with the receipt still queued or claimed is followed by the plugin past the runner, and its final outcome is reported to the sender and the orchestrator. The plugin NEVER re-sends or re-admits it: no CLI re-drive, no new mailbox admission, no target row from the plugin. Eight cases: (a) the owner settles later: settled, and the reply reaches the sender; (b) it fails later: failed with the receipt's typed reason; (c) it is claimed and the owner goes away: never re-sent, ambiguous/unknown at the bound; (d) an ack with notification_error and no runner is tracked from its receipt; (e) core's own runner cancels the unclaimed receipt (runtime_offline): reported cancelled with that reason, never re-sent; (f) still queued with the owner gone at the bound: the plugin cancels it under the mailbox lock and reports failed/queued_expired, with no row; (g) core's pending completion ("Delivery remains pending …") reached the sender, the gateway restarts, then the receipt settles: exactly one plugin sender notice with the reply (E2 X2); (h) the runner admitted the message and died before printing its outcome: the drainer finds the receipt first and only follows it."""
+    """(R4 condition 3, ruling B1) A live-owner delivery whose core runner ended (or never started) with the receipt still queued or claimed is followed by the plugin past the runner, and its final outcome is reported to the sender and the orchestrator. The plugin NEVER re-sends or re-admits it: no CLI re-drive, no new mailbox admission, no target row from the plugin. Eight cases: (a) the owner settles later: settled only once the target's Bot Chat holds the full role='user' row newer than the ticket's baseline and claimed by this ticket (D5a, E5); otherwise ambiguous/unknown. The reply reaches the sender; (b) it fails later: failed with the receipt's typed reason; (c) it is claimed and the owner goes away: never re-sent, ambiguous/unknown at the bound; (d) an ack with notification_error and no runner is tracked from its receipt; (e) core's own runner cancels the unclaimed receipt (runtime_offline): reported cancelled with that reason, never re-sent; (f) still queued with the owner gone at the bound: the plugin cancels it under the mailbox lock and reports failed/queued_expired, with no row; (g) core's pending completion ("Delivery remains pending …") reached the sender, the gateway restarts, then the receipt settles: exactly one plugin sender notice with the reply (E2 X2); (h) the runner admitted the message and died before printing its outcome: the drainer finds the receipt first and only follows it."""
     from tools import bot_live_delivery as mailbox
     from tools.bot_failure_reasons import RUNTIME_OFFLINE
     from tools.process_registry_notifications import format_process_notification
@@ -926,6 +938,7 @@ def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
         if case == "failed_later":
             mailbox.complete_delivery(home, did, status="failed", reason="provider_rate_limit", error="429")
         else:
+            _land_live_row(fleet, did)
             mailbox.complete_delivery(home, did, status="settled", reply="LIVE-REPLY-H8")
         final = "failed" if case == "failed_later" else "settled"
         assert fleet.until(lambda: fleet.ticket(did)["state"] == final), fleet.ticket(did)
@@ -946,6 +959,7 @@ def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
                          display_kind="process_complete", display_metadata={"display_text": "x"})
         _restart_gateway(fleet, monkeypatch)
         owner_claims()
+        _land_live_row(fleet, did)
         mailbox.complete_delivery(home, did, status="settled", reply="LATE-REPLY-H8")
         assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
         assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1)
@@ -954,6 +968,7 @@ def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
         fleet.tick(4, pause=0.5)
         assert fleet.ticket(did)["state"] == "pending" and len(fleet.attempts(did)) == 1, fleet.attempts(did)
         owner_claims()
+        _land_live_row(fleet, did)
         mailbox.complete_delivery(home, did, status="settled", reply="LIVE-REPLY-H8")
         assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
     else:
@@ -971,7 +986,11 @@ def test_ac_fleet_f62_h_8(fleet, live_owner, case, monkeypatch):
                        timeout=30.0)
     fleet.tick(3, pause=0.5)
     assert len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1
-    assert fleet.rows(TARGET, "PAYLOAD_H8") == []
+    landed = case in ("settled_later", "no_runner", "pending_restart", "runner_died_after_admission")
+    rows = fleet.rows(TARGET, "PAYLOAD_H8")
+    assert len(rows) == (1 if landed else 0), rows      # the owner's own row (E5); never one from the plugin
+    if landed:
+        assert fleet.ticket(did)["matched_row_id"] is not None, fleet.ticket(did)
     assert [r["delivery_id"] for r in _admissions(home, "PAYLOAD_H8")] == [did]
     assert len(fleet.attempts(did)) == 1, fleet.attempts(did)
 
@@ -1135,6 +1154,7 @@ def test_ac_fleet_f62_h_12(fleet, case, monkeypatch, request):
         try:
             claim = mailbox.claim_pending_delivery(home, mailbox.find_canonical_live_owner(home))
             assert claim is not None and claim["delivery_id"] == did, claim
+            _land_live_row(fleet, did)
             mailbox.complete_delivery(home, did, status="settled", reply="REPLY-FROM-researcher")
             assert in_window.wait(timeout=40), "the runner's completion never reached the transform"
             assert session.exited
@@ -1215,7 +1235,8 @@ def test_ac_fleet_f62_h_13(fleet, case, request):
     time.sleep(2.0)
     fleet.tick(2, pause=0.5)                             # past retention: an open late attempt keeps the ticket
     assert fleet.ticket(did) is not None and fleet.ticket(did)["late_open"] == 1
-    fleet.settings(retention_seconds=3600)               # the rest asserts post-resolution rows, not GC
+    # The rest asserts post-resolution rows, not GC; the second ticket's own window outlasts the first's late writer.
+    fleet.settings(retention_seconds=3600, redrive_window_seconds=90)
     if case == "live_claimed":
         lease.release()
     second = fleet.send("status? PAYLOAD_H13_SECOND")
@@ -1224,6 +1245,7 @@ def test_ac_fleet_f62_h_13(fleet, case, request):
         assert len(fleet.attempts(second["delivery_id"])) == 1   # core's own first attempt only: no re-drive yet
         assert fleet.until(lambda: len(fleet.rows(TARGET, "PAYLOAD_H13_FIRST")) == 1, timeout=30.0)
     else:
+        _land_live_row(fleet, did)
         mailbox.complete_delivery(home, did, status="settled", reply="LATE-H13")
     assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 2, timeout=30.0)   # one late-outcome notice
     assert fleet.ticket(did)["late_open"] == 0
@@ -1256,3 +1278,212 @@ def test_ac_fleet_f62_h_14(fleet, case, monkeypatch):
 
 
 # AC-FLEET-F62.h-15 is WITHDRAWN by user ruling A1 (Option Z; Option S rejected): no test def, id kept.
+
+
+_UNVERIFIED = ("Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. "
+               "Check the target before considering another send.")
+
+
+def _last_json(text):
+    try:
+        return json.loads((text or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
+def _settle_without_row(fleet, did, reply="UNPERSISTED-H17", *, unreadable=False):
+    """The live owner's turn ends `settled` but its user row never landed (tui_gateway/prompt_turn.py:996-1002).
+    ``unreadable``: the target transcript is corrupted after the claim (which reads it) and before the settle, so the
+    plugin's probe is `unknown`."""
+    from tools import bot_live_delivery as mailbox
+
+    home = fleet.homes[TARGET]
+    claim = mailbox.claim_pending_delivery(home, mailbox.find_canonical_live_owner(home))
+    assert claim is not None and claim["delivery_id"] == did, claim
+    if unreadable:
+        (home / "state.db").write_bytes(b"not a sqlite database" * 64)
+    mailbox.complete_delivery(home, did, status="settled", reply=reply)
+
+
+def _assert_unverified_end(fleet, did, body_needle, *, target_readable=True):
+    assert fleet.until(lambda: fleet.ticket(did)["state"] == "ambiguous", timeout=60.0), fleet.ticket(did)
+    assert fleet.ticket(did)["reason"] == "unknown", fleet.ticket(did)
+    assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1,
+                       timeout=30.0)
+    fleet.tick(3, pause=0.5)
+    assert len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1
+    for who in ("default", ORCH):
+        body = str(_notices(fleet, who, did)[0]["content"])
+        assert body == f"Delivery {did} to @{TARGET}: {_UNVERIFIED}", (who, body)   # exact, no generic suffix
+    assert fleet.ticket(did)["matched_row_id"] is None
+    if target_readable:                                  # never assert absence of a row that cannot be read
+        assert fleet.rows(TARGET, body_needle) == []
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("case", ["push", "push_unknown", "non_push", "before_commit", "identical_live",
+                                  "commit_late_then_row", "cli", "hook_timeout_external"])
+def test_ac_fleet_f62_h_17(fleet, case, request, monkeypatch):
+    """(E5, user ruling msg 120) A tracked delivery's settled outcome is never reported as success unless the target's Bot Chat holds the full role='user' row newer than the baseline and claimed by this ticket (D5a). This covers a live receipt settled by an owner whose turn never persisted the row, and a CLI turn that exited 0 with its reply and no row. For a push sender, core's queued completion is rewritten before publication to status: ambiguous with exactly the text "Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. Check the target before considering another send." That holds also when the runner beats the ticket commit, and when the commit lands after the plugin's 10 s wait (then a verified late row gives one final settled sender notice). For a non-push sender, core's raw row comes first (waived), then one correction notice. An identical-content sibling's row never vouches. The ticket ends ambiguous/unknown with one sender and one orchestrator notice."""
+    if case == "cli":
+        _cli_exit0_no_row(fleet)
+        return
+    request.getfixturevalue("live_owner")
+    if case == "non_push":
+        _non_push_unverified(fleet)
+        return
+    if case == "identical_live":
+        _identical_live(fleet)
+        return
+    if case in ("before_commit", "commit_late_then_row", "hook_timeout_external"):
+        _commit_race(fleet, case, monkeypatch)
+        return
+    ack = fleet.send("status? PAYLOAD_H17_PUSH")
+    did, pid = ack["delivery_id"], ack["process_id"]
+    assert ack.get("redrive", {}).get("tracked") is True, ack
+    # push_unknown: the probe cannot read the target transcript; unknown gets the same text, never asserting absence.
+    _settle_without_row(fleet, did, unreadable=case == "push_unknown")
+    _wait_runner_done(fleet, pid, timeout=40.0)
+    assert fleet.until(lambda: fleet.registry.get(pid)._completion_event.is_set(), ticks=False, timeout=30.0)
+    out = _completion_output(fleet, pid)
+    assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+    assert '"status": "settled"' not in out and "UNPERSISTED-H17" not in out, out
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_PUSH", target_readable=case != "push_unknown")
+
+
+def _non_push_unverified(fleet):
+    """A sender that cannot receive completions: core's raw `settled` row is not rewritten (waived), and the plugin
+    writes exactly one correction notice."""
+    import contextvars
+
+    from gateway.session_context import declare_stateless_channel
+    from hermes_state import SessionDB
+
+    fleet.agent = _make_sender_agent()
+    fleet.agent._session_db = SessionDB(db_path=fleet.root / "state.db")   # arms core's durable row (bot_mode_dm.py:739)
+
+    def stateless_send():
+        declare_stateless_channel()
+        return fleet.send("status? PAYLOAD_H17_NONPUSH")
+
+    ack = contextvars.copy_context().run(stateless_send)
+    did, pid = ack["delivery_id"], ack["process_id"]
+    assert ack.get("redrive", {}).get("tracked") is True, ack
+    assert "cannot receive completion notifications" in str(ack.get("detail") or ""), ack
+    _settle_without_row(fleet, did)
+    _wait_runner_done(fleet, pid, timeout=40.0)
+
+    def core_raw_rows():
+        _sid, msgs = _bot_chat(fleet.root)
+        return [m for m in msgs if m.get("display_kind") == "process_complete"
+                and not (m.get("display_metadata") or {}).get("nv_delivery_redrive")
+                and pid in str(m.get("content") or "")]
+    assert fleet.until(lambda: len(core_raw_rows()) == 1, ticks=False, timeout=30.0)
+    assert '"status": "settled"' in str(core_raw_rows()[0]["content"])        # the waived residual, not rewritten
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_NONPUSH")
+    assert _UNVERIFIED in str(_notices(fleet, "default", did)[0]["content"])
+
+
+def _identical_live(fleet):
+    """Two identical live messages, of which only one persists: the sibling's row never vouches for the other."""
+    from tools import bot_live_delivery as mailbox
+
+    fleet.settings(redrive_window_seconds=12)
+    home = fleet.homes[TARGET]
+    first, second = fleet.send("status? PAYLOAD_H17_SAME"), fleet.send("status? PAYLOAD_H17_SAME")
+    ids = (first["delivery_id"], second["delivery_id"])
+    owner = mailbox.find_canonical_live_owner(home)
+    for n, did in enumerate(ids):
+        claim = mailbox.claim_pending_delivery(home, owner)
+        assert claim is not None and claim["delivery_id"] == did, (claim, ids)
+        if n == 0:
+            _land_live_row(fleet, did)                   # only the first owner turn persisted its row
+        mailbox.complete_delivery(home, did, status="settled", reply=f"SAME-{n}")
+    for ack in (first, second):
+        _wait_runner_done(fleet, ack["process_id"], timeout=40.0)
+    assert fleet.until(lambda: all(fleet.ticket(d)["state"] != "pending" for d in ids), timeout=60.0)
+    for ack in (first, second):
+        out = _completion_output(fleet, ack["process_id"])
+        assert _last_json(out).get("status") != "settled", out
+    for did in ids:
+        assert (fleet.ticket(did)["state"], fleet.ticket(did)["reason"]) == ("ambiguous", "unknown"), fleet.ticket(did)
+        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1)
+    assert len(fleet.rows(TARGET, "PAYLOAD_H17_SAME")) == 1
+
+
+def _runner_of(fleet):
+    """The one live delivery runner this test spawned (core's registry, owner_task_id = the test's task id)."""
+    found = [s for s in list(fleet.registry._running.values())
+             if "--run-delivery" in s.command and getattr(s, "owner_task_id", "") == fleet.task_id]
+    return found[0] if len(found) == 1 else None
+
+
+def _commit_race(fleet, case, monkeypatch):
+    """The runner publishes before the ticket commit. The plugin's own 10 s wait fails closed (before_commit), a row
+    landing after that rewrite still settles with one final sender notice (commit_late_then_row), and a hook timeout
+    below 10 s is core's fail-open, reported under the waiver (hook_timeout_external)."""
+    import threading
+
+    from tools import bot_live_delivery as mailbox
+
+    if case == "hook_timeout_external":
+        for home in fleet.homes.values():
+            data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig"))
+            data["plugins"]["hook_callback_timeout"] = 3
+            (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+        fleet.load()
+        fleet.tick()
+    store = fleet.loaded.module.store
+    real_commit, gate = store.commit_ticket, threading.Event()
+
+    def held(*a, **k):
+        assert gate.wait(timeout=120), "commit gate never released"
+        return real_commit(*a, **k)
+    monkeypatch.setattr(store, "commit_ticket", held)
+    acks = []
+    sender = threading.Thread(target=lambda: acks.append(fleet.send("status? PAYLOAD_H17_RACE")), daemon=True)
+    sender.start()
+    try:
+        assert fleet.until(lambda: _runner_of(fleet) is not None and _admissions(fleet.homes[TARGET], "PAYLOAD_H17_RACE"),
+                           ticks=False, timeout=30.0)
+        session = _runner_of(fleet)
+        did = _admissions(fleet.homes[TARGET], "PAYLOAD_H17_RACE")[0]["delivery_id"]
+        _settle_without_row(fleet, did)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)   # published, ticket uncommitted
+        assert store.ticket(did) is None
+        out = _completion_output(fleet, session.id)
+        if case == "hook_timeout_external":
+            assert _last_json(out).get("status") == "settled", out   # core's fail-open (waived), not a fail-closed pass
+        else:
+            assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+        if case == "commit_late_then_row":
+            _land_live_row(fleet, did)                   # the owner's late flush lands the row before the commit
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    assert acks and acks[0]["delivery_id"] == did, acks
+    if case == "commit_late_then_row":
+        assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled", timeout=60.0), fleet.ticket(did)
+        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1, timeout=30.0)
+        fleet.tick(3, pause=0.5)
+        notes = _notices(fleet, "default", did)
+        assert len(notes) == 1 and "UNPERSISTED-H17" in str(notes[0]["content"]), notes
+        assert len(fleet.rows(TARGET, "PAYLOAD_H17_RACE")) == 1
+        return
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_RACE")
+
+
+def _cli_exit0_no_row(fleet):
+    """A text-only CLI turn whose persists failed exits 0 with its reply and no row (D5a): rewritten, never settled."""
+    fleet.settings(redrive_window_seconds=12)
+    fleet.configure(TARGET, mode="exit0_unpersisted", pre=0.1)
+    ack = fleet.send("status? PAYLOAD_H17_CLI")
+    did, pid = ack["delivery_id"], ack["process_id"]
+    assert ack.get("redrive", {}).get("tracked") is True, ack
+    _wait_runner_done(fleet, pid, timeout=40.0)
+    assert fleet.until(lambda: fleet.registry.get(pid)._completion_event.is_set(), ticks=False, timeout=30.0)
+    out = _completion_output(fleet, pid)
+    assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+    assert "REPLY-FROM-researcher" not in out, out
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_CLI")
+    assert len(fleet.attempts(did)) == 1, fleet.attempts(did)    # never re-sent (B1 / D5 "exit 0, absent")
