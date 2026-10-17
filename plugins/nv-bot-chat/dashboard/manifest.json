@@ -1,0 +1,11 @@
+{
+  "name": "nv-bot-chat",
+  "label": "Bot Chat",
+  "description": "Lists each served profile's hidden canonical Bot Chat and opens its transcript (read-only).",
+  "icon": "MessageSquare",
+  "version": "0.1.0",
+  "tab": { "path": "/bot-chat", "position": "after:sessions" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

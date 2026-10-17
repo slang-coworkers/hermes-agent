@@ -68,6 +68,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |
 | `nv-approval-ledger` | standalone (hook + 3 tools) | Immutable fleet approval-decision ledger — writer-gated agent decisions and webhook-observed human PR-review verdicts, read via `list_trusted_decisions` |
 | `nv-artifact` | standalone (4 hooks + 2 tools + dashboard tab) | Fleet PR→session ownership index (first-claim-wins) — the worker who creates a PR owns it, later PR webhook events reach the owning session instead of a new orphan — plus per-artifact outcome/cost analytics read via `hermes pr remap` / `hermes outcomes funnel\|winrate\|cost-per-merge` and an **Artifacts** dashboard page |
+| `nv-bot-chat` | standalone (CLI + dashboard tab) | Read-only viewer for each served profile's hidden canonical **Bot Chat** — lists them via `hermes bot-chats` and a **Bot Chat** dashboard tab that opens a transcript, which the stock web Sessions page cannot show |
 | `nv-cost-cap` | standalone (6 hooks + llm_execution middleware + CLI) | Two-tier per-session cost cap — accrues per-session spend from Hermes's own accounting (subagent+aux+codex inclusive), Tier-1 p90 escalation / Tier-2 hard ceiling, immortal sessions capped per day, unknown pricing fail-closed; a non-immortal Tier-2 crossing stops that session in-band (never raises) plus an optional profile ESTOP belt; runtime policy via the orchestrator-only `hermes cost-cap` CLI. See [nv-cost-cap](../../developer-guide/plugins/nv-cost-cap.md). |
 
 Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the hooks-based plugins follows.
@@ -376,6 +377,26 @@ A fleet-wide index that answers *who owns this PR?* durably, so a PR created by 
 **Enabling:** `hermes plugins enable nv-artifact` (or check the box in `hermes plugins`).
 
 **Disabling again:** `hermes plugins disable nv-artifact`.
+
+### nv-bot-chat
+
+Bot Mode gives every coworker profile one canonical **Bot Chat**: the session titled exactly `Bot Chat` in that profile's session store, born **hidden** so it stays out of shared session lists. The desktop app's Bots pane opens it, but the web dashboard's Sessions page never lists hidden sessions. `nv-bot-chat` adds a **Bot Chat** tab to the web dashboard that lists those chats and opens one, read-only. It uses only the stock dashboard-plugin mechanism ([Extending the Dashboard](./extending-the-dashboard.md)), so no core file changes.
+
+**Which profiles.** The plugin lists exactly the profiles the gateway serves: the `default` profile (always served, store at `$HERMES_HOME/state.db`) plus, with `gateway.multiplex_profiles: true`, the named profiles in `gateway.multiplex_profile_allowlist` (every valid named profile when no allowlist is set). Without multiplexing only the active profile is served. A profile that is installed but not served is never listed or opened.
+
+**Which session.** In each served store the canonical row is the exact-title `Bot Chat` session that is hidden and not archived. A visible session that a user happens to title `Bot Chat` is an ordinary session and is not listed. Archived rows are skipped, because this viewer never writes to a session store. Opening a chat reads its live compression tip: after context compression, new turns land in a continuation session, and that continuation is what you see. The transcript is the latest 500 messages and includes rows preserved by in-place compaction. Compaction summaries use the same display projection as the core messages route.
+
+**Surfaces.**
+
+- `hermes bot-chats` prints `{"bot_chats": [{profile, session_id, resolved_id, title, hidden, message_count, started_at}, …]}` as JSON.
+- Dashboard tab **Bot Chat** (`/bot-chat`, after Sessions). It lists one entry per served profile that has a Bot Chat. Click an entry to show its transcript.
+- Backend routes under `/api/plugins/nv-bot-chat/`, behind the dashboard's normal auth: `GET /bot-chats`, and `GET /bot-chats/{profile}/{session_id}/messages`. The messages route takes the session store from the served set, never from the request. It returns `404` unless `{session_id}` is that served profile's canonical Bot Chat (its root id or its live tip), so it cannot be used to read another profile or another session.
+
+There is no send box. To continue a Bot Chat, use the desktop app or a messaging platform.
+
+**Enabling:** `hermes plugins enable nv-bot-chat` (or check the box in `hermes plugins`). For a copy installed under `$HERMES_HOME/plugins/`, the dashboard serves the tab and mounts its routes only while `nv-bot-chat` is in `plugins.enabled`. The dashboard serves a bundled copy (this repo's `plugins/nv-bot-chat`) unless it is explicitly disabled.
+
+**Disabling again:** `hermes plugins disable nv-bot-chat`.
 
 ## Adding a bundled plugin
 

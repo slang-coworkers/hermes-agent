@@ -1,0 +1,8 @@
+name: osh-f64c-gw
+version: 0.1.0
+description: "OSH-F64.c throwaway gateway/default seed — the root config of the osh-f64c-gw OpenShell sandbox: a Bot-Mode multiplex gateway serving default + orchestrator + builder, with the nv-bot-chat dashboard plugin enabled. The model block is stub-shaped and never called (the Bot Chats are seeded, no turn runs)."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
