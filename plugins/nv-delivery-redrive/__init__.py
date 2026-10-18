@@ -30,7 +30,7 @@ _CORE_NAMES = {
 }
 _SESSION_FIELDS = ("_completion_event", "_reader_thread", "output_buffer", "detached", "exit_code", "owner_task_id",
                    "command")
-_REGISTRY_METHODS = ("get", "running_owned_by", "unread_completions_owned_by")
+_REGISTRY_METHODS = ("get", "list_sessions")
 
 
 def _missing_core_names() -> list[str]:

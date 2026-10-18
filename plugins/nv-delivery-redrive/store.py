@@ -354,7 +354,10 @@ def reap_inflight(now: float, keep_seconds: float) -> None:
         conn.executemany("UPDATE inflight SET state = 'abandoned' WHERE id = ? AND state = 'open'",
                          [(i,) for i in dead])
         conn.execute("DELETE FROM inflight WHERE state != 'open' AND created_at <= ?", (now - keep_seconds,))
-        conn.execute("DELETE FROM published WHERE at <= ?", (now - keep_seconds,))
+        # A pre-bind fail-closed publication is copied onto its ticket at commit; while any send is still open, the
+        # commit that needs it may still come.
+        if not conn.execute("SELECT 1 FROM inflight WHERE state = 'open' LIMIT 1").fetchone():
+            conn.execute("DELETE FROM published WHERE at <= ?", (now - keep_seconds,))
 
 
 def _alive(pid: Optional[int], boot: Optional[float]) -> bool:

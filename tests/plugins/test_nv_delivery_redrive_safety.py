@@ -15,12 +15,16 @@ from tests.plugins.test_fleet_f62_h_acceptance import (
     _UNVERIFIED,
     ORCH,
     TARGET,
+    _admissions,
     _busy,
     _completion_output,
+    _last_json,
     _notices,
     _runner_of,
+    _settle_without_row,
     _wait_runner_done,
     fleet,
+    live_owner,
 )
 
 _SILENT_TARGET = textwrap.dedent('''\
@@ -202,3 +206,72 @@ def test_retarget_with_overlapping_same_task_row(fleet, monkeypatch, sibling):
     assert len(fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()) == 1
     for who in ("default", ORCH):
         assert _notices(fleet, who, ack["delivery_id"]) == [], who
+
+
+def _prebind_settle(fleet, monkeypatch, body):
+    """Stall the sender inside next_call after core spawned the runner; returns (gate, acks, sender, session, did)."""
+    import threading
+
+    gate, acks = threading.Event(), []
+    real_spawn = fleet.bot_mode_dm._spawn_delivery
+
+    def stalled(*a, **k):
+        out = real_spawn(*a, **k)
+        assert gate.wait(timeout=120), "spawn gate never released"
+        return out
+
+    monkeypatch.setattr(fleet.bot_mode_dm, "_spawn_delivery", stalled)
+    sender = threading.Thread(target=lambda: acks.append(fleet.send(body)), daemon=True)
+    sender.start()
+    assert fleet.until(lambda: _runner_of(fleet) is not None and _admissions(fleet.homes[TARGET], body),
+                       ticks=False, timeout=30.0)
+    return gate, acks, sender, _runner_of(fleet), _admissions(fleet.homes[TARGET], body)[0]["delivery_id"]
+
+
+@pytest.mark.platforms("linux")
+def test_observed_prebind_runner_still_fails_closed(fleet, live_owner, monkeypatch):
+    """A pre-bind runner whose exit a poll observed before its completion reached the transform is still found, so
+    its unverified settled fails closed instead of passing raw."""
+    import tools.process_registry as registry_mod
+
+    real_transform = registry_mod.transform_process_output
+
+    def observed_first(output, **k):
+        if "--run-delivery" in str(k.get("command") or "") and k.get("returncode") is not None:
+            for session in list(fleet.registry._finished.values()):
+                if session.command == k.get("command"):
+                    fleet.registry._poll_observed.add(session.id)
+        return real_transform(output, **k)
+
+    monkeypatch.setattr(registry_mod, "transform_process_output", observed_first)
+    gate, _acks, sender, session, did = _prebind_settle(fleet, monkeypatch, "status? PAYLOAD_S5_OBSERVED")
+    try:
+        _settle_without_row(fleet, did)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        assert session.id in fleet.registry._poll_observed
+        out = _completion_output(fleet, session.id)
+        assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+        assert '"status": "settled"' not in out, out
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+
+
+@pytest.mark.platforms("linux")
+def test_published_survives_retention_while_its_send_is_open(fleet, live_owner, monkeypatch):
+    """A pre-bind fail-closed publication outlives the retention sweep while its send is still open, so the ticket
+    committed after the bind still records that the sender was told the delivery is unverified."""
+    drain = fleet.loaded.module.drain
+    monkeypatch.setattr(drain, "INFLIGHT_KEEP_SECONDS", 0.0)
+    gate, acks, sender, session, did = _prebind_settle(fleet, monkeypatch, "status? PAYLOAD_S6_RETAIN")
+    try:
+        _settle_without_row(fleet, did)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        assert _last_json(_completion_output(fleet, session.id)).get("status") == "ambiguous"
+        fleet.tick(3, pause=0.5)                         # every sweep past retention while the send is open
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    assert acks and acks[0]["delivery_id"] == did, acks
+    assert fleet.until(lambda: fleet.ticket(did) is not None, ticks=False, timeout=10.0)
+    assert fleet.ticket(did)["published_status"] == "ambiguous", fleet.ticket(did)

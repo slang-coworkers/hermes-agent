@@ -324,13 +324,15 @@ def _runner_target(command: str) -> Optional[str]:
 
 
 def _runner_session(task_ids: set[str], command: str) -> Any:
-    """``(task_id, session)`` of the registry runner running ``command`` for one of ``task_ids``, else None."""
+    """``(task_id, session)`` of the registry runner running ``command`` for one of ``task_ids``, else None. Finished
+    sessions count whether or not a poll already observed them: core moves a session to finished before it
+    publishes, so this transform can run after a poll saw the exit."""
     from tools.process_registry import process_registry
 
     for task_id in task_ids:
-        for session in [*process_registry.running_owned_by(task_id),
-                        *process_registry.unread_completions_owned_by(task_id)]:
-            if session.command == command:
+        for entry in process_registry.list_sessions(task_id=task_id):
+            session = process_registry.get(str(entry.get("session_id") or ""))
+            if session is not None and session.owner_task_id == task_id and session.command == command:
                 return task_id, session
     return None
 
