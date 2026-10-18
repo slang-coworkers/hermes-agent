@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1324,18 +1325,35 @@ def _assert_unverified_end(fleet, did, body_needle, *, target_readable=True):
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("case", ["push", "push_unknown", "non_push", "before_commit", "identical_live",
-                                  "commit_late_then_row", "cli", "hook_timeout_external"])
+                                  "commit_late_then_row", "cli", "hook_timeout_external", "stall_before_bind",
+                                  "stale_prebind", "slow_spawn", "overlap_ordinary", "overlap_retarget",
+                                  "overlap_retarget_real", "overlap_retarget_real_bind_during_poll",
+                                  "clock_rollback", "inflight_insert_fail", "inflight_insert_fail_after_return"])
 def test_ac_fleet_f62_h_17(fleet, case, request, monkeypatch):
     """(E5, user ruling msg 120) A tracked delivery's settled outcome is never reported as success unless the target's Bot Chat holds the full role='user' row newer than the baseline and claimed by this ticket (D5a). This covers a live receipt settled by an owner whose turn never persisted the row, and a CLI turn that exited 0 with its reply and no row. For a push sender, core's queued completion is rewritten before publication to status: ambiguous with exactly the text "Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. Check the target before considering another send." That holds also when the runner beats the ticket commit, and when the commit lands after the plugin's 10 s wait (then a verified late row gives one final settled sender notice). For a non-push sender, core's raw row comes first (waived), then one correction notice. An identical-content sibling's row never vouches. The ticket ends ambiguous/unknown with one sender and one orchestrator notice."""
     if case == "cli":
         _cli_exit0_no_row(fleet)
         return
+    if case.startswith("overlap_retarget"):   # CLI path to the hook's real recipient
+        _overlap(fleet, monkeypatch, retarget=True,
+                 sibling_target="sibling-target" if case == "overlap_retarget" else ORCH,
+                 bind_during_poll=case == "overlap_retarget_real_bind_during_poll")
+        return
     request.getfixturevalue("live_owner")
+    if case == "overlap_ordinary":
+        _overlap(fleet, monkeypatch, retarget=False)
+        return
+    if case in ("clock_rollback", "inflight_insert_fail", "inflight_insert_fail_after_return"):
+        _ordinary_unsafe_bookkeeping(fleet, monkeypatch, kind=case)
+        return
     if case == "non_push":
         _non_push_unverified(fleet)
         return
     if case == "identical_live":
         _identical_live(fleet)
+        return
+    if case in ("stall_before_bind", "stale_prebind", "slow_spawn"):
+        _stall_before_bind(fleet, monkeypatch, stale=case == "stale_prebind", slow_spawn=case == "slow_spawn")
         return
     if case in ("before_commit", "commit_late_then_row", "hook_timeout_external"):
         _commit_race(fleet, case, monkeypatch)
@@ -1473,6 +1491,234 @@ def _commit_race(fleet, case, monkeypatch):
         assert len(fleet.rows(TARGET, "PAYLOAD_H17_RACE")) == 1
         return
     _assert_unverified_end(fleet, did, "PAYLOAD_H17_RACE")
+
+
+def _stall_before_bind(fleet, monkeypatch, *, stale=False, slow_spawn=False):
+    """E9.1: the sender stalls inside next_call after core spawned the runner, so the runner reaches the transform
+    before its call's in-flight row is bound. With no persisted target row it still fails closed to ambiguous.
+    ``stale``: the stall outlasts 60 s after the spawn while the drainer ticks; ``slow_spawn``: 60 s pass, ticking,
+    before core spawns at all. Neither ages the open row out."""
+    import threading
+
+    gate, acks = threading.Event(), []
+    real_spawn = fleet.bot_mode_dm._spawn_delivery
+
+    def stalled(*a, **k):
+        if slow_spawn:                                    # work before the spawn has no core bound
+            pre_end = time.monotonic() + 65.0
+            while time.monotonic() < pre_end:
+                fleet.tick()
+                time.sleep(2.0)
+        out = real_spawn(*a, **k)                         # the runner is spawned; next_call has not returned
+        assert gate.wait(timeout=120), "spawn gate never released"
+        return out
+    monkeypatch.setattr(fleet.bot_mode_dm, "_spawn_delivery", stalled)
+    sender = threading.Thread(target=lambda: acks.append(fleet.send("status? PAYLOAD_H17_PREBIND")), daemon=True)
+    sender.start()
+    try:
+        assert fleet.until(lambda: _runner_of(fleet) is not None
+                           and _admissions(fleet.homes[TARGET], "PAYLOAD_H17_PREBIND"), ticks=False,
+                           timeout=100.0 if slow_spawn else 30.0)
+        session = _runner_of(fleet)
+        did = _admissions(fleet.homes[TARGET], "PAYLOAD_H17_PREBIND")[0]["delivery_id"]
+        if stale:
+            stall_end = time.monotonic() + 65.0           # past the 60 s in-flight age, with live drainer ticks
+            while time.monotonic() < stall_end:
+                fleet.tick()
+                time.sleep(2.0)
+        settled_at = time.monotonic()
+        _settle_without_row(fleet, did)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        assert time.monotonic() - settled_at > 10.0      # the plugin's whole 10 s wait ran inside the stall
+        assert fleet.loaded.module.store.ticket(did) is None and not acks                # still before the bind
+        out = _completion_output(fleet, session.id)
+        assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+        assert '"status": "settled"' not in out and "UNPERSISTED-H17" not in out, out
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    assert acks and acks[0]["delivery_id"] == did, acks
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_PREBIND")
+
+
+_RETARGET_INIT = textwrap.dedent('''\
+    def register(ctx):
+        def _gate(tool_name=None, args=None, **kwargs):
+            if tool_name == "message_agent" and "RETARGET_ME_H17" in str((args or {}).get("message")):
+                return {"action": "modify", "args": {"target": "orchestrator"}}
+            return None
+        ctx.register_hook("pre_tool_call", _gate)
+''')
+
+
+def _overlap(fleet, monkeypatch, *, retarget, sibling_target="sibling-target", bind_during_poll=False):
+    """E9.2-E9.4: a same-task in-flight row is opened after this call's D3 row and before its spawn, and the call
+    stalls before its bind. Ordinary call: fails closed, sibling row never bound or marked. Re-target whose real
+    recipient no candidate names: core's completion byte-for-byte. Re-target whose real recipient a candidate names
+    (``sibling_target == ORCH``): exactly the unverified rewrite, still with no ticket, retry, resend or notice, also
+    when its own bind is released inside the gate's 10 s poll (``bind_during_poll``, the D5a.2 latch)."""
+    import threading
+
+    from agent.redact import redact_terminal_output
+    from tools.process_registry import _completion_output as core_tail
+
+    if retarget:
+        gate_dir = fleet.root / "plugins" / "f62h-retarget-gate"
+        gate_dir.mkdir(parents=True)
+        (gate_dir / "plugin.yaml").write_text(_GATE_YAML.replace("f62h-test-gate", "f62h-retarget-gate"),
+                                              encoding="utf-8")
+        (gate_dir / "__init__.py").write_text(_RETARGET_INIT, encoding="utf-8")
+        cfg = yaml.safe_load((fleet.root / "config.yaml").read_text(encoding="utf-8-sig"))
+        cfg["plugins"]["enabled"].append("f62h-retarget-gate")
+        (fleet.root / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        fleet.load()
+        fleet.tick()
+        fleet.configure(ORCH, pre=0.1, mode="exit0_unpersisted")   # the real recipient replies, row unproven
+    store = fleet.loaded.module.store
+    gate, acks, sibling, sibling_snap, own, core_acks = threading.Event(), [], [], [], [], []
+    real_open = store.open_inflight
+    monkeypatch.setattr(store, "open_inflight", lambda *a, **k: own.append(real_open(*a, **k)) or own[-1])
+    real_spawn = fleet.bot_mode_dm._spawn_delivery
+    real_start = fleet.bot_mode_dm._start_delivery
+    monkeypatch.setattr(fleet.bot_mode_dm, "_start_delivery",
+                        lambda *a, **k: core_acks.append(real_start(*a, **k)) or core_acks[-1])
+    in_transform = threading.Event()
+    if bind_during_poll:
+        import tools.process_registry as registry_mod
+
+        real_transform = registry_mod.transform_process_output
+
+        def entered(output, **k):
+            if "--run-delivery" in str(k.get("command") or "") and k.get("returncode") is not None:
+                in_transform.set()
+            return real_transform(output, **k)
+        monkeypatch.setattr(registry_mod, "transform_process_output", entered)
+
+    def stalled(*a, **k):
+        # Opened AFTER this call's D3 row and BEFORE the spawn: a "latest open row of the task" match would take it.
+        sibling.append(real_open(sender_session_id="bc-sibling", task_id=fleet.task_id, target=sibling_target,
+                                 baseline=0))
+        sibling_snap.append(dict(store.inflight(sibling[0])))
+        out = real_spawn(*a, **k)
+        assert gate.wait(timeout=120), "spawn gate never released"
+        return out
+    monkeypatch.setattr(fleet.bot_mode_dm, "_spawn_delivery", stalled)
+    body = "status? RETARGET_ME_H17" if retarget else "status? PAYLOAD_H17_OVERLAP"
+    sender = threading.Thread(target=lambda: acks.append(fleet.send(body, raw=True)), daemon=True)
+    sender.start()
+    try:
+        assert fleet.until(lambda: _runner_of(fleet) is not None, ticks=False, timeout=30.0)
+        session = _runner_of(fleet)
+        assert len(own) == 1 and sibling_snap and sibling_snap[0]["state"] == "open", (own, sibling_snap)
+        assert not sibling_snap[0].get("process_id"), sibling_snap
+        if not retarget:
+            assert fleet.until(lambda: _admissions(fleet.homes[TARGET], "PAYLOAD_H17_OVERLAP"), ticks=False,
+                               timeout=30.0)
+            did = _admissions(fleet.homes[TARGET], "PAYLOAD_H17_OVERLAP")[0]["delivery_id"]
+            _settle_without_row(fleet, did)
+        if bind_during_poll:
+            assert in_transform.wait(timeout=30.0), "the runner's completion never reached the transform"
+            entered_at = time.monotonic()
+            time.sleep(1.0)
+            assert not session._completion_event.is_set(), "the gate did not poll"
+            assert not store.inflight(own[0]).get("process_id"), store.inflight(own[0])
+            assert dict(store.inflight(sibling[0])) == sibling_snap[0], (store.inflight(sibling[0]), sibling_snap[0])
+            gate.set()
+            assert fleet.until(lambda: store.inflight(own[0]).get("process_id") == session.id, ticks=False,
+                               timeout=5.0, pause=0.05), store.inflight(own[0])
+            assert time.monotonic() - entered_at < 7.5, "the own bind landed too late in the poll"
+            assert store.inflight(own[0])["state"] == "untracked", store.inflight(own[0])
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        if bind_during_poll:
+            assert time.monotonic() - entered_at < 9.5, "the 10 s expiry, not the own bind, ended the poll"
+        out = _completion_output(fleet, session.id)
+        if retarget:
+            argv = shlex.split(session.command)
+            assert argv[argv.index("-p") + 1] == ORCH, session.command   # the hook's real recipient
+            if sibling_target != ORCH:
+                assert out == redact_terminal_output(core_tail(session)["output"], session.command), out
+        else:
+            assert _last_json(out).get("status") == "ambiguous" and _UNVERIFIED in out, out
+            assert '"status": "settled"' not in out, out
+        assert dict(store.inflight(sibling[0])) == sibling_snap[0], (store.inflight(sibling[0]), sibling_snap[0])
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    ack = json.loads(acks[0])
+    assert dict(store.inflight(sibling[0])) == sibling_snap[0], (store.inflight(sibling[0]), sibling_snap[0])
+    if retarget:
+        if sibling_target == ORCH:
+            expected = json.dumps({"status": "ambiguous", "reason": "unknown", "delivery_id": ack["delivery_id"],
+                                   "to": f"@{ORCH}", "detail": _UNVERIFIED})
+            assert out == redact_terminal_output(expected, session.command), (out, expected)
+        assert core_acks and acks[0] == core_acks[-1], (acks, core_acks)
+        assert "redrive" not in ack and fleet.ticket(ack["delivery_id"]) is None, ack
+        fleet.tick(3, pause=0.5)
+        for who in ("default", ORCH):
+            assert _notices(fleet, who, ack["delivery_id"]) == [], who
+        assert fleet.attempts(ack["delivery_id"]) == []
+        return
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_OVERLAP")
+
+
+def _ordinary_unsafe_bookkeeping(fleet, monkeypatch, *, kind):
+    """E9.3: a backward clock step across the spawn (``clock_rollback``), or a failed in-flight insert settled before
+    (``inflight_insert_fail``) or after (``inflight_insert_fail_after_return``) next_call returns: an ordinary call
+    still publishes no raw settled."""
+    import threading
+
+    store = fleet.loaded.module.store
+    rows, insert_calls = [], []
+    real_open = store.open_inflight
+    if kind.startswith("inflight_insert_fail"):
+        def failing(*a, **k):
+            insert_calls.append(k)
+            raise RuntimeError("in-flight insert failed (test)")
+        monkeypatch.setattr(store, "open_inflight", failing)
+    else:
+        monkeypatch.setattr(store, "open_inflight", lambda *a, **k: rows.append(real_open(*a, **k)) or rows[-1])
+    gate, acks = threading.Event(), []
+    real_spawn = fleet.bot_mode_dm._spawn_delivery
+
+    def stalled(*a, **k):
+        real_time = time.time
+        if kind == "clock_rollback":                      # the wall clock steps back after D3 opened the row
+            monkeypatch.setattr(time, "time", lambda: real_time() - 3600.0)
+        try:
+            out = real_spawn(*a, **k)
+        finally:
+            monkeypatch.setattr(time, "time", real_time)
+        assert gate.wait(timeout=120), "spawn gate never released"
+        return out
+    monkeypatch.setattr(fleet.bot_mode_dm, "_spawn_delivery", stalled)
+    sender = threading.Thread(target=lambda: acks.append(fleet.send("status? PAYLOAD_H17_BOOK", raw=True)), daemon=True)
+    sender.start()
+    try:
+        assert fleet.until(lambda: _runner_of(fleet) is not None
+                           and _admissions(fleet.homes[TARGET], "PAYLOAD_H17_BOOK"), ticks=False, timeout=30.0)
+        session = _runner_of(fleet)
+        if kind == "clock_rollback":
+            assert rows and session.started_at < store.inflight(rows[0])["created_at"], (session.started_at, rows)
+        else:
+            assert len(insert_calls) == 1, insert_calls
+        did = _admissions(fleet.homes[TARGET], "PAYLOAD_H17_BOOK")[0]["delivery_id"]
+        if kind == "inflight_insert_fail_after_return":
+            gate.set()
+            sender.join(timeout=120)                      # next_call has returned before the settle
+            assert acks
+        _settle_without_row(fleet, did)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        out = _completion_output(fleet, session.id)
+        assert _last_json(out).get("status") == "ambiguous" and _last_json(out).get("detail") == _UNVERIFIED, out
+        assert '"status": "settled"' not in out and "UNPERSISTED-H17" not in out, out
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    ack = json.loads(acks[0])
+    if kind.startswith("inflight_insert_fail"):
+        assert "redrive" not in ack and fleet.ticket(did) is None, ack   # untracked (AC-14), yet never a raw settled
+        return
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_BOOK")
 
 
 def _cli_exit0_no_row(fleet):
