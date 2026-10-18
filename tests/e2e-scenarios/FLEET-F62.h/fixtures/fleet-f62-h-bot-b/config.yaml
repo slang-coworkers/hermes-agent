@@ -10,8 +10,16 @@ providers:
     key_env: ANTHROPIC_API_KEY
     models:
       aws/anthropic/bedrock-claude-opus-4-8: {}
+bot_mode:
+  turn_wait_seconds: 30
 plugins:
   enabled:
     - nv-delivery-redrive
+  # A sender's middleware reads its own profile's settings, so they match the root config's.
+  entries:
+    nv-delivery-redrive:
+      settings:
+        orchestrator_profile: fleet-f62-h-bot-a
+        retry_backoff_seconds: 90
 sessions:
   auto_prune: false
