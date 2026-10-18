@@ -109,5 +109,9 @@ survives gateway restarts: re-drive runners run outside the process registry, so
   - the rewrite runs inside a hook bounded by `plugins.hook_callback_timeout`. If the hook fails or runs out of time
     first (a timeout below 10 s does), core's text passes unchanged;
   - an untracked send (no fresh drainer heartbeat, no valid `orchestrator_profile`) is never rewritten.
+- **Re-targeted sends.** A `message_agent` call whose recipient a `pre_tool_call` `modify` rewrites is not re-driven:
+  it behaves as on 0.22.2, and its ack is core's, byte for byte. Its completion is core's too, except that it becomes
+  the "Could not verify …" text above when, before the call's bind, another open call of the same task names the same
+  real recipient.
 - **Durable work belongs on kanban.** The plugin re-delivers *messages* into the target's Bot Chat. Use
   [Kanban](./kanban.md) for work that must survive as a task.
