@@ -203,10 +203,14 @@ def _bind(inflight: Optional[int], fallback: Optional[dict[str, Any]], process_i
     if inflight is not None:
         store.bind_inflight(inflight, process_id=process_id, dm_path=dm_path, untracked=untracked)
     if fallback is not None:
+        from tools.process_registry import process_registry
+
+        session = process_registry.get(process_id) if process_id else None
         with _fallback_lock:
             fallback.update(process_id=process_id, dm_path=dm_path, bound=True)
-            if process_id is None or dm_path is None:
-                _fallbacks.remove(fallback)             # no runner to gate
+            # No runner to gate, or its completion was already published (and gated) before this bind.
+            if dm_path is None or session is None or session._completion_event.is_set():
+                _fallbacks.remove(fallback)
 
 
 # D5a.2: a send whose in-flight insert failed is still gated, from this record, until its runner's completion is.
