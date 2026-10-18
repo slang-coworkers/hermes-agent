@@ -670,6 +670,7 @@ def bot_world(tmp_path, monkeypatch):
     monkeypatch.setattr(process_registry, "pending_watchers", [])
     bot_mode_probe._reset_cache_for_tests()
     world = SimpleNamespace(root=root, target=target, stop=threading.Event(), closers=[])
+    world.with_redrive = lambda: _with_redrive(world, monkeypatch)
     yield world
     world.stop.set()
     process_registry.kill_all(consume_output=True)
@@ -847,6 +848,8 @@ def test_ac_upg_f68_19(bot_world):
     Proves the sender-turn-end half (E6.4): the ack is `queued` with a `delivery_id`, and the runner survives the
     sender's lifecycle sweeps (`agent_close`, `gateway_turn_timeout`, `kill_all`) while an explicit stop still ends it.
     The process-exit and killed-runner halves are AC-FLEET-F62.h-5 / -11 (carried)."""
+    import logging
+
     from tools.process_registry import process_registry
 
     db = _target_db(bot_world)
@@ -859,8 +862,20 @@ def test_ac_upg_f68_19(bot_world):
     for source in ("agent_close", "gateway_turn_timeout", "kill_all"):
         process_registry.kill_all("turn-ac19", source=source)
         assert process_registry.get(proc_id).exited is False, f"the runner died in the {source} sweep"
-    process_registry.kill_process(proc_id, source="process.kill")
-    assert process_registry.get(proc_id).exited is True
+    # A refused signal and a slow reap return the same dict; only the kill's log lines tell them apart.
+    kill_log = logging.getLogger("tools.process_registry")
+    seen: list[logging.LogRecord] = []
+    tap = logging.Handler(logging.INFO)
+    tap.emit = seen.append
+    prior_level = kill_log.level
+    kill_log.addHandler(tap)
+    kill_log.setLevel(logging.INFO)
+    try:
+        killed = process_registry.kill_process(proc_id, source="process.kill")
+    finally:
+        kill_log.removeHandler(tap)
+        kill_log.setLevel(prior_level)
+    assert process_registry.get(proc_id).exited is True, (killed, [record.getMessage() for record in seen])
 
 _AC21_SHAPES = ("fresh", "continuation", "compressed", "duplicate", "prefix_collision")
 
@@ -879,7 +894,9 @@ def test_ac_upg_f68_21(bot_world, shape, path):
     and claim; only the owner's turn body is stood in). `fresh` on `live_owner` has no chat to own, so its owner holds
     a Bot Chat with no prior rows. `live_owner_unpersisted`: the owner's turn completes but its user row never lands
     (both turn-start and turn-end persists log and continue, `agent/turn_context.py:508-524`,
-    `agent/turn_finalizer.py:635-637`); no success outcome may follow."""
+    `agent/turn_finalizer.py:635-637`); no success outcome may follow. For the unpersisted case, this node's world loads
+    nv-delivery-redrive with tracking live and sends through the real tool executor, a push sender, so the plugin's gate is
+    what keeps core's `settled` from reaching the sender."""
     from tools.process_registry import process_registry
 
     db = _target_db(bot_world)
@@ -893,14 +910,27 @@ def test_ac_upg_f68_21(bot_world, shape, path):
     if path == "cli_fallback":
         gate = _model_for_target(bot_world, reply).gate
     else:
-        gate = _live_owner(bot_world, db, landing, reply, persist_row=path == "live_owner").gate
+        owner = _live_owner(bot_world, db, landing, reply, persist_row=path == "live_owner")
+        gate = owner.gate
 
-    out = _send(_bot_sender(), f"turn-ac21-{shape}-{path}")
+    if path == "live_owner_unpersisted":
+        out = bot_world.with_redrive()(f"turn-ac21-{shape}-{path}")
+    else:
+        out = _send(_bot_sender(), f"turn-ac21-{shape}-{path}")
     assert out.get("status") == "queued" and out.get("delivery_id"), out
     proc_id = out["process_id"]
     if path == "live_owner_unpersisted":
+        from tools.bot_live_delivery import read_delivery_result
+
+        assert out.get("redrive", {}).get("tracked") is True, out
         gate.set()
         mine = _completions(process_registry, proc_id)
+        receipt = read_delivery_result(bot_world.target, out["delivery_id"]) or {}
+        assert owner.claims and receipt.get("status") == "settled", ("core must have settled the turn", owner.claims, receipt)
+        assert len(mine) == 1, mine
+        payload = json.loads((mine[0].get("output") or "").strip().splitlines()[-1])
+        assert (payload.get("status"), payload.get("reason"), payload.get("delivery_id")) == (
+            "ambiguous", "unknown", out["delivery_id"]), payload
         assert _full_rows(db, landing) == [] and not [e for e in mine if _settled_completion(e)], (
             "a success outcome while the resumed Bot Chat holds no row with the delivered content", mine)
         return
@@ -1058,3 +1088,190 @@ def test_ac_fleet_f62_g_14(bot_world, monkeypatch, arming):
     assert len(completions) == 1, completions
     assert reply in (completions[0].get("output") or ""), completions[0]
     assert not process_registry.is_completion_consumed(proc_id)
+
+
+_F62H_MODULE = "tests.plugins.test_fleet_f62_h_acceptance"
+try:
+    import importlib
+
+    _f62h = importlib.import_module(_F62H_MODULE)
+    fleet = _f62h.fleet  # registers F62.h's fixture in this module
+except ModuleNotFoundError as exc:
+    if exc.name != _F62H_MODULE:
+        raise
+    _f62h = None
+
+
+def _redrive(request):
+    """F62.h's `fleet`: nv-delivery-redrive enabled, a real AIAgent sender (the root profile), the target `researcher`
+    behind a fake CLI, the profile `orchestrator`, core's real runner and turn flock, drainer ticks via the real hook."""
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/test_fleet_f62_h_acceptance.py) is not at this head"
+    return request.getfixturevalue("fleet")
+
+
+def _sender_outcomes(world, ack):
+    """Everything the sender was told about one delivery: core's completions for its runner, the plugin's notices."""
+    session = world.registry.get(ack["process_id"])
+    assert session._completion_event.wait(timeout=30), "the delivery runner never finished"
+    queue, queued = world.registry.completion_queue, []
+    while not queue.empty():
+        queued.append(queue.get_nowait())
+    for evt in queued:
+        queue.put(evt)
+    mine = [e for e in queued if e.get("session_id") == ack["process_id"] and e.get("type", "completion") == "completion"]
+    return mine, _f62h._notices(world, "default", ack["delivery_id"])
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("case", ["stays_busy", "delivered_once"])
+def test_ac_upg_f68_18(request, case):
+    """(R4 re-spec of AC-FLEET-F62.g-10; item 4) A local delivery to a target whose Bot Chat stays busy is never silently dropped. Within the bounded re-attempts on its `delivery_id`, it is either delivered once or ends in one typed final failure with reason `queued_expired`, and that failure reaches the sender's session and the orchestrator profile."""
+    world = _redrive(request)
+    if case == "stays_busy":
+        world.settings(redrive_window_seconds=12)
+    body = f"status? PAYLOAD_F68_18_{case}"
+    with _f62h._busy(world):
+        ack = world.send(body)
+        did = ack["delivery_id"]
+        assert ack.get("status") == "queued" and did, ack
+        completions, _ = _sender_outcomes(world, ack)
+        assert len(completions) == 1, completions
+        assert json.loads(_f62h._completion_output(world, ack["process_id"])).get("status") == "queued", completions
+        if case == "stays_busy":
+            assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=90.0)
+    if case == "delivered_once":
+        assert world.until(lambda: world.ticket(did)["state"] == "settled", timeout=60.0), world.ticket(did)
+    t = world.ticket(did)
+    assert len(world.attempts(did)) <= 6 and _f62h._attempt_ids(world, did) == {did}, world.attempts(did)
+    world.tick(3, pause=0.5)
+    landed = world.rows(_f62h.TARGET, body)
+    to_sender = _f62h._notices(world, "default", did)
+    if case == "delivered_once":
+        assert t["state"] == "settled" and len(landed) == 1 and len(world.attempts(did)) >= 2, (t, landed)
+        assert len(to_sender) == 1 and "REPLY-FROM-researcher" in str(to_sender[0]["content"]), to_sender
+        return
+    assert (t["state"], t["reason"]) == ("failed", "queued_expired") and landed == [], (t, landed)
+    assert world.until(lambda: len(_f62h._notices(world, _f62h.ORCH, did)) >= 1, timeout=15.0)
+    world.tick(2, pause=0.5)
+    for who in ("default", _f62h.ORCH):
+        notes = _f62h._notices(world, who, did)
+        assert len(notes) == 1, (who, notes)
+        assert did in str(notes[0]["content"]) and "queued_expired" in str(notes[0]["content"]), notes[0]
+
+
+def _outcome_completions(completions):
+    """Core completions that carry a delivery outcome: the target's reply or a typed live/CLI result. A killed runner's
+    bare exit, or the tracked `queued` busy rewrite, carries none."""
+    found = []
+    for evt in completions:
+        out = str(evt.get("output") or "")
+        try:
+            payload = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
+        except ValueError:
+            payload = {}
+        if "REPLY-FROM-" in out or (isinstance(payload, dict) and payload.get("status") not in (None, "queued")):
+            found.append(evt)
+    return found
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("case", ["late_alive_runner", "late_orphan_target", "queued_expired_final", "may_still_land"])
+def test_ac_upg_f68_20(request, case):
+    """(R4 re-spec of AC-FLEET-F62.g-12) When a first attempt is accepted late, while the re-drive owner is already deciding on the same delivery, the target transcript holds exactly one copy of the message and the sender receives exactly one outcome. A delivery that has reached its terminal failure `queued_expired` after a clean refusal (its re-attempts exhausted, each one refused busy) is final: its message never appears in the target transcript afterwards, even once the target is free. An attempt that may still land never reaches that failure: at the bound it ends `ambiguous`/`unknown` (AC-FLEET-F62.h-13)."""
+    import time
+
+    import psutil
+
+    world = _redrive(request)
+    body = f"status? PAYLOAD_F68_20_{case}"
+    if case in ("late_alive_runner", "late_orphan_target"):
+        world.configure(_f62h.TARGET, pre=6.0)            # attempt 1's writer is alive and has not written its row
+        ack = world.send(body)
+        did = ack["delivery_id"]
+        runner = psutil.Process(world.registry.get(ack["process_id"]).pid)
+        if case == "late_orphan_target":
+            assert world.until(lambda: any("--query-file" in " ".join(c.cmdline())
+                                           for c in runner.children(recursive=True)), ticks=False, timeout=10.0)
+            runner.kill()                                 # attempt 1 lost its outcome; only its orphaned writer lives
+        world.tick(4, pause=0.5)                          # the re-drive owner decides on this id during the acceptance
+        assert any(_f62h._alive(p) for p in _f62h._target_pids(world)), "the acceptance must still be in flight"
+        assert world.rows(_f62h.TARGET, body) == [], "the acceptance must come late"
+        assert world.until(lambda: world.ticket(did)["state"] == "settled", timeout=30.0), world.ticket(did)
+        world.tick(3, pause=0.5)
+        completions, to_sender = _sender_outcomes(world, ack)
+        assert len(world.rows(_f62h.TARGET, body)) == 1 and len(world.attempts(did)) == 1, world.attempts(did)
+        assert len(_outcome_completions(completions)) + len(to_sender) == 1, (completions, to_sender)
+        return
+    if case == "may_still_land":
+        world.settings(redrive_window_seconds=10)
+        world.configure(_f62h.TARGET, pre=15.0)           # attempt 1 is a live writer across the whole bound
+        ack = world.send(body)
+        did = ack["delivery_id"]
+        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=40.0)
+        t = world.ticket(did)
+        assert (t["state"], t["reason"]) == ("ambiguous", "unknown"), t
+        return
+    world.settings(redrive_window_seconds=12)
+    with _f62h._busy(world):
+        ack = world.send(body)
+        did = ack["delivery_id"]
+        completions, _ = _sender_outcomes(world, ack)
+        assert len(completions) == 1, completions
+        assert json.loads(_f62h._completion_output(world, ack["process_id"])).get("reason") == "target_busy", completions
+        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=90.0)
+        t = world.ticket(did)
+        assert (t["state"], t["reason"]) == ("failed", "queued_expired"), t
+        attempts = world.attempts(did)
+        assert 2 <= len(attempts) <= 6 and _f62h._attempt_ids(world, did) == {did}, attempts
+        for attempt in attempts:
+            out = str(attempt["outcome"] or "")
+            if not out and attempt["out_path"] and Path(attempt["out_path"]).exists():
+                out = Path(attempt["out_path"]).read_text(encoding="utf-8")
+            assert attempt["state"] == "over" and "target_busy" in out, [dict(a) for a in attempts]
+    world.tick(4, pause=1.0)
+    time.sleep(2.0)  # health: allow HX013 -- absence of a late delivery has no event to await; the window lets a wrongly scheduled re-drive land first
+    assert world.rows(_f62h.TARGET, body) == [] and world.ticket(did)["state"] == "failed", world.ticket(did)
+
+
+def _with_redrive(world, monkeypatch):
+    """A tracked-delivery world: nv-delivery-redrive enabled with tracking live (a valid
+    `orchestrator_profile`, a fresh drainer heartbeat) in this root, and a real AIAgent sender whose `message_agent` runs
+    through the real tool executor, so the plugin's middleware and `transform_terminal_output` see the delivery. The
+    sender is a push sender (`reply_delivery: "notification"`). Returns `send(task_id) -> ack`."""
+    from hermes_cli import plugins as plugins_mod
+
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/test_fleet_f62_h_acceptance.py) is not at this head"
+    orch = _f62h._profile(world.root, _f62h.ORCH)
+    (world.root / "profile.yaml").write_text("description: sender\nui_meta:\n  hermes-bots:\n    shape: cloud\n",
+                                             encoding="utf-8")
+    settings = {"redrive_window_seconds": 40, "max_attempts": 6, "retry_backoff_seconds": 1,
+                "heartbeat_stale_seconds": 30, "orchestrator_profile": _f62h.ORCH}
+    for home in (world.root, orch):
+        shutil.copytree(_f62h.PLUGIN_SRC, home / "plugins" / _f62h.PLUGIN_KEY)
+        (home / "config.yaml").write_text(hermes_yaml.safe_dump(
+            {"plugins": {"enabled": [_f62h.PLUGIN_KEY], "entries": {_f62h.PLUGIN_KEY: {"settings": settings}}}}),
+            encoding="utf-8")
+    bundled = world.root.parent / "bundled-empty"
+    bundled.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    _f62h._seed_bot_chat(world.root, _f62h.SENDER_SID)
+    _f62h._seed_bot_chat(orch, "bc-orchestrator")
+    plugins_mod._reset_plugin_managers_for_tests()
+    world.closers.append(plugins_mod._reset_plugin_managers_for_tests)
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins[_f62h.PLUGIN_KEY]
+    assert loaded.enabled is True and loaded.error is None, loaded.error
+    monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+    manager.invoke_hook("on_kanban_dispatch_tick", board=None, profile_name="default", dry_run=False, outcome="idle",
+                        result=None)
+    agent = _f62h._make_sender_agent()
+
+    def send(task_id):
+        messages = []
+        agent._execute_tool_calls_sequential(_f62h._assistant_turn(f"@{_BOT}", _DM_BODY, f"call-{task_id}"), messages,
+                                             task_id)
+        content = [m for m in messages if m.get("role") == "tool"][-1]["content"]
+        return json.loads(content if isinstance(content, str) else content[0]["text"])
+
+    return send
