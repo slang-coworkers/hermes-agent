@@ -1,4 +1,4 @@
-"""Safety regression tests for nv-delivery-redrive: a re-targeted call, a stale tick
+"""Safety regression tests for nv-delivery-redrive: re-targeted calls (the E9 guard), a stale tick
 snapshot, a late identical sibling and a silent exit 0. Each loads the plugin through the acceptance test's ``fleet``
 fixture (real discovery, real executor, real delivery runner, fake target CLI) and asserts one outcome.
 """
@@ -12,9 +12,13 @@ import textwrap
 import pytest
 
 from tests.plugins.test_fleet_f62_h_acceptance import (
+    _UNVERIFIED,
     ORCH,
     TARGET,
     _busy,
+    _completion_output,
+    _notices,
+    _runner_of,
     _wait_runner_done,
     fleet,
 )
@@ -38,10 +42,8 @@ _REWRITE_INIT = textwrap.dedent(f'''\
 ''')
 
 
-@pytest.mark.platforms("linux")
-def test_rewritten_target_is_not_tracked(fleet):
-    """A pre_tool_call modify that re-targets the call is not ticketed under the target the middleware resolved, so
-    a busy refusal from the real target is never re-driven to the original one."""
+def _install_rewrite_gate(fleet):
+    """A third-party pre_tool_call plugin whose modify re-targets any message_agent call carrying REWRITE_S1 to ORCH."""
     import hermes_yaml as yaml
 
     gate = fleet.root / "plugins" / "f62h-rewrite-gate"
@@ -53,6 +55,13 @@ def test_rewritten_target_is_not_tracked(fleet):
     (fleet.root / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
     fleet.load()
     fleet.tick()
+
+
+@pytest.mark.platforms("linux")
+def test_rewritten_target_is_not_tracked(fleet):
+    """A pre_tool_call modify that re-targets the call is not ticketed under the target the middleware resolved, so
+    a busy refusal from the real target is never re-driven to the original one."""
+    _install_rewrite_gate(fleet)
     with _busy(fleet, ORCH):                             # the real target refuses busy
         out = fleet.send("status? REWRITE_S1")
         assert out.get("delivery_id") and out.get("process_id") and "redrive" not in out, out
@@ -137,3 +146,59 @@ def test_silent_exit0_is_never_resent(fleet):
     assert len(fleet.attempts(did)) == 1
     assert len(fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()) == 1
     assert fleet.rows(TARGET, "PAYLOAD_S4") == []
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("sibling", ["other_recipient", "real_recipient"])
+def test_retarget_with_overlapping_same_task_row(fleet, monkeypatch, sibling):
+    """A re-targeted call overlapping an open same-task row opened inside its spawn window, its bind held past its
+    completion: no ticket, core's ack byte-for-byte, no plugin attempt to either profile and no notice. Its completion
+    is core's byte-for-byte when the row names another recipient, and exactly the unverified rewrite when it names the
+    call's real recipient."""
+    import threading
+
+    from agent.redact import redact_terminal_output
+    from tools.process_registry import _completion_output as core_tail
+
+    _install_rewrite_gate(fleet)
+    store = fleet.loaded.module.store
+    gate, acks, core_acks, rows = threading.Event(), [], [], []
+    real_start = fleet.bot_mode_dm._start_delivery
+    monkeypatch.setattr(fleet.bot_mode_dm, "_start_delivery",
+                        lambda *a, **k: core_acks.append(real_start(*a, **k)) or core_acks[-1])
+    real_spawn = fleet.bot_mode_dm._spawn_delivery
+
+    def stalled(*a, **k):
+        rows.append(store.open_inflight(sender_session_id="bc-sibling", task_id=fleet.task_id,
+                                        target="sibling-target" if sibling == "other_recipient" else ORCH, baseline=0))
+        out = real_spawn(*a, **k)
+        assert gate.wait(timeout=120), "spawn gate never released"
+        return out
+
+    monkeypatch.setattr(fleet.bot_mode_dm, "_spawn_delivery", stalled)
+    sender = threading.Thread(target=lambda: acks.append(fleet.send("status? REWRITE_S1", raw=True)), daemon=True)
+    sender.start()
+    try:
+        assert fleet.until(lambda: _runner_of(fleet) is not None, ticks=False, timeout=30.0)
+        session = _runner_of(fleet)
+        snapshot = dict(store.inflight(rows[0]))
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=40.0)
+        out = _completion_output(fleet, session.id)
+    finally:
+        gate.set()
+        sender.join(timeout=120)
+    ack = json.loads(acks[0])
+    assert core_acks and acks[0] == core_acks[-1], (acks, core_acks)
+    if sibling == "other_recipient":
+        assert out == redact_terminal_output(core_tail(session)["output"], session.command), out
+    else:
+        expected = json.dumps({"status": "ambiguous", "reason": "unknown", "delivery_id": ack["delivery_id"],
+                               "to": f"@{ORCH}", "detail": _UNVERIFIED})
+        assert out == redact_terminal_output(expected, session.command), (out, expected)
+    assert dict(store.inflight(rows[0])) == snapshot
+    fleet.tick(3, pause=0.5)
+    assert "redrive" not in ack and fleet.ticket(ack["delivery_id"]) is None, ack
+    assert fleet.attempts(ack["delivery_id"]) == []
+    assert len(fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()) == 1
+    for who in ("default", ORCH):
+        assert _notices(fleet, who, ack["delivery_id"]) == [], who
