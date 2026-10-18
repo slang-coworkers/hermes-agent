@@ -502,7 +502,7 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post
 A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L852	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L891	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
@@ -734,6 +734,7 @@ A	tests/plugins/test_self_f56_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	R	H5			
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	post-C1	item-5			item-5
+A	tests/plugins/test_upg_f68_acceptance.py#allow:L1232	in-surface	health-allow	item-5			
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py#allow:L243	in-surface	health-allow	item-5			
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
@@ -746,6 +747,8 @@ A	tests/tools/test_rt_f08_doc_contract.py	in-surface	R	H5
 M	tools/bot_mode_dm.py	core	post-C1	item-4	F62.g		item-4
 (retained)	tools/bot_mode_dm.py#F62.g	core	item-4	retained	F62.g		
 (retained)	tools/bot_mode_dm.py#MSG-DELIV	core	E	retained	MSG-DELIV		
+M	tools/process_registry.py	core	post-C1	item-A1	A1		item-A1
+M	tools/terminal_tool_background.py	core	post-C1	item-A1	A1		item-A1
 M	website/docs/developer-guide/adding-platform-adapters.md	in-surface	M	H5			
 M	website/docs/developer-guide/gateway-internals.md	in-surface	M	H5			
 A	website/docs/developer-guide/plugins/nv-cost-cap.md	in-surface	R	H5			#78
