@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import shlex
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -137,27 +138,98 @@ def middleware(tool_name: str = "", args: Any = None, next_call: Any = None, tas
         return next_call(args)
     target_home = roster[target]
     baseline_state, baseline = probe.max_row(target_home, db_seen=False)
-    inflight = None
+    inflight, fallback = None, None
     try:
         # D5a.1: core spawns the runner inside next_call, so its completion can reach the transform before the
-        # ticket below is committed; this row tells the transform to wait for that commit.
+        # ticket below is committed; this row tells the transform the send is still in flight.
         inflight = store.open_inflight(sender_session_id=session_id or "", task_id=task_id or "", target=target,
                                        target_home=str(target_home), baseline=baseline)
     except Exception:
-        logger.warning("nv-delivery-redrive: in-flight row not recorded", exc_info=True)
-    out = next_call(args)
-    try:
-        tracked_out = _track(out, args, me=me, root=root, sender_home=Path(home), target=target,
-                             target_home=target_home, baseline_state=baseline_state, baseline=baseline,
-                             session_id=session_id, inflight=inflight)
-    except Exception:
-        logger.warning("nv-delivery-redrive: could not record a ticket; core's ack returned unchanged",
+        logger.warning("nv-delivery-redrive: in-flight row not recorded; gating on an in-process record",
                        exc_info=True)
+        fallback = _open_fallback(task_id or "", target)
+    out, bound = None, False
+    try:
+        out = next_call(args)
         tracked_out = out
+        process_id, dm_path, retargeted = _dispatched(out, target, target_home)
+        _bind(inflight, fallback, process_id, dm_path, untracked=retargeted)
+        bound = True
+        if not retargeted and inflight is not None:
+            try:
+                tracked_out = _track(out, args, me=me, root=root, sender_home=Path(home), target=target,
+                                     target_home=target_home, baseline_state=baseline_state, baseline=baseline,
+                                     session_id=session_id, inflight=inflight)
+            except Exception:
+                logger.warning("nv-delivery-redrive: could not record a ticket; core's ack returned unchanged",
+                               exc_info=True)
+                tracked_out = out
+    finally:
+        if not bound:
+            with contextlib.suppress(Exception):
+                _bind(inflight, fallback, None, None, untracked=True)
     if tracked_out is out:
         with contextlib.suppress(Exception):
             store.close_inflight(inflight, "untracked")
     return tracked_out
+
+
+def _dispatched(out: Any, target: str, target_home: Path) -> tuple[Optional[str], Optional[str], bool]:
+    """``(process_id, dm_path, retargeted)`` of what core dispatched. ``retargeted`` is True when a ``pre_tool_call``
+    ``modify`` changed ``target``, or the dispatched recipient cannot be confirmed (D3.3, E9)."""
+    from tools import bot_live_delivery
+    from tools.bot_mode_probe import _handle
+    from tools.process_registry import process_registry
+
+    try:
+        ack = json.loads(out) if isinstance(out, str) else None
+    except ValueError:
+        ack = None
+    if not isinstance(ack, dict) or not ack.get("delivery_id"):
+        return None, None, False
+    process_id = str(ack.get("process_id") or "") or None
+    if process_id:
+        session = process_registry.get(process_id)
+        command = session.command if session is not None else ""
+        dm_path = _runner_dm_path(command or "")
+        return process_id, dm_path, dm_path is None or _runner_target(command or "") != target
+    receipt = bot_live_delivery.read_delivery_result(target_home, ack["delivery_id"])
+    confirmed = receipt is not None and ack.get("to") == f"@{_handle(target)}"
+    return None, _live_dm_path(ack["delivery_id"]) if confirmed else None, not confirmed
+
+
+def _bind(inflight: Optional[int], fallback: Optional[dict[str, Any]], process_id: Optional[str],
+          dm_path: Optional[str], *, untracked: bool) -> None:
+    if inflight is not None:
+        store.bind_inflight(inflight, process_id=process_id, dm_path=dm_path, untracked=untracked)
+    if fallback is not None:
+        with _fallback_lock:
+            fallback.update(process_id=process_id, dm_path=dm_path, bound=True)
+            if process_id is None or dm_path is None:
+                _fallbacks.remove(fallback)             # no runner to gate
+
+
+# D5a.2: a send whose in-flight insert failed is still gated, from this record, until its runner's completion is.
+_fallbacks: list[dict[str, Any]] = []
+_fallback_lock = threading.Lock()
+
+
+def _open_fallback(task_id: str, target: str) -> dict[str, Any]:
+    record = {"task_id": task_id, "target": target, "created_monotonic": time.monotonic(), "process_id": None,
+              "dm_path": None, "bound": False}
+    with _fallback_lock:
+        _fallbacks.append(record)
+    return record
+
+
+def _fallbacks_for(task_id: str) -> list[dict[str, Any]]:
+    with _fallback_lock:
+        return [dict(r) for r in _fallbacks if r["task_id"] == task_id]
+
+
+def _drop_fallback(dm_path: str) -> None:
+    with _fallback_lock:
+        _fallbacks[:] = [r for r in _fallbacks if not (r["bound"] and r["dm_path"] == dm_path)]
 
 
 def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: Path, target: str,
@@ -175,13 +247,6 @@ def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: 
     if not did or ack.get("status") not in ("queued", "claimed", "settled"):
         return out
     dm_path, content, pid, create_time = _capture(ack)
-    if ack.get("process_id"):
-        from tools.process_registry import process_registry
-
-        # A pre_tool_call ``modify`` may have re-targeted the call after this middleware resolved it.
-        session = process_registry.get(str(ack["process_id"]))
-        if dm_path is None or session is None or _runner_target(session.command or "") != target:
-            return out
     path = "cli"
     if not ack.get("process_id"):
         receipt = bot_live_delivery.read_delivery_result(target_home, did)
@@ -258,35 +323,73 @@ def _runner_target(command: str) -> Optional[str]:
     return argv[argv.index("-p") + 1] if "-p" in argv[:-1] else None
 
 
-def _runner_owned_by(task_id: str, command: str) -> bool:
+def _runner_session(task_ids: set[str], command: str) -> Any:
+    """``(task_id, session)`` of the registry runner running ``command`` for one of ``task_ids``, else None."""
     from tools.process_registry import process_registry
 
-    if not task_id:
-        return False
-    sessions = [*process_registry.running_owned_by(task_id), *process_registry.unread_completions_owned_by(task_id)]
-    return any(s.command == command for s in sessions)
+    for task_id in task_ids:
+        for session in [*process_registry.running_owned_by(task_id),
+                        *process_registry.unread_completions_owned_by(task_id)]:
+            if session.command == command:
+                return task_id, session
+    return None
+
+
+def _own_bound(dm_path: str) -> Optional[dict[str, Any]]:
+    """This runner's own in-flight row or fallback record, once its call has bound it (D5a.1)."""
+    row = store.bound_inflight(dm_path)
+    if row is not None:
+        return row
+    with _fallback_lock:
+        found = [dict(r) for r in _fallbacks if r["bound"] and r["dm_path"] == dm_path]
+    return {**found[-1], "state": "fallback"} if found else None
 
 
 def _await_ticket(dm_path: str, command: str) -> Any:
-    """D5a.2: the committed ticket for ``dm_path``; ``None`` when the send is untracked; ``probe.UNKNOWN`` when a
-    send that is still in flight did not commit within the wait (fail closed)."""
+    """D5a.2: the committed ticket for ``dm_path``; ``None`` when this runner's send is untracked; ``probe.UNKNOWN``
+    to fail closed. Reads in-flight rows only: binding and marking them is their own call's middleware's job."""
     ticket = store.ticket_by_dm_path(dm_path)
     if ticket is not None:
         return ticket
-    target = _runner_target(command)
-    rows = [r for r in store.open_inflight_rows(target) if _runner_owned_by(r["task_id"], command)] if target else []
-    if not rows:
-        return None
-    ids = {r["id"] for r in rows}
+    if store.published_for(dm_path) == "ambiguous":
+        return probe.UNKNOWN
+    real = _runner_target(command)
     deadline = time.monotonic() + COMMIT_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        time.sleep(0.2)
+    own, latched = _own_bound(dm_path), False
+    if own is None:
+        rows = store.prebind_rows()
+        tasks = {r["task_id"] for r in rows if r["task_id"]}
+        with _fallback_lock:
+            tasks |= {r["task_id"] for r in _fallbacks if not r["bound"] and r["task_id"]}
+        found = _runner_session(tasks, command)
+        if found is None:
+            return None
+        task_id = found[0]
+        candidates = [r for r in rows if r["task_id"] == task_id]
+        candidates += [r for r in _fallbacks_for(task_id) if not r["bound"]]
+        if not any(c["target"] == real for c in candidates):
+            return None
+        latched = True
+        while own is None:
+            if time.monotonic() >= deadline:
+                return probe.UNKNOWN
+            time.sleep(0.05)
+            ticket = store.ticket_by_dm_path(dm_path)
+            if ticket is not None:
+                return ticket
+            own = _own_bound(dm_path)
+    if own["target"] != real:
+        return probe.UNKNOWN if latched else None
+    while True:
         ticket = store.ticket_by_dm_path(dm_path)
         if ticket is not None:
             return ticket
-        if not any(r["id"] in ids for r in store.open_inflight_rows(target)):
-            return store.ticket_by_dm_path(dm_path)
-    return probe.UNKNOWN
+        if own["state"] == "untracked":
+            return None
+        if time.monotonic() >= deadline:
+            return probe.UNKNOWN
+        time.sleep(0.2)
+        own = _own_bound(dm_path) or own
 
 
 def _claims_row(ticket: dict[str, Any]) -> bool:
@@ -350,10 +453,14 @@ def transform_terminal_output(command: str = "", output: str = "", returncode: A
         if reported_success(output, returncode):
             if not settings.tracking_live(store.root()):
                 return None
-            gated = _gate(command, dm_path, output, returncode)
+            try:
+                gated = _gate(command, dm_path, output, returncode)
+            finally:
+                _drop_fallback(dm_path)
             if attempt is None and (attempt := store.attempt_by_dm_path(dm_path)) is not None:
                 store.record_attempt_outcome(attempt["delivery_id"], 1, outcome)
             return gated
+        _drop_fallback(dm_path)
         if attempt is None or not clean_refusal(output) or not settings.tracking_live(store.root()):
             return None
         ticket = store.ticket(attempt["delivery_id"]) or {}

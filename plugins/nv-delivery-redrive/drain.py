@@ -738,7 +738,7 @@ def tick(**kwargs: Any) -> None:
         except Exception:
             logger.warning("nv-delivery-redrive: tick failed for target %s", target_home, exc_info=True)
     try:
-        store.expire_inflight(now, INFLIGHT_KEEP_SECONDS)
+        store.reap_inflight(now, INFLIGHT_KEEP_SECONDS)
         _decide_notices(orch is not None)
         notify.deliver_pending(orch)
         _collect(now)

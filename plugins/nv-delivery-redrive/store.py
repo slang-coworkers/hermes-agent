@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -84,15 +85,18 @@ CREATE TABLE IF NOT EXISTS inflight (
     sender_session_id TEXT,
     task_id TEXT,
     target TEXT NOT NULL,
-    target_home TEXT NOT NULL,
+    target_home TEXT NOT NULL DEFAULT '',
     baseline INTEGER,
     created_at REAL NOT NULL,
+    opener_pid INTEGER,
+    opener_boot REAL,
+    process_id TEXT,
+    dm_path TEXT,
     state TEXT NOT NULL DEFAULT 'open',
     delivery_id TEXT
 );
 CREATE TABLE IF NOT EXISTS published (dm_path TEXT PRIMARY KEY, status TEXT NOT NULL, at REAL NOT NULL);
 """
-INFLIGHT_WAIT_SECONDS = 60.0
 
 _lock = threading.RLock()
 _conns: dict[str, sqlite3.Connection] = {}
@@ -250,6 +254,11 @@ def publish_unticketed(dm_path: str, status: str) -> None:
                      (dm_path, status, time.time()))
 
 
+def published_for(dm_path: str) -> Optional[str]:
+    rows = _read("SELECT status FROM published WHERE dm_path = ?", (dm_path,))
+    return rows[0]["status"] if rows else None
+
+
 def update_ticket(delivery_id: str, conn: Optional[sqlite3.Connection] = None, **fields: Any) -> None:
     if not fields:
         return
@@ -274,13 +283,41 @@ def delete_ticket(conn: sqlite3.Connection, delivery_id: str) -> None:
 
 
 # --- in-flight sends (D5a.1) -------------------------------------------------------------------------------------
-def open_inflight(*, sender_session_id: str, task_id: str, target: str, target_home: str,
-                  baseline: Optional[int]) -> int:
+def _opener() -> tuple[int, Optional[float]]:
+    """This process's pid and start time: a pid alone can be reused by a later process."""
+    pid = os.getpid()
+    try:
+        import psutil
+
+        return pid, float(psutil.Process(pid).create_time())
+    except Exception:
+        return pid, None
+
+
+def _same_boot(a: Optional[float], b: Optional[float]) -> bool:
+    return a is not None and b is not None and abs(a - b) < 0.01
+
+
+def open_inflight(*, sender_session_id: str, task_id: str, target: str, baseline: Optional[int],
+                  target_home: str = "") -> int:
+    pid, boot = _opener()
     with txn() as conn:
         cur = conn.execute("INSERT INTO inflight (sender_session_id, task_id, target, target_home, baseline, "
-                           "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                           (sender_session_id, task_id, target, target_home, baseline, time.time()))
+                           "created_at, opener_pid, opener_boot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (sender_session_id, task_id, target, target_home, baseline, time.time(), pid, boot))
         return int(cur.lastrowid)
+
+
+def inflight(inflight_id: int) -> Optional[dict[str, Any]]:
+    rows = _read("SELECT * FROM inflight WHERE id = ?", (inflight_id,))
+    return rows[0] if rows else None
+
+
+def bind_inflight(inflight_id: int, *, process_id: Optional[str], dm_path: Optional[str], untracked: bool) -> None:
+    """D5a.1: only the call's own middleware binds its own row, once ``next_call`` has returned or raised."""
+    with txn() as conn:
+        conn.execute("UPDATE inflight SET process_id = ?, dm_path = ?, state = CASE WHEN ? THEN 'untracked' "
+                     "ELSE state END WHERE id = ? AND state = 'open'", (process_id, dm_path, untracked, inflight_id))
 
 
 def close_inflight(inflight_id: Optional[int], state: str) -> None:
@@ -290,18 +327,47 @@ def close_inflight(inflight_id: Optional[int], state: str) -> None:
         conn.execute("UPDATE inflight SET state = ? WHERE id = ? AND state = 'open'", (state, inflight_id))
 
 
-def open_inflight_rows(target: str) -> list[dict[str, Any]]:
-    return _read("SELECT * FROM inflight WHERE state = 'open' AND target = ? AND created_at > ?",
-                 (target, time.time() - INFLIGHT_WAIT_SECONDS))
+def bound_inflight(dm_path: str) -> Optional[dict[str, Any]]:
+    rows = _read("SELECT * FROM inflight WHERE dm_path = ? AND state != 'abandoned' ORDER BY id DESC LIMIT 1",
+                 (dm_path,))
+    return rows[0] if rows else None
 
 
-def expire_inflight(now: float, keep_seconds: float) -> None:
-    """Open rows older than the wait are abandoned; closed rows are dropped once nothing can wait on them."""
+def prebind_rows() -> list[dict[str, Any]]:
+    """D5a.2 candidates: open, unbound rows opened by this gateway process. No age filter (E9.3)."""
+    pid, boot = _opener()
+    rows = _read("SELECT * FROM inflight WHERE state = 'open' AND process_id IS NULL AND dm_path IS NULL "
+                 "AND opener_pid = ?", (pid,))
+    return [r for r in rows if _same_boot(r["opener_boot"], boot)]
+
+
+def reap_inflight(now: float, keep_seconds: float) -> None:
+    """Open rows whose opening process is gone are ``abandoned``; closed rows are dropped once nothing waits on them."""
+    pid, boot = _opener()
+    dead = []
+    for row in _read("SELECT id, opener_pid, opener_boot FROM inflight WHERE state = 'open'"):
+        if row["opener_pid"] == pid and _same_boot(row["opener_boot"], boot):
+            continue
+        if not _alive(row["opener_pid"], row["opener_boot"]):
+            dead.append(row["id"])
     with txn() as conn:
-        conn.execute("UPDATE inflight SET state = 'untracked' WHERE state = 'open' AND created_at <= ?",
-                     (now - INFLIGHT_WAIT_SECONDS,))
+        conn.executemany("UPDATE inflight SET state = 'abandoned' WHERE id = ? AND state = 'open'",
+                         [(i,) for i in dead])
         conn.execute("DELETE FROM inflight WHERE state != 'open' AND created_at <= ?", (now - keep_seconds,))
         conn.execute("DELETE FROM published WHERE at <= ?", (now - keep_seconds,))
+
+
+def _alive(pid: Optional[int], boot: Optional[float]) -> bool:
+    import psutil
+
+    if not pid:
+        return False
+    try:
+        return boot is None or _same_boot(float(psutil.Process(pid).create_time()), boot)
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True                                     # cannot tell: keep the row open (fail closed)
 
 
 # --- attempts ---------------------------------------------------------------------------------------------------
