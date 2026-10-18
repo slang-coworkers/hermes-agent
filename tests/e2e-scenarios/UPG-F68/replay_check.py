@@ -70,6 +70,8 @@ CORE_AUTHORITY = {
     "hermes_cli/kanban_db.py": {"GOV-F25", "GOV-F25.b"},
     "hermes_cli/kanban_db_connect.py": {"GOV-F25", "GOV-F25.b"},
     "hermes_cli/kanban_db_notify.py": {"GOV-F25", "GOV-F25.b"},
+    "tools/process_registry.py": {"A1"},
+    "tools/terminal_tool_background.py": {"A1"},
 }
 # Retained core with no hunk at the candidate (ADR §CORE-CHANGE C/D): the path must equal the tag, or, for ITEM4's path,
 # the tag plus exactly ITEM4's lines.
@@ -86,6 +88,14 @@ ITEM4 = ("tools/bot_mode_dm.py", "F62.g", {
     "-": (("_spawn_delivery", "                            _completion_output_chars=REPLY_COMPLETION_CHARS)"),),
 })
 U_DEL = ()
+# Core fix A1 (erratum E7″ §E7.0, core-A1.diff r2 sha256 de56cf3a against d923a5eb): each path as its (tag blob,
+# blob with the diff applied). Pinned blobs, not lines, so a line moved inside its function is refused too.
+CORE_A1 = {
+    "tools/process_registry.py":
+        ("25bdc43394ed63a200b652e9f650567d0313afd9", "a2b02314793c8369e66d5b6ddff24415c7ec1a6f"),
+    "tools/terminal_tool_background.py":
+        ("2b4579b991ed6473d298138421323ba425fd38a8", "75380eb7dac90c0b5916888dc597e71d57cd5e77"),
+}
 # Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
 # None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
 # table survives a re-carry onto another tag.
@@ -97,7 +107,7 @@ E2_ALLOW = (
 )
 HEALTH_ALLOW = re.compile(r"^# health: allow ([A-Z0-9_, ]+) -- .+$")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
-ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
+ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci|A1)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
 FORK_CI = re.compile(r"^(\.github/workflows/[^/]+\.ya?ml|contributors/.+)$")
 FORK_CI_AUTHORITY = "msg-596"
 # (workflow, job) -> raised timeout-minutes. Msg 602: a Python test slice that timed out on a standard runner.
@@ -230,6 +240,10 @@ def git(repo, *args, ok=(0,)):
 
 def blob(repo, rev, path):
     return git(repo, "rev-parse", "-q", "--verify", f"{rev}:{path}", ok=(0, 1)).strip() or None
+
+
+def mode(repo, rev, path):
+    return git(repo, "ls-tree", rev, "--", path).split(" ", 1)[0] or None
 
 
 _TEXT = {}
@@ -601,6 +615,31 @@ def check_item4(repo, tag, head, after_c1):
     return fails
 
 
+def check_core_a1(repo, tag, head, after_c1):
+    """A1: each CORE_A1 path is its pinned tag blob at the tag and its pinned A1 blob at the head, a regular file at
+    both, and exactly one commit after C1 touches them: tagged ``[UPG-F68 A1]``, changing those paths alone, old blob to
+    new with the mode unchanged. Returns fails."""
+    fails = []
+    for path, (old, new) in CORE_A1.items():
+        if (blob(repo, tag, path), mode(repo, tag, path)) != (old, "100644"):
+            fails.append(f"A1: {path} at the tag is not the regular file core-A1.diff applies to")
+        if (blob(repo, head, path), mode(repo, head, path)) != (new, "100644"):
+            fails.append(f"A1: {path} at the head is not the tag plus exactly core-A1.diff (blob and mode)")
+    touching = [(sha, item) for sha, _src, item in after_c1 if set(name_status(repo, f"{sha}^", sha)) & set(CORE_A1)]
+    if len(touching) != 1:
+        return fails + [f"A1: {len(touching)} commits after C1 touch the A1 paths (want exactly one)"]
+    sha, item = touching[0]
+    if item != "A1":
+        fails.append(f"A1: {sha[:10]} changes the A1 paths outside a [UPG-F68 A1] commit")
+    if set(name_status(repo, f"{sha}^", sha)) != set(CORE_A1):
+        fails.append(f"A1: {sha[:10]} must change exactly the A1 paths")
+    fails.extend(f"A1: {sha[:10]} does not move {path} from its tag blob to its A1 blob as a regular file"
+                 for path, (old, new) in CORE_A1.items()
+                 if (blob(repo, f"{sha}^", path), blob(repo, sha, path), mode(repo, f"{sha}^", path), mode(repo, sha, path))
+                 != (old, new, "100644", "100644"))
+    return fails
+
+
 def check_e2_allow(repo, c1, head, path):
     """2(e'): ``path`` changes from C1 to the head only by added ``# health: allow`` comments at its E2_ALLOW sites, and
     its AST is identical (comments and line positions are not in ``ast.dump``). Returns (fails, allowed sites)."""
@@ -908,12 +947,13 @@ def main():
         core_rows[key] = ("(retained)", "core", cls, "retained", auth)
     if item4_landed:
         fails.extend(check_item4(repo, revs["tag"], revs["head"], after_c1))
+    fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1))
 
     fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()], after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
-        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed):
+        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed) and path not in CORE_A1:
             f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
             fails.extend(f_e)
             e2_allowed.extend(found)
