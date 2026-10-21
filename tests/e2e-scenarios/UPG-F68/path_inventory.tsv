@@ -82,6 +82,7 @@ M	hermes_cli/kanban_db_notify.py#claim_unseen_events_for_sub	core	replay	H5	GOV-
 M	hermes_cli/kanban_db_notify.py#publish_task_notification	core	replay	H5	GOV-F25		
 M	hermes_cli/kanban_db_notify.py#purge_stale_done_notify_subs	core	replay	H5	GOV-F25		
 M	hermes_cli/kanban_db_notify.py#release_notify_sub_lease	core	replay	H5	GOV-F25		
+M	hermes_cli/providers.py	core	post-C1	item-UA48	UA-48		item-UA48
 A	plugins/hello/__init__.py	in-surface	R	H5			item-5
 A	plugins/hello/plugin.yaml	in-surface	R	H5			
 A	plugins/nv-approval-ledger/__init__.py	in-surface	R	H5			item-5
@@ -502,7 +503,7 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post
 A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L891	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L898	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
@@ -734,7 +735,7 @@ A	tests/plugins/test_self_f56_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	R	H5			
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	post-C1	item-5			item-5
-A	tests/plugins/test_upg_f68_acceptance.py#allow:L1232	in-surface	health-allow	item-5			
+A	tests/plugins/test_upg_f68_acceptance.py#allow:L1264	in-surface	health-allow	item-5			
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py#allow:L243	in-surface	health-allow	item-5			
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
