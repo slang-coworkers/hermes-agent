@@ -13,7 +13,7 @@ commits. Checks, each named after ADR §Merge gate 2:
       bytes) and nothing else; MSG-DELIV is E; F62.g is HELD while tools/bot_mode_dm.py equals the tag, and item-4
       once it is the tag plus exactly the ITEM4 lines.
   (d) the A1 union rule for ``_kanban_sub_op`` (the same equation over the whole function), with its three locators.
-  (e) no core path changes after C1 except item 4 (ITEM4, only in ``[UPG-F68 4]`` commits) and
+  (e) post-C1 core is limited to item 4 (ITEM4, only in ``[UPG-F68 4]`` commits), pinned A1 and UA48 single-commit changes, and
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point (--repoints): each recorded line is
@@ -72,6 +72,7 @@ CORE_AUTHORITY = {
     "hermes_cli/kanban_db_notify.py": {"GOV-F25", "GOV-F25.b"},
     "tools/process_registry.py": {"A1"},
     "tools/terminal_tool_background.py": {"A1"},
+    "hermes_cli/providers.py": {"UA-48"},
 }
 # Retained core with no hunk at the candidate (ADR §CORE-CHANGE C/D): the path must equal the tag, or, for ITEM4's path,
 # the tag plus exactly ITEM4's lines.
@@ -96,6 +97,12 @@ CORE_A1 = {
     "tools/terminal_tool_background.py":
         ("2b4579b991ed6473d298138421323ba425fd38a8", "75380eb7dac90c0b5916888dc597e71d57cd5e77"),
 }
+# Pin both blobs so an unrelated provider edit cannot inherit this core exception.
+# Require one tagged commit to keep the exception auditable.
+CORE_UA48 = {
+    "hermes_cli/providers.py":
+        ("fc4062c36e3ea4fcffda0674606f483d79873aad", "e3d604a300b946cd75658b2cea5cdfb37346814e"),
+}
 # Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
 # None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
 # table survives a re-carry onto another tag.
@@ -107,7 +114,7 @@ E2_ALLOW = (
 )
 HEALTH_ALLOW = re.compile(r"^# health: allow ([A-Z0-9_, ]+) -- .+$")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
-ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci|A1)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
+ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci|A1|UA48)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
 FORK_CI = re.compile(r"^(\.github/workflows/[^/]+\.ya?ml|contributors/.+)$")
 FORK_CI_AUTHORITY = "msg-596"
 # (workflow, job) -> raised timeout-minutes. Msg 602: a Python test slice that timed out on a standard runner.
@@ -615,26 +622,26 @@ def check_item4(repo, tag, head, after_c1):
     return fails
 
 
-def check_core_a1(repo, tag, head, after_c1):
-    """A1: each CORE_A1 path is its pinned tag blob at the tag and its pinned A1 blob at the head, a regular file at
-    both, and exactly one commit after C1 touches them: tagged ``[UPG-F68 A1]``, changing those paths alone, old blob to
-    new with the mode unchanged. Returns fails."""
+def check_core_a1(repo, tag, head, after_c1, fix="A1", pins=CORE_A1):
+    """A1 (and UA48 via ``fix``/``pins``): each pinned path is its tag blob at the tag and its fix blob at the head, a
+    regular file at both, and exactly one commit after C1 touches them: tagged ``[UPG-F68 <fix>]``, changing those paths
+    alone, old blob to new with the mode unchanged. Returns fails."""
     fails = []
-    for path, (old, new) in CORE_A1.items():
+    for path, (old, new) in pins.items():
         if (blob(repo, tag, path), mode(repo, tag, path)) != (old, "100644"):
-            fails.append(f"A1: {path} at the tag is not the regular file core-A1.diff applies to")
+            fails.append(f"{fix}: {path} at the tag is not the regular file the {fix} diff applies to")
         if (blob(repo, head, path), mode(repo, head, path)) != (new, "100644"):
-            fails.append(f"A1: {path} at the head is not the tag plus exactly core-A1.diff (blob and mode)")
-    touching = [(sha, item) for sha, _src, item in after_c1 if set(name_status(repo, f"{sha}^", sha)) & set(CORE_A1)]
+            fails.append(f"{fix}: {path} at the head is not the tag plus exactly the {fix} diff (blob and mode)")
+    touching = [(sha, item) for sha, _src, item in after_c1 if set(name_status(repo, f"{sha}^", sha)) & set(pins)]
     if len(touching) != 1:
-        return fails + [f"A1: {len(touching)} commits after C1 touch the A1 paths (want exactly one)"]
+        return fails + [f"{fix}: {len(touching)} commits after C1 touch the {fix} paths (want exactly one)"]
     sha, item = touching[0]
-    if item != "A1":
-        fails.append(f"A1: {sha[:10]} changes the A1 paths outside a [UPG-F68 A1] commit")
-    if set(name_status(repo, f"{sha}^", sha)) != set(CORE_A1):
-        fails.append(f"A1: {sha[:10]} must change exactly the A1 paths")
-    fails.extend(f"A1: {sha[:10]} does not move {path} from its tag blob to its A1 blob as a regular file"
-                 for path, (old, new) in CORE_A1.items()
+    if item != fix:
+        fails.append(f"{fix}: {sha[:10]} changes the {fix} paths outside a [UPG-F68 {fix}] commit")
+    if set(name_status(repo, f"{sha}^", sha)) != set(pins):
+        fails.append(f"{fix}: {sha[:10]} must change exactly the {fix} paths")
+    fails.extend(f"{fix}: {sha[:10]} does not move {path} from its tag blob to its {fix} blob as a regular file"
+                 for path, (old, new) in pins.items()
                  if (blob(repo, f"{sha}^", path), blob(repo, sha, path), mode(repo, f"{sha}^", path), mode(repo, sha, path))
                  != (old, new, "100644", "100644"))
     return fails
@@ -948,12 +955,13 @@ def main():
     if item4_landed:
         fails.extend(check_item4(repo, revs["tag"], revs["head"], after_c1))
     fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1))
+    fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1, "UA48", CORE_UA48))
 
     fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()], after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
-        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed) and path not in CORE_A1:
+        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed) and path not in CORE_A1 and path not in CORE_UA48:
             f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
             fails.extend(f_e)
             e2_allowed.extend(found)
@@ -1038,7 +1046,7 @@ def main():
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; no core after C1 beyond item 4 and the 2(e') allows; fork-ci is only the ruled runner, timeout, line, insert and contributor edits; inventory"
+          " sources; post-C1 core is limited to item 4, A1, UA48 and 2(e') allows; fork-ci is only the ruled runner, timeout, line, insert and contributor edits; inventory"
           " matches")
     return 0
 
