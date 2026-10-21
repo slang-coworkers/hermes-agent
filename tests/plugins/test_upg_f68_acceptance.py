@@ -868,10 +868,42 @@ def test_ac_upg_f68_19(bot_world):
     tap = logging.Handler(logging.INFO)
     tap.emit = seen.append
     prior_level = kill_log.level
+    # macOS keeps `bash -lic` above the runner: once core SIGKILLs that root, the runner is reparented out of the pytest
+    # subtree and the tag's live-system guard refuses core's next signal (CI 39129288055). For this one call only, a
+    # refused SIGTERM/SIGKILL goes through when its PID was in the runner's tree while the root was alive and a child of
+    # this test, and still has that start time; any other refusal stands.
+    import posix
+    import signal
+
+    import psutil
+
+    root = psutil.Process(process_registry.get(proc_id).pid)
+    tree = {root.pid: root.create_time()} if os.getpid() in {p.pid for p in root.parents()} else {}
+    guarded_kill = os.kill
+
+    def _runner_tree_kill(pid, sig, *args):
+        with contextlib.suppress(psutil.Error):
+            if tree and root.is_running():
+                tree.update({p.pid: p.create_time() for p in root.children(recursive=True)})
+        try:
+            return guarded_kill(pid, sig, *args)
+        except RuntimeError:
+            try:
+                ours = int(sig) in (signal.SIGTERM, signal.SIGKILL) and psutil.Process(pid).create_time() == tree.get(pid)
+            except psutil.Error:
+                ours = False
+            seen.append(logging.makeLogRecord({"msg": f"test: guard refused os.kill({pid}, {int(sig)}), "
+                                                      f"{'let through' if ours else 'kept'}; runner tree {tree}"}))
+            if not ours:
+                raise
+        return posix.kill(pid, sig, *args)
+
     kill_log.addHandler(tap)
     kill_log.setLevel(logging.INFO)
     try:
-        killed = process_registry.kill_process(proc_id, source="process.kill")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "kill", _runner_tree_kill)
+            killed = process_registry.kill_process(proc_id, source="process.kill")
     finally:
         kill_log.removeHandler(tap)
         kill_log.setLevel(prior_level)
