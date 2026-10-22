@@ -109,6 +109,20 @@ survives gateway restarts: re-drive runners run outside the process registry, so
   - the rewrite runs inside a hook bounded by `plugins.hook_callback_timeout`. If the hook fails or runs out of time
     first (a timeout below 10 s does), core's text passes unchanged;
   - an untracked send (no fresh drainer heartbeat, no valid `orchestrator_profile`) is never rewritten.
+- **Skipped rewrites.** Core runs one copy of the rewrite per call at a time and keeps its own text when it skips one.
+  Each `message_agent` call carries its own call id, so two deliveries finishing together are both rewritten. Five
+  paths can still feed the sender agent core's raw `settled`:
+  - a process watcher armed after its launching turn, at a gateway restart or before the gateway was serving;
+  - that watcher's chat receipt while the launching turn is still busy (it shows output only on a nonzero exit);
+  - a kill or reconcile from a context with no call id: gateway shutdown, `/stop`, a goal's process listing;
+  - any call within the window after one rewrite timed out (60 s, longer while timed-out workers are still hung);
+  - a rewrite whose worker thread fails to start.
+
+  A tracked delivery still unverified at a drainer tick then ends `ambiguous`/`unknown`, with one correction to the
+  sender and one to the orchestrator, and is not re-sent. A verified or untracked call gets no such correction.
+- **Unpublished exits.** The gateway waits for a finished process to publish its result before it reports it. If the
+  result has not been published 60 s after the exit, the chat gets one notice that the outcome is unknown, without any
+  output; the normal report follows once the result is published.
 - **Re-targeted sends.** A `message_agent` call whose recipient a `pre_tool_call` `modify` rewrites is not re-driven:
   it behaves as on 0.22.2, and its ack is core's, byte for byte. Its completion is core's too, except that it becomes
   the "Could not verify …" text above when, before the call's bind, another open call of the same task names the same
