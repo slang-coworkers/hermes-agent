@@ -102,6 +102,7 @@ gateway:
     started: "🔄 بدأت مهمة خلفية: \"{preview}\"\nمعرّف المهمة: {task_id}\nيمكنك متابعة المحادثة — ستظهر النتائج عند الانتهاء."
     task_finished: "✅ انتهت المهمة في الخلفية"
     task_failed: "❌ فشلت المهمة في الخلفية"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "رمز الخروج {code}"
     last_output: ". آخر مخرجات:\n```\n{tail}\n```"
     rerun_hint: "\nاطلب منّي إعادة تشغيلها أو عرض السجل الكامل."
