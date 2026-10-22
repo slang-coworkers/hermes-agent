@@ -60,6 +60,7 @@ class TestCompletionConsumedPrune:
         """When a finished session is pruned, _completion_consumed is
         cleared for the same session_id."""
         from tools.process_registry import ProcessRegistry, FINISHED_TTL_SECONDS
+        import threading
         import time
 
         reg = ProcessRegistry()
@@ -71,6 +72,8 @@ class TestCompletionConsumedPrune:
                 self.exited = True
                 self.process = None  # handle release reads the real dataclass fields
                 self._pty = None
+                self._completion_event = threading.Event()  # published: unpublished sessions are never pruned
+                self._completion_event.set()
 
         reg._finished["stale-1"] = _FakeSess("stale-1")
         reg._completion_consumed.add("stale-1")
