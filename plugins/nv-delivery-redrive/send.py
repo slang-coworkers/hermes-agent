@@ -12,8 +12,16 @@ import logging
 import shlex
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+from tools.approval_context import (
+    _approval_session_id,
+    _approval_turn_id,
+    reset_current_observability_context,
+    set_current_observability_context,
+)
 
 from . import probe, settings, store
 from .notify import UNVERIFIED
@@ -121,8 +129,37 @@ def _live_dm_path(delivery_id: str) -> Optional[str]:
 
 def middleware(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
                session_id: str = "", **kwargs: Any) -> Any:
-    if tool_name != TOOL or not isinstance(args, dict):
+    if tool_name != TOOL:
         return next_call(args)
+    # D5a.5: core's reader copies this context at spawn, so the runner's completion transform carries this call's id;
+    # with none, every runner completion shares one hook gate key and core skips all but the first that overlap.
+    call_id = kwargs.get("tool_call_id")
+    tokens = set_current_observability_context(
+        turn_id=_approval_turn_id.get(),
+        tool_call_id=call_id if isinstance(call_id, str) and call_id else f"nv-redrive:{uuid.uuid4().hex}",
+        session_id=_approval_session_id.get())
+    called = False
+
+    def bound_next(payload: Any) -> Any:
+        nonlocal called
+        called = True
+        return next_call(payload)
+    try:
+        if not isinstance(args, dict):
+            return next_call(args)
+        try:
+            return _send(args, bound_next, task_id, session_id)
+        except Exception:
+            # Core would run the call itself after a middleware error, outside this binding.
+            if called:
+                raise
+            logger.warning("nv-delivery-redrive: send-side setup failed; passing through", exc_info=True)
+            return next_call(args)
+    finally:
+        reset_current_observability_context(tokens)
+
+
+def _send(args: dict, next_call: Any, task_id: str, session_id: str) -> Any:
     try:
         from hermes_constants import get_hermes_home
 
