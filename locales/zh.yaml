@@ -102,6 +102,7 @@ gateway:
     started: "🔄 后台任务已启动：「{preview}」\n任务 ID：{task_id}\n你可以继续聊天 — 完成后结果将在此显示。"
     task_finished: "✅ 后台任务已完成"
     task_failed: "❌ 后台任务失败"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "退出码 {code}"
     last_output: "。最后输出：\n```\n{tail}\n```"
     rerun_hint: "\n可以让我重新运行它，或显示完整日志。"

@@ -102,6 +102,7 @@ gateway:
     started: "🔄 Attività in background avviata: \"{preview}\"\nID attività: {task_id}\nPuoi continuare a chattare — i risultati appariranno al termine."
     task_finished: "✅ Attività in background terminata"
     task_failed: "❌ Attività in background non riuscita"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "exit {code}"
     last_output: ". Ultimo output:\n```\n{tail}\n```"
     rerun_hint: "\nChiedimi di rieseguirla o di mostrarti il log completo."

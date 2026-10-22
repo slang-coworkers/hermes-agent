@@ -102,6 +102,7 @@ gateway:
     started: "🔄 Tarea en segundo plano iniciada: \"{preview}\"\nID de tarea: {task_id}\nPuedes seguir chateando — los resultados aparecerán aquí cuando terminen."
     task_finished: "✅ Tarea en segundo plano terminada"
     task_failed: "❌ La tarea en segundo plano falló"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "código de salida {code}"
     last_output: ". Última salida:\n```\n{tail}\n```"
     rerun_hint: "\nPídeme reejecutarla o mostrar el registro completo."

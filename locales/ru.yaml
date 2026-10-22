@@ -102,6 +102,7 @@ gateway:
     started: "🔄 Фоновая задача запущена: «{preview}»\nID задачи: {task_id}\nМожно продолжить общение — результаты появятся здесь по завершении."
     task_finished: "✅ Фоновая задача завершена"
     task_failed: "❌ Фоновая задача завершилась с ошибкой"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "код выхода {code}"
     last_output: ". Последний вывод:\n```\n{tail}\n```"
     rerun_hint: "\nПопросите меня перезапустить её или показать полный журнал."
