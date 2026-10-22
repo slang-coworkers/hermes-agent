@@ -968,21 +968,22 @@ async def test_watcher_deferral_never_blocks_the_loop(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path, "concise")
     runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
     beats, deferred_ticks = [], []
+    unpatched_sleep = asyncio.sleep
 
     def on_tick(n):
         deferred_ticks.append(n)
-        if len(beats) >= 5:
+        if n >= 4 and len(beats) >= 5:
             session._completion_event.set()
     _ticking(monkeypatch, on_tick)
 
     async def heartbeat():
         while not session._completion_event.is_set():
             beats.append(len(deferred_ticks))
-            await asyncio.sleep(0)
+            await unpatched_sleep(0)
 
     await asyncio.wait_for(asyncio.gather(runner._run_process_watcher(_agent_watcher()), heartbeat()), timeout=30)
 
-    assert len(beats) >= 5 and len(set(beats)) > 1, beats   # beats interleaved with several deferred ticks
+    assert len(deferred_ticks) >= 4 and len(beats) >= 5 and len(set(beats)) > 1, (beats, deferred_ticks)
     runner._enqueue_process_completion_notification.assert_awaited_once()
 
 

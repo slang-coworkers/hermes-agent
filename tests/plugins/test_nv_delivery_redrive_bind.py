@@ -1,7 +1,7 @@
 """nv-delivery-redrive's per-call hook identity (ADR D5a.5): the ``tool_execution`` middleware binds a ``tool_call_id``
 around ``next_call`` so each delivery runner's completion transform gets its own hook gate key, and the drainer's own
 re-drives never enter core's registry. Each test loads the plugin through the acceptance test's ``fleet`` fixture
-(real discovery, real middleware chain).
+(real discovery); the id tests call the loaded middleware directly, the drainer test runs a real send and re-drive.
 """
 
 from __future__ import annotations
