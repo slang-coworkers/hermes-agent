@@ -60,6 +60,10 @@ _FAKE_TARGET = textwrap.dedent('''\
     with open({pidlog!r}, "a", encoding="utf-8") as f:
         f.write(json.dumps({{"profile": profile, "pid": os.getpid()}}) + "\\n")
     time.sleep(spec.get("pre", 0.1))
+    if spec.get("hold") and os.path.exists(spec["hold"]):
+        open(spec["hold"] + ".in", "w", encoding="utf-8").close()
+        while os.path.exists(spec["hold"]):
+            time.sleep(0.05)
     if spec.get("mode") == "not_owned":
         print("hermes-refusal-reason: SESSION_NOT_OWNED", file=sys.stderr)
         sys.exit(1)
@@ -364,6 +368,19 @@ def _target_pids(fleet):
     return [int(json.loads(line)["pid"]) for line in fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()]
 
 
+def _pidlog_profiles(fleet):
+    """Every profile a fake target CLI logged, in start order (written once it has read its spec)."""
+    if not fleet.pidlog.exists():
+        return []
+    return [json.loads(line)["profile"] for line in fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()]
+
+
+def _spec_read(fleet, started):
+    """Whether a target CLI sent after ``started`` TARGET pidlog lines has read its spec. A reconfigure is safe only then:
+    the CLI's process (``_has_query_child``) exists before its ``json.load``, so an earlier reconfigure can reach it."""
+    return _pidlog_profiles(fleet).count(TARGET) > started
+
+
 def _alive(pid):
     import psutil
 
@@ -371,6 +388,42 @@ def _alive(pid):
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
+
+
+def _has_query_child(runner):
+    """Whether the runner has started its target CLI. A process that exits mid-scan, reaped or not, is skipped: psutil
+    raises NoSuchProcess (ZombieProcess is one) for it, and that means "not this one", never a failed wait."""
+    import psutil
+
+    try:
+        children = runner.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return False
+    for child in children:
+        try:
+            if "--query-file" in " ".join(child.cmdline()):
+                return True
+        except psutil.NoSuchProcess:
+            continue
+    return False
+
+
+def _kill(runner, *, tree=True):
+    """SIGKILL the runner (after its descendants, with ``tree``). A process that has already exited is as good as
+    killed; any other error still raises."""
+    import psutil
+
+    procs = [runner]
+    if tree:
+        try:
+            procs = runner.children(recursive=True) + procs
+        except psutil.NoSuchProcess:
+            pass
+    for proc in procs:
+        try:
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
 
 
 def _busy(fleet, profile=TARGET):
@@ -497,13 +550,12 @@ def _kill_before_row(fleet, body):
     import psutil
 
     fleet.configure(TARGET, pre=5.0)
+    started = _pidlog_profiles(fleet).count(TARGET)
     ack = fleet.send(body)
     runner = psutil.Process(fleet.registry.get(ack["process_id"]).pid)
-    assert fleet.until(lambda: any("--query-file" in " ".join(c.cmdline()) for c in runner.children(recursive=True)),
-                       ticks=False, timeout=10.0)
+    assert fleet.until(lambda: _spec_read(fleet, started), ticks=False, timeout=30.0)
     fleet.configure(TARGET, pre=0.1)
-    for proc in runner.children(recursive=True) + [runner]:
-        proc.kill()
+    _kill(runner)
     _wait_runner_done(fleet, ack["process_id"])
     return ack
 
@@ -588,13 +640,12 @@ def test_ac_fleet_f62_h_3(fleet, shape):
 
     if shape == "killed_before_row_then_identical":
         fleet.configure(TARGET, pre=5.0)
+        started = _pidlog_profiles(fleet).count(TARGET)
         first = fleet.send("status? PAYLOAD_H3")
         runner = psutil.Process(fleet.registry.get(first["process_id"]).pid)
-        assert fleet.until(lambda: any("--query-file" in " ".join(c.cmdline()) for c in runner.children(recursive=True)),
-                           ticks=False, timeout=10.0)
+        assert fleet.until(lambda: _spec_read(fleet, started), ticks=False, timeout=30.0)
         fleet.configure(TARGET, pre=0.1)
-        for proc in runner.children(recursive=True) + [runner]:
-            proc.kill()                                  # dies in the pre-row sleep: no row, no recorded outcome
+        _kill(runner)                                    # dies in the pre-row sleep: no row, no recorded outcome
         _wait_runner_done(fleet, first["process_id"])
         fleet.tick()                                     # observed over (its window closes) before the second send
         second = fleet.send("status? PAYLOAD_H3")       # identical content, own window
@@ -608,12 +659,12 @@ def test_ac_fleet_f62_h_3(fleet, shape):
     if shape == "late_row_identical_exit0_unpersisted":
         fleet.settings(redrive_window_seconds=12)
         fleet.configure(TARGET, pre=3.0)
+        started = _pidlog_profiles(fleet).count(TARGET)
         first = fleet.send("status? PAYLOAD_H3")
         runner = psutil.Process(fleet.registry.get(first["process_id"]).pid)
-        assert fleet.until(lambda: any("--query-file" in " ".join(c.cmdline()) for c in runner.children(recursive=True)),
-                           ticks=False, timeout=10.0)
+        assert fleet.until(lambda: _spec_read(fleet, started), ticks=False, timeout=30.0)
         fleet.configure(TARGET, mode="exit0_unpersisted", pre=0.1)
-        runner.kill()                                    # orphaned target writes its row later; its outcome is lost
+        _kill(runner, tree=False)                        # orphaned target writes its row later; its outcome is lost
         _wait_runner_done(fleet, first["process_id"])
         second = fleet.send("status? PAYLOAD_H3")       # overlapping window; exits 0 without persisting
         _wait_runner_done(fleet, second["process_id"])
@@ -641,13 +692,12 @@ def test_ac_fleet_f62_h_3(fleet, shape):
         assert len(fleet.attempts(did)) == 1, fleet.attempts(did)
     elif shape == "row_then_killed":
         assert fleet.until(lambda: len(fleet.rows(TARGET, "PAYLOAD_H3")) == 1, ticks=False, timeout=20.0)
-        for proc in runner.children(recursive=True) + [runner]:
-            proc.kill()
+        _kill(runner)
         fleet.tick(2, pause=0.5)
     else:
-        assert fleet.until(lambda: any("--query-file" in " ".join(c.cmdline()) for c in runner.children(recursive=True)),
+        assert fleet.until(lambda: _has_query_child(runner),
                            ticks=False, timeout=10.0)
-        runner.kill()                                    # SIGKILL the runner only: the target CLI is orphaned
+        _kill(runner, tree=False)                        # SIGKILL the runner only: the target CLI is orphaned
         fleet.tick(3, pause=0.5)                         # orphan still before its row: no re-drive may start
         assert any(_alive(p) for p in _target_pids(fleet)) and fleet.rows(TARGET, "PAYLOAD_H3") == []
         assert len(fleet.attempts(did)) == 1, fleet.attempts(did)
@@ -739,22 +789,34 @@ def test_ac_fleet_f62_h_6(fleet, case):
         import psutil
         from hermes_cli import middleware
 
-        fleet.configure(TARGET, pre=4.0)
-        first = fleet.send("status? PAYLOAD_H6_FIRST")
-        runner = psutil.Process(fleet.registry.get(first["process_id"]).pid)
-        assert fleet.until(lambda: any("--query-file" in " ".join(c.cmdline()) for c in runner.children(recursive=True)),
-                           ticks=False, timeout=10.0)
-        fleet.configure(TARGET, pre=0.1)                 # the orphan already read its spec: still 4 s before its row
-        runner.kill()                                    # releases the runner-held flock; the target CLI lives on
-        _wait_runner_done(fleet, first["process_id"])
-        second = fleet.send("status? PAYLOAD_H6_SECOND")
-        _wait_runner_done(fleet, second["process_id"])
+        strict = "tool_dispatch" in middleware.VALID_MIDDLEWARE          # Option S holds the second send
+        # The orphan is held for as long as the second message takes under load; its ticket's bound must outlast that.
+        fleet.settings(redrive_window_seconds=600)
+        hold = fleet.state_dir / "orphan.hold"
+        hold.write_text("", encoding="utf-8")
+        fleet.configure(TARGET, pre=0.1, hold=str(hold))
+        try:
+            first = fleet.send("status? PAYLOAD_H6_FIRST")
+            runner = psutil.Process(fleet.registry.get(first["process_id"]).pid)
+            assert fleet.until(lambda: TARGET in _pidlog_profiles(fleet) and Path(f"{hold}.in").exists(),
+                               ticks=False, timeout=60.0)
+            fleet.configure(TARGET, pre=0.1)             # the orphan read its spec with the hold; later CLIs never wait
+            _kill(runner, tree=False)                    # releases the runner-held flock; the target CLI lives on
+            _wait_runner_done(fleet, first["process_id"])
+            if strict:
+                hold.unlink()                            # Option S holds the second send until the first resolves
+            second = fleet.send("status? PAYLOAD_H6_SECOND")
+            _wait_runner_done(fleet, second["process_id"])
+            if not strict:                               # the second row lands while the orphan is still held
+                assert fleet.until(lambda: len(fleet.rows(TARGET, "PAYLOAD_H6_SECOND")) == 1, ticks=False,
+                                   timeout=60.0)
+        finally:
+            hold.unlink(missing_ok=True)
         ids = (first["delivery_id"], second["delivery_id"])
         assert fleet.until(lambda: all(fleet.ticket(d)["state"] == "settled" for d in ids), timeout=60.0)
         one, two = fleet.rows(TARGET, "PAYLOAD_H6_FIRST"), fleet.rows(TARGET, "PAYLOAD_H6_SECOND")
         assert len(one) == 1 and len(two) == 1, (one, two)
         assert all(len(fleet.attempts(d)) == 1 for d in ids)
-        strict = "tool_dispatch" in middleware.VALID_MIDDLEWARE          # Option S holds the second send
         assert (one[0]["id"] < two[0]["id"]) is strict, (one, two)
         return
     body_one = "status? PAYLOAD_H6_FIRST"
@@ -1328,7 +1390,11 @@ def _assert_unverified_end(fleet, did, body_needle, *, target_readable=True):
                                   "commit_late_then_row", "cli", "hook_timeout_external", "stall_before_bind",
                                   "stale_prebind", "slow_spawn", "overlap_ordinary", "overlap_retarget",
                                   "overlap_retarget_real", "overlap_retarget_real_bind_during_poll",
-                                  "clock_rollback", "inflight_insert_fail", "inflight_insert_fail_after_return"])
+                                  "clock_rollback", "inflight_insert_fail", "inflight_insert_fail_after_return",
+                                  "concurrent_transforms", "live_same_runner_collision", "live_prune_during_publish",
+                                  "residual_deferred_watcher",
+                                  "residual_busy_tail", "residual_idless_kill", "residual_post_timeout",
+                                  "residual_worker_cap", "residual_worker_start"])
 def test_ac_fleet_f62_h_17(fleet, case, request, monkeypatch):
     """(E5, user ruling msg 120) A tracked delivery's settled outcome is never reported as success unless the target's Bot Chat holds the full role='user' row newer than the baseline and claimed by this ticket (D5a). This covers a live receipt settled by an owner whose turn never persisted the row, and a CLI turn that exited 0 with its reply and no row. For a push sender, core's queued completion is rewritten before publication to status: ambiguous with exactly the text "Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. Check the target before considering another send." That holds also when the runner beats the ticket commit, and when the commit lands after the plugin's 10 s wait (then a verified late row gives one final settled sender notice). For a non-push sender, core's raw row comes first (waived), then one correction notice. An identical-content sibling's row never vouches. The ticket ends ambiguous/unknown with one sender and one orchestrator notice."""
     if case == "cli":
@@ -1351,6 +1417,15 @@ def test_ac_fleet_f62_h_17(fleet, case, request, monkeypatch):
         return
     if case == "identical_live":
         _identical_live(fleet)
+        return
+    if case == "concurrent_transforms":
+        _concurrent_transforms(fleet, monkeypatch)
+        return
+    if case in ("live_same_runner_collision", "live_prune_during_publish"):
+        _live_same_runner_collision(fleet, monkeypatch, prune=case == "live_prune_during_publish")
+        return
+    if case.startswith("residual_"):
+        _residual(fleet, monkeypatch, request, case.removeprefix("residual_"))
         return
     if case in ("stall_before_bind", "stale_prebind", "slow_spawn"):
         _stall_before_bind(fleet, monkeypatch, stale=case == "stale_prebind", slow_spawn=case == "slow_spawn")
@@ -1429,6 +1504,331 @@ def _identical_live(fleet):
         assert (fleet.ticket(did)["state"], fleet.ticket(did)["reason"]) == ("ambiguous", "unknown"), fleet.ticket(did)
         assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1)
     assert len(fleet.rows(TARGET, "PAYLOAD_H17_SAME")) == 1
+
+
+def _concurrent_transforms(fleet, monkeypatch):
+    """E11: two tracked live runners whose completion transforms overlap: the first is held inside the plugin until the
+    second has entered. Core keys concurrent calls of one hook callback by the call's id, so each completion must carry
+    its own id; otherwise the second is skipped and core's raw settled is published. Both must be rewritten exactly."""
+    import threading
+
+    from agent.redact import redact_terminal_output
+    from tools import bot_live_delivery as mailbox
+
+    for home in fleet.homes.values():
+        data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig"))
+        data["plugins"]["hook_callback_timeout"] = 120
+        (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    fleet.load()
+    fleet.tick()
+    store = fleet.loaded.module.store
+    real_lookup = store.attempt_by_dm_path
+    lock, entered = threading.Lock(), []
+    armed, second_in, release = threading.Event(), threading.Event(), threading.Event()
+
+    def held(dm_path, *a, **k):
+        # Only the two runners' completion transforms: post_tool_call also runs on a hook worker, during the sends.
+        if armed.is_set() and threading.current_thread().name.startswith("hermes-hook-"):
+            with lock:
+                first = not entered
+                if threading.current_thread().ident not in entered:
+                    entered.append(threading.current_thread().ident)
+                if len(entered) == 2:
+                    second_in.set()
+            if first:
+                assert second_in.wait(timeout=60.0), "the second completion's transform never entered"
+                release.set()
+        return real_lookup(dm_path, *a, **k)
+    monkeypatch.setattr(store, "attempt_by_dm_path", held)
+    home = fleet.homes[TARGET]
+    first, second = fleet.send("status? PAYLOAD_H17_CONC_A"), fleet.send("status? PAYLOAD_H17_CONC_B")
+    owner = mailbox.find_canonical_live_owner(home)
+    armed.set()
+    try:
+        for n, ack in enumerate((first, second)):
+            claim = mailbox.claim_pending_delivery(home, owner)
+            assert claim is not None and claim["delivery_id"] == ack["delivery_id"], (claim, ack)
+            mailbox.complete_delivery(home, ack["delivery_id"], status="settled", reply=f"CONC-{n}")
+        for ack in (first, second):
+            _wait_runner_done(fleet, ack["process_id"], timeout=40.0)
+        for ack in (first, second):
+            assert fleet.until(lambda: fleet.registry.get(ack["process_id"])._completion_event.is_set(), ticks=False,
+                               timeout=90.0)
+    finally:
+        second_in.set()
+    assert release.is_set() and len(entered) == 2, entered
+    for ack in (first, second):
+        session = fleet.registry.get(ack["process_id"])
+        expected = json.dumps({"status": "ambiguous", "reason": "unknown", "delivery_id": ack["delivery_id"],
+                               "to": f"@{TARGET}", "detail": _UNVERIFIED})
+        out = _completion_output(fleet, ack["process_id"])
+        assert out == redact_terminal_output(expected, session.command), (out, expected)
+    for ack, needle in ((first, "PAYLOAD_H17_CONC_A"), (second, "PAYLOAD_H17_CONC_B")):
+        _assert_unverified_end(fleet, ack["delivery_id"], needle)
+
+
+class _GatewayWatcherRig:
+    """A real GatewayRunner whose event loop runs on a thread, with a bound messaging session. A runner spawned inside a
+    send then gets core's live watcher (tools/terminal_tool_background.py:197-202); every completion the watcher would
+    hand the sender agent is captured."""
+
+    def __init__(self, fleet, monkeypatch):
+        import asyncio
+        import threading
+        from types import SimpleNamespace as NS
+        from unittest.mock import AsyncMock
+
+        import gateway.run as gateway_run
+        from gateway.config import GatewayConfig, Platform
+        from gateway.session_context import set_session_vars
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", fleet.root)
+        self.loop = asyncio.new_event_loop()
+        self.injected, self.sent = [], []
+        self.runner = gateway_run.GatewayRunner(GatewayConfig())
+        self.session_key = "agent:main:telegram:dm:123"
+        self.adapter = NS(send=AsyncMock(side_effect=lambda *a, **k: self.sent.append(a[1])),
+                          handle_message=AsyncMock(), _active_sessions={})
+        self.runner.adapters[Platform.TELEGRAM] = self.adapter
+
+        async def _capture(synth_text, evt):
+            self.injected.append((synth_text, evt))
+            return True
+        self.runner._enqueue_process_completion_notification = _capture
+        self.runner._running, self.runner._gateway_loop = True, self.loop
+        monkeypatch.setattr(gateway_run, "_gateway_runner_ref", lambda: self.runner)
+        self.thread = threading.Thread(target=self.loop.run_forever, name="f62h-gateway-loop", daemon=True)
+        self.thread.start()
+        self.tokens = set_session_vars(platform="telegram", chat_id="123", session_key=self.session_key)
+
+    def close(self):
+        from gateway.session_context import clear_session_vars
+
+        clear_session_vars(self.tokens)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=10)
+
+    def injected_for(self, process_id):
+        return [text for text, evt in self.injected if evt.get("session_id") == process_id]
+
+    def start_sender(self, fleet, body, acks):
+        """The send runs on its own thread inside this rig's bound session context (threads do not inherit it)."""
+        import contextvars
+        import threading
+
+        thread = threading.Thread(target=contextvars.copy_context().run,
+                                  args=(lambda: acks.append(fleet.send(body)),), daemon=True)
+        thread.start()
+        return thread
+
+    def run_deferred(self, process_id):
+        """Start the one watcher core parked in ``pending_watchers`` the way its post-turn drain does: on the loop, from
+        a context with no bound call id (gateway/run_turn.py:1666-1671)."""
+        import asyncio
+
+        from tools.process_registry import process_registry as registry
+
+        mine = [w for w in registry.pending_watchers if w.get("session_id") == process_id]
+        assert len(mine) == 1, registry.pending_watchers
+        registry.pending_watchers = [w for w in registry.pending_watchers if w.get("session_id") != process_id]
+        self.runner._running = True
+        asyncio.run_coroutine_threadsafe(self.runner._run_process_watcher(mine[0]), self.loop)
+
+
+def _live_same_runner_collision(fleet, monkeypatch, *, prune=False):
+    """E11 (vi): in a gateway, core's live watcher hands the sender agent its own transform of the runner's output, under
+    the same bound id as the reader's transform. With the reader's transform held in the plugin's 10 s wait (the
+    fail-closed case), the watcher must wait for the reader's publish, so the plugin's rewrite reaches the sender.
+    ``prune`` (E11.1): while that publish is held, another spawn prunes the registry with the runner older than the
+    finished-session TTL; the unpublished session must stay registered rather than be dropped or reloaded."""
+    import sys
+    import threading
+
+    from tools import process_registry as pr_mod
+
+    store = fleet.loaded.module.store
+    real_commit, gate = store.commit_ticket, threading.Event()
+    real_publish, published = fleet.registry._publish_finished, threading.Event()
+
+    def held_commit(*a, **k):
+        assert gate.wait(timeout=120), "commit gate never released"
+        return real_commit(*a, **k)
+
+    def held_publish(session, *a, **k):
+        if "--run-delivery" in session.command:
+            assert published.wait(timeout=120), "publish gate never released"
+        return real_publish(session, *a, **k)
+    monkeypatch.setattr(store, "commit_ticket", held_commit)
+    if prune:
+        monkeypatch.setattr(fleet.registry, "_publish_finished", held_publish)
+    else:
+        published.set()
+    rig = _GatewayWatcherRig(fleet, monkeypatch)
+    acks, sender = [], None
+    try:
+        sender = rig.start_sender(fleet, "status? PAYLOAD_H17_GWLIVE", acks)
+        assert fleet.until(lambda: _runner_of(fleet) is not None
+                           and _admissions(fleet.homes[TARGET], "PAYLOAD_H17_GWLIVE"), ticks=False, timeout=30.0)
+        session = _runner_of(fleet)
+        fleet.until(lambda: session.watcher_platform, ticks=False, timeout=10.0)  # core stamps it after registering
+        assert session.watcher_platform == "telegram", "no live gateway watcher was armed"
+        did = _admissions(fleet.homes[TARGET], "PAYLOAD_H17_GWLIVE")[0]["delivery_id"]
+        _settle_without_row(fleet, did)
+        assert fleet.until(lambda: session.exited, ticks=False, timeout=40.0)
+        if prune:
+            assert fleet.until(lambda: session.id in fleet.registry._finished, ticks=False, timeout=40.0)
+            assert not session._completion_event.is_set(), "the publish was not held"
+            # A TTL of 0 ages the runner without touching started_at, which its completion event carries.
+            with patch.object(pr_mod, "FINISHED_TTL_SECONDS", 0):
+                other = fleet.registry.spawn_local(f"{shlex.quote(sys.executable)} -c pass", task_id="f62h-prune")
+            assert fleet.registry._finished.get(session.id) is session, "an unpublished session was pruned"
+            assert fleet.registry.get(session.id) is session, "the watcher would read a reloaded copy"
+            assert not session._completion_event.is_set() and not rig.injected_for(session.id), "prune missed the hold"
+            assert fleet.until(lambda: other.exited, ticks=False, timeout=30.0)
+            published.set()
+        assert fleet.until(lambda: rig.injected_for(session.id), ticks=False, timeout=60.0), "watcher never injected"
+    finally:
+        gate.set()
+        published.set()
+        if sender is not None:
+            sender.join(timeout=120)
+        rig.close()
+    texts = rig.injected_for(session.id)
+    assert len(texts) == 1, texts
+    assert _UNVERIFIED in texts[0] and '"status": "ambiguous"' in texts[0], texts[0]
+    assert '"status": "settled"' not in texts[0] and "UNPERSISTED-H17" not in texts[0], texts[0]
+    assert session._completion_event.is_set()
+    assert not any("outcome is unknown" in str(m) for m in rig.sent), rig.sent
+    _assert_unverified_end(fleet, did, "PAYLOAD_H17_GWLIVE")
+
+
+def _hold_idless_transform(fleet, monkeypatch, release, *, name="holder", tool_call_id=""):
+    """Run one call of the plugin's transform through core on a thread with NO bound call id (or ``tool_call_id``), and
+    hold it inside the plugin until ``release`` is set: the competing call that makes core skip a later one."""
+    import contextvars
+    import threading
+
+    from tools.approval_context import set_current_observability_context
+    from tools.process_registry import transform_process_output
+
+    dm = str(fleet.dm_dir / f"{name}.dm")
+    cmd = fleet.bot_mode_dm._delivery_command([str(fleet.fake), "-p", TARGET, *fleet.bot_relay.BOT_CHAT_TURN_ARGS], dm,
+                                              stdin_file=False)
+    store = fleet.loaded.module.store
+    real, entered = store.attempt_by_dm_path, threading.Event()
+
+    def held(dm_path, *a, **k):
+        if str(dm_path).endswith(f"{name}.dm"):
+            entered.set()
+            assert release.wait(timeout=240), "holder never released"
+        return real(dm_path, *a, **k)
+    monkeypatch.setattr(store, "attempt_by_dm_path", held)
+
+    def run():
+        if tool_call_id:
+            set_current_observability_context(tool_call_id=tool_call_id)
+        transform_process_output('{"status": "settled", "delivery_id": "holder"}', command=cmd, returncode=0)
+    thread = threading.Thread(target=contextvars.Context().run, args=(run,), daemon=True)
+    thread.start()
+    assert entered.wait(timeout=30), "the holder never entered the plugin"
+    return thread
+
+
+def _hold_reader_finish(fleet, monkeypatch, gate):
+    """Keep the runner's reader from finishing (it has read the whole output, `settled` line included) until ``gate``."""
+    real = fleet.registry._finish_exited
+
+    def held(session, *a, **k):
+        if "--run-delivery" in session.command:
+            assert gate.wait(timeout=240), "reader gate never released"
+        return real(session, *a, **k)
+    monkeypatch.setattr(fleet.registry, "_finish_exited", held)
+
+
+def _assert_backstop(fleet, ack, needle):
+    """The named-residual backstop for a tracked ticket still unverified at a drainer tick: ambiguous/unknown, exactly one
+    correction to the sender and one to the orchestrator, and no resend."""
+    _assert_unverified_end(fleet, ack["delivery_id"], needle)
+    assert len(fleet.attempts(ack["delivery_id"])) == 1, fleet.attempts(ack["delivery_id"])
+
+
+def _residual(fleet, monkeypatch, request, path):
+    """Assert each named residual exposes raw settled on its actual surface, then reaches the conditional backstop."""
+    import threading
+
+    release, reader_gate = threading.Event(), threading.Event()
+    needle = f"PAYLOAD_H17_RES_{path.upper()}"
+    rig = None
+    try:
+        if path in ("post_timeout", "worker_cap"):
+            for home in fleet.homes.values():
+                data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig"))
+                data["plugins"]["hook_callback_timeout"] = 2
+                (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+            fleet.load()
+            fleet.tick()
+        if path == "post_timeout":
+            _hold_idless_transform(fleet, monkeypatch, release)
+            time.sleep(3.0)                               # the holder outlived the 2 s bound: callback-wide suppression
+        elif path == "worker_cap":
+            fleet.manager._hook_timeout_suppression_seconds = 0.5
+            for n in range(3):
+                _hold_idless_transform(fleet, monkeypatch, release, name=f"holder{n}", tool_call_id=f"cap-{n}")
+                time.sleep(3.0)
+        if path in ("deferred_watcher", "busy_tail"):
+            rig = _GatewayWatcherRig(fleet, monkeypatch)
+            rig.runner._running = False                   # not serving at spawn: core parks the watcher
+        if path in ("idless_kill", "busy_tail"):
+            _hold_reader_finish(fleet, monkeypatch, reader_gate)
+        acks = []
+        if rig is not None:
+            rig.start_sender(fleet, f"status? {needle}", acks).join(timeout=120)
+        else:
+            acks.append(fleet.send(f"status? {needle}"))
+        ack = acks[0]
+        assert ack.get("redrive", {}).get("tracked") is True, ack
+        if path in ("deferred_watcher", "idless_kill", "busy_tail"):
+            _hold_idless_transform(fleet, monkeypatch, release)
+        refused = []
+        if path == "worker_start":
+            import hermes_cli.plugins_dispatch as dispatch
+
+            real_thread = dispatch.threading.Thread
+
+            class _NoStart(real_thread):
+                def start(self):
+                    if self.name.startswith("hermes-hook-"):
+                        refused.append(self.name)
+                        raise RuntimeError("can't start new thread (test)")
+                    return super().start()
+            monkeypatch.setattr(dispatch.threading, "Thread", _NoStart)
+        _settle_without_row(fleet, ack["delivery_id"])
+        session = fleet.registry.get(ack["process_id"])
+        if path in ("idless_kill", "busy_tail"):
+            assert fleet.until(lambda: '"status": "settled"' in session.output_buffer, ticks=False, timeout=40.0)
+            fleet.registry.kill_all(fleet.task_id, source="f62h-residual", consume_output=False)
+        assert fleet.until(session._completion_event.is_set, ticks=False, timeout=60.0)
+        if path in ("deferred_watcher", "busy_tail"):
+            if path == "busy_tail":                       # a still-running launching turn makes core send the receipt
+                rig.adapter._active_sessions = {rig.session_key: object()}
+            rig.run_deferred(session.id)
+            assert fleet.until(lambda: rig.injected_for(session.id), ticks=False, timeout=60.0)
+            exposed = rig.injected_for(session.id)[0]
+            if path == "busy_tail":
+                assert fleet.until(lambda: rig.sent, ticks=False, timeout=30.0)
+                exposed = rig.sent[-1]                    # the chat receipt itself carries the tail on a nonzero exit
+        else:
+            exposed = _completion_output(fleet, ack["process_id"])
+        if path == "worker_start":
+            monkeypatch.setattr(dispatch.threading, "Thread", real_thread)
+            assert refused, "no hook worker start was refused"
+        assert '"status": "settled"' in exposed, exposed
+    finally:
+        release.set()
+        reader_gate.set()
+        if rig is not None:
+            rig.close()
+    _assert_backstop(fleet, ack, needle)
 
 
 def _runner_of(fleet):
