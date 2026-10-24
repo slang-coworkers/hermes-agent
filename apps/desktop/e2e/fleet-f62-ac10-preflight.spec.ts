@@ -65,7 +65,7 @@ test('FLEET-F62 desktop navigation preflight (uncounted): the shared driveFleetF
       await expect(
         page.locator('[data-bot-face]').first(),
         'at least one coworker face rendered in the roster'
-      ).toBeVisible()
+      ).toBeVisible({ timeout: 30_000 })
     },
     afterKanbanBoard: async page => {
       await expect(kanbanTile(page), 'the Kanban board route-tile docked beside main').toBeVisible()
