@@ -323,6 +323,8 @@ FORK_CI_CONTRIBUTORS = {
 OLD_GATED_LINES = {
     ("apps/desktop/e2e/fleet-f62-ac10.helpers.ts", "    window.location.hash = '/settings?tab=plugins'"):
         ("    window.location.hash = '/capabilities?tab=plugins'", "E14"),
+    ("apps/desktop/e2e/fleet-f62-ac10-preflight.spec.ts", "      ).toBeVisible()"):
+        ("      ).toBeVisible({ timeout: 30_000 })", "E14.1"),
 }
 TIMEOUT_LINE = re.compile(r"^(\s+timeout-minutes: )\d+(\s*)$")
 JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
@@ -1129,8 +1131,8 @@ def main():
                     r[0].add(before.strip())
                     r[1].add(after.strip())
     for (p, before), (after, auth) in OLD_GATED_LINES.items():
-        head_lines = text_at(repo, revs["head"], p).splitlines()
-        if before not in text_at(repo, revs["c1"], p).splitlines() or before in head_lines or head_lines.count(after) != 1:
+        c1_lines, head_lines = text_at(repo, revs["c1"], p).splitlines(), text_at(repo, revs["head"], p).splitlines()
+        if c1_lines.count(before) - head_lines.count(before) != 1 or head_lines.count(after) != 1:
             fails.append(f"OLD-GATED LINE {p}: the {auth} pair must be a C1 line, replaced once by its pinned form")
         r = rec.setdefault(p, (set(), set()))
         r[0].add(before.strip())
