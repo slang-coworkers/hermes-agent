@@ -27,7 +27,7 @@ M	apps/desktop/e2e/chat.spec.ts	old-gated	M	H5
 A	apps/desktop/e2e/cost-f30-ac7.spec.ts	in-surface	R	H5			item-5
 M	apps/desktop/e2e/fixtures.ts	old-gated	M	H5			
 A	apps/desktop/e2e/fixtures.unit.test.ts	old-gated	R	H5			
-A	apps/desktop/e2e/fleet-f62-ac10-preflight.spec.ts	old-gated	R	H5			
+A	apps/desktop/e2e/fleet-f62-ac10-preflight.spec.ts	old-gated	R	H5			item-5
 A	apps/desktop/e2e/fleet-f62-ac10.helpers.ts	old-gated	R	H5			item-5
 A	apps/desktop/e2e/fleet-f62-ac10.helpers.unit.test.ts	old-gated	R	H5			
 A	apps/desktop/e2e/fleet-f62-ac10.spec.ts	in-surface	R	H5			item-5
@@ -539,7 +539,7 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post
 A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L1039	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L1041	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
