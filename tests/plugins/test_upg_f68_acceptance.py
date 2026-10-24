@@ -1225,6 +1225,8 @@ def test_ac_upg_f68_20(request, case):
             assert world.until(lambda: any("--query-file" in " ".join(c.cmdline())
                                            for c in runner.children(recursive=True)), ticks=False, timeout=10.0)
             runner.kill()                                 # attempt 1 lost its outcome; only its orphaned writer lives
+        else:
+            assert world.until(lambda: _f62h._target_pids(world), ticks=False, timeout=20.0)
         world.tick(4, pause=0.5)                          # the re-drive owner decides on this id during the acceptance
         assert any(_f62h._alive(p) for p in _f62h._target_pids(world)), "the acceptance must still be in flight"
         assert world.rows(_f62h.TARGET, body) == [], "the acceptance must come late"
@@ -1242,6 +1244,9 @@ def test_ac_upg_f68_20(request, case):
         assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=40.0)
         t = world.ticket(did)
         assert (t["state"], t["reason"]) == ("ambiguous", "unknown"), t
+        # Attempt 1 lands after the bound; end once it has (as AC-FLEET-F62.h-13 does), so teardown never kills a live tree.
+        assert world.until(lambda: (pids := _f62h._target_pids(world)) and not any(_f62h._alive(p) for p in pids),
+                           ticks=False, timeout=30.0)
         return
     world.settings(redrive_window_seconds=12)
     with _f62h._busy(world):
