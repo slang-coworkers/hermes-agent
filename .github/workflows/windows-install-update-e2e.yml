@@ -48,8 +48,13 @@ concurrency:
 
 jobs:
   install-update:
-    name: Windows install.ps1 + hermes update E2E
+    name: Windows install.ps1 + hermes update E2E (${{ matrix.slice }}/2)
     runs-on: windows-latest
+    # Each slice gets its own runner disk: journeys never remove their fake profiles, and ten fill a standard runner's C:.
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2]
     # A typical run is ~17 min; one slow runner took 28 min for the same work (run 36295230146).
     timeout-minutes: 150
     steps:
@@ -86,6 +91,7 @@ jobs:
           HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
           # Bound concurrent fake profiles to limit peak C: disk pressure.
           HERMES_TEST_WORKERS: '2'
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/2
           # test_crash_cells.py runs its whole journey (install, gateway phase, six crash cells)
           # inside one file: ~2,100 s on a normal runner, past 2,400 s on a slow one.
           HERMES_TEST_FILE_TIMEOUT: '3600'
@@ -95,6 +101,7 @@ jobs:
           NOUS_API_KEY: ''
 
       - name: Every crash cell ran
+        if: matrix.slice == 1  # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1
         # run_tests.sh passes a file whose tests were all deselected (pytest exit 5) or skipped,
         # so a lost marker or opt-in would run zero crash cells green. The crash journey writes
         # this manifest only when it ran (tests/e2e/core/windows_update/test_crash_cells.py).
@@ -112,7 +119,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-install-update-e2e-${{ github.run_attempt }}
+          name: windows-install-update-e2e-${{ matrix.slice }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/win-update-e2e
           if-no-files-found: ignore
           retention-days: 14
