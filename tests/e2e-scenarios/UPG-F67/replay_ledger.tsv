@@ -1,0 +1,171 @@
+# path	stripped fork-added line (d0402936)	tag relocation anchor (v2026.9.24 file:line; validated by replay_check.py)	disposition (not read by replay_check.py): c2:<file:line @C2 f602f80b4a> carries it | tag-model:<file:line @C2 f602f80b4a> the v2026.9.24 mechanism used there replaced it | superset:<file:line @v2026.9.24> | excluded:<ruling>
+apps/desktop/e2e/fixtures.ts	${autoTitleDefault}${displaySection}${extraConfig ? `\n${extraConfig.trim()}\n` : ''}`	apps/desktop/e2e/fixtures.ts:219	superset:apps/desktop/e2e/fixtures.ts:219
+gateway/kanban_watchers.py	"_d_platform = (sub.get(""platform"") or """").lower()"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"if (sub.get(""retry_policy"") or ""default"").lower() == ""durable"":"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# Durable path (generic — keyed on the	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# policy, never the platform): PEEK (never	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# pre-advance) and bypass the local-adapter	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# owner skip below (a secondary api_server	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# owner has no local adapter). Delivery	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# preserves the sub's transport — self-post	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# for api_server, push wake otherwise — and	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	# never drops.	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	if _d_platform not in active_platforms:	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	_new_cursor, _d_events = _kb.unseen_events_for_sub(	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	conn,	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"task_id=sub[""task_id""],"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"platform=sub[""platform""],"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"chat_id=sub[""chat_id""],"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"thread_id=sub.get(""thread_id"") or """","	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	kinds=TERMINAL_KINDS,	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	if not _d_events:	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	deliveries.append({	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""sub"": sub,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""old_cursor"": sub.get(""last_event_id"") or 0,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""cursor"": _new_cursor,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""events"": _d_events,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""task"": _kb.get_task(conn, sub[""task_id""]),"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""board"": slug,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"""durable"": True,"	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	})	gateway/kanban_watchers_notifier.py:288	c2:gateway/kanban_watchers_notifier.py:300
+gateway/kanban_watchers.py	"if d.get(""durable""):"	gateway/kanban_watchers_notifier.py:734	c2:gateway/kanban_watchers_notifier.py:766
+gateway/kanban_watchers.py	# Crash-safe per-event peek-then-advance delivery to a	gateway/kanban_watchers_notifier.py:734	c2:gateway/kanban_watchers_notifier.py:766
+gateway/kanban_watchers.py	# (possibly secondary-profile) owner. Self-contained; does	gateway/kanban_watchers_notifier.py:734	c2:gateway/kanban_watchers_notifier.py:766
+gateway/kanban_watchers.py	# not touch the default batch path below.	gateway/kanban_watchers_notifier.py:734	c2:gateway/kanban_watchers_notifier.py:766
+gateway/kanban_watchers.py	await self._deliver_durable_notifications(d)	gateway/kanban_watchers_notifier.py:734	c2:gateway/kanban_watchers_notifier.py:766
+gateway/kanban_watchers.py	"wake_notification = """""	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	"elif kind == ""notification"":"	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	# Generic caller-supplied notification (publish_task_notification):	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	# the payload's free-form message is the delivery body and,	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	# for a wake subscription, is carried into the synthetic turn	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	# below so the woken session sees the actual content.	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	"if ev.payload and ev.payload.get(""message""):"	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	"note = str(ev.payload[""message""])[:500]"	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	wake_notification = note	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	"f""🔔 {board_tag}{tag}Kanban {sub['task_id']} — {note}"""	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	if note	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	"else f""🔔 {board_tag}{tag}Kanban {sub['task_id']} notification"""	gateway/kanban_watchers_notifier.py:459	c2:gateway/kanban_watchers_notifier.py:488
+gateway/kanban_watchers.py	# * push-capable: the text send IS the delivery, so	gateway/kanban_watchers_notifier.py:617	tag-model:gateway/kanban_watchers_notifier.py:837
+gateway/kanban_watchers.py	#   advance immediately; the wake injection below stays	gateway/kanban_watchers_notifier.py:617	tag-model:gateway/kanban_watchers_notifier.py:837
+gateway/kanban_watchers.py	#   best-effort.	gateway/kanban_watchers_notifier.py:617	tag-model:gateway/kanban_watchers_notifier.py:837
+gateway/kanban_watchers.py	"""block_loop_detected"", ""notification"","	gateway/kanban_watchers_notifier.py:39	c2:gateway/kanban_watchers_notifier.py:39
+gateway/kanban_watchers.py	# Carry a generic notification's free-form message into	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	# the wake turn inline (no i18n key — the content is the	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	# caller's, not a fixed status string).	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	if wake_notification:	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	"_synth += ""\n"" + wake_notification"	gateway/kanban_watchers_notifier.py:560	c2:gateway/kanban_watchers_notifier.py:617
+gateway/kanban_watchers.py	advances to that event id ONLY after ``deliver_wake`` succeeds — a	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	profile-scoped api_server self-post that confirmed the persist ack (it	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	raises otherwise), deduped by a stable ``(repo#pr, delivery-id)``	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	Idempotency-Key. Confirmable durable delivery exists only for the	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	api_server transport (its self-post carries the persist ack); a durable	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	sub on any other (push) transport is retained and alerted rather than	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	advanced on a fire-and-forget wake. A failure stops at that event	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	(cursor contiguity), applies capped backoff, and NEVER deletes the sub;	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	the next tick retries from here.	gateway/kanban_watchers.py:40	c2:gateway/kanban_watchers.py:238
+gateway/kanban_watchers.py	# Resolve the OWNER's adapter. api_server delivery is profile-scoped by	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# owner_profile on the self-post, not by the adapter, so a secondary	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# api_server owner with no adapter of its own is reached via the shared	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# api_server adapter; a push transport's adapter, by contrast, IS the	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# profile identity, so it is NEVER allowed to fall back to the default	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# adapter (that would push to the wrong profile — the fail-closed profile	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	# resolution invariant, gateway/authz_mixin.py).	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	adapter = self._authorization_adapter(plat, owner_profile)	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	if adapter is None and plat == _Platform.API_SERVER:	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	adapter = self.adapters.get(plat)	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	"sub_key, f""no {plat.value} adapter for owner {owner_profile or 'default'}"""	gateway/kanban_watchers_notifier.py:151	tag-model:gateway/kanban_watchers.py:296
+gateway/kanban_watchers.py	owner_profile=owner_profile,	gateway/kanban_watchers_notifier.py:594	tag-model:gateway/kanban_watchers.py:376
+gateway/kanban_watchers.py	conn = _kb.connect(board=board)	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	return _kb.claim_notify_sub_lease(	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	expected_cursor=expected_cursor,	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	token=token,	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	lease_until=lease_until,	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	now=now,	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:158
+gateway/kanban_watchers.py	return _kb.advance_and_release_notify_sub(	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:169
+gateway/kanban_watchers.py	new_cursor=new_cursor,	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:169
+gateway/kanban_watchers.py	_kb.release_notify_sub_lease(	gateway/kanban_watchers.py:123	c2:gateway/kanban_watchers.py:180
+gateway/platforms/api_server.py	import time as _t	gateway/platforms/api_server.py:1022	tag-model:gateway/platforms/api_server.py:1042
+gateway/platforms/api_server.py	"self._store[key] = {""resp"": resp, ""fp"": fingerprint, ""ts"": _t.time()}"	gateway/platforms/api_server.py:1022	tag-model:gateway/platforms/api_server.py:1042
+gateway/platforms/api_server.py	def _cache_if_persisted(r):	gateway/platforms/api_server_openai_routes.py:772	c2:gateway/platforms/api_server_openai_routes.py:524
+gateway/platforms/api_server.py	# A real agent turn always reports turn_persisted (True/False);	gateway/platforms/api_server_openai_routes.py:772	c2:gateway/platforms/api_server_openai_routes.py:524
+gateway/platforms/api_server.py	# caching a missing/None/False result would serve a same-key	gateway/platforms/api_server_openai_routes.py:772	c2:gateway/platforms/api_server_openai_routes.py:524
+gateway/platforms/api_server.py	# durable retry a non-durable answer for the 300s TTL.	gateway/platforms/api_server_openai_routes.py:772	c2:gateway/platforms/api_server_openai_routes.py:524
+gateway/platforms/api_server.py	idempotency_key, fp, _compute_completion,	gateway/platforms/api_server_openai_routes.py:792	c2:gateway/platforms/api_server_openai_routes.py:831
+gateway/wake.py	— the push wake path.	gateway/wake.py:1	tag-model:gateway/wake.py:1
+gateway/wake.py	owner_profile: Optional[str] = None,	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	require_persist_ack: bool = False,	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	``owner_profile`` (keyword-only, defaulted): when set, the non-push	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	self-post targets the EXISTING profile-scoped mirror	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	``POST /p/<owner_profile>/v1/chat/completions`` so the wake resumes a	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	SECONDARY-profile session (whose store the middleware scopes to	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	``profiles/<owner>/state.db``); when ``None`` the unprefixed same-profile	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	``/v1/chat/completions`` is used. ``idempotency_key`` (keyword-only,	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	defaulted): when set, sent as the ``Idempotency-Key`` request header so a	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	same-key retry is deduped by the api_server's in-flight/completed cache.	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	``require_persist_ack`` (keyword-only, defaulted False): when True the	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	non-push self-post treats a 2xx as success ONLY if the response also carries	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	``X-Hermes-Turn-Persisted: true`` (a durable caller opts in); when False a	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	2xx alone is success.	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	Raises on failure (bad arguments, exhausted retries, HTTP error, or — only	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	when ``require_persist_ack`` — a response that does not confirm persistence)	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	so the caller can rewind/retry instead of treating the wake as delivered.	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	_extra: dict = {}	gateway/wake.py:110	c2:gateway/wake.py:120
+gateway/wake.py	if owner_profile is not None:	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"_extra[""owner_profile""] = owner_profile"	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"_extra[""idempotency_key""] = idempotency_key"	gateway/wake.py:110	c2:gateway/wake.py:120
+gateway/wake.py	"_extra[""require_persist_ack""] = require_persist_ack"	gateway/wake.py:110	c2:gateway/wake.py:120
+gateway/wake.py	await _self_post_chat_completion(	gateway/wake.py:110	c2:gateway/wake.py:120
+gateway/wake.py	adapter,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	text=text,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	session_id=session_id,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	**_extra,	gateway/wake.py:110	c2:gateway/wake.py:120
+gateway/wake.py	adapter: Any,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	*,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	text: str,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	session_id: str,	gateway/wake.py:185	c2:gateway/wake.py:199
+gateway/wake.py	When ``owner_profile`` is set the request targets the profile-scoped mirror	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	``/p/<owner_profile>/v1/chat/completions`` (the middleware scopes the	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	session store to that profile's ``state.db``), so a wake can resume a	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	SECONDARY-profile session; otherwise the unprefixed same-profile endpoint	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	is used. When ``require_persist_ack`` is set, a 2xx alone is NOT success —	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	the response must also carry ``X-Hermes-Turn-Persisted: true`` (a	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	server-generated ack that the target profile's final turn actually	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	committed); a missing / malformed / ``false`` ack RAISES so a durable	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	caller does not treat an unpersisted turn as delivered. When it is unset	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	(the default), a 2xx is success as before.	gateway/wake.py:91	c2:gateway/wake.py:91
+gateway/wake.py	# Profile-scoped mirror resumes a secondary-profile session; owner_profile	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	# None targets the unprefixed same-profile endpoint.	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"path = ""/v1/chat/completions"""	gateway/wake.py:221	tag-model:gateway/wake.py:250
+gateway/wake.py	if owner_profile:	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"path = f""/p/{owner_profile}{path}"""	gateway/wake.py:200	excluded:decision 1 / WP-D1 — the /p/<owner>/ HTTP mirror wake does not exist at v2026.9.24; a served profile wakes in-process and fails closed with require_persist_ack in WP0
+gateway/wake.py	"url = f""http://{host}:{port}{path}"""	gateway/wake.py:221	tag-model:gateway/wake.py:250
+hermes_cli/kanban_db.py	"if ""retry_policy"" not in notify_cols:"	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	_add_column_if_missing(	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"""kanban_notify_subs"","	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"""retry_policy"","	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"""retry_policy TEXT NOT NULL DEFAULT 'default'"","	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"if ""claimed_by"" not in notify_cols:"	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"conn, ""kanban_notify_subs"", ""claimed_by"", ""claimed_by TEXT"""	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"if ""lease_until"" not in notify_cols:"	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	"conn, ""kanban_notify_subs"", ""lease_until"", ""lease_until INTEGER"""	hermes_cli/kanban_db_connect.py:916	c2:hermes_cli/kanban_db_connect.py:856
+hermes_cli/kanban_db.py	""" delivery_metadata TEXT,"""	hermes_cli/kanban_db_connect.py:1044	c2:hermes_cli/kanban_db_connect.py:1064
+hermes_cli/kanban_db.py	""" created_at INTEGER NOT NULL,"""	hermes_cli/kanban_db_connect.py:1044	c2:hermes_cli/kanban_db_connect.py:1064
+hermes_cli/kanban_db.py	metadata: Optional[dict] = None,	hermes_cli/kanban_db_notify.py:418	c2:hermes_cli/kanban_db_notify.py:560
+hermes_cli/kanban_db.py	"_append_event(conn, task_id, ""notification"", payload)"	hermes_cli/kanban_db_notify.py:418	c2:hermes_cli/kanban_db_notify.py:560
+hermes_cli/kanban_db.py	"insert_retry = retry_policy if retry_policy in _NOTIFY_RETRY_POLICIES else ""default"""	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:158
+hermes_cli/kanban_db.py	insert_retry,	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:158
+hermes_cli/kanban_db.py	if retry_policy in _NOTIFY_RETRY_POLICIES:	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:172
+hermes_cli/kanban_db.py	UPDATE kanban_notify_subs	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:172
+hermes_cli/kanban_db.py	SET retry_policy = ?	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:172
+hermes_cli/kanban_db.py	WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"(retry_policy, task_id, platform, chat_id, thread_id or """"),"	hermes_cli/kanban_db_notify.py:67	c2:hermes_cli/kanban_db_notify.py:172
+hermes_cli/kanban_db.py	"""FROM kanban_notify_subs """	hermes_cli/kanban_db_notify.py:352	c2:hermes_cli/kanban_db_notify.py:411
+hermes_cli/kanban_db.py	"""WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? """	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"""AND last_event_id = ? """	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"""AND LOWER(retry_policy) = 'durable' """	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"""AND (claimed_by IS NULL OR lease_until <= ?)"","	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"(token, int(lease_until), task_id, platform, chat_id, thread_id or """","	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:470
+hermes_cli/kanban_db.py	"""AND last_event_id = ? AND claimed_by = ?"","	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:508
+hermes_cli/kanban_db.py	"(int(new_cursor), task_id, platform, chat_id, thread_id or """","	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:508
+hermes_cli/kanban_db.py	"""AND claimed_by = ?"","	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:535
+hermes_cli/kanban_db.py	"(task_id, platform, chat_id, thread_id or """", token),"	hermes_cli/kanban_db_notify.py:392	c2:hermes_cli/kanban_db_notify.py:535
