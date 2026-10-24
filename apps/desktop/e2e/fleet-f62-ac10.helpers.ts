@@ -274,7 +274,7 @@ async function activateSessions(page: Page): Promise<void> {
  *  switch, bring the Sessions pane forward, then dock the board via the split affordance. */
 async function openKanbanBoard(page: Page): Promise<void> {
   await page.evaluate(() => {
-    window.location.hash = '/settings?tab=plugins'
+    window.location.hash = '/capabilities?tab=plugins'
   })
   const enableKanban = page.getByRole('switch', { name: 'Desktop: Kanban' })
   await expect(enableKanban).toBeVisible({ timeout: 30_000 })

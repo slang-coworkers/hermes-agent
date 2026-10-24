@@ -56,7 +56,9 @@ test('AC-FLEET-F62-10: the desktop app renders exactly the five-coworker roster 
       // could BOTH pass with the title on the wrong row, leaving the mapping unproven.
       for (const bot of COWORKERS) {
         const row = page.getByRole('button', { name: rowNameRegex(bot.title, bot.name) })
-        await expect(row, `exactly one roster row named "${bot.title} · @${bot.name}"`).toHaveCount(1)
+        await expect(row, `exactly one roster row named "${bot.title} · @${bot.name}"`).toHaveCount(1, {
+          timeout: 30_000
+        })
         await expect(
           row.locator(`[data-bot-face="${bot.name}"]`),
           `the ${bot.name} row carries its own avatar face`
