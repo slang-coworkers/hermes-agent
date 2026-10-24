@@ -219,7 +219,7 @@ A	tests/e2e-scenarios/FLEET-F62.a/oracle.py	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62.a/oracle.py#allow:L71	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/SOUL.md	in-surface	R	H5			#77
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/mcp.json	in-surface	R	H5			
@@ -229,14 +229,14 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skills/base-nanocl
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/approver/skills/codex-critique/SKILL.md	in-surface	R	H5			item-4
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/scripts/check_gate.py	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/default/scripts/pr_ci_gate.py	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/SOUL.md	in-surface	R	H5			#77
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/mcp.json	in-surface	R	H5			
@@ -253,7 +253,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/fixer/skills/nv-path-guard-
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/managed/config.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/SOUL.md	in-surface	R	H5			#77
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/mcp.json	in-surface	R	H5			
@@ -265,7 +265,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/orchestrator/skills/supervi
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/provision.dry-run.txt	in-surface	R	H5			#77
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/SOUL.md	in-surface	R	H5			#77
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/mcp.json	in-surface	R	H5			
@@ -277,7 +277,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/nv-gitconfi
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/reviewer/skills/plan/SKILL.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/SOUL.md	in-surface	R	H5			#77
-A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/config.yaml	in-surface	R	H5			#80
+A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/config.yaml	in-surface	R	H5			#80,item-5
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62.c/fixtures/openshell/triager/mcp.json	in-surface	R	H5			
