@@ -64,6 +64,7 @@ M	gateway/platforms/api_server_openai_routes.py#OpenAICompatRoutesMixin._run_ide
 M	gateway/platforms/api_server_openai_routes.py#_cache_if_persisted	core	replay	H5	GOV-F25		
 M	gateway/platforms/api_server_runs.py	core	M	H5	WP-D1		
 M	gateway/platforms/api_server_runs.py#run_internal_session_turn	core	replay	H5	WP-D1		
+M	gateway/run_notifications.py	core	post-C1	#86	FLEET-F62.h		#86
 M	gateway/wake.py	core	M	H5	GOV-F25,GOV-F25.b,WP-D1		
 M	gateway/wake.py#_self_post_chat_completion	core	replay	H5	GOV-F25,WP-D1		
 M	gateway/wake.py#deliver_wake	core	replay	H5	GOV-F25		
@@ -83,6 +84,23 @@ M	hermes_cli/kanban_db_notify.py#publish_task_notification	core	replay	H5	GOV-F2
 M	hermes_cli/kanban_db_notify.py#purge_stale_done_notify_subs	core	replay	H5	GOV-F25		
 M	hermes_cli/kanban_db_notify.py#release_notify_sub_lease	core	replay	H5	GOV-F25		
 M	hermes_cli/providers.py	core	post-C1	item-UA48	UA-48		item-UA48
+M	locales/af.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/ar.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/de.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/en.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/es.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/fr.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/ga.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/hu.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/it.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/ja.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/ko.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/pt.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/ru.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/tr.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/uk.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/zh-hant.yaml	core	post-C1	#86	FLEET-F62.h		#86
+M	locales/zh.yaml	core	post-C1	#86	FLEET-F62.h		#86
 A	plugins/hello/__init__.py	in-surface	R	H5			item-5
 A	plugins/hello/plugin.yaml	in-surface	R	H5			
 A	plugins/nv-approval-ledger/__init__.py	in-surface	R	H5			item-5
@@ -112,7 +130,7 @@ A	plugins/nv-coworker-compose/compose.py	in-surface	R	H5			item-2,#77,#80,item-5
 A	plugins/nv-coworker-compose/compose.py#allow:L1	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/compose.py#allow:L2271	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/compose.py#allow:L3445	in-surface	health-allow	item-5			
-A	plugins/nv-coworker-compose/compose.py#allow:L4158	in-surface	health-allow	item-5			
+A	plugins/nv-coworker-compose/compose.py#allow:L4172	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/compose.py#allow:L902	in-surface	health-allow	item-5			
 A	plugins/nv-coworker-compose/openshell/Dockerfile.worker	in-surface	R	H5			#77,item-6
 A	plugins/nv-coworker-compose/openshell/__init__.py	in-surface	R	H5			
@@ -131,6 +149,14 @@ A	plugins/nv-coworker-compose/plugin.yaml	in-surface	R	H5
 A	plugins/nv-coworker-compose/route_scripts/check_gate.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/route_scripts/pr_ci_gate.py	in-surface	R	H5			
 A	plugins/nv-coworker-compose/tools.py	in-surface	R	H5			
+A	plugins/nv-delivery-redrive/__init__.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/drain.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/notify.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/plugin.yaml	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/probe.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/send.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/settings.py	in-surface	post-C1	#86			#86
+A	plugins/nv-delivery-redrive/store.py	in-surface	post-C1	#86			#86
 A	plugins/nv-fleet-gates/__init__.py	in-surface	R	H5			item-5,item-4
 A	plugins/nv-fleet-gates/aliases.py	in-surface	R	H5			
 A	plugins/nv-fleet-gates/cli.py	in-surface	R	H5			
@@ -282,6 +308,15 @@ A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/workflows/triage-issue/SKILL.md
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-17.md	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-18.md	in-surface	post-C1	#77			#77
 A	tests/e2e-scenarios/FLEET-F62.e/AC-FLEET-F62.e-13.md	in-surface	post-C1	#80			#80,item-3
+A	tests/e2e-scenarios/FLEET-F62.h/AC-FLEET-F62.h-16.md	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/SOUL.md	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/config.yaml	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/distribution.yaml	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/profile.yaml	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/SOUL.md	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/config.yaml	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/distribution.yaml	in-surface	post-C1	#86			#86
+A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/profile.yaml	in-surface	post-C1	#86			#86
 A	tests/e2e-scenarios/FLEET-F62/AC-CRED-F28-2.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-6.md	in-surface	R	H5			
@@ -293,40 +328,40 @@ A	tests/e2e-scenarios/FLEET-F62/AC-ISO-F14-2.md	in-surface	R	H5
 A	tests/e2e-scenarios/FLEET-F62/AC-ISO-F14-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-architect/skill-bundles/architect.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-builder/skill-bundles/builder.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-default/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-orchestrator/skill-bundles/orchestrator.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/mcp.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-reviewer/skill-bundles/reviewer.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/.env.template	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/SOUL.md	in-surface	R	H5			
-A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/config.yaml	in-surface	R	H5			
+A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/config.yaml	in-surface	R	H5			item-5
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/cron/jobs.json	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/distribution.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/FLEET-F62/fixtures/podman/fleet-f62-tester/mcp.json	in-surface	R	H5			
@@ -503,7 +538,7 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post
 A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L937	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L1033	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
@@ -525,8 +560,13 @@ A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/distribution.yaml	in-surfac
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/config.yaml	in-surface	R	H5			
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/distribution.yaml	in-surface	R	H5			
 A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	R	H5			
+M	tests/gateway/test_background_process_notifications.py	in-surface	post-C1	#86			#86
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	R	H5			item-5
+M	tests/gateway/test_child_notice_profile_admission.py	in-surface	post-C1	#86			#86
+M	tests/gateway/test_completion_delivery.py	in-surface	post-C1	#86			#86
+M	tests/gateway/test_completion_session_boundary.py	in-surface	post-C1	#86			#86
 A	tests/gateway/test_gov_f25b_hardening.py	in-surface	R	H5			item-5
+M	tests/gateway/test_internal_event_bypass_pairing.py	in-surface	post-C1	#86			#86
 A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	R	H5			
 A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	R	H5			item-5
 M	tests/gateway/test_plugin_message_injection.py	in-surface	M	H5			item-5
@@ -592,7 +632,7 @@ A	tests/plugins/fixtures/gov-f27/skills/shared-skill/SKILL.md	in-surface	R	H5
 A	tests/plugins/fixtures/gov-f27/spines/base.yaml	in-surface	R	H5			
 A	tests/plugins/fixtures/gov-f27/workflows/hermes-verify/SKILL.md	in-surface	R	H5			
 A	tests/plugins/fixtures/loop-f35/coworker-types.yaml	in-surface	R	H5			
-A	tests/plugins/fixtures/loop-f35/expected.yaml	in-surface	R	H5			
+A	tests/plugins/fixtures/loop-f35/expected.yaml	in-surface	R	H5			item-5
 A	tests/plugins/fixtures/loop-f35/overlays/critique-gate.yaml	in-surface	R	H5			
 A	tests/plugins/fixtures/loop-f35/skills/fix-skill/SKILL.md	in-surface	R	H5			
 A	tests/plugins/fixtures/loop-f35/skills/review-skill/SKILL.md	in-surface	R	H5			
@@ -669,6 +709,7 @@ A	tests/plugins/test_fleet_f62_d_installer_unit.py	in-surface	post-C1	#77			#77,
 A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	post-C1	#77			#77,item-3,item-5
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	post-C1	#80			#80,item-3,item-5
 A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	post-C1	item-4			item-4
+A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	post-C1	#86			#86
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	post-C1	#80			#80,item-3,item-5
 A	tests/plugins/test_gov_f22_guard_catalog_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	R	H5			item-2
@@ -699,10 +740,13 @@ A	tests/plugins/test_nv_coworker_compose_egress_unit.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_coworker_compose_engage_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_coworker_compose_mounts_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_coworker_compose_mounts_unit.py	in-surface	R	H5			item-2
+A	tests/plugins/test_nv_coworker_compose_redrive_wiring.py	in-surface	post-C1	item-5			item-5
 A	tests/plugins/test_nv_coworker_compose_session_driver_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_coworker_compose_session_modes_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_nv_coworker_compose_transport.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_nv_coworker_compose_yaml_compat_unit.py	in-surface	post-C1	item-2			item-2
+A	tests/plugins/test_nv_delivery_redrive_bind.py	in-surface	post-C1	#86			#86
+A	tests/plugins/test_nv_delivery_redrive_safety.py	in-surface	post-C1	#86			#86
 A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	R	H5			item-2,item-5,item-4
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	R	H5			item-2,item-5
@@ -740,16 +784,19 @@ A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py#allow:L243	in-surface	health-allow	item-5			
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
 M	tests/test_tests_tree_layout.py	in-surface	post-C1	item-5			item-5
+M	tests/tools/test_accretion_caps.py	in-surface	post-C1	#86			#86
 A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	R	H5			
 A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5			
 A	tests/tools/test_dm_spawn_persists.py	in-surface	post-C1	item-4			item-4
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	R	H5			
+M	tests/tools/test_process_registry.py	in-surface	post-C1	#86			#86
+M	tests/tools/test_process_registry_completion_races.py	in-surface	post-C1	#86			#86
 A	tests/tools/test_rt_f08_doc_contract.py	in-surface	R	H5			
 M	tests/tui_gateway/test_compute_host.py	in-surface	post-C1	item-5			item-5
 M	tools/bot_mode_dm.py	core	post-C1	item-4	F62.g		item-4
 (retained)	tools/bot_mode_dm.py#F62.g	core	item-4	retained	F62.g		
 (retained)	tools/bot_mode_dm.py#MSG-DELIV	core	E	retained	MSG-DELIV		
-M	tools/process_registry.py	core	post-C1	item-A1	A1		item-A1
+M	tools/process_registry.py	core	post-C1	item-A1	A1		item-A1,#86
 M	tools/terminal_tool_background.py	core	post-C1	item-A1	A1		item-A1
 M	website/docs/developer-guide/adding-platform-adapters.md	in-surface	M	H5			
 M	website/docs/developer-guide/gateway-internals.md	in-surface	M	H5			
@@ -758,10 +805,11 @@ A	website/docs/developer-guide/plugins/nv-fleet-gates.md	in-surface	R	H5			item-
 A	website/docs/developer-guide/plugins/nv-workflow-modes.md	in-surface	R	H5			
 A	website/docs/developer-guide/plugins/router-seams.md	in-surface	R	H5			item-5
 A	website/docs/developer-guide/podman-onecli-plugin.md	in-surface	R	H5			
-M	website/docs/user-guide/bot-mode.md	in-surface	M	H5			
+M	website/docs/user-guide/bot-mode.md	in-surface	M	H5			#86
 M	website/docs/user-guide/configuration.md	in-surface	M-conflict	H5		tag:website/docs/user-guide/configuration.md:2795-2795 H5:website/docs/user-guide/configuration.md:2800-2800 C1:website/docs/user-guide/configuration.md:2827-2827	item-5
 A	website/docs/user-guide/cross-session-context.md	in-surface	R	H5			
 M	website/docs/user-guide/docker.md	in-surface	M	H5			
+A	website/docs/user-guide/features/bot-mode-redrive.md	in-surface	post-C1	#86			#86
 M	website/docs/user-guide/features/built-in-plugins.md	in-surface	M	H5			
 A	website/docs/user-guide/features/cost-accounting.md	in-surface	R	H5			
 A	website/docs/user-guide/features/coworker-fleet-dashboard.md	in-surface	R	H5			
