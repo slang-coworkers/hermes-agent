@@ -21,7 +21,7 @@ commits. Checks, each named after ADR §Merge gate 2:
   (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
       commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
       to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
-      timed out on a standard runner), the FORK_CI_LINES substitutions and the FORK_CI_INSERTS blocks (only a removable
+      timed out on a standard runner; msg 3924: the Windows E2E), the FORK_CI_LINES substitutions and the FORK_CI_INSERTS blocks (only a removable
       block may later be removed), each admitted once under its recorded authority; no workflow line outside a
       comment still names a 32-core label at the head; and the only ``contributors/`` change is adding the FORK_CI_CONTRIBUTORS files with exactly their recorded content (msg 990).
 --inventory: one row per path (plus the ``path#scope`` core rows); status, surface, class and origin must equal this
@@ -117,8 +117,10 @@ SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac
 ITEM = re.compile(r"\[UPG-F68 (\d+|fork-ci|A1|UA48)[a-z]?\]")  # sub-items (5a/5b/5c) record under their item
 FORK_CI = re.compile(r"^(\.github/workflows/[^/]+\.ya?ml|contributors/.+)$")
 FORK_CI_AUTHORITY = "msg-596"
-# (workflow, job) -> raised timeout-minutes. Msg 602: a Python test slice that timed out on a standard runner.
-FORK_CI_TIMEOUTS = {(".github/workflows/tests.yml", "test"): 90}
+# (workflow, job) -> (raised timeout-minutes, authority). Msg 602: a Python test slice that timed out on a standard
+# runner.
+FORK_CI_TIMEOUTS = {(".github/workflows/tests.yml", "test"): (90, "msg-602"),
+                    (".github/workflows/windows-install-update-e2e.yml", "install-update"): (150, "msg-3924")}
 # (workflow, exact line at C1) -> (replacement, authority). Attribution must use the PR base branch on pull_request,
 # not origin/main.
 FORK_CI_LINES = {
@@ -133,6 +135,13 @@ FORK_CI_LINES = {
      "          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}\n"):
         ("          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '4' || '4') || '' }}\n",
          "msg-208"),
+    (".github/workflows/windows-install-update-e2e.yml",
+     "          # One journey per file, all in parallel (each is mostly network + subprocess wait).\n"):
+        ("          # Bound concurrent fake profiles to limit peak C: disk pressure.\n", "msg-3924"),
+    (".github/workflows/windows-install-update-e2e.yml", "          HERMES_TEST_WORKERS: '6'\n"):
+        ("          HERMES_TEST_WORKERS: '2'\n", "msg-3924"),
+    (".github/workflows/js-tests.yml", "        run: node .github/scripts/run-workspace-checks.mjs\n"):
+        ("        run: node .github/scripts/run-workspace-checks.mjs --concurrency 2\n", "msg-3924"),
 }
 _INSTALL_STEP = r'''
       - name: Install the project into the test environment
@@ -192,6 +201,15 @@ _GIT_DIAG_STEP = r'''
           print(f"_locate_real_git()={update_cmd._locate_real_git()!r}")
           PY
 '''
+_ATTRIBUTION_BASE = r'''          # Exclude unrelated release history from a direct dispatch's attribution.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ -z "${{ inputs.commit }}" ]; then
+            for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
+              mb=$(git merge-base "$b" HEAD) || continue
+              [ "$mb" = "$(git rev-parse HEAD)" ] && continue
+              if [ "$(git rev-list --count "$mb..HEAD")" -lt "$(git rev-list --count "$MERGE_BASE..HEAD")" ]; then MERGE_BASE=$mb; fi
+            done
+          fi
+'''
 # (workflow, job, exact line at C1 it follows [, discriminator]) -> (inserted block, authority, removable). A
 # discriminator tells apart blocks that share an anchor; only a removable block may disappear later.
 FORK_CI_INSERTS = {
@@ -202,6 +220,9 @@ FORK_CI_INSERTS = {
     (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n"): (_INSTALL_STEP, "msg-232", True),
     (".github/workflows/tests.yml", "test", "          prune-python-cache: true\n", "msg-252"): (_PTH_STEP, "msg-252", False),
     (".github/workflows/tests-os.yml", "os-tests", "          prune-python-cache: true\n"): (_GIT_DIAG_STEP, "msg-232", True),
+    (".github/workflows/contributor-check.yml", "check-attribution",
+     FORK_CI_LINES[(".github/workflows/contributor-check.yml", "          MERGE_BASE=$(git merge-base origin/main HEAD)\n")][0]):
+        (_ATTRIBUTION_BASE, "msg-3924", False),
 }
 # Blocks that never coexist at one revision: the install makes hermes_bootstrap importable under -I, which is what
 # the .pth exists to avoid (a minted launcher then skips the closure repair).
@@ -709,13 +730,13 @@ def added_allows(repo, c1, head, path):
 
 def fork_ci_authority(path):
     """The attribution files carry msg-990 alone (no runner label in them); a workflow file carries msg-596, plus
-    msg-602 for a FORK_CI_TIMEOUTS raise and the authority of each of its FORK_CI_LINES."""
+    the authority of each of its FORK_CI_TIMEOUTS raises, FORK_CI_LINES and FORK_CI_INSERTS."""
     lines = list(dict.fromkeys([*(auth for (f, _was), (_now, auth) in FORK_CI_LINES.items() if f == path),
                                 *(auth for k, (_blk, auth, _rm) in FORK_CI_INSERTS.items() if k[0] == path)]))
     if path in FORK_CI_CONTRIBUTORS or lines == ["msg-990"]:
         return "msg-990"
-    timeout = ["msg-602"] if any(f == path for f, _job in FORK_CI_TIMEOUTS) else []
-    return ",".join([FORK_CI_AUTHORITY, *timeout, *lines])
+    timeout = [auth for (f, _job), (_min, auth) in FORK_CI_TIMEOUTS.items() if f == path]
+    return ",".join(dict.fromkeys([FORK_CI_AUTHORITY, *timeout, *lines]))
 
 
 def _job_of(lines, n):
@@ -731,7 +752,7 @@ def _fork_ci_line(path, old, n, was, now, used):
     if (path, was) not in used and FORK_CI_LINES.get((path, was), (None,))[0] == now:
         used.add((path, was))
         return True
-    m, raised = TIMEOUT_LINE.match(was), FORK_CI_TIMEOUTS.get((path, _job_of(old, n)))
+    m, (raised, _auth) = TIMEOUT_LINE.match(was), FORK_CI_TIMEOUTS.get((path, _job_of(old, n)), (None, None))
     return bool(m and raised and now == f"{m.group(1)}{raised}{m.group(2)}")
 
 
