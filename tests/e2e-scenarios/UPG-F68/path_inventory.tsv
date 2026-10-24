@@ -780,7 +780,7 @@ A	tests/plugins/test_self_f56_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	R	H5			
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	R	H5			item-2,item-5
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	post-C1	item-5			item-5
-A	tests/plugins/test_upg_f68_acceptance.py#allow:L1264	in-surface	health-allow	item-5			
+A	tests/plugins/test_upg_f68_acceptance.py#allow:L1269	in-surface	health-allow	item-5			
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	R	H5			item-5
 A	tests/test_iso_f12_lifecycle_acceptance.py#allow:L243	in-surface	health-allow	item-5			
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	R	H5			item-5
