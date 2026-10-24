@@ -13,7 +13,8 @@ commits. Checks, each named after ADR §Merge gate 2:
       bytes) and nothing else; MSG-DELIV is E; F62.g is HELD while tools/bot_mode_dm.py equals the tag, and item-4
       once it is the tag plus exactly the ITEM4 lines.
   (d) the A1 union rule for ``_kanban_sub_op`` (the same equation over the whole function), with its three locators.
-  (e) post-C1 core is limited to item 4 (ITEM4, only in ``[UPG-F68 4]`` commits), pinned A1 and UA48 single-commit changes, and
+  (e) post-C1 core is limited to item 4 (ITEM4, only in ``[UPG-F68 4]`` commits), pinned A1 and UA48 single-commit changes, the
+      F62.h carry (#86's picks; CORE_F62H / CORE_F62H_ON_A1, erratum E11), and
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point (--repoints): each recorded line is
@@ -58,6 +59,24 @@ C1_CONFLICTS = ("gateway/kanban_watchers.py", "gateway/platforms/api_server_open
 PICK_CONFLICTS = {("1fb4d74ccb", "plugins/nv-coworker-compose/openshell/installer.py")}
 # Authority per H5 core path (ADR §CORE-CHANGE A/B); an inventory row may name only these.
 CORE_AUTHORITY = {
+    "gateway/run_notifications.py": {"FLEET-F62.h"},
+    "locales/af.yaml": {"FLEET-F62.h"},
+    "locales/ar.yaml": {"FLEET-F62.h"},
+    "locales/de.yaml": {"FLEET-F62.h"},
+    "locales/en.yaml": {"FLEET-F62.h"},
+    "locales/es.yaml": {"FLEET-F62.h"},
+    "locales/fr.yaml": {"FLEET-F62.h"},
+    "locales/ga.yaml": {"FLEET-F62.h"},
+    "locales/hu.yaml": {"FLEET-F62.h"},
+    "locales/it.yaml": {"FLEET-F62.h"},
+    "locales/ja.yaml": {"FLEET-F62.h"},
+    "locales/ko.yaml": {"FLEET-F62.h"},
+    "locales/pt.yaml": {"FLEET-F62.h"},
+    "locales/ru.yaml": {"FLEET-F62.h"},
+    "locales/tr.yaml": {"FLEET-F62.h"},
+    "locales/uk.yaml": {"FLEET-F62.h"},
+    "locales/zh-hant.yaml": {"FLEET-F62.h"},
+    "locales/zh.yaml": {"FLEET-F62.h"},
     "agent/session_persistence.py": {"GOV-F25"},
     "agent/turn_facade.py": {"GOV-F25"},
     "agent/turn_finalizer.py": {"GOV-F25"},
@@ -70,7 +89,7 @@ CORE_AUTHORITY = {
     "hermes_cli/kanban_db.py": {"GOV-F25", "GOV-F25.b"},
     "hermes_cli/kanban_db_connect.py": {"GOV-F25", "GOV-F25.b"},
     "hermes_cli/kanban_db_notify.py": {"GOV-F25", "GOV-F25.b"},
-    "tools/process_registry.py": {"A1"},
+    "tools/process_registry.py": {"A1", "FLEET-F62.h"},
     "tools/terminal_tool_background.py": {"A1"},
     "hermes_cli/providers.py": {"UA-48"},
 }
@@ -102,6 +121,52 @@ CORE_A1 = {
 CORE_UA48 = {
     "hermes_cli/providers.py":
         ("fc4062c36e3ea4fcffda0674606f483d79873aad", "e3d604a300b946cd75658b2cea5cdfb37346814e"),
+}
+# The FLEET-F62.h carry (erratum E11): #86's reviewed commits, each a ``-x`` pick of its source in F62H_RANGE (fetch
+# refs/pull/86/head). Its core is exactly the approved diff 3f986ba1 (19 files +32/-1), pinned as (tag blob, carried
+# blob); process_registry.py also holds A1, so its pin starts from A1's blob and A1's hunks stay where they are.
+F62H_RANGE = ("d923a5eb487a17c0a68801bba9ef0f56c81040a8", "b6e9762b46afa7e55c54f40674157b2ee192c04f")
+CORE_F62H = {
+    "gateway/run_notifications.py":
+        ("75c5a125ce822f4fefac3cf95e6ea6f72e0b3a44", "59dd97d22701d8f1ae3925be6e3d8475a48f2c55"),
+    "locales/af.yaml":
+        ("87ab18786ca055d966940e77fad0e5bc70d344d6", "1614e452bdeb5abd03595b538c816a811ed4d429"),
+    "locales/ar.yaml":
+        ("c62826b63cf64d3dc33c4e606d53042e981f34c7", "8908774a8a0f165e6ae1b10cc9cf9b7bda67e0ef"),
+    "locales/de.yaml":
+        ("4536f6a64641577ee222d3f0cdff8b3d10b0f180", "a0d582d146691cc2cbc587bcd916a9822a742fdc"),
+    "locales/en.yaml":
+        ("d9e709db0681bae72b7059cf87ee7bd54dac4c5f", "b7bea41d52bf9ae7447302f6213924410237d07a"),
+    "locales/es.yaml":
+        ("fd8978b6534de799e5be753241d530a650bdc237", "e1c8ee13ab46c9cabf006fbf8bc152f95e1cea21"),
+    "locales/fr.yaml":
+        ("a5f96aa23c70c379657fc08f1c23b5c9470f5e15", "bb396cc5dfb46c2c6a8329d88b6d1a4f56b2bfb6"),
+    "locales/ga.yaml":
+        ("5d283d9af6541001722d4beef570780324a73598", "5744070e60fb9f3ca4bc354c18e83a23a54b4881"),
+    "locales/hu.yaml":
+        ("0d601ac94f5307790f8cccafb97f3ee8d89086ca", "a4fc568e9a28b244144852ab4e848e6b56abda00"),
+    "locales/it.yaml":
+        ("9d5208a3edd3fa61e3c614ac34e2b23a238da5d3", "e06b202491471d788895d38f4b67c144f7e7442c"),
+    "locales/ja.yaml":
+        ("2871d05ca06a724b89c98617c1a6c50ccd568415", "52d20f89ff48864751a19b3b574c771583323d82"),
+    "locales/ko.yaml":
+        ("8158a52f02e56dd26d811eb6ca022fb72ea826d7", "6b2a4e3c8be8a4554da136a9b0177ff9d696a11b"),
+    "locales/pt.yaml":
+        ("981f3f70abac98bba8fc45f9e7cdd7aadb628d25", "6d4ae840f51883d122d2046e446452649f565081"),
+    "locales/ru.yaml":
+        ("0026179b9a108ae547a530db7564650e0588c90c", "e35da9957fadd038eb63b27235feb5a6ca15b63d"),
+    "locales/tr.yaml":
+        ("09e1fd3d52188e615f6685a3841fafb82a7b3a0f", "5ccb4abc4f49d3d015fdb8960ce5479f4713949d"),
+    "locales/uk.yaml":
+        ("0e91045396c376065e1697cb6b1c0d6059e5bd69", "1f6b9f8342b84fe8e4e1c2e4ce6f25d59866d11b"),
+    "locales/zh-hant.yaml":
+        ("245b558cc6b7fd5bc50bb43e68fb5febbe531cd0", "abc54e98cd8656db5e1d6591ad151c213ac58b89"),
+    "locales/zh.yaml":
+        ("198f7fe292a0b14f71871efd8cc6b26b121702dc", "c1c449a308fa7b12081b81f4e8ce55cb2ee0ef99"),
+}
+CORE_F62H_ON_A1 = {
+    "tools/process_registry.py":
+        ("a2b02314793c8369e66d5b6ddff24415c7ec1a6f", "d6909531079fc8119aa21dc09511a34594205d58"),
 }
 # Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
 # None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
@@ -661,17 +726,20 @@ def check_item4(repo, tag, head, after_c1):
     return fails
 
 
-def check_core_a1(repo, tag, head, after_c1, fix="A1", pins=CORE_A1):
+def check_core_a1(repo, tag, head, after_c1, fix="A1", pins=CORE_A1, carry=frozenset()):
     """A1 (and UA48 via ``fix``/``pins``): each pinned path is its tag blob at the tag and its fix blob at the head, a
     regular file at both, and exactly one commit after C1 touches them: tagged ``[UPG-F68 <fix>]``, changing those paths
-    alone, old blob to new with the mode unchanged. Returns fails."""
+    alone, old blob to new with the mode unchanged. With the F62.h carry (``carry``, its pick shas), a CORE_F62H_ON_A1
+    path ends at its carried blob instead and the carry's picks are judged by check_f62h_carry. Returns fails."""
     fails = []
     for path, (old, new) in pins.items():
         if (blob(repo, tag, path), mode(repo, tag, path)) != (old, "100644"):
             fails.append(f"{fix}: {path} at the tag is not the regular file the {fix} diff applies to")
-        if (blob(repo, head, path), mode(repo, head, path)) != (new, "100644"):
+        want = CORE_F62H_ON_A1[path][1] if carry and path in CORE_F62H_ON_A1 else new
+        if (blob(repo, head, path), mode(repo, head, path)) != (want, "100644"):
             fails.append(f"{fix}: {path} at the head is not the tag plus exactly the {fix} diff (blob and mode)")
-    touching = [(sha, item) for sha, _src, item in after_c1 if set(name_status(repo, f"{sha}^", sha)) & set(pins)]
+    touching = [(sha, item) for sha, _src, item in after_c1
+                if sha not in carry and set(name_status(repo, f"{sha}^", sha)) & set(pins)]
     if len(touching) != 1:
         return fails + [f"{fix}: {len(touching)} commits after C1 touch the {fix} paths (want exactly one)"]
     sha, item = touching[0]
@@ -755,6 +823,32 @@ def fork_ci_authority(path):
         return "msg-990"
     timeout = [auth for (f, _job), (_min, auth) in FORK_CI_TIMEOUTS.items() if f == path]
     return ",".join(dict.fromkeys([FORK_CI_AUTHORITY, *timeout, *lines]))
+
+
+def f62h_sources(repo):
+    """#86's commits oldest first, or None when F62H_RANGE's head is not in the object store."""
+    if subprocess.run(["git", "-C", repo, "cat-file", "-e", f"{F62H_RANGE[1]}^{{commit}}"], check=False,
+                      capture_output=True, stdin=subprocess.DEVNULL).returncode:
+        return None
+    return git(repo, "rev-list", "--reverse", f"{F62H_RANGE[0]}..{F62H_RANGE[1]}").split()
+
+
+def check_f62h_carry(repo, tag, head, after_c1, sources):
+    """The F62.h carry: each CORE_F62H path is its tag blob at the tag and its carried blob at the head, each
+    CORE_F62H_ON_A1 path ends at its carried blob, and every commit after C1 touching one of them is a pick of an
+    F62H_RANGE commit, or A1's own commit on an A1 path. Returns fails."""
+    fails = []
+    for path, (old, new) in CORE_F62H.items():
+        if (blob(repo, tag, path), mode(repo, tag, path)) != (old, "100644"):
+            fails.append(f"F62H: {path} at the tag is not the regular file the carried core diff applies to")
+        if (blob(repo, head, path), mode(repo, head, path)) != (new, "100644"):
+            fails.append(f"F62H: {path} at the head is not the tag plus exactly the carried core diff (blob and mode)")
+    paths = set(CORE_F62H) | set(CORE_F62H_ON_A1)
+    for sha, src, item in after_c1:
+        touched = set(name_status(repo, f"{sha}^", sha)) & paths
+        if touched and src not in sources and not (item == "A1" and touched <= set(CORE_A1)):
+            fails.append(f"F62H: {sha[:10]} changes {sorted(touched)[0]} and is not a pick of #86")
+    return fails
 
 
 def _job_of(lines, n):
@@ -853,7 +947,9 @@ def check_fork_ci(repo, c1, head, after_c1):
     return fails, mapped
 
 
-def origin_of(sha, src, item, picks):
+def origin_of(sha, src, item, picks, carry_src=()):
+    if src and src in carry_src:
+        return "#86"
     if src:
         return "#" + {"b41d14df02": "78", "1fb4d74ccb": "77", "35767fe243": "80", "0615c1e7a0": "82"}.get(src[:10], src[:10])
     if item == "fork-ci":
@@ -984,6 +1080,11 @@ def main():
     f_c, core_rows = check_core(repo, revs, core_paths, allowed, out)
     fails.extend(f_a2 + f_c + check_a1(repo, revs, out))
     after_c1 = commits_after(repo, revs["c1"], revs["head"])
+    carry_src = f62h_sources(repo) or []
+    carry = frozenset(sha for sha, src, _item in after_c1 if src in carry_src)
+    f62h_landed = bool(carry) or any(blob(repo, revs["head"], p) != old for p, (old, _new) in CORE_F62H.items())
+    if f62h_landed and not carry_src:
+        fails.append(f"F62H: the carry is at the head but #86's head {F62H_RANGE[1][:10]} is not here (fetch refs/pull/86/head)")
     item4_landed = blob(repo, revs["head"], ITEM4[0]) != blob(repo, revs["tag"], ITEM4[0])
     for key, (path, cls, auth) in RETAINED.items():
         if path == ITEM4[0] and item4_landed:
@@ -993,14 +1094,18 @@ def main():
         core_rows[key] = ("(retained)", "core", cls, "retained", auth)
     if item4_landed:
         fails.extend(check_item4(repo, revs["tag"], revs["head"], after_c1))
-    fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1))
+    fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1, carry=carry))
+    if f62h_landed:
+        fails.extend(check_f62h_carry(repo, revs["tag"], revs["head"], after_c1, set(carry_src)))
     fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1, "UA48", CORE_UA48))
 
-    fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()], after_c1))
+    fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()]
+                             + (carry_src if f62h_landed else []), after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
-        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed) and path not in CORE_A1 and path not in CORE_UA48:
+        if surface_of(path, h5_paths) == "core" and not (path == ITEM4[0] and item4_landed) and path not in CORE_A1 and path not in CORE_UA48 \
+                and not (f62h_landed and path in CORE_F62H):
             f_e, found = check_e2_allow(repo, revs["c1"], revs["head"], path)
             fails.extend(f_e)
             e2_allowed.extend(found)
@@ -1027,7 +1132,7 @@ def main():
     post_origins = {}
     for sha, src, item in after_c1:
         for p in name_status(repo, f"{sha}^", sha):
-            o = origin_of(sha, src, item, a.picks)
+            o = origin_of(sha, src, item, a.picks, carry_src)
             if o not in post_origins.setdefault(p, []):
                 post_origins[p].append(o)
             if o == "untagged":
@@ -1085,7 +1190,7 @@ def main():
         print("\nFAIL\n" + "\n".join(fails))
         return 1
     print("\nOK: C1 carries every H5 path; core = tag + GOV-F25 + WP-D1 per scope (A1/A2 as ruled); picks equal their"
-          " sources; post-C1 core is limited to item 4, A1, UA48 and 2(e') allows; fork-ci is only the ruled runner, timeout, line, insert and contributor edits; inventory"
+          " sources; post-C1 core is limited to item 4, A1, UA48, the F62.h carry and 2(e') allows; fork-ci is only the ruled runner, timeout, line, insert and contributor edits; inventory"
           " matches")
     return 0
 
