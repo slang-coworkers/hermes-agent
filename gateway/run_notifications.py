@@ -76,6 +76,8 @@ def _update_output_tail(output: str, limit: int) -> str:
 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
 # Routing fields copied verbatim from a process watcher onto its synthetic completion event.
 _WATCHER_ROUTE_FIELDS = ("session_key", "platform", "chat_type", "chat_id", "thread_id", "user_id", "user_name")
+# Watcher ticks an exited process may wait for its owner's publish before the chat hears "outcome unknown" (60 s at 5 s).
+_UNPUBLISHED_EXIT_NOTICE_TICKS = 12
 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 # Storage causes that clear on their own (one session's lease/compression, not the store): the
 # home-channel notice appends the operator restart tail for every OTHER cause.
@@ -1964,6 +1966,7 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
                       session_id, interval, notify_mode, agent_notify)
         silent = notify_mode == "off" and not agent_notify
         last_output_len = 0
+        deferred_ticks = 0
         while True:
             await asyncio.sleep(interval)
             session = process_registry.get(session_id)
@@ -1988,6 +1991,15 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
             has_new_output = current_output_len > last_output_len
             last_output_len = current_output_len
             if session.exited:
+                # The reader marks exited before its publish transforms the output; building now would race that
+                # transform on the same hook identity, and core would skip this, the sender-facing call.
+                if not session._completion_event.is_set():
+                    deferred_ticks += 1
+                    if deferred_ticks == _UNPUBLISHED_EXIT_NOTICE_TICKS:
+                        async with self._completion_event_scope(watcher):
+                            notice = t("gateway.background.unverified_exit", session_id=session_id)
+                        await self._send_watcher_message(platform_name, chat_id, thread_id, notice, watcher)
+                    continue
                 # Agent-notify: inject a synthetic message unless the agent already consumed the result via
                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
                 if agent_notify and not process_registry.is_completion_consumed(session_id):

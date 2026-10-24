@@ -732,6 +732,7 @@ class TestPruning:
             exited=True,
             started_at=time.time() - FINISHED_TTL_SECONDS - 100,
         )
+        old_session._completion_event.set()
         registry._finished[old_session.id] = old_session
         registry._prune_if_needed()
         assert "proc_old" not in registry._finished
@@ -744,6 +745,7 @@ class TestPruning:
                 exited=True,
                 started_at=time.time() - i,  # older as i increases
             )
+            s._completion_event.set()
             registry._finished[s.id] = s
 
         # Add one more running to trigger prune
@@ -856,6 +858,7 @@ class TestFinishedHandleRelease:
         session._pty = _FakePty()
         # Force TTL expiry.
         session.started_at = _time.time() - (FINISHED_TTL_SECONDS + 60)
+        session._completion_event.set()
         registry._finished[session.id] = session
 
         with registry._lock:

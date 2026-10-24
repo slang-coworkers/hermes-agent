@@ -83,6 +83,7 @@ def _finished_session(registry, session_id="proc_boundary", **kwargs):
         notify_on_complete=True,
         **kwargs,
     )
+    session._completion_event.set()
     registry._finished[session.id] = session
     return session
 

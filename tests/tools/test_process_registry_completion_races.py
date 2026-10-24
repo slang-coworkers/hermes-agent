@@ -434,6 +434,7 @@ def test_capacity_pruning_keeps_a_session_whose_scope_stop_is_pending(monkeypatc
     session = _failed_scope_stop(registry, monkeypatch, [False])
     for i in range(module.MAX_PROCESSES):
         registry._finished[f"proc_newer_{i}"] = _session(f"proc_newer_{i}", exited=True)
+        registry._finished[f"proc_newer_{i}"]._completion_event.set()
 
     with registry._lock:
         registry._prune_if_needed()

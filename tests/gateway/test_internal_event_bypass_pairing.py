@@ -8,6 +8,7 @@ pairing code to the chat.
 """
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -38,6 +39,13 @@ class _FakeRegistry:
 
     def is_completion_consumed(self, session_id):
         return session_id in self._completion_consumed
+
+
+def _published():
+    """The completion event of a session whose owner already published its result (the watcher waits for it)."""
+    event = threading.Event()
+    event.set()
+    return event
 
 
 def _build_runner(monkeypatch, tmp_path) -> GatewayRunner:
@@ -130,7 +138,8 @@ async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monk
 
     sessions = [
         SimpleNamespace(
-            output_buffer="done\n", exited=True, exit_code=0, command="echo test"
+            output_buffer="done\n", exited=True, exit_code=0, command="echo test",
+            _completion_event=_published(),
         ),
     ]
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))

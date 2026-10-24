@@ -102,6 +102,7 @@ gateway:
     started: "🔄 Tasc cúlra tosaithe: \"{preview}\"\nAitheantas an tasc: {task_id}\nIs féidir leat leanúint leis an gcomhrá — taispeánfar na torthaí nuair a bheidh sé críochnaithe."
     task_finished: "✅ Tasc cúlra críochnaithe"
     task_failed: "❌ Theip ar an tasc cúlra"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "scor {code}"
     last_output: ". Aschur is déanaí:\n```\n{tail}\n```"
     rerun_hint: "\nIarr orm é a rith arís nó an log iomlán a thaispeáint."

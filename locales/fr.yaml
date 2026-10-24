@@ -107,6 +107,7 @@ gateway:
     started: "🔄 Tâche d'arrière-plan démarrée : « {preview} »\nID de tâche : {task_id}\nVous pouvez continuer à discuter — les résultats apparaîtront ici une fois terminés."
     task_finished: "✅ Tâche d'arrière-plan terminée"
     task_failed: "❌ Échec de la tâche d'arrière-plan"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "code de sortie {code}"
     last_output: |-
       . Dernière sortie :
