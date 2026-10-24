@@ -745,6 +745,7 @@ A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5
 A	tests/tools/test_dm_spawn_persists.py	in-surface	post-C1	item-4			item-4
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	R	H5			
 A	tests/tools/test_rt_f08_doc_contract.py	in-surface	R	H5			
+M	tests/tui_gateway/test_compute_host.py	in-surface	post-C1	item-5			item-5
 M	tools/bot_mode_dm.py	core	post-C1	item-4	F62.g		item-4
 (retained)	tools/bot_mode_dm.py#F62.g	core	item-4	retained	F62.g		
 (retained)	tools/bot_mode_dm.py#MSG-DELIV	core	E	retained	MSG-DELIV		
