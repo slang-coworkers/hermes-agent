@@ -44,6 +44,7 @@ plugins:
   - nv-coworker-compose
   - nv-fleet-gates
   - podman-onecli
+  - nv-delivery-redrive
   entries:
     nv-fleet-gates:
       settings:
@@ -73,6 +74,9 @@ plugins:
           builder: []
           tester: []
           reviewer: []
+    nv-delivery-redrive:
+      settings:
+        orchestrator_profile: orchestrator
 gateway:
   multiplex_profiles: true
   systemd_watchdog_seconds: 30

@@ -50,6 +50,7 @@ plugins:
   - nv-coworker-compose
   - nv-fleet-gates
   - podman-onecli
+  - nv-delivery-redrive
   entries:
     nv-fleet-gates:
       settings:
@@ -80,6 +81,9 @@ plugins:
           tester: []
           reviewer: []
     nv-coworker-compose:
+      settings:
+        orchestrator_profile: orchestrator
+    nv-delivery-redrive:
       settings:
         orchestrator_profile: orchestrator
 sessions:

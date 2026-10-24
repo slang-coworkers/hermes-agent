@@ -28,7 +28,7 @@ coworker_config:
   # placement is asserted by GOV-F23 AC-1 (managed fragment) and AC-3 (absent from
   # every profile config). The render-enforced approvals.deny floor is profile-local.
   agent.disabled_toolsets: []
-  plugins.enabled: ["nv-fleet-gates", "nv-coworker-compose"]
+  plugins.enabled: ["nv-fleet-gates", "nv-coworker-compose", "nv-delivery-redrive"]
   plugins.entries.nv-fleet-gates.settings.policy: "deny-admin-to-workers"
   plugins.entries.nv-cost-cap.settings.ceiling_usd: 20
   plugins.entries.nv-coworker-compose.settings.orchestrator_profile: "orchestrator"
