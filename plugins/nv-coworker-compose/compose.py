@@ -3823,6 +3823,20 @@ def _inject_self_plugin(config: dict[str, Any], orchestrator_profile: str) -> No
     settings["orchestrator_profile"] = orchestrator_profile
 
 
+_REDRIVE_PLUGIN = "nv-delivery-redrive"
+
+
+def _inject_redrive_plugin(config: dict[str, Any], orchestrator_profile: str) -> None:
+    """Enable nv-delivery-redrive on a rendered profile, so a busy Bot Mode delivery is
+    re-driven fleet-wide (FLEET-F62.h); it tracks nothing without ``orchestrator_profile``."""
+    plugins = config.setdefault("plugins", {})
+    enabled = plugins.setdefault("enabled", [])
+    if _REDRIVE_PLUGIN not in enabled:
+        enabled.append(_REDRIVE_PLUGIN)
+    settings = plugins.setdefault("entries", {}).setdefault(_REDRIVE_PLUGIN, {}).setdefault("settings", {})
+    settings["orchestrator_profile"] = orchestrator_profile
+
+
 _FIRECRAWL_DISABLE = ("web-firecrawl", "browser-firecrawl")
 
 
@@ -4355,6 +4369,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
     rendered: dict[str, str] = {}
     for tname, resolved in resolved_by_type.items():
         _inject_self_plugin(resolved["config"], orchestrator_profile)
+        _inject_redrive_plugin(resolved["config"], orchestrator_profile)
         _enforce_retention(resolved["config"])
         # The shared-learnings clone and mount composition are container-substrate
         # writers of terminal.docker_volumes; the remote-ssh substrate has no local
@@ -4458,6 +4473,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
     if openshell_trust is not None:
         _enforce_openshell_trust(default_config, openshell_trust)
     ddir = out_root / default_profile
+    _inject_redrive_plugin(default_config, orchestrator_profile)
     _render_default(ddir, default_profile, default_config)
     _render_bound_route_scripts(out_root, default_config, default_profile)
     # OSH-F64.b (D2): render the gateway APF policy for the model-call sandbox (the default
