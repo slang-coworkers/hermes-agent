@@ -140,6 +140,10 @@ FORK_CI_LINES = {
         ("          # Bound concurrent fake profiles to limit peak C: disk pressure.\n", "msg-3924"),
     (".github/workflows/windows-install-update-e2e.yml", "          HERMES_TEST_WORKERS: '6'\n"):
         ("          HERMES_TEST_WORKERS: '2'\n", "msg-3924"),
+    (".github/workflows/windows-install-update-e2e.yml", "    name: Windows install.ps1 + hermes update E2E\n"):
+        ("    name: Windows install.ps1 + hermes update E2E (${{ matrix.slice }}/2)\n", "msg-3924"),
+    (".github/workflows/windows-install-update-e2e.yml", "          name: windows-install-update-e2e-${{ github.run_attempt }}\n"):
+        ("          name: windows-install-update-e2e-${{ matrix.slice }}-${{ github.run_attempt }}\n", "msg-3924"),
     (".github/workflows/js-tests.yml", "        run: node .github/scripts/run-workspace-checks.mjs\n"):
         ("        run: node .github/scripts/run-workspace-checks.mjs --concurrency 2\n", "msg-3924"),
 }
@@ -210,6 +214,13 @@ _ATTRIBUTION_BASE = r'''          # Exclude unrelated release history from a dir
             done
           fi
 '''
+_WIN_SLICES = r'''    # Each slice gets its own runner disk: journeys never remove their fake profiles, and ten fill a standard runner's C:.
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2]
+'''
+_WIN_CRASH_LEG = "        if: matrix.slice == 1  # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1\n"
 # (workflow, job, exact line at C1 it follows [, discriminator]) -> (inserted block, authority, removable). A
 # discriminator tells apart blocks that share an anchor; only a removable block may disappear later.
 FORK_CI_INSERTS = {
@@ -223,6 +234,13 @@ FORK_CI_INSERTS = {
     (".github/workflows/contributor-check.yml", "check-attribution",
      FORK_CI_LINES[(".github/workflows/contributor-check.yml", "          MERGE_BASE=$(git merge-base origin/main HEAD)\n")][0]):
         (_ATTRIBUTION_BASE, "msg-3924", False),
+    (".github/workflows/windows-install-update-e2e.yml", "install-update", "    runs-on: windows-latest\n"):
+        (_WIN_SLICES, "msg-3924", False),
+    (".github/workflows/windows-install-update-e2e.yml", "install-update",
+     FORK_CI_LINES[(".github/workflows/windows-install-update-e2e.yml", "          HERMES_TEST_WORKERS: '6'\n")][0]):
+        ("          HERMES_TEST_SLICE: ${{ matrix.slice }}/2\n", "msg-3924", False),
+    (".github/workflows/windows-install-update-e2e.yml", "install-update", "      - name: Every crash cell ran\n"):
+        (_WIN_CRASH_LEG, "msg-3924", False),
 }
 # Blocks that never coexist at one revision: the install makes hermes_bootstrap importable under -I, which is what
 # the .pth exists to avoid (a minted launcher then skips the closure repair).
