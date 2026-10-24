@@ -32,6 +32,14 @@ jobs:
         run: |
           # Get the merge base between this PR and main
           MERGE_BASE=$(git merge-base origin/${{ github.event_name == 'pull_request' && github.base_ref || 'main' }} HEAD)
+          # Exclude unrelated release history from a direct dispatch's attribution.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ -z "${{ inputs.commit }}" ]; then
+            for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
+              mb=$(git merge-base "$b" HEAD) || continue
+              [ "$mb" = "$(git rev-parse HEAD)" ] && continue
+              if [ "$(git rev-list --count "$mb..HEAD")" -lt "$(git rev-list --count "$MERGE_BASE..HEAD")" ]; then MERGE_BASE=$mb; fi
+            done
+          fi
 
           # Find any new author emails in this PR's commits
           NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
