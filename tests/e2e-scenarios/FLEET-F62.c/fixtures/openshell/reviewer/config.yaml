@@ -21,6 +21,7 @@ plugins:
   enabled:
   - nv-coworker-compose
   - nv-fleet-gates
+  - nv-delivery-redrive
   entries:
     nv-fleet-gates:
       settings:
@@ -39,6 +40,9 @@ plugins:
           approver: {}
           default: {}
     nv-coworker-compose:
+      settings:
+        orchestrator_profile: orchestrator
+    nv-delivery-redrive:
       settings:
         orchestrator_profile: orchestrator
 GH_TOKEN: ${env:GH_TOKEN}

@@ -20,6 +20,7 @@ plugins:
   enabled:
   - nv-coworker-compose
   - nv-fleet-gates
+  - nv-delivery-redrive
   entries:
     nv-fleet-gates:
       settings:
@@ -37,6 +38,9 @@ plugins:
           reviewer: {}
           approver: {}
           default: {}
+    nv-delivery-redrive:
+      settings:
+        orchestrator_profile: orchestrator
 gateway:
   multiplex_profiles: true
   systemd_watchdog_seconds: 30
