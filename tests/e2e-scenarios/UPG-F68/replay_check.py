@@ -18,7 +18,8 @@ commits. Checks, each named after ADR §Merge gate 2:
   (e') comment-only ``# health: allow <RULE> -- <why>`` waivers at the E2_ALLOW sites, each file's AST identical
        at C1 and the head (erratum E2.3a); the list is printed.
   (f) an old-gated desktop file changes after C1 only by a recorded import re-point (--repoints): each recorded line is
-      a line of an ``import`` statement (multi-line ones included) at C1 (before) or at the head (after).
+      a line of an ``import`` statement (multi-line ones included) at C1 (before) or at the head (after), or by an
+      OLD_GATED_LINES pair: that exact line at C1, replaced at the head (exactly once) by its pinned v0.22.2 form.
   (g) fork-ci (user rulings, operator msgs 596/602): a workflow file changes after C1 only in ``[UPG-F68 fork-ci]``
       commits, only on ``runs-on`` / matrix ``runner`` lines, each line being its C1 text with the 32-core labels mapped
       to standard runners, plus the ``timeout-minutes`` raise of the FORK_CI_TIMEOUTS jobs (msg 602: only a slice that
@@ -317,6 +318,11 @@ FORK_CI_CONTRIBUTORS = {
     "contributors/emails/harsh1492@gmail.com": "szihs\n",
     "contributors/emails/hermes-builder@slang-coworkers.local":
         "szihs\n# hermes-builder bot commits, pushed under this account\n",
+}
+# (path, exact line at C1) -> (its line at the head, authority): v0.22.2 drift in an old-gated desktop helper.
+OLD_GATED_LINES = {
+    ("apps/desktop/e2e/fleet-f62-ac10.helpers.ts", "    window.location.hash = '/settings?tab=plugins'"):
+        ("    window.location.hash = '/capabilities?tab=plugins'", "E14"),
 }
 TIMEOUT_LINE = re.compile(r"^(\s+timeout-minutes: )\d+(\s*)$")
 JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
@@ -1122,6 +1128,13 @@ def main():
                     r = rec.setdefault(p, (set(), set()))
                     r[0].add(before.strip())
                     r[1].add(after.strip())
+    for (p, before), (after, auth) in OLD_GATED_LINES.items():
+        head_lines = text_at(repo, revs["head"], p).splitlines()
+        if before not in text_at(repo, revs["c1"], p).splitlines() or before in head_lines or head_lines.count(after) != 1:
+            fails.append(f"OLD-GATED LINE {p}: the {auth} pair must be a C1 line, replaced once by its pinned form")
+        r = rec.setdefault(p, (set(), set()))
+        r[0].add(before.strip())
+        r[1].add(after.strip())
     for path in sorted(post):
         if surface_of(path, h5_paths) == "old-gated":
             before, after = rec.get(path, (set(), set()))
