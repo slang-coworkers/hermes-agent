@@ -206,6 +206,8 @@ def row_problem(name: str, row: dict) -> str | None:
             return f"kind {row['kind']!r}"
         if row["kind"] == "label" and not re.fullmatch(r"[\w.-]+", row["replacement"]):
             return "a label replacement is one runner label"
+        if row["kind"] == "action" and not ACTION_REF.match(row["match"]):
+            return "an action match is the whole owner/name@<40-sha> [# comment]"
         if row["kind"] == "action" and row["replacement"] != "KEEP" and not ACTION_REF.match(row["replacement"]):
             return "an action replacement is owner/name@<40-sha> [# comment] or KEEP"
     elif name == "fork_ci_sizing.tsv":
@@ -310,22 +312,16 @@ class ForkCiMap:
     def __init__(self, rows: list[dict]):
         self.labels = [r for r in rows if r["kind"] == "label"]
         self.actions = [r for r in rows if r["kind"] == "action"]
-        self.keep = {r["match"].split("@")[0].split()[0] for r in self.actions if r["replacement"] == "KEEP"
+        self.keep = {r["match"].split("#", 1)[0].strip() for r in self.actions if r["replacement"] == "KEEP"
                      and r["authority"]}
         self.label_set = {r["match"] for r in self.labels}
         self.used: set[str] = set()
-        self.prefix_refs: dict[str, set[str]] = {}
 
     def apply(self, line: str) -> str:
         for row in self.actions:
             if row["replacement"] == "KEEP":
                 continue
-            if "@" in row["match"]:
-                new = line.replace(row["match"], row["replacement"])
-            else:
-                pattern = rf"(?<![\w./-]){re.escape(row['match'])}@[^\s#]+"
-                self.prefix_refs.setdefault(row["_line"], set()).update(re.findall(pattern, line))
-                new = re.sub(pattern, lambda _m: row["replacement"], line)
+            new = line.replace(row["match"], row["replacement"])
             if new != line:
                 self.used.add(row["_line"])
                 line = new
@@ -619,7 +615,7 @@ class Checker:
             for where, key, value in scalars(doc):
                 if LABEL_SHAPE.search(value) or value in fmap.label_set:
                     self.rep.fail("FORK_CI_LABEL", path, f"{where} = {value[:120]}")
-                if key == "uses" and value.startswith("useblacksmith/") and value.split("@")[0] not in fmap.keep:
+                if key == "uses" and value.startswith("useblacksmith/") and value.strip() not in fmap.keep:
                     self.rep.fail("FORK_CI_ACTION", path, f"{where} = {value} has no KEEP row")
 
     def fork_delta(self) -> None:
@@ -670,10 +666,6 @@ class Checker:
         for row in self.t["fork_ci_map.tsv"]:
             if row["_line"] not in fmap.used and row["replacement"] != "KEEP":
                 self.rep.fail("DATA_STALE", row["_line"], f"{row['match']} changes no fork-ci line")
-        for line, refs in sorted(fmap.prefix_refs.items()):
-            if len(refs) > 1:
-                self.rep.fail("DATA_STALE", line, f"an owner/name match without a ref covers {len(refs)} refs "
-                              f"({', '.join(sorted(refs))}); each ref needs its own row")
 
 
 def describe(res: Counter) -> str:

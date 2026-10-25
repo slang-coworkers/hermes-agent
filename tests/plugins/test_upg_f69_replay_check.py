@@ -124,25 +124,45 @@ def test_a_workers_row_explains_its_step_edit():
     assert rep.findings == []
 
 
-def test_an_action_row_without_a_ref_must_not_cover_two_refs(tmp_path):
-    """An ``owner/name`` map match rules one source ref only; two refs need two rows."""
+CHECKOUT_OLD = "useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a"
+CHECKOUT_PIN = "actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a"
+WORKFLOW = "name: ci\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+
+
+def _fork_ci_replay(tmp_path: Path, onto_uses: list[str], candidate_uses: list[str], map_rows: list[str]):
+    """A one-workflow repo where from = head = onto, plus a data dir holding exactly the given map rows."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
-    old = ["useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a", "useblacksmith/checkout@" + "0" * 40]
-    pin = "actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a"
-    workflow = "name: ci\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
-    b = _commit(repo, {".github/workflows/ci.yml": workflow + "".join(f"      - uses: {u}\n" for u in old)}, "onto")
-    c = _commit(repo, {".github/workflows/ci.yml": workflow + f"      - uses: {pin}\n" * 2}, "candidate")
+    wf = ".github/workflows/ci.yml"
+    b = _commit(repo, {wf: WORKFLOW + "".join(f"      - uses: {u}\n" for u in onto_uses)}, "onto")
+    c = _commit(repo, {wf: WORKFLOW + "".join(f"      - uses: {u}\n" for u in candidate_uses)}, "candidate")
     data = tmp_path / "data"
     data.mkdir()
     (data / "bump.json").write_text(f'{{"from": "{b}", "onto": "{b}", "head": "{b}"}}', encoding="utf-8")
     rc = _checker_module()
-    rows = {"path_inventory.tsv": ["M\t.github/workflows/ci.yml\tfork-ci\tfork-ci\tt\tt"],
-            "fork_ci_map.tsv": [f"action\tuseblacksmith/checkout\t{pin}\tt"]}
+    rows = {"fork_ci_map.tsv": map_rows}
+    if onto_uses != candidate_uses:
+        rows["path_inventory.tsv"] = [f"M\t{wf}\tfork-ci\tfork-ci\tt\tt"]
     for name, header in rc.TABLES.items():
         (data / name).write_text("\n".join(["\t".join(header), *rows.get(name, [])]) + "\n", encoding="utf-8")
-    result = _run(repo, b, b, b, c, data)
+    return _run(repo, b, b, b, c, data)
+
+
+def test_an_action_row_without_a_ref_is_malformed(tmp_path):
+    """An action map row must name the whole owner/name@<ref> it rules; ``owner/name`` alone is malformed data."""
+    result = _fork_ci_replay(tmp_path, [CHECKOUT_OLD], [CHECKOUT_PIN],
+                             [f"action\tuseblacksmith/checkout\t{CHECKOUT_PIN}\tt"])
     assert result.returncode == 1, result.stdout + result.stderr
-    assert any(ln.startswith("FAIL DATA_STALE fork_ci_map.tsv:2: an owner/name match without a ref covers 2 refs")
+    assert any(ln.startswith("FAIL DATA_MISSING fork_ci_map.tsv:2: malformed: an action match is the whole")
                for ln in result.stdout.splitlines()), result.stdout
+
+
+def test_a_keep_row_authorizes_only_its_own_ref(tmp_path):
+    """A KEEP row keeps exactly its owner/name@<ref>; the same action at another ref is still an unruled action."""
+    other = "useblacksmith/checkout@" + "0" * 40
+    result = _fork_ci_replay(tmp_path, [CHECKOUT_OLD, other], [CHECKOUT_OLD, other],
+                             [f"action\t{CHECKOUT_OLD}  # v1\tKEEP\thosted-runner proof"])
+    actions = [ln for ln in result.stdout.splitlines() if ln.startswith("FAIL FORK_CI_ACTION ")]
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert actions == [f"FAIL FORK_CI_ACTION .github/workflows/ci.yml: jobs.test.steps[1].uses = {other} has no KEEP row"]
