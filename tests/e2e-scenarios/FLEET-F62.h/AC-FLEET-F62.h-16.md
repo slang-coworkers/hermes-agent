@@ -20,7 +20,7 @@ In the run-3 shape on one gateway, while bot B has no canonical live Bot Chat ow
 is the tracked `target_busy` → `status: queued` shape, and once B's lock is released the plugin re-drives the
 message: exactly one PING row in B's Bot Chat and the ticket `settled`, with no manual relay or resend.
 
-The section below is the ADR's scenario outline (spec r3.3, ADR `978348d2`, lines 152-211), copied verbatim. The
+The section below is the ADR's scenario outline (spec r3.3.7.6, ADR `f8718f06`, lines 172-233), copied verbatim. The
 tester installs the `fixtures:` list itself; `## Setup` steps after that are post-install only. `<root>` is the
 testbed `HERMES_HOME`. Both fixtures already list `nv-delivery-redrive` in `plugins.enabled`; the root config edits
 below are the scenario's own.
@@ -39,8 +39,10 @@ python3 -c "import hermes_yaml as y; from pathlib import Path; r=Path('<root>');
 ### AC-FLEET-F62.h-16 (live, model: live, timeout_s: 600)
 - **Ships as:** tests/e2e-scenarios/FLEET-F62.h/AC-FLEET-F62.h-16.md
 - **Fixtures:** fixtures/fleet-f62-h-bot-a/ and fixtures/fleet-f62-h-bot-b/ (profile dirs with `distribution.yaml`
-  at the root, Bot-Mode-managed `profile.yaml`, `plugins.enabled: [nv-delivery-redrive]`). The testbed home's root
-  config enables `nv-delivery-redrive` and sets:
+  at the root, Bot-Mode-managed `profile.yaml`, `plugins.enabled: [nv-delivery-redrive]`). Each fixture's own
+  `config.yaml` and the testbed home's root config enable `nv-delivery-redrive` and set the values below. A
+  sender's middleware reads its own profile's config, so root-only settings never reach bot A (E9 r3.3.2, builder
+  CODE_REVIEW):
   - `bot_mode.turn_wait_seconds: 30`;
   - `plugins.entries.nv-delivery-redrive.settings.orchestrator_profile: fleet-f62-h-bot-a`;
   - `plugins.entries.nv-delivery-redrive.settings.retry_backoff_seconds: 90` (so attempt 2 cannot start while the
@@ -68,7 +70,7 @@ python3 -c "import hermes_yaml as y; from pathlib import Path; r=Path('<root>');
   1. Check that B has no canonical live owner. `python3 -c "from tools.bot_live_delivery import
      find_canonical_live_owner; print(find_canonical_live_owner('<root>/profiles/fleet-f62-h-bot-b'))"` → expect:
      `None`.
-  2. In bot A's Bot Chat, send "Use message_agent to tell fleet-f62-h-bot-b: PING-F62H. Then finish your turn."
+  2. In bot A's Bot Chat, send "Use message_agent to send fleet-f62-h-bot-b exactly this text: 'PING-F62H. Acknowledge in your reply only; do not call message_agent.' Then finish your turn."
      → expect: A's `message_agent` tool row is core's hand-off ack: `status: queued`, a `delivery_id`, a
      `process_id`, and a `redrive` key (`tools/bot_mode_dm.py:743-756`).
   3. Wait `turn_wait_seconds` + 15 s (45 s) while the lock is still held. → expect: A's completion row for that
@@ -94,7 +96,8 @@ python3 -c "import hermes_yaml as y; from pathlib import Path; r=Path('<root>');
 - **Evidence:** `evidence.txt` (one outcome line per step); a `python3 -c` sqlite3 query per step over
   `$HERMES_HOME/profiles/fleet-f62-h-bot-b/state.db` (user rows with the sentinel, with ids) and over A's state.db
   (the tool row and the completion row); one over the plugin's `data.db` (ticket + attempts); the gateway log lines
-  naming the `delivery_id`.
+  naming the `delivery_id`. Also list the tool rows of B's PING turn, so a stray B `message_agent` is reported as a
+  drive failure, not a plugin one (E16).
 
 
 ## Pass
