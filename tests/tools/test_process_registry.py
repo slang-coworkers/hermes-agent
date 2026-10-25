@@ -1,4 +1,5 @@
 """Tests for tools/process_registry.py — ProcessRegistry query methods, pruning, checkpoint."""
+# health: allow FILE_LINES -- the prune guard keeps unpublished sessions, so these prune tests publish theirs
 
 import json
 import os

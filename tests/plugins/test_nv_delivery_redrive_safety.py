@@ -1,5 +1,5 @@
 """Safety regression tests for nv-delivery-redrive: re-targeted calls (the E9 guard), a stale tick
-snapshot, a late identical sibling and a silent exit 0. Each loads the plugin through the acceptance test's ``fleet``
+snapshot, a late identical sibling and a silent exit 0. Each loads the plugin through the shared ``fleet``
 fixture (real discovery, real executor, real delivery runner, fake target CLI) and asserts one outcome.
 """
 
@@ -11,21 +11,20 @@ import textwrap
 
 import pytest
 
-from tests.plugins.test_fleet_f62_h_acceptance import (
-    _UNVERIFIED,
+from tests.plugins.fleet_f62_h_rig import (
     ORCH,
+    SENDER_SID,
     TARGET,
     _admissions,
+    _append_user_row,
     _busy,
     _completion_output,
-    _last_json,
     _notices,
-    _runner_of,
-    _settle_without_row,
     _wait_runner_done,
-    fleet,
-    live_owner,
+    fleet_fixture,
+    live_owner_fixture,
 )
+from tests.plugins.test_fleet_f62_h_acceptance import _UNVERIFIED, _last_json, _runner_of, _settle_without_row
 
 _SILENT_TARGET = textwrap.dedent('''\
     #!{python}
@@ -275,3 +274,22 @@ def test_published_survives_retention_while_its_send_is_open(fleet, live_owner, 
     assert acks and acks[0]["delivery_id"] == did, acks
     assert fleet.until(lambda: fleet.ticket(did) is not None, ticks=False, timeout=10.0)
     assert fleet.ticket(did)["published_status"] == "ambiguous", fleet.ticket(did)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("row, decision",
+                         [("linger_same_pid", "skip"), ("other_pid", "notice"), ("not_settled", "notice")])
+def test_linger_carried_completion_counts_only_for_its_own_settled_pid(fleet, row, decision):
+    """(E16) A ``-Q`` one-shot's linger carries core's completion into the sender's Bot Chat as a plain user turn
+    (hermes_cli/quiet_single_query.py:192-200). For this ticket's pid with a ``settled`` payload, that row means no
+    second sender notice; a row naming another pid, or carrying no ``settled``, still gets the notice."""
+    drain = fleet.loaded.module.drain
+    did, pid = "e16" * 21 + "0", "proc_e16000000001"
+    named = "proc_e16000000002" if row == "other_pid" else pid
+    status = "queued" if row == "not_settled" else "settled"
+    payload = json.dumps({"status": status, "delivery_id": did, "reply": "ACK"})
+    _append_user_row(fleet.root, SENDER_SID, f"[IMPORTANT: Background process {named} completed normally "
+                                             f"(exit code 0).\nCommand: x\nOutput:\n{payload}\n]")
+    ticket = {"delivery_id": did, "state": "settled", "path": "live", "process_id": pid, "published_status": None,
+              "settled_by": 1, "sender_home": str(fleet.root), "sender_session_id": SENDER_SID, "reply": "ACK"}
+    assert drain._sender_decision(ticket) == decision

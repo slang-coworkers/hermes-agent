@@ -1,6 +1,6 @@
 """nv-delivery-redrive's per-call hook identity (ADR D5a.5): the ``tool_execution`` middleware binds a ``tool_call_id``
 around ``next_call`` so each delivery runner's completion transform gets its own hook gate key, and the drainer's own
-re-drives never enter core's registry. Each test loads the plugin through the acceptance test's ``fleet`` fixture
+re-drives never enter core's registry. Each test loads the plugin through the shared ``fleet`` fixture
 (real discovery); the id tests call the loaded middleware directly, the drainer test runs a real send and re-drive.
 """
 
@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from tests.plugins.test_fleet_f62_h_acceptance import TARGET, _busy, _wait_runner_done, fleet
+from tests.plugins.fleet_f62_h_rig import TARGET, _busy, _wait_runner_done, fleet_fixture
 
 _MINTED = re.compile(r"nv-redrive:[0-9a-f]{32}")
 
