@@ -110,6 +110,7 @@ def runner_create_time(pid: Optional[int]) -> Optional[float]:
 
         return float(psutil.Process(pid).create_time())
     except Exception:
+        logger.debug("nv-delivery-redrive: no start time for pid %s", pid, exc_info=True)
         return None
 
 

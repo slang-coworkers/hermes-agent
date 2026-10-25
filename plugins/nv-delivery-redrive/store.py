@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "nv-delivery-redrive"
 OPEN_STATES = ("pending",)
@@ -291,6 +294,7 @@ def _opener() -> tuple[int, Optional[float]]:
 
         return pid, float(psutil.Process(pid).create_time())
     except Exception:
+        logger.debug("nv-delivery-redrive: no start time for this process", exc_info=True)
         return pid, None
 
 

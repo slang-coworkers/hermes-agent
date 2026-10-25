@@ -138,7 +138,9 @@ def core_carried(ticket: dict[str, Any], output: str, exit_code: Any) -> bool:
 
 
 def transcript_carried(ticket: dict[str, Any]) -> bool:
-    """(b′): the sender's originating session already holds core's completion row carrying the settled outcome."""
+    """(b′): the sender's originating session already holds core's completion row carrying the settled outcome. Core
+    persists that completion as a ``process_complete`` row, or, through a ``-Q`` one-shot's linger, as a plain user turn
+    (``hermes_cli/quiet_single_query.py:192-200``), so every user row naming this process is checked."""
     pid = ticket.get("process_id")
     if not pid:
         return False
@@ -151,7 +153,7 @@ def transcript_carried(ticket: dict[str, Any]) -> bool:
             return False
         for message in db.get_messages(tip, include_inactive=True, include_ancestors=True):
             content = str(message.get("content") or "")
-            if message.get("display_kind") != "process_complete" or f"Background process {pid}" not in content:
+            if message.get("role") != "user" or f"Background process {pid}" not in content:
                 continue
             output = content.partition("Output:\n")[2]
             if ticket["path"] == "live":

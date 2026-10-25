@@ -84,5 +84,6 @@ def hook_timeout() -> float:
         raw = ((load_config_readonly() or {}).get("plugins") or {}).get("hook_callback_timeout")
         value = 30.0 if raw is None else float(raw)
     except Exception:
+        logger.debug("nv-delivery-redrive: plugins.hook_callback_timeout unreadable; using 30 s", exc_info=True)
         return 30.0
     return value if value > 0 else float("inf")
