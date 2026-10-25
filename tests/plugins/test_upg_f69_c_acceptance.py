@@ -488,6 +488,9 @@ def test_ac_upg_f69_c_12(tmp_path, monkeypatch):
     spec_path = spec_dir / DIRECT_SPEC.name
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
     spec["egress"].pop("inference_provider")
+    # Without inference_provider compose takes the legacy OSH-F64 posture, which requires proxy_addr;
+    # the value is the one the OSH-F64.b managed spec carries.
+    spec["egress"]["proxy_addr"] = "172.17.0.1:18255"
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
     _, seed, installed, _ = _install_default(tmp_path, monkeypatch, spec_path)
     assert installed.get("model") == seed["model"]

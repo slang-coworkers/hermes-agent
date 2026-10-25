@@ -121,12 +121,12 @@ A	plugins/nv-cost-cap/store.py	in-surface	replay	F68
 A	plugins/nv-coworker-compose/__init__.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/_yaml_compat.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/cli.py	in-surface	replay	F68	
-A	plugins/nv-coworker-compose/compose.py	in-surface	replay	F68	
+A	plugins/nv-coworker-compose/compose.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	plugins/nv-coworker-compose/openshell/Dockerfile.worker	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/__init__.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/dockerfile_lint.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/install-into-sandbox.sh	in-surface	replay	F68	
-A	plugins/nv-coworker-compose/openshell/installer.py	in-surface	replay	F68	
+A	plugins/nv-coworker-compose/openshell/installer.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	plugins/nv-coworker-compose/openshell/profile.d/nv-github-session.sh	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/trust.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/trust_source.py	in-surface	replay	F68	
@@ -142,13 +142,31 @@ A	plugins/nv-delivery-redrive/probe.py	in-surface	replay	F68+UPG-F69	D-6 team-le
 A	plugins/nv-delivery-redrive/send.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
 A	plugins/nv-delivery-redrive/settings.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
 A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6) + N3 comment reword, reviewer 87-r1-findings e2a80dfe via architect msg 164
-A	plugins/nv-fleet-gates/__init__.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/__init__.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port; user msg 2982 (orch msg 16, thread hermes-UPG-F69.c): UPG-F69.c ADR §D10, the per-turn terminal scope
 A	plugins/nv-fleet-gates/aliases.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/cli.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/edges.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/plugin.yaml	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/predicates.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/stores.py	in-surface	replay	F68	
+A	plugins/nv-ingress/__init__.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/bridge.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/deliver.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/edge/__init__.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/edge/__main__.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/edge/gateway_boot.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/edge/openshell_lint.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/edge/scope.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/envelope.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/hostrender.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/ledger.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/ownership.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/plugin.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/route_scripts/ingress_stage.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/sessions.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/skills/ci-gate/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/skills/ci-gate/scripts/checks_gate.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	plugins/nv-ingress/webhook_guard.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	plugins/nv-workflow-modes/__init__.py	in-surface	replay	F68	
 A	plugins/nv-workflow-modes/plugin.yaml	in-surface	replay	F68	
 A	plugins/nv-workflow-modes/skills/implement/SKILL.md	in-surface	replay	F68	
@@ -285,6 +303,7 @@ A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/workflows/triage-issue/SKILL.md
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-17.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-18.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62.e/AC-FLEET-F62.e-13.md	in-surface	replay	F68	
+A	tests/e2e-scenarios/FLEET-F62.f/AC-FLEET-F62.f-9.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/e2e-scenarios/FLEET-F62/AC-CRED-F28-2.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-5.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-6.md	in-surface	replay	F68	
@@ -361,6 +380,106 @@ A	tests/e2e-scenarios/GOV-F27/fixtures/gov-f27-ui/skills/review-skill/SKILL.md	i
 A	tests/e2e-scenarios/GOV-F27/fixtures/gov-f27-ui/skills/shared-skill/SKILL.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/GOV-F27/fixtures/gov-f27-ui/spines/base.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/GOV-F27/fixtures/gov-f27-ui/workflows/hermes-verify/SKILL.md	in-surface	replay	F68	
+A	tests/e2e-scenarios/ING-F66/AC-ING-F66-19.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/AC-ING-F66-20.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/AC-ING-F66-21.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/AC-ING-F66-24.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/hooks/github-events.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/host/edge.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/host/nv-ingress-edge.service	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/host/nv-ingress-forward.service	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/host/nv-ingress-gateway-boot.service	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/cron/jobs.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/policy-approver.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skill-bundles/approver.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skills/approve/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skills/ci-gate/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skills/ci-gate/scripts/checks_gate.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-approver/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/policy-gateway.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/scripts/check_gate.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/scripts/ingress_stage.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-default/scripts/pr_ci_gate.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/cron/jobs.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/policy-fixer.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/skill-bundles/fixer.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/skills/implement/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-fixer/skills/nv-gitconfig/gitconfig-github	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/cron/jobs.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/policy-orchestrator.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/skill-bundles/orchestrator.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-orchestrator/skills/supervise-issues/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/cron/jobs.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/policy-reviewer.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skill-bundles/reviewer.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/ci-gate/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/ci-gate/scripts/checks_gate.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/nv-gitconfig/gitconfig-github	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-reviewer/skills/plan/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/.env.template	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/cron/jobs.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/mcp.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/policy-triager.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/skill-bundles/triager.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/skills/nv-gitconfig/gitconfig-github	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/ing-f66-triager/skills/triage-issue/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-fleet/managed/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-default/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-default/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-default/envelope-check-run-failure.json	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-default/scripts/ingress_stage.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-owner/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-owner/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/fixtures/ing-f66-ui-owner/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/coworker-types.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/overlays/ci-gate.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/skills/base-nanoclaw/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/skills/codex-critique/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/skills/supervise-issues/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/spines/base.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/wire-manifest.txt	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/workflows/approve/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/workflows/base/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/workflows/implement/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/workflows/plan/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/ING-F66/spec/openshell/workflows/triage-issue/SKILL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/e2e-scenarios/ISO-F14/AC-ISO-F14-1.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/ISO-F14/AC-ISO-F14-2.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/ISO-F14/AC-ISO-F14-5.md	in-surface	replay	F68	
@@ -444,8 +563,8 @@ A	tests/e2e-scenarios/OSH-F63/fixtures/openshell/osh-f63-tester/skill-bundles/te
 A	tests/e2e-scenarios/OSH-F63/fixtures/openshell/provision.dry-run.txt	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F63/spec/openshell/coworker-types.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F63/spec/openshell/spines/base.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-6.md	in-surface	replay	F68	
-A	tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-7.md	in-surface	replay	F68	
+A	tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-6.md	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
+A	tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-7.md	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-gateway/SOUL.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-gateway/config.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-gateway/distribution.yaml	in-surface	replay	F68	
@@ -457,6 +576,20 @@ A	tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-worker-builder/config.yaml	in-
 A	tests/e2e-scenarios/OSH-F64.b/fixtures/osh-f64b-worker-builder/distribution.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64.b/spec/coworker-types.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64.b/spec/spines/base.yaml	in-surface	replay	F68	
+A	tests/e2e-scenarios/OSH-F64.e/AC-OSH-F64.b-6.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/AC-OSH-F64.b-7.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/AC-OSH-F64.e-7.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-gateway/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-gateway/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-gateway/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-architect/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-architect/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-architect/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-orchestrator/SOUL.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-orchestrator/config.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/fixtures/osh-f64e-worker-orchestrator/distribution.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/spec/coworker-types.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/e2e-scenarios/OSH-F64.e/spec/spines/base.yaml	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/e2e-scenarios/OSH-F64/AC-OSH-F64-3.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64/AC-OSH-F64-4.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64/AC-OSH-F64-5.md	in-surface	replay	F68	
@@ -591,6 +724,7 @@ A	tests/hermes_cli/test_rt_f09_doc_contract.py	in-surface	replay	F68
 A	tests/hermes_cli/test_self_f55_agent_templates_acceptance.py	in-surface	replay	F68	
 A	tests/hermes_cli/test_self_f57_acceptance.py	in-surface	replay	F68+UPG-F69	ADR §D4 find_all_skills rename (UPG-F69 3)
 A	tests/hermes_state/test_cost_f31_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/fake_openshell.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/fixtures/ch-f52/coworker-types.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/ch-f52/spines/base.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/gov-f23/coworker-types-omitted.yaml	in-surface	replay	F68	
@@ -608,6 +742,8 @@ A	tests/plugins/fixtures/gov-f27/skills/review-skill/SKILL.md	in-surface	replay	
 A	tests/plugins/fixtures/gov-f27/skills/shared-skill/SKILL.md	in-surface	replay	F68	
 A	tests/plugins/fixtures/gov-f27/spines/base.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/gov-f27/workflows/hermes-verify/SKILL.md	in-surface	replay	F68	
+A	tests/plugins/fixtures/ing-f66-openshell/gateway_boot-c16d47c.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/plugins/fixtures/ing-f66-openshell/gateway_boot-f767641.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/fixtures/loop-f35/coworker-types.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/loop-f35/expected.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/loop-f35/overlays/critique-gate.yaml	in-surface	replay	F68	
@@ -676,6 +812,7 @@ A	tests/plugins/test_fleet_f62_d_gates_unit.py	in-surface	replay	F68
 A	tests/plugins/test_fleet_f62_d_installer_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	replay	F68	
+A	tests/plugins/test_fleet_f62_f_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-1..5 msg 1162 (-1/-2/-3/-6/-11 WITHDRAWN) + DN-E4-6 orch msg 122 (-10) + E4′ d3c4f3ff §E4.3 + DN-E4-9/-11 opt 1 (msg 1288) + E4″ 31ef5b36 AC-UPG-F69-7 + DN-E4-14 opt 1 (operator msg 1782, orch msg 212): AC-UPG-F69-7 negatives modified_target / unconfirmed_recipient (UPG-F69 D-6) + -12 RE-POINT to text of record, orch msgs 274/278 via architect msg 154 (carried-41-triage 2bf86e3a)
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	replay	F68	
@@ -719,6 +856,10 @@ A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_unit.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_ingress_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/plugins/test_nv_ingress_admission_v2.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4); user msg 3162 (orch msg 40): erratum E1 D12, the real-admission node of AC-ING-F66-2
+A	tests/plugins/test_nv_ingress_openshell_contract.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/plugins/test_nv_ingress_unit.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_nv_path_guard_base_oracle.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_workflow_modes_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_workflow_modes_installer.py	in-surface	replay	F68	
@@ -727,8 +868,10 @@ A	tests/plugins/test_obs_f46_request_capture_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_osh_f63_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f63_regressions.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_acceptance.py	in-surface	replay	F68	
-A	tests/plugins/test_osh_f64_b_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_osh_f64_b_acceptance.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	tests/plugins/test_osh_f64_cli_transport.py	in-surface	replay	F68	
+A	tests/plugins/test_osh_f64_e_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/plugins/test_osh_f64_e_unit.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_osh_f64_f_acceptance.py	in-surface	new	OSH-F64.f	user ruling O1 msg 2890 (orch msg 8, thread hermes-OSH-F64.f): OSH-F64.f, the default-profile route reconcile; user dashboard msg 3012 (orch msg 52): option 1, the F69 data rows for OSH-F64.f
 A	tests/plugins/test_osh_f64_installer_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_onboard_cli.py	in-surface	replay	F68	
@@ -750,6 +893,7 @@ A	tests/plugins/test_upg_f67_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3); DN-E4-7/-8 opt 1 (msg 1288): AC-UPG-F68-18/-20 on the authority stub (UPG-F69 D-6); msg 72/78 + memo item3c §2/§3/§6 + E4′ §E4.6 + E7.1a/D-1..D-4 (msg 596, architect msg 94): AC-UPG-F68-19/-21 off the retired lease consumer (UPG-F69 3); orch msg 194 (architect msg 112): AC-UPG-F68-12 TAG_COMMIT re-pinned to v0.22.5 bf0203a7, criterion text unchanged (UPG-F69 3)
 A	tests/plugins/test_upg_f69_a_acceptance.py	in-surface	new	UPG-F69.a	user msg 2018 (orch msg 2, thread hermes-UPG-F69.a)
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
+A	tests/plugins/test_upg_f69_c_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 16 (UPG-F69 3)
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	replay	F68	
@@ -796,11 +940,12 @@ A	website/docs/user-guide/fleet-engage-modes.md	in-surface	replay	F68
 A	website/docs/user-guide/fleet-entity-model.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-github-ingress.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-guard-catalog.md	in-surface	replay	F68	
+A	website/docs/user-guide/fleet-ingress.md	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	website/docs/user-guide/fleet-mcp-scope.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-metrics.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-mount-composition.md	in-surface	replay	F68	
-A	website/docs/user-guide/fleet-nanoclaw-base-port.md	in-surface	replay	F68	
-A	website/docs/user-guide/fleet-openshell.md	in-surface	replay	F68	
+A	website/docs/user-guide/fleet-nanoclaw-base-port.md	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
+A	website/docs/user-guide/fleet-openshell.md	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	website/docs/user-guide/fleet-per-agent-memory.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-raw-request-capture.md	in-surface	replay	F68	
 A	website/docs/user-guide/fleet-session-driver.md	in-surface	replay	F68	
