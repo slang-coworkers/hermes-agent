@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- an exited session's watcher must wait for its publish before building the completion
 """Process/completion/update notifications, media delivery and async-delegation delivery for GatewayRunner.
 
 Split out of ``gateway/run.py``; bound onto ``GatewayRunner`` via the MRO.
