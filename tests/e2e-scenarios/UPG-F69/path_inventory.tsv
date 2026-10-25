@@ -60,4 +60,6 @@ A	tests/e2e-scenarios/UPG-F69/fork_ci_lines.tsv	in-surface	new	UPG-F69
 A	tests/e2e-scenarios/UPG-F69/fork_ci_map.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/fork_ci_sizing.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/path_inventory.tsv	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/replay_check.py	in-surface	new	UPG-F69	
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
+A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
