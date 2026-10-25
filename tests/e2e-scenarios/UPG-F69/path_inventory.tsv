@@ -1,0 +1,63 @@
+# Class `ruled`: an upstream-added step with no v0.22.2 counterpart; the architect's review is its authority.
+status	path	surface	class	origin	authority
+M	.github/actionlint.yaml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a
+M	.github/actions/setup-pm/README.md	fork-ci	fork-ci	UPG-F69	msg-206:5a,arch-msg-20
+M	.github/workflows/archive-inputs.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/blob-size-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/bootstrap-installer-build.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/bootstrap-installer.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/canary-release.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/case-collision-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/catalog-tests.yml	fork-ci	ruled	UPG-F69	
+M	.github/workflows/ci-review-comment.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/ci.yaml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/contributor-check.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-990,msg-3924
+M	.github/workflows/deploy-site.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/desktop-bundle-smoke.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/desktop-bundled-release.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/docker-lint.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/docker.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/docs-site-checks.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/e2e-desktop-core.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/e2e-desktop-update.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/e2e-desktop.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/history-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/icons-freshness-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/infographic-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/install-e2e-red.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/install-e2e-windows-run.yml	fork-ci	fork-ci	UPG-F69	msg-596
+M	.github/workflows/js-autofix.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/js-tests.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-3924
+M	.github/workflows/label-rerun.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a
+M	.github/workflows/lazy-deps-guard.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/lint.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/live-providers.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/lockfile-diff.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/nix.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/plugin-catalog-ci.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/pm-bundle.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/profile-artifact-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/prompt-surface-diff.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/remote-backends.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/rust-tests.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/sandbox-image.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/skills-index-freshness.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/skills-index.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/stable-release.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/supply-chain-audit.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/termux-verify.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/tests-os.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-208,msg-226
+M	.github/workflows/tests.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-602,msg-226,msg-252,msg-208
+M	.github/workflows/uv-lockfile-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	.github/workflows/windows-desktop-attach-e2e.yml	fork-ci	ruled	UPG-F69	
+M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-3924
+M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+A	contributors/emails/harsh1492@gmail.com	fork-ci	fork-ci	F68	msg-990
+A	contributors/emails/hermes-builder@slang-coworkers.local	fork-ci	fork-ci	F68	msg-990
+A	tests/e2e-scenarios/UPG-F69/fork_ci_contributors.tsv	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/fork_ci_lines.tsv	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/fork_ci_map.tsv	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/fork_ci_sizing.tsv	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/path_inventory.tsv	in-surface	new	UPG-F69	
+A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	

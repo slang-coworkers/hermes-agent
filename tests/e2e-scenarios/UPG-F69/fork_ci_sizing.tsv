@@ -1,0 +1,4 @@
+workflow	job	key	value	authority
+tests.yml	test	timeout-minutes	90	msg-602
+windows-install-update-e2e.yml	install-update	timeout-minutes	150	msg-3924
+js-tests.yml	check	workers	2	msg-3924
