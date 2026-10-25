@@ -8,7 +8,7 @@ M	.github/workflows/bootstrap-installer-build.yml	fork-ci	fork-ci	UPG-F69	msg-59
 M	.github/workflows/bootstrap-installer.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/canary-release.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/case-collision-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
-M	.github/workflows/catalog-tests.yml	fork-ci	ruled	UPG-F69	
+M	.github/workflows/catalog-tests.yml	fork-ci	ruled	UPG-F69	5a/msg-206 + architect review E3
 M	.github/workflows/ci-review-comment.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/ci.yaml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/contributor-check.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-990,msg-3924
@@ -50,7 +50,7 @@ M	.github/workflows/tests-os.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,
 M	.github/workflows/tests.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-602,msg-226,msg-252,msg-208
 M	.github/workflows/uv-lockfile-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
-M	.github/workflows/windows-desktop-attach-e2e.yml	fork-ci	ruled	UPG-F69	
+M	.github/workflows/windows-desktop-attach-e2e.yml	fork-ci	ruled	UPG-F69	5a/msg-206 + architect review E3
 M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20,msg-3924
 M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 A	contributors/emails/harsh1492@gmail.com	fork-ci	fork-ci	F68	msg-990
