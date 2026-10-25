@@ -38,12 +38,12 @@ def _run_checker(repo: Path, frm: str, onto: str, head: str, candidate: str, dat
     return subprocess.run(
         [sys.executable, str(CHECKER), "--repo", str(repo), "--from", frm, "--onto", onto, "--head", head,
          "--candidate", candidate, "--data-dir", str(data)],
-        capture_output=True, text=True, encoding="utf-8", timeout=900,
+        capture_output=True, text=True, encoding="utf-8", timeout=900, check=False,
     )
 
 
 def _tsv_rows(path: Path) -> list[dict[str, str]]:
-    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln and not ln.startswith("#")]
+    lines = [ln for ln in path.read_text(encoding="utf-8-sig").splitlines() if ln and not ln.startswith("#")]
     header = lines[0].split("\t")
     return [dict(zip(header, ln.split("\t"))) for ln in lines[1:]]
 
@@ -51,7 +51,7 @@ def _tsv_rows(path: Path) -> list[dict[str, str]]:
 def _yaml_load(path: Path):
     from hermes_yaml import safe_load
 
-    return safe_load(path.read_text(encoding="utf-8"))
+    return safe_load(path.read_text(encoding="utf-8-sig"))
 
 
 def _walk(node, key=None):
@@ -68,7 +68,7 @@ def _walk(node, key=None):
 
 def test_ac_upg_f69_1():
     """The re-pinned replay checker, run on the candidate with the bump of record (`bump.json`: from `d923a5eb`, onto `bf0203a7`, head = the F68 head it replays), exits 0: every path changed between onto and candidate has exactly one inventory row; every core and fork-ci row has an authority; every core scope and file has an empty residual, a ruled residual or an `absorbed` disposition; every overlap scope carries a matching ruling."""
-    bump = json.loads((SCEN / "bump.json").read_text(encoding="utf-8"))
+    bump = json.loads((SCEN / "bump.json").read_text(encoding="utf-8-sig"))
     result = _run_checker(REPO, bump["from"], bump["onto"], bump["head"], "HEAD", SCEN)
     findings = [ln for ln in result.stdout.splitlines() if ln.startswith("FAIL ")]
     assert result.returncode == 0 and not findings, result.stdout[-4000:] + result.stderr[-2000:]
@@ -170,7 +170,7 @@ def synthetic(tmp_path):
     ])
     _write_tsv(data / "fork_ci_map.tsv", "kind\tmatch\treplacement\tauthority", [
         "label\tblacksmith-4vcpu-ubuntu-2404\tubuntu-latest\tmsg-596",
-        f"action\tuseblacksmith/checkout\t{CHECKOUT_PIN}\tmsg-596",
+        f"action\tuseblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a\t{CHECKOUT_PIN}\tmsg-596",
     ])
     _write_tsv(data / "fork_ci_sizing.tsv", "workflow\tjob\tkey\tvalue\tauthority", [
         "ci.yml\ttest\ttimeout-minutes\t90\tmsg-602",
@@ -193,7 +193,7 @@ def synthetic(tmp_path):
 def _edit(rel: str, old: str, new: str):
     def mutate(repo: Path, data: Path) -> None:
         path = repo / rel
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
         assert old in text
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
     return mutate
@@ -219,7 +219,7 @@ def _insert_in_wrong_job(repo: Path, data: Path) -> None:
 
 def _drop_fork_change(repo: Path, data: Path) -> None:
     _write_files(repo, {"plugins/p/__init__.py": _FROM_FILES["plugins/p/__init__.py"]})
-    rows = (data / "path_inventory.tsv").read_text(encoding="utf-8").splitlines()
+    rows = (data / "path_inventory.tsv").read_text(encoding="utf-8-sig").splitlines()
     kept = [row for row in rows if "\tplugins/p/__init__.py\t" not in row]
     (data / "path_inventory.tsv").write_text("\n".join(kept) + "\n", encoding="utf-8")
 
@@ -266,7 +266,7 @@ def test_ac_upg_f69_2(synthetic, mutation):
 
 def test_ac_upg_f69_3():
     """The candidate is v0.22.5 plus exactly the inventoried fork delta: `onto` in `bump.json` is `bf0203a794a07aac3ff764972ab9087baa4e4f4e`, the merge base of HEAD and onto is onto, and every path that differs between onto and HEAD is an inventory row (all other paths are byte-identical to v0.22.5)."""
-    bump = json.loads((SCEN / "bump.json").read_text(encoding="utf-8"))
+    bump = json.loads((SCEN / "bump.json").read_text(encoding="utf-8-sig"))
     assert bump["onto"] == V0225
     assert _git(REPO, "merge-base", "HEAD", V0225).stdout.strip() == V0225
     changed = {p for p in _git(REPO, "diff", "--no-renames", "--name-only", V0225, "HEAD").stdout.splitlines() if p}
@@ -282,7 +282,7 @@ def _workflow_files() -> list[Path]:
 
 def test_ac_upg_f69_4():
     """No file under `.github/workflows/` and no entry of `.github/actionlint.yaml` carries a Blacksmith runner label or a GitHub large-runner label (`*-latest-32-core`, `*-latest-32-arm-core`; 8 such non-comment lines in 6 workflows remain at v0.22.5). Every `useblacksmith/*` action left in a workflow has a ruled `KEEP` row. Every sizing row in `fork_ci_sizing.tsv` (job timeout or worker count, each with an authority) holds in the workflow job it names."""
-    keep = {row["match"] for row in _tsv_rows(SCEN / "fork_ci_map.tsv")
+    keep = {row["match"].split("#", 1)[0].strip() for row in _tsv_rows(SCEN / "fork_ci_map.tsv")
             if row["kind"] == "action" and row["replacement"] == "KEEP" and row["authority"]}
     labels, actions = [], []
     for path in _workflow_files():
@@ -290,7 +290,7 @@ def test_ac_upg_f69_4():
             rel = path.relative_to(REPO).as_posix()
             if RUNNER_LABEL.search(value):
                 labels.append((rel, value))
-            if key == "uses" and value.startswith("useblacksmith/") and value.split("@", 1)[0] not in keep:
+            if key == "uses" and value.startswith("useblacksmith/") and value.strip() not in keep:
                 actions.append((rel, value))
     assert labels == [], labels[:20]
     assert actions == [], actions[:20]
@@ -418,7 +418,7 @@ def test_ac_upg_f69_6(authority_api, case, kanban_home, caplog):
     """(ruling 1a) Through a started session authority, a durable wake is acknowledged only for a fully saved turn, on both paths. A saved turn (`persisted_turn.complete is True`) makes the served-profile `run_internal_session_turn` return `True` and the default-profile HTTP self-post return `X-Hermes-Turn-Persisted: true`. The real durable notifier then delivers the event, and its cursor advances with no alert. A same-key replay joins the settled admission without running the turn again. An unsaved turn (no receipt), a compacted turn (`complete` False, rows present) and a truthy non-bool `complete` are never acknowledged on either path: `False` / `false`, the durable notifier keeps the event (cursor unmoved, sub kept), and after `_DURABLE_ALERT_THRESHOLD` consecutive failures it logs the operator alert. With no session authority, AC-UPG-F67-9's `turn_persisted is True` contract is unchanged."""
     from aiohttp import web
 
-    import gateway.platforms.api_server as api_server
+    from gateway.platforms import api_server
     from gateway.platforms import api_server_runs
 
     api, owner = authority_api
