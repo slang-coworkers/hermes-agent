@@ -17,12 +17,12 @@ permissions:
 
 jobs:
   check-attribution:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.check-emails.outputs.review_status }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0  # Full history needed for git log
@@ -31,7 +31,15 @@ jobs:
         id: check-emails
         run: |
           # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          MERGE_BASE=$(git merge-base origin/${{ github.event_name == 'pull_request' && github.base_ref || 'main' }} HEAD)
+          # Exclude unrelated release history from a direct dispatch's attribution.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ -z "${{ inputs.commit }}" ]; then
+            for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
+              mb=$(git merge-base "$b" HEAD) || continue
+              [ "$mb" = "$(git rev-parse HEAD)" ] && continue
+              if [ "$(git rev-list --count "$mb..HEAD")" -lt "$(git rev-list --count "$MERGE_BASE..HEAD")" ]; then MERGE_BASE=$mb; fi
+            done
+          fi
 
           # Find any new author emails in this PR's commits
           NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
