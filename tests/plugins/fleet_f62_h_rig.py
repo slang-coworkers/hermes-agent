@@ -28,6 +28,8 @@ PLUGIN_SRC = _REPO / "plugins" / PLUGIN_KEY
 TARGET = "researcher"
 ORCH = "orchestrator"
 SENDER_SID = "bc-hermes"
+# Every wait below is a ceiling, never a window: under load (>= 6.5x measured) one runner boot can use most of 30 s.
+_WAIT_FLOOR = 180.0
 
 _FAKE_TARGET = textwrap.dedent('''\
     #!{python}
@@ -203,8 +205,10 @@ def fleet_fixture(tmp_path, monkeypatch):
     (root / "profile.yaml").write_text(
         "description: sender\nui_meta:\n  hermes-bots:\n    shape: cloud\n", encoding="utf-8")
     homes = {"default": root, TARGET: _profile(root, TARGET), ORCH: _profile(root, ORCH)}
-    settings = {"redrive_window_seconds": 40, "max_attempts": 6, "retry_backoff_seconds": 1,
-                "heartbeat_stale_seconds": 30, "orchestrator_profile": ORCH}
+    # The rig ticks by hand and boots runners under load, so neither a tick-free wait (D8 staleness) nor a re-drive
+    # chain (the window) may outrun these; the cases that test either bound set their own.
+    settings = {"redrive_window_seconds": 300, "max_attempts": 6, "retry_backoff_seconds": 1,
+                "heartbeat_stale_seconds": 600, "orchestrator_profile": ORCH}
     cfg = {"plugins": {"enabled": [PLUGIN_KEY], "entries": {PLUGIN_KEY: {"settings": settings}}},
            "bot_mode": {"turn_wait_seconds": 1}}
     for home in homes.values():
@@ -295,7 +299,7 @@ def fleet_fixture(tmp_path, monkeypatch):
                 and m.get("display_kind") != "process_complete"]
 
     def until(predicate, *, ticks=True, timeout=30.0, pause=0.25):
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + max(timeout, _WAIT_FLOOR)
         while time.monotonic() < deadline:
             if ticks:
                 tick()
@@ -421,6 +425,7 @@ def _busy(fleet, profile=TARGET):
 
 
 def _wait_runner_done(fleet, process_id, timeout=30.0):
+    timeout = max(timeout, _WAIT_FLOOR)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         session = fleet.registry.get(process_id)
