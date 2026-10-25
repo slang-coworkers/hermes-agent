@@ -88,8 +88,8 @@ def matching_origins(home: str | os.PathLike, content: str, *, db_seen: bool) ->
         if None in origins:
             return UNKNOWN
         return sorted(int(o) for o in origins)
-    except Exception as exc:
-        logger.debug("nv-delivery-redrive: probe of %s failed: %s", path, exc)
+    except Exception:
+        logger.debug("nv-delivery-redrive: probe of %s failed", path, exc_info=True)
         return UNKNOWN
 
 

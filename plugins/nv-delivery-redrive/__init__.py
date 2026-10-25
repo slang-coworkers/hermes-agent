@@ -42,6 +42,7 @@ def _missing_core_names() -> list[str]:
         try:
             module = importlib.import_module(module_name)
         except Exception:
+            logger.debug("nv-delivery-redrive: core module %s did not import", module_name, exc_info=True)
             missing.append(module_name)
             continue
         missing.extend(f"{module_name}.{name}" for name in names if not hasattr(module, name))
@@ -53,6 +54,7 @@ def _missing_core_names() -> list[str]:
         fields = {f.name for f in dataclasses.fields(ProcessSession)}
         missing.extend(f"ProcessSession.{name}" for name in _SESSION_FIELDS if name not in fields)
     except Exception:
+        logger.debug("nv-delivery-redrive: process registry shape unreadable", exc_info=True)
         missing.append("tools.process_registry.ProcessSession")
     return missing
 
