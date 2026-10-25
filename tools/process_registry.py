@@ -2575,9 +2575,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
         MAX_PROCESSES. Must hold _lock. A session whose scope stop is still pending is kept
         either way: it is kill_all's only handle on a scope that may hold live descendants."""
         now = time.time()
-        # Unpublished sessions stay too: the gateway watcher waits on their event, and a reload comes back already set.
-        prunable = {sid: s for sid, s in self._finished.items()
-                    if not getattr(s, "_scope_stop_pending", False) and s._completion_event.is_set()}
+        prunable = {sid: s for sid, s in self._finished.items() if not getattr(s, "_scope_stop_pending", False) and s._completion_event.is_set()}
         expired = [sid for sid, s in prunable.items() if (now - s.started_at) > FINISHED_TTL_SECONDS]
         over_cap = len(self._running) + len(self._finished) - len(expired) >= MAX_PROCESSES
         if over_cap and (survivors := [sid for sid in prunable if sid not in expired]):
