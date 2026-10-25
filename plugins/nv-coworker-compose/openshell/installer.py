@@ -1032,6 +1032,16 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
         _atomic_write_text(main, include + "".join(kept))
 
 
+_DIGEST_VERB_ABSENT = "flag not allowed: policy digest"
+
+
+def _mirror_bytes(bound: Path) -> Optional[bytes]:
+    try:
+        return bound.read_bytes()
+    except OSError:
+        return None
+
+
 def _record_policy_digest(home: Path, sandbox: str) -> Path:
     return home / ".osh-f64" / "sandbox-policy" / f"{sandbox}.sha256"
 
@@ -1046,7 +1056,7 @@ def _rendered_policy(cmd: List[str], step: Step) -> Tuple[str, Path, Path, bytes
     if not rendered.is_file():
         raise ValueError(f"{name}: rendered policy {rendered} is missing; run the compose step first")
     want = rendered.read_bytes()
-    if bound != rendered and bound.is_file() and bound.read_bytes() != want:
+    if bound != rendered and _mirror_bytes(bound) not in (None, want):
         raise ValueError(
             f"{name}: --policy {bound} does not match the rendered policy {rendered}; refresh the "
             "host mirror before installing (a stale mirror would bind an old policy)")
@@ -1064,9 +1074,14 @@ def _broker_policy_digest(name: str, bound: Path) -> str:
     # One sha256sum line for exactly the requested file; any other answer is not a verification.
     line = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]" + re.escape(str(bound)) + r"\n?", proc.stdout or "")
     if proc.returncode != 0 or line is None:
+        if proc.returncode == 2 and not proc.stdout and (proc.stderr or "").strip() == _DIGEST_VERB_ABSENT:
+            raise ValueError(f"{name}: the broker does not offer `openshell policy digest` for --policy {bound}; "
+                             "enable or allow it for this sandbox prefix (a rooted install needs it); "
+                             "no sandbox was changed")
         reason = ((proc.stderr or "").strip().splitlines() or [f"unparsable output {proc.stdout!r}"])[-1]
         raise ValueError(f"{name}: the broker could not verify --policy {bound} "
-                         f"(exit {proc.returncode}: {reason}); no sandbox was changed")
+                         f"(exit {proc.returncode}: {reason}); a rooted install needs the host file's sha256 "
+                         "from `openshell policy digest`; no sandbox was changed")
     return line.group(1).lower()
 
 
