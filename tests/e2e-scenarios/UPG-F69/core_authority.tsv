@@ -1,0 +1,38 @@
+# UPG-F69 core paths changed d923a5eb→ad99872c ∪ bf0203a7→candidate (ADR §D2 rule 1-4).
+# Carried paths keep UPG-F68's authority; F69's own reason follows `;`.
+key	authority	disposition
+agent/session_persistence.py	GOV-F25 (UPG-F68 carry)	replay
+agent/turn_facade.py	GOV-F25 (UPG-F68 carry)	replay
+agent/turn_finalizer.py	GOV-F25 (UPG-F68 carry)	replay
+gateway/kanban_watchers.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
+gateway/kanban_watchers_notifier.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
+gateway/platforms/api_server.py	GOV-F25,GOV-F25.b,WP-D1 (UPG-F68 carry)	replay
+gateway/platforms/api_server_openai_routes.py	GOV-F25,GOV-F25.b (UPG-F68 carry); ADR §D1 union + 1a/msg-206 + E1.4 + architect msg 38 (UPG-F69 ack)	replay
+gateway/platforms/api_server_runs.py	WP-D1 (UPG-F68 carry); 1a/msg-206 + E1.4 + architect msg 38 (UPG-F69 ack)	replay
+gateway/run_notifications.py	FLEET-F62.h (UPG-F68 carry); 2a/msg-206 + E2.1 re-cut (UPG-F69 F62.h-recut); decision-g1-waiver-drop-2026-10-26 (3f19efc4)	replay
+gateway/wake.py	GOV-F25,GOV-F25.b,WP-D1 (UPG-F68 carry)	replay
+hermes_cli/kanban_db.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
+hermes_cli/kanban_db_connect.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
+hermes_cli/kanban_db_notify.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
+hermes_cli/providers.py	UA-48	absorbed
+locales/af.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/ar.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/de.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/en.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/es.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/fr.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/ga.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/hu.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/it.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/ja.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/ko.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/pt.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/ru.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/tr.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/uk.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/zh-hant.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+locales/zh.yaml	FLEET-F62.h (UPG-F68 carry)	replay
+tools/bot_mode_dm.py	F62.g (UPG-F68 carry)	replay
+tools/process_registry.py	A1 (UPG-F68 carry); user msg 306 (UPG-F69 E2)	replay
+tools/terminal_tool_background.py	A1 (UPG-F68 carry)	replay
+tools/process_registry.py#ProcessRegistry._prune_if_needed	user msg 306 (UPG-F69 E2)	ruled
