@@ -133,8 +133,8 @@ def test_ac_self_f57_b_3(tmp_path, monkeypatch):
         "---\nname: self-f57b-ttl\ndescription: v2\n---\n\n# self-f57b-ttl\n\nBody.\n",
         encoding="utf-8",
     )
-    os.utime(shared, (root_before.st_atime, root_before.st_mtime))
-    os.utime(skill_dir, (child_before.st_atime, child_before.st_mtime))
+    os.utime(shared, ns=(root_before.st_atime_ns, root_before.st_mtime_ns))
+    os.utime(skill_dir, ns=(child_before.st_atime_ns, child_before.st_mtime_ns))
 
     # Just under the 30 s bound (age 29 s): signature unchanged -> still cached "v1".
     clock["t"] = 1029.0
