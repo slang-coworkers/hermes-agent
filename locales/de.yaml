@@ -104,6 +104,7 @@ gateway:
     started: "🔄 Hintergrund-Aufgabe gestartet: \"{preview}\"\nAufgaben-ID: {task_id}\nSie können weiter chatten — die Ergebnisse erscheinen hier, wenn sie fertig sind."
     task_finished: "✅ Hintergrund-Aufgabe abgeschlossen"
     task_failed: "❌ Hintergrund-Aufgabe fehlgeschlagen"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "Exit {code}"
     last_output: ". Letzte Ausgabe:\n```\n{tail}\n```"
     rerun_hint: "\nBitten Sie mich, sie erneut auszuführen oder das vollständige Log zu zeigen."

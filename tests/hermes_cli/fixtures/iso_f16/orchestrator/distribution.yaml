@@ -1,0 +1,6 @@
+name: iso-f16-orchestrator
+version: 0.1.0
+description: >-
+  ISO-F16 reference profile distribution (orchestrator role): frontier model,
+  high reasoning effort, priority service tier, kanban/delegation toolsets.
+  Disjoint from the sibling worker distribution.

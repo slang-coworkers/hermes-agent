@@ -104,6 +104,7 @@ gateway:
     started: "🔄 Agtergrondtaak begin: \"{preview}\"\nTaak-ID: {task_id}\nJy kan aanhou gesels — resultate verskyn hier wanneer dit klaar is."
     task_finished: "✅ Agtergrondtaak voltooi"
     task_failed: "❌ Agtergrondtaak het misluk"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "afsluitkode {code}"
     last_output: ". Laaste uitvoer:\n```\n{tail}\n```"
     rerun_hint: "\nVra my om dit weer uit te voer of die volledige log te wys."

@@ -1,0 +1,11 @@
+manifest_version: 1
+name: nv-delivery-redrive
+version: 0.1.0
+description: "Re-drives a local Bot Mode message_agent delivery that a busy target refused, under its ack delivery_id, from the gateway's kanban dispatch tick. At most once in the target's Bot Chat, bounded, typed final outcome to the sender and the orchestrator. Needs plugins.entries.nv-delivery-redrive.settings.orchestrator_profile; POSIX only."
+author: "slang-coworkers (fleet plugin)"
+kind: standalone
+provides_tools: []
+provides_hooks:
+  - on_kanban_dispatch_tick
+  - transform_terminal_output
+  - post_tool_call

@@ -104,6 +104,7 @@ gateway:
     started: "🔄 背景任務已啟動：「{preview}」\n任務 ID：{task_id}\n你可以繼續聊天 — 完成後結果將顯示於此。"
     task_finished: "✅ 背景任務已完成"
     task_failed: "❌ 背景任務失敗"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "結束代碼 {code}"
     last_output: "。最後輸出：\n```\n{tail}\n```"
     rerun_hint: "\n可以請我重新執行，或顯示完整日誌。"

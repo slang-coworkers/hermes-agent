@@ -104,6 +104,7 @@ gateway:
     started: "🔄 Arka plan görevi başlatıldı: \"{preview}\"\nGörev kimliği: {task_id}\nSohbete devam edebilirsin — sonuçlar tamamlandığında burada görünecek."
     task_finished: "✅ Arka plan görevi tamamlandı"
     task_failed: "❌ Arka plan görevi başarısız oldu"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "çıkış kodu {code}"
     last_output: ". Son çıktı:\n```\n{tail}\n```"
     rerun_hint: "\nYeniden çalıştırmamı veya tam günlüğü göstermemi isteyebilirsiniz."

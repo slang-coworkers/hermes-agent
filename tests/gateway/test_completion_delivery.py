@@ -274,6 +274,7 @@ def test_process_tool_redacts_explicit_kill_output(monkeypatch):
         exited=True,
         exit_code=0,
     )
+    session._completion_event.set()
     registry._finished[session.id] = session
     monkeypatch.setattr(pr_module, "process_registry", registry)
 
@@ -307,6 +308,7 @@ def test_autonomous_completion_redacts_real_command_and_output_secrets(monkeypat
         exit_code=0,
         notify_on_complete=True,
     )
+    session._completion_event.set()
     registry._finished[session.id] = session
     monkeypatch.setattr(pr_module, "process_registry", registry)
     monkeypatch.setattr(redact_module, "_REDACT_ENABLED", True)
@@ -350,6 +352,7 @@ def test_concurrent_process_watchers_coalesce_one_session_completion_turn(monkey
             exit_code=0,
             notify_on_complete=True,
         )
+        session._completion_event.set()
         registry._finished[session.id] = session
         watchers.append({
             "session_id": session.id,

@@ -1,0 +1,4 @@
+name: mem-f43-bot
+version: "0.1.0"
+description: "MEM-F43 AC-9 fixture: a coworker profile that discovers the fleet's shared-learnings skill only through skills.external_dirs (no local copy). Setup rewrites the ${SHARED_LEARNINGS}/skills placeholder to an absolute testbed path."
+author: hermes-builder

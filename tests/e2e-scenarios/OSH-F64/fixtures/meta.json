@@ -1,0 +1,24 @@
+{
+  "row": "OSH-F64",
+  "substrate": "openshell",
+  "backend": "ssh",
+  "sandbox_scope": "profile",
+  "enabled_plugins": ["nv-coworker-compose", "nv-fleet-gates", "podman-onecli"],
+  "distributions": ["default", "orchestrator", "architect", "builder", "tester", "reviewer"],
+  "egress_endpoints": ["172.17.0.1:18255", "inference-api.nvidia.com:443", "172.17.0.1:18777"],
+  "raw_tls_skip_hops": ["172.17.0.1:18255", "172.17.0.1:18777"],
+  "filesystem_read_only": ["/opt/osh-lane"],
+  "binaries": ["/usr/bin/python3*", "/opt/hermes/.venv/bin/python"],
+  "checks": [
+    {"op": "equals", "key": "terminal.backend", "value": "ssh"},
+    {"op": "equals", "key": "plugins.entries.nv-fleet-gates.settings.expected_backend", "value": "ssh"}
+  ],
+  "notes": [
+    "The OSH-F64 spec is FLEET-F62's full five-coworker fleet with substrate: openshell flipped; every non-substrate key equals the committed FLEET-F62 podman render (AC-OSH-F64-2).",
+    "provision.dry-run.txt and policy-<role>.yaml are the deterministic, path-independent OpenShell provisioning references; the full per-profile render is verified LIVE by AC-OSH-F64-2, not committed as a byte snapshot (change-detector prohibition, AGENTS.md).",
+    "dockerfile.worker.lint.txt is the reference report the vendored dockerfile_lint checker must reproduce for AC-OSH-F64-1.",
+    "OpenShell 0.0.72 amendment on the v1 network_policies render: the OneCLI request hop is 172.17.0.1:18255 (podman keeps 10255); egress.broker_addr (172.17.0.1:18777) renders a third worker-egress endpoint, egress.filesystem_read_only (/opt/osh-lane) is appended to filesystem_policy.read_only (write-denied), and egress.binaries (/usr/bin/python3*, /opt/hermes/.venv/bin/python) are appended to worker-egress.binaries (which already carries /usr/bin/curl). No ssh_control_path: 172.17.0.1:22 is INBOUND via the proxy socket; 172.17.0.1:22 and the control-plane 172.17.0.1:10256 remain forbidden.",
+    "tls:skip render (raw_tls_skip_hops): with the delta present, the two OneCLI proxy CONNECT-tunnel hops 172.17.0.1:18255 (proxy_addr) and 172.17.0.1:18777 (broker_addr) render as raw passthrough endpoints {host, port, tls: skip} with NO protocol/enforcement/rules (a protocol:rest POST /** rule would break the opaque tunnel; operator-validated 0.0.72 shape). inference-api.nvidia.com:443 is a real HTTP-API endpoint and KEEPS protocol:rest/enforcement:enforce with its POST /** rule. The tls:skip shape is keyed strictly on the delta being present, never inferred from the allow-set.",
+    "A spec absent broker_addr/filesystem_read_only/binaries renders OSH-F63 4c1ef384's exact base v1 policy (two endpoints proxy+inference, BOTH protocol:rest, /usr/bin/curl only, base read_only) — the behavioural back-compat contract."
+  ]
+}

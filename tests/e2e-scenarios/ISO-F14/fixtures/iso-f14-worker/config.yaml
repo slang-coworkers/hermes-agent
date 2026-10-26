@@ -1,0 +1,50 @@
+# iso-f14-worker — static sandbox scenario fixture (ISO-F14). Unlike compose output it
+# omits the ISO-F13 workspace mount, because these scenarios exercise only the runtime
+# egress posture. No raw credential is present: the provider name carries a non-secret
+# placeholder and OneCLI injects the real value at request time.
+#
+# The provider block is a placeholder so the profile LOADS; the AC-ISO-F14-1/2/5
+# scenarios drive a _DockerEnvironment spawn (no model call), so the api_key literal
+# is never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-iso-f14-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+
+proxy:
+  enabled: false
+
+terminal:
+  # ISO-F15 session-driver seam: the fleet's only backend.
+  backend: docker
+  docker_shared_container_key: ""
+  # ISO-F13 requires container_persistent set explicitly per role; the bind-mounted
+  # workspace survives across the persist-false container lifecycle because it stays true.
+  container_persistent: true
+  docker_image: hermes-sandbox:latest   # SUBSTITUTE the actual fleet sandbox image shipping bash+curl
+  container_memory: 1024                 # MiB pin (reaches the kernel via CRED-F28's cgroup-probe allowlist)
+  container_cpu: 0.5
+  docker_persist_across_processes: false # no cross-process reuse (podman-3.4.4 {{.Label}} ps is broken)
+  docker_env:
+    HTTPS_PROXY: http://172.17.0.1:10255
+    https_proxy: http://172.17.0.1:10255
+    HTTP_PROXY: http://172.17.0.1:10255
+    http_proxy: http://172.17.0.1:10255
+    NO_PROXY: 127.0.0.1,localhost,::1
+    no_proxy: 127.0.0.1,localhost,::1
+    SSL_CERT_FILE: /etc/ssl/certs/hermes-egress-ca.crt
+    REQUESTS_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    CURL_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    NODE_EXTRA_CA_CERTS: /etc/ssl/certs/hermes-egress-ca.crt
+    HERMES_CA_BUNDLE: /etc/ssl/certs/hermes-egress-ca.crt
+    DENO_CERT: /etc/ssl/certs/hermes-egress-ca.crt
+    ANTHROPIC_API_KEY: onecli-injects-at-request-time   # non-secret placeholder; OneCLI injects at request time
+  docker_volumes:
+    # host CA copy (item-9 deployment / CRED-F28 onboard writes the FILE) -> sandbox CA path, read-only
+    - /opt/onecli/ca.crt:/etc/ssl/certs/hermes-egress-ca.crt:ro

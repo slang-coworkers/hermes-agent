@@ -1,0 +1,8 @@
+name: upg-f68-bot-b
+version: 0.1.0
+description: "UPG-F68 AC-UPG-F68-17 live scenario — bot B (the target). Answers bot A's message in its own Bot Chat; the harness holds its reply until bot A's sending turn has closed."
+author: hermes-builder
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - distribution.yaml
