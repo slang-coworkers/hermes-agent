@@ -65,6 +65,7 @@ M	gateway/platforms/api_server_openai_routes.py#_cache_if_persisted	core	replay	
 M	gateway/platforms/api_server_runs.py	core	M	H5	WP-D1		
 M	gateway/platforms/api_server_runs.py#run_internal_session_turn	core	replay	H5	WP-D1		
 M	gateway/run_notifications.py	core	post-C1	#86	FLEET-F62.h		#86
+A	gateway/run_notifications.py#allow:L1	core	E2-allow	item-5	FLEET-F62.h		
 M	gateway/wake.py	core	M	H5	GOV-F25,GOV-F25.b,WP-D1		
 M	gateway/wake.py#_self_post_chat_completion	core	replay	H5	GOV-F25,WP-D1		
 M	gateway/wake.py#deliver_wake	core	replay	H5	GOV-F25		
@@ -539,7 +540,7 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/config.yaml	in-surface	post
 A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surface	post-C1	item-4			item-4
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	post-C1	new			new,item-5
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	post-C1	new			new
-A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L1041	in-surface	health-allow	item-5			
+A	tests/e2e-scenarios/UPG-F68/replay_check.py#allow:L1053	in-surface	health-allow	item-5			
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	post-C1	new			new
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	R	H5			
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	R	H5			
@@ -686,6 +687,8 @@ A	tests/plugins/fixtures/sched-f33/overlays/.gitkeep	in-surface	R	H5
 A	tests/plugins/fixtures/sched-f33/skills/.gitkeep	in-surface	R	H5			
 A	tests/plugins/fixtures/sched-f33/spines/base.yaml	in-surface	R	H5			
 A	tests/plugins/fixtures/sched-f33/workflows/.gitkeep	in-surface	R	H5			
+A	tests/plugins/fleet_f62_h_rig.py	in-surface	post-C1	#86			#86
+A	tests/plugins/fleet_f62_h_rig.py#allow:L293	in-surface	health-allow	item-5			
 A	tests/plugins/test_a2a_f18_wired_messaging_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_a2a_f19_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_ch_f51_acceptance.py	in-surface	R	H5			item-2
@@ -711,6 +714,13 @@ A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	post-C1	#77			#77,i
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	post-C1	#80			#80,item-3,item-5
 A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	post-C1	item-4			item-4
 A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	post-C1	#86			#86
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L109	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L1338	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L1344	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L1478	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L1495	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L1589	in-surface	health-allow	item-5			
+A	tests/plugins/test_fleet_f62_h_acceptance.py#allow:L866	in-surface	health-allow	item-5			
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	post-C1	#80			#80,item-3,item-5
 A	tests/plugins/test_gov_f22_guard_catalog_acceptance.py	in-surface	R	H5			item-2
 A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	R	H5			item-2
@@ -791,6 +801,7 @@ A	tests/tools/test_cross_session_context_acceptance.py	in-surface	R	H5
 A	tests/tools/test_dm_spawn_persists.py	in-surface	post-C1	item-4			item-4
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	R	H5			
 M	tests/tools/test_process_registry.py	in-surface	post-C1	#86			#86
+A	tests/tools/test_process_registry.py#allow:L2	in-surface	health-allow	item-5			
 M	tests/tools/test_process_registry_completion_races.py	in-surface	post-C1	#86			#86
 A	tests/tools/test_rt_f08_doc_contract.py	in-surface	R	H5			
 M	tests/tui_gateway/test_compute_host.py	in-surface	post-C1	item-5			item-5
