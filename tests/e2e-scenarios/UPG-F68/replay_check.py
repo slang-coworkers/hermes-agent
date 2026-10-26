@@ -292,7 +292,13 @@ _WIN_SLICES = r'''    # Each slice gets its own runner disk: journeys never remo
       matrix:
         slice: [1, 2]
 '''
-_WIN_CRASH_LEG = "        if: matrix.slice == 1  # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1\n"
+_WIN_CRASH_LEG_IF = "        if: matrix.slice == 1  # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1\n"
+_WIN_CRASH_LEG = '''          # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1, so slice 2 must not have run it.
+          if ('${{ matrix.slice }}' -ne '1') {
+            if (Test-Path -LiteralPath $manifest) { throw "test_crash_cells.py ran in slice ${{ matrix.slice }}, not slice 1" }
+            exit 0
+          }
+'''
 # (workflow, job, exact line at C1 it follows [, discriminator]) -> (inserted block, authority, removable). A
 # discriminator tells apart blocks that share an anchor; only a removable block may disappear later.
 FORK_CI_INSERTS = {
@@ -312,7 +318,10 @@ FORK_CI_INSERTS = {
      FORK_CI_LINES[(".github/workflows/windows-install-update-e2e.yml", "          HERMES_TEST_WORKERS: '6'\n")][0]):
         ("          HERMES_TEST_SLICE: ${{ matrix.slice }}/2\n", "msg-3924", False),
     (".github/workflows/windows-install-update-e2e.yml", "install-update", "      - name: Every crash cell ran\n"):
-        (_WIN_CRASH_LEG, "msg-3924", False),
+        (_WIN_CRASH_LEG_IF, "msg-3924", True),
+    (".github/workflows/windows-install-update-e2e.yml", "install-update",
+     "          $manifest = Join-Path $env:HERMES_E2E_ARTIFACTS 'crash-cells-ran.txt'\n"):
+        (_WIN_CRASH_LEG, "msg-5546", False),
 }
 # Blocks that never coexist at one revision: the install makes hermes_bootstrap importable under -I, which is what
 # the .pth exists to avoid (a minted launcher then skips the closure repair).
