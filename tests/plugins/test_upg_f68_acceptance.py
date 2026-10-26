@@ -273,6 +273,9 @@ def test_ac_upg_f68_8():
     from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 
     class _Routes(OpenAICompatRoutesMixin):
+        # The pre-authority path: v0.22.5's _run_idempotent reads the runner's session authority.
+        gateway_runner = SimpleNamespace(session_authority=None)
+
         def _run_idempotency_scope(self, request):
             return "upg-f68-scope"
 
