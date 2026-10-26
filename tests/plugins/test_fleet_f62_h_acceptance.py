@@ -353,51 +353,70 @@ def test_ac_fleet_f62_h_8(fleet, case, monkeypatch):
         assert fleet.ticket(did)["matched_row_id"] is not None, fleet.ticket(did)
 
 
-def _h8_finish(fleet, case, did, ack, pending, monkeypatch, format_process_notification):
+def _h8_settled(fleet, case, did, ack, pending, monkeypatch, fmt):
+    fleet.authority.settle(did, reply="LIVE-REPLY-H8")
+    assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
+    assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1, timeout=30.0)
+    assert "LIVE-REPLY-H8" in str(_notices(fleet, "default", did)[0]["content"])
+
+
+def _h8_failed(fleet, case, did, ack, pending, monkeypatch, fmt):
+    fleet.authority.fail(did, "provider_rate_limit", "429")
+    assert fleet.until(lambda: fleet.ticket(did)["state"] == "failed"), fleet.ticket(did)
+    assert fleet.ticket(did)["reason"] == "provider_rate_limit", fleet.ticket(did)
+
+
+def _h8_legacy_cancelled(fleet, case, did, ack, pending, monkeypatch, fmt):
     from tools.bot_failure_reasons import RUNTIME_OFFLINE
 
-    if case in ("settled_later", "no_runner", "runner_killed_after_admission"):
-        fleet.authority.settle(did, reply="LIVE-REPLY-H8")
-        assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
-        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1, timeout=30.0)
-        assert "LIVE-REPLY-H8" in str(_notices(fleet, "default", did)[0]["content"])
-    elif case == "failed_later":
-        fleet.authority.fail(did, "provider_rate_limit", "429")
-        assert fleet.until(lambda: fleet.ticket(did)["state"] == "failed"), fleet.ticket(did)
-        assert fleet.ticket(did)["reason"] == "provider_rate_limit", fleet.ticket(did)
-    elif case == "legacy_cancelled":
-        assert fleet.until(lambda: fleet.ticket(did)["state"] == "cancelled"), fleet.ticket(did)
-        assert fleet.ticket(did)["reason"] == RUNTIME_OFFLINE, fleet.ticket(did)
-    elif case == "pending_restart":
-        # Before it went down, the gateway injected core's pending completion into the sender's Bot Chat.
-        _append_user_row(fleet.root, SENDER_SID,
-                         format_process_notification({"type": "completion", "session_id": ack["process_id"],
-                                                      **pending}),
-                         display_kind="process_complete", display_metadata={"display_text": "x"})
-        _restart_gateway(fleet, monkeypatch)
-        fleet.authority.settle(did, reply="LATE-REPLY-H8")
-        assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
-        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1)
-        assert "LATE-REPLY-H8" in str(_notices(fleet, "default", did)[0]["content"])
-    elif case == "legacy_expired":
-        assert fleet.until(lambda: fleet.ticket(did)["state"] != "pending", timeout=60.0), fleet.ticket(did)
-        assert (fleet.ticket(did)["state"], fleet.ticket(did)["reason"]) == ("failed", "queued_expired")
-        receipt = fleet.authority.receipt(did)
-        assert (receipt["status"], receipt["reason"]) == ("cancelled", "queued_expired"), receipt
-    else:                                                # claimed_owner_gone, admitted_unknown: never cancelled
-        assert fleet.until(lambda: fleet.ticket(did)["state"] != "pending", timeout=60.0), fleet.ticket(did)
-        t = fleet.ticket(did)
-        assert (t["state"], t["reason"], t["late_open"]) == ("ambiguous", "unknown", 1), t
-        receipt = fleet.authority.receipt(did)
-        assert receipt["status"] == ("claimed" if case == "claimed_owner_gone" else "queued"), receipt
-        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1)
-        for who in ("default", ORCH):
-            assert str(_notices(fleet, who, did)[0]["content"]) == _H8_FINAL_UNKNOWN.format(did=did)
-        if case == "admitted_unknown":
-            fleet.authority.settle(did, reply="LATE-H8")          # the owner settles after the bound: one LATE
-            assert fleet.until(lambda: fleet.ticket(did)["late_open"] == 0, timeout=30.0), fleet.ticket(did)
-            assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 2, timeout=30.0)
-            assert "Late outcome: delivery" in str(_notices(fleet, "default", did)[-1]["content"])
+    assert fleet.until(lambda: fleet.ticket(did)["state"] == "cancelled"), fleet.ticket(did)
+    assert fleet.ticket(did)["reason"] == RUNTIME_OFFLINE, fleet.ticket(did)
+
+
+def _h8_pending_restart(fleet, case, did, ack, pending, monkeypatch, fmt):
+    # Before it went down, the gateway injected core's pending completion into the sender's Bot Chat.
+    _append_user_row(fleet.root, SENDER_SID,
+                     fmt({"type": "completion", "session_id": ack["process_id"], **pending}),
+                     display_kind="process_complete", display_metadata={"display_text": "x"})
+    _restart_gateway(fleet, monkeypatch)
+    fleet.authority.settle(did, reply="LATE-REPLY-H8")
+    assert fleet.until(lambda: fleet.ticket(did)["state"] == "settled"), fleet.ticket(did)
+    assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1)
+    assert "LATE-REPLY-H8" in str(_notices(fleet, "default", did)[0]["content"])
+
+
+def _h8_legacy_expired(fleet, case, did, ack, pending, monkeypatch, fmt):
+    assert fleet.until(lambda: fleet.ticket(did)["state"] != "pending", timeout=60.0), fleet.ticket(did)
+    assert (fleet.ticket(did)["state"], fleet.ticket(did)["reason"]) == ("failed", "queued_expired")
+    receipt = fleet.authority.receipt(did)
+    assert (receipt["status"], receipt["reason"]) == ("cancelled", "queued_expired"), receipt
+
+
+def _h8_unknown_at_bound(fleet, case, did, ack, pending, monkeypatch, fmt):
+    """claimed_owner_gone, admitted_unknown: an admitted receipt is never cancelled."""
+    assert fleet.until(lambda: fleet.ticket(did)["state"] != "pending", timeout=60.0), fleet.ticket(did)
+    t = fleet.ticket(did)
+    assert (t["state"], t["reason"], t["late_open"]) == ("ambiguous", "unknown", 1), t
+    receipt = fleet.authority.receipt(did)
+    assert receipt["status"] == ("claimed" if case == "claimed_owner_gone" else "queued"), receipt
+    assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 1 and len(_notices(fleet, ORCH, did)) == 1)
+    for who in ("default", ORCH):
+        assert str(_notices(fleet, who, did)[0]["content"]) == _H8_FINAL_UNKNOWN.format(did=did)
+    if case == "admitted_unknown":
+        fleet.authority.settle(did, reply="LATE-H8")          # the owner settles after the bound: one LATE
+        assert fleet.until(lambda: fleet.ticket(did)["late_open"] == 0, timeout=30.0), fleet.ticket(did)
+        assert fleet.until(lambda: len(_notices(fleet, "default", did)) == 2, timeout=30.0)
+        assert "Late outcome: delivery" in str(_notices(fleet, "default", did)[-1]["content"])
+
+
+_H8_FINISH = {"settled_later": _h8_settled, "no_runner": _h8_settled, "runner_killed_after_admission": _h8_settled,
+              "failed_later": _h8_failed, "legacy_cancelled": _h8_legacy_cancelled,
+              "pending_restart": _h8_pending_restart, "legacy_expired": _h8_legacy_expired,
+              "claimed_owner_gone": _h8_unknown_at_bound, "admitted_unknown": _h8_unknown_at_bound}
+
+
+def _h8_finish(fleet, case, did, ack, pending, monkeypatch, format_process_notification):
+    _H8_FINISH[case](fleet, case, did, ack, pending, monkeypatch, format_process_notification)
 
 
 def _legacy_ticket(fleet, did, body, *, state, attempt, **fields):
