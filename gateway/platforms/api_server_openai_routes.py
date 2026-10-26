@@ -1007,15 +1007,18 @@ class OpenAICompatRoutesMixin:
         # Same #13437 identity contract as the SSE path: an explicit-header client is echoed
         # the stable id it sent; a fingerprint-derived (header-less) turn keeps reporting the
         # id the agent actually resolved, so headerless clients still learn where the turn went.
+        from gateway.platforms.api_server_runs import turn_ack
         response_headers = {
             "X-Hermes-Session-Id": (provided_session_id or result.get("session_id", session_id)),
             # Server-generated persistence ack (never reflected from a request
             # header): 'true' ONLY when this turn's messages actually committed
-            # to the session DB (result['turn_persisted'] is True). A bare 200
+            # to the session DB (turn_ack: the authority's persisted_turn receipt
+            # is complete, or with no authority turn_persisted is True). A bare 200
             # is emitted even on a failed flush, so a wake caller gates its
             # cursor advance on this header; missing/false = not durable.
             "X-Hermes-Turn-Persisted": (
-                "true" if result.get("turn_persisted") is True else "false"
+                "true" if turn_ack(result, under_authority=getattr(self.gateway_runner, 'session_authority', None) is not None)
+                else "false"
             ),
         }
         if gateway_session_key:

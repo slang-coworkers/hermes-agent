@@ -205,6 +205,17 @@ def terminal_run_status(result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return status, fields
 
 
+def turn_ack(result: Any, *, under_authority: bool) -> bool:
+    """Whether a finished turn may be acked as durable: the authority's receipt covers the whole turn, or (with no
+    authority) the agent reported its flush committed."""
+    if not isinstance(result, dict):
+        return False
+    if under_authority:
+        receipt = result.get("persisted_turn")
+        return isinstance(receipt, dict) and receipt.get("complete") is True
+    return result.get("turn_persisted") is True
+
+
 def _run_not_found(_openai_error, run_id: str) -> web.Response:
     return _json_error(_openai_error, f"Run not found: {run_id}", code="run_not_found", status=404)
 
@@ -649,7 +660,7 @@ async def run_internal_session_turn(self, *, session_id: str, text: str, profile
                 route_source="global", session_history_delivery="1",
                 notification_category=notification_category,
             )
-            return result.get("turn_persisted") is True
+            return turn_ack(result, under_authority=getattr(getattr(self, "gateway_runner", None), "session_authority", None) is not None)
         raise RuntimeError(
             f"internal wake gave up for session {session_id} after {attempts} attempts: {last_err}")
     finally:
