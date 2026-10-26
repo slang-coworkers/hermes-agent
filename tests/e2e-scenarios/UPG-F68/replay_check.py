@@ -124,12 +124,17 @@ CORE_UA48 = {
         ("fc4062c36e3ea4fcffda0674606f483d79873aad", "e3d604a300b946cd75658b2cea5cdfb37346814e"),
 }
 # The FLEET-F62.h carry (erratum E11): #86's reviewed commits, each a ``-x`` pick of its source in F62H_RANGE (fetch
-# refs/pull/86/head). Its core is exactly the approved diff 3f986ba1 (19 files +32/-1), pinned as (tag blob, carried
-# blob); process_registry.py also holds A1, so its pin starts from A1's blob and A1's hunks stay where they are.
-F62H_RANGE = ("d923a5eb487a17c0a68801bba9ef0f56c81040a8", "b6e9762b46afa7e55c54f40674157b2ee192c04f")
+# refs/pull/86/head). Its core is #86's at its final head (19 files +31/-1, within the approved +32/-1), pinned as
+# (tag blob, carried blob); process_registry.py also holds A1, so its pin starts from A1's blob and A1's hunks stay where
+# they are. F62H_SKIP commits are not picked: Y already carries what they set (erratum E11.1).
+F62H_RANGE = ("d923a5eb487a17c0a68801bba9ef0f56c81040a8", "555d8e75dec842aef29c2f510dd83d2175065f8a")
+F62H_SKIP = {
+    "c73123ca38400cc91abfe52a727a461f74b911fb": "#86's fork CI and contributor emails, equal to #85 head X's",
+    "555d8e75dec842aef29c2f510dd83d2175065f8a": "tests/test_tests_tree_layout.py, equal to #85's",
+}
 CORE_F62H = {
     "gateway/run_notifications.py":
-        ("75c5a125ce822f4fefac3cf95e6ea6f72e0b3a44", "59dd97d22701d8f1ae3925be6e3d8475a48f2c55"),
+        ("75c5a125ce822f4fefac3cf95e6ea6f72e0b3a44", "dbe24e12336f811a7aa6491f52b9ecb7769bbccd"),
     "locales/af.yaml":
         ("87ab18786ca055d966940e77fad0e5bc70d344d6", "1614e452bdeb5abd03595b538c816a811ed4d429"),
     "locales/ar.yaml":
@@ -167,7 +172,7 @@ CORE_F62H = {
 }
 CORE_F62H_ON_A1 = {
     "tools/process_registry.py":
-        ("a2b02314793c8369e66d5b6ddff24415c7ec1a6f", "d6909531079fc8119aa21dc09511a34594205d58"),
+        ("a2b02314793c8369e66d5b6ddff24415c7ec1a6f", "23a089d0d3d1731abe79685c09ad634df8f941d3"),
 }
 # Erratum E2.3a: the only core lines allowed after C1, as (path, rule, the stripped code line the waiver sits on or
 # None for a new first line, the authority of the hunk it waives). Matched by code line, not line number, so the
@@ -177,6 +182,7 @@ E2_ALLOW = (
     ("gateway/platforms/api_server.py", "BLE001", "except Exception:", "GOV-F25.b"),
     ("gateway/platforms/api_server.py", "FILE_LINES", None, "GOV-F25.b,WP-D1"),
     ("hermes_cli/kanban_db.py", "FILE_LINES", None, "GOV-F25"),
+    ("gateway/run_notifications.py", "FILE_LINES", None, "FLEET-F62.h"),
 )
 HEALTH_ALLOW = re.compile(r"^# health: allow ([A-Z0-9_, ]+) -- .+$")
 SURFACE = re.compile(r"^(plugins/|website/docs/|tests/|apps/desktop/e2e/[^/]+-ac\d+\.spec\.ts$)")
@@ -851,6 +857,12 @@ def check_f62h_carry(repo, tag, head, after_c1, sources):
             fails.append(f"F62H: {path} at the tag is not the regular file the carried core diff applies to")
         if (blob(repo, head, path), mode(repo, head, path)) != (new, "100644"):
             fails.append(f"F62H: {path} at the head is not the tag plus exactly the carried core diff (blob and mode)")
+    for skip, why in F62H_SKIP.items():
+        if any(src == skip for _sha, src, _item in after_c1):
+            fails.append(f"F62H: {skip[:10]} is picked; it must be skipped ({why})")
+        for path in name_status(repo, f"{skip}^", skip):
+            if not path.startswith(".github/") and blob(repo, head, path) != blob(repo, skip, path):
+                fails.append(f"F62H: skipping {skip[:10]} needs {path} at the head to equal its blob there ({why})")
     paths = set(CORE_F62H) | set(CORE_F62H_ON_A1)
     for sha, src, item in after_c1:
         touched = set(name_status(repo, f"{sha}^", sha)) & paths
@@ -1108,7 +1120,7 @@ def main():
     fails.extend(check_core_a1(repo, revs["tag"], revs["head"], after_c1, "UA48", CORE_UA48))
 
     fails.extend(check_picks(repo, [p.strip() for p in a.picks.split(",") if p.strip()]
-                             + (carry_src if f62h_landed else []), after_c1))
+                             + ([c for c in carry_src if c not in F62H_SKIP] if f62h_landed else []), after_c1))
     post = name_status(repo, revs["c1"], revs["head"])
     e2_allowed = []
     for path in sorted(set(post) | {f for f, *_rest in E2_ALLOW}):
