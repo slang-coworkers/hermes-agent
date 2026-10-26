@@ -652,12 +652,21 @@ class _ModelStub:
 
     def __init__(self, reply):
         self.reply, self.gate, self.served, self.requests = reply, threading.Event(), threading.Event(), []
+        self.errors = []   # HTTP statuses answered, one per chat request, before any reply
         stub = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 stub.requests.append(request)
+                if stub.errors and request.get("messages"):
+                    raw = json.dumps({"error": {"message": "rate limit exceeded", "type": "rate_limit"}}).encode()
+                    self.send_response(stub.errors.pop(0))
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 stub.gate.wait(120)
                 message = {"role": "assistant", "content": stub.reply}
                 body = {"id": "chatcmpl-r8", "object": "chat.completion", "created": 1, "model": "test-model",
@@ -683,6 +692,10 @@ class _ModelStub:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1"
+
+    def chats(self):
+        """The chat-completion requests (the daemon also probes the model's metadata)."""
+        return [r for r in self.requests if r.get("messages")]
 
     def close(self):
         self.gate.set()
@@ -740,6 +753,7 @@ def bot_world(tmp_path, monkeypatch):
     bot_mode_probe._reset_cache_for_tests()
     world = SimpleNamespace(root=root, target=target, stop=threading.Event(), closers=[])
     world.with_redrive = lambda: _with_redrive(world, monkeypatch)
+    world.authority_owner = lambda reply, **kwargs: _authority_owner(world, monkeypatch, reply, **kwargs)
     yield world
     world.stop.set()
     process_registry.kill_all(consume_output=True)
@@ -754,18 +768,6 @@ def _target_db(world):
     db = SessionDB(db_path=world.target / "state.db")
     world.closers.append(db.close)
     return db
-
-
-def _model_for_target(world, reply):
-    """The target profile's model is a loopback stub held on its gate; no credential, nothing beyond 127.0.0.1."""
-    stub = _ModelStub(reply)
-    world.closers.append(stub.close)
-    (world.target / "config.yaml").write_text(
-        f"model:\n  provider: custom\n  base_url: {stub.url}\n  api_mode: chat_completions\n  default: test-model\n"
-        "memory:\n  memory_enabled: false\n  user_profile_enabled: false\n"
-        "terminal:\n  env: local\n", encoding="utf-8")
-    (world.target / ".env").write_text(f"OPENAI_API_KEY=local-test-only\nOPENAI_BASE_URL={stub.url}\n", encoding="utf-8")
-    return stub
 
 
 def _live_owner(world, db, session_id, reply, *, outcome=None, persist_row=True):
@@ -816,6 +818,193 @@ def _live_owner(world, db, session_id, reply, *, outcome=None, persist_row=True)
     return owner
 
 
+def _authority_owner(world, monkeypatch, reply, *, persist_row=True):
+    """The target's session authority as the F62.h rig's file-backed stub at core's T seam (`install_authority`, plus
+    the runner shim so core's runner process sees it too): core's own `find_canonical_live_owner` and `_door` pick the
+    Bot Chat tip and admit the delivery. The stub's FIFO worker claims each queued receipt, records the session core
+    pinned (`sessions`), appends the turn's `role='user'` row there (none with `persist_row` false: a storage failure
+    the turn survives, `agent/turn_context.py:509-525`) and settles with `reply` once `gate` is set. While `hold` is
+    clear it claims nothing, so the receipt stays `queued`."""
+    import time
+
+    from tools import bot_live_delivery as mailbox
+
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/fleet_f62_h_rig.py) is not at this head"
+    state_dir = world.root.parent / "authority-state"
+    state_dir.mkdir()
+    _f62h.install_authority(state_dir, setattr_=monkeypatch.setattr)
+    shim = state_dir / "runner_shim.py"
+    shim.write_text(_f62h._RUNNER_SHIM.format(repo=str(REPO), state_dir=str(state_dir)), encoding="utf-8")
+    _f62h.install_runner_shim(shim, setattr_=monkeypatch.setattr)
+    owner = SimpleNamespace(gate=threading.Event(), hold=threading.Event(), sessions=[], claims=[])
+    owner.hold.set()
+    db = _target_db(world)
+
+    def claim(path):
+        with mailbox._locked(world.target):
+            record = mailbox._read(path)
+            if record is None or record.get("status") != "queued":
+                return None
+            record.update(status="claimed", claimed_at=time.time_ns())
+            mailbox._write(path, record)
+        return record
+
+    def loop():
+        while not world.stop.wait(0.05):
+            if not owner.hold.is_set():
+                continue
+            for path in sorted(mailbox._root(world.target).glob("*.json")):
+                record = claim(path)
+                if record is None:
+                    continue
+                owner.sessions.append(record["session_id"])
+                owner.claims.append(record["message"])
+                if persist_row:
+                    db.append_message(record["session_id"], "user", content=record["message"])
+                while not owner.gate.wait(0.05):
+                    if world.stop.is_set():
+                        return
+                mailbox.complete_delivery(world.target, record["delivery_id"], status="settled", reply=reply)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return owner
+
+
+# Upstream's committed-before-schedule barrier (`tests/gateway/fixtures/local_recovery_daemon.py`), narrowed to one
+# delivery: its admission commits and is answered, and is never scheduled in this process.
+_HOLD_SCHEDULE = '''import json, runpy, sys
+sys.path.insert(0, {repo!r})
+from gateway.session_authority import SessionAuthority
+from hermes_state_runtime import list_session_admissions
+schedule = SessionAuthority._schedule
+def hold(self, ref):
+    pending = list_session_admissions(self.db, session_id=ref.session_id)
+    if pending and {mark!r} in json.dumps(pending[-1].get("payload")):
+        return
+    return schedule(self, ref)
+SessionAuthority._schedule = hold
+runpy.run_module("gateway.run", run_name="__main__")
+'''
+
+
+def _real_authority(world, reply):
+    """The target profile's own session authority, as core runs it: `python -m gateway.run` under the target's
+    HERMES_HOME (the shape of upstream's `tests/gateway/fixtures/local_recovery_probe.py:74-96`), its model the loopback
+    stub. The tool and core's runner reach it through real discovery and the real `bot_relay.deliver` RPC.
+    `start(hold=<mark>)` runs it under `_HOLD_SCHEDULE`; `kill()` is SIGKILL, the crash boundary."""
+    import time
+
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
+
+    model = _ModelStub(reply)
+    world.closers.append(model.close)
+    (world.target / "config.yaml").write_text(json.dumps({
+        "gateway": {"multiplex_profiles": False},
+        "model": {"provider": "custom", "default": "test-model", "base_url": model.url, "api_mode": "chat_completions"},
+        "auxiliary": {"title_generation": {"enabled": False}}, "platform_toolsets": {"cli": []},
+        "memory": {"memory_enabled": False, "user_profile_enabled": False}, "agent": {"api_max_retries": 1}}),
+        encoding="utf-8")
+    bundled = world.root.parent / "authority-bundled"
+    bundled.mkdir(exist_ok=True)
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env.update(HOME=str(world.root.parent / "os-home"), HERMES_HOME=str(world.target), PYTHONPATH=str(REPO),
+               HERMES_BUNDLED_PLUGINS=str(bundled), OPENAI_API_KEY="loopback-only", OPENAI_BASE_URL=model.url,
+               PYTHONUNBUFFERED="1")
+    authority = SimpleNamespace(model=model, proc=None, starts=0)
+
+    def start(hold=None):
+        command = [sys.executable, "-m", "gateway.run"]
+        if hold is not None:
+            launcher = world.root.parent / "hold_schedule.py"
+            launcher.write_text(_HOLD_SCHEDULE.format(repo=str(REPO), mark=hold), encoding="utf-8")
+            command = [sys.executable, str(launcher)]
+        authority.starts += 1
+        log = open(world.root.parent / f"authority-{authority.starts}.log", "w+", encoding="utf-8")
+        world.closers.append(log.close)
+        authority.proc = subprocess.Popen(command, cwd=str(REPO), env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                          stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and authority.proc.poll() is None:
+            if discover_gateway_endpoint(world.target, timeout=2).state == "ready":
+                return
+            time.sleep(0.1)
+        log.seek(0)
+        raise AssertionError(f"the target authority never became ready: {log.read()[-4000:]}")
+
+    def kill():
+        if authority.proc is not None and authority.proc.poll() is None:
+            authority.proc.kill()
+            authority.proc.wait(timeout=30)
+
+    authority.start, authority.kill = start, kill
+    world.closers.append(kill)
+    return authority
+
+
+# Core's own runner, signalling once its replay of the pinned intent (`_admit_live_dm`) has returned.
+_RUNNER_ADMITTED = '''import sys
+from pathlib import Path
+sys.path.insert(0, {repo!r})
+try:
+    import hermes_bootstrap  # noqa: F401  (the runner's own boot step)
+except Exception:
+    pass
+from tools import bot_mode_dm
+admit = bot_mode_dm._admit_live_dm
+def admitted(*args, **kwargs):
+    record = admit(*args, **kwargs)
+    Path({mark!r}).write_text("", encoding="utf-8")
+    return record
+bot_mode_dm._admit_live_dm = admitted
+raise SystemExit(bot_mode_dm._delivery_main(sys.argv[1:]))
+'''
+
+
+def _runner_admitted(world, monkeypatch):
+    """Start core's runner through `_RUNNER_ADMITTED`; returns the file that appears once it is inside its wait."""
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/fleet_f62_h_rig.py) is not at this head"
+    mark = world.root.parent / "runner-admitted"
+    shim = world.root.parent / "runner_admitted.py"
+    shim.write_text(_RUNNER_ADMITTED.format(repo=str(REPO), mark=str(mark)), encoding="utf-8")
+    _f62h.install_runner_shim(shim, setattr_=monkeypatch.setattr)
+    return mark
+
+
+def _admissions_for(world, needle):
+    """The target's session-admission rows whose payload holds `needle`: `(request_id, status, outcome)`."""
+    import sqlite3
+
+    with contextlib.closing(sqlite3.connect(f"file:{world.target / 'state.db'}?mode=ro", uri=True)) as conn:
+        rows = conn.execute("SELECT request_id, status, outcome, payload_json FROM session_admissions ORDER BY seq")
+        return [tuple(r[:3]) for r in rows if needle in (r[3] or "")]
+
+
+def _ac21_real_turn(world):
+    from tools.bot_live_delivery import read_delivery_result
+    from tools.process_registry import process_registry
+
+    reply = "REPLY_R8_21_real_turn"
+    authority = _real_authority(world, reply)
+    authority.start()
+    db = _target_db(world)
+    assert db.get_session_by_title("Bot Chat") is None, "the target must have no Bot Chat before its first delivery"
+    out = _send(_bot_sender(), "turn-ac21-real-turn")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id, did = out["process_id"], out["delivery_id"]
+    _wait_for(authority.model.chats, "the target's turn never reached its model")
+    assert not process_registry.get(proc_id).exited and not _queued_completion(process_registry, proc_id), (
+        "a success outcome before the target turn finished")
+    assert (read_delivery_result(world.target, did) or {}).get("status") != "settled"
+
+    authority.model.gate.set()
+    mine = _completions(process_registry, proc_id)
+    assert len(mine) == 1 and _settled_completion(mine[0]) and reply in (mine[0].get("output") or ""), mine
+    tip = _resumed_bot_chat(db)
+    assert tip is not None and tip == read_delivery_result(world.target, did)["session_id"], tip
+    users = [m for m in db.get_messages(tip) if m.get("role") == "user"]
+    assert [m.get("content") for m in users] == [_delivered()], users
+
+
 def _resumed_bot_chat(db):
     """The session `chat -c 'Bot Chat'` resumes: the CLI's own resolver, projected to the compression tip."""
     sid = db.resolve_session_by_title("Bot Chat")
@@ -832,8 +1021,8 @@ def _full_rows(db, sid):
 
 
 def _seed_shape(db, shape):
-    """Arrange the target transcript for one AC-21 shape. Returns (the session the delivery must land in, or None for
-    the one `--create-if-missing` mints; the sessions that must never receive it)."""
+    """Arrange the target transcript for one AC-21 shape. Returns (the session the delivery must land in, or None when
+    the target has no Bot Chat yet; the sessions that must never receive it)."""
     if shape == "fresh":
         return None, []
     db.create_session("bc-root", source="cli")
@@ -910,27 +1099,14 @@ def _queued_completion(registry, proc_id):
 
 
 
-@pytest.mark.platforms("posix")
-def test_ac_upg_f68_19(bot_world):
-    """(R4 re-spec of AC-FLEET-F62.g-11) A pending local delivery survives its sender process and a killed runner, because a durable owner holds it. If the target exits before accepting, exits 0 without persisting, or its runner is killed, the delivery ends in a re-attempt on the same `delivery_id` or in one typed final failure in the sender's session. Before target acceptance, no success completion and no target transcript row exist. If a re-attempt then succeeds, exactly one target row and one final outcome exist.
-
-    Proves the sender-turn-end half (E6.4): the ack is `queued` with a `delivery_id`, and the runner survives the
-    sender's lifecycle sweeps (`agent_close`, `gateway_turn_timeout`, `kill_all`) while an explicit stop still ends it.
-    The process-exit and killed-runner halves are AC-FLEET-F62.h-5 / -11 (carried)."""
+def _kill_runner(process_registry, proc_id):
+    """An explicit stop of core's runner (`process.kill`); asserts it ended."""
     import logging
+    import posix
+    import signal
 
-    from tools.process_registry import process_registry
+    import psutil
 
-    db = _target_db(bot_world)
-    db.create_session("bc-live", source="desktop")
-    db.set_session_title("bc-live", "Bot Chat")
-    _live_owner(bot_world, db, "bc-live", "REPLY_R8_19")
-    out = _send(_bot_sender(), "turn-ac19")
-    assert out.get("status") == "queued" and out.get("delivery_id"), out
-    proc_id = out["process_id"]
-    for source in ("agent_close", "gateway_turn_timeout", "kill_all"):
-        process_registry.kill_all("turn-ac19", source=source)
-        assert process_registry.get(proc_id).exited is False, f"the runner died in the {source} sweep"
     # A refused signal and a slow reap return the same dict; only the kill's log lines tell them apart.
     kill_log = logging.getLogger("tools.process_registry")
     seen: list[logging.LogRecord] = []
@@ -941,11 +1117,6 @@ def test_ac_upg_f68_19(bot_world):
     # subtree and the tag's live-system guard refuses core's next signal (CI 39129288055). For this one call only, a
     # refused SIGTERM/SIGKILL goes through when its PID was in the runner's tree while the root was alive and a child of
     # this test, and still has that start time; any other refusal stands.
-    import posix
-    import signal
-
-    import psutil
-
     root = psutil.Process(process_registry.get(proc_id).pid)
     tree = {root.pid: root.create_time()} if os.getpid() in {p.pid for p in root.parents()} else {}
     guarded_kill = os.kill
@@ -978,42 +1149,343 @@ def test_ac_upg_f68_19(bot_world):
         kill_log.setLevel(prior_level)
     assert process_registry.get(proc_id).exited is True, (killed, [record.getMessage() for record in seen])
 
+
+def _receipt(world, did):
+    from tools.bot_live_delivery import read_delivery_result
+
+    return read_delivery_result(world.target, did) or {}
+
+
+def _ac19_sender_turn_end(request):
+    from tools.process_registry import process_registry
+
+    world = request.getfixturevalue("bot_world")
+    db = _target_db(world)
+    db.create_session("bc-live", source="cli")
+    db.set_session_title("bc-live", "Bot Chat")
+    owner = world.authority_owner("REPLY_R8_19")
+    owner.hold.clear()
+    out = _send(_bot_sender(), "turn-ac19")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id, did = out["process_id"], out["delivery_id"]
+    for source in ("agent_close", "gateway_turn_timeout", "kill_all"):
+        process_registry.kill_all("turn-ac19", source=source)
+        assert process_registry.get(proc_id).exited is False, f"the runner died in the {source} sweep"
+    assert _receipt(world, did)["status"] == "queued", _receipt(world, did)
+    assert not _queued_completion(process_registry, proc_id) and _full_rows(db, "bc-live") == [], (
+        "a success completion or a target row before target acceptance")
+    _kill_runner(process_registry, proc_id)
+    assert _receipt(world, did)["status"] == "queued", "the durable owner must still hold the delivery"
+    owner.hold.set()
+    owner.gate.set()
+    _wait_for(lambda: _receipt(world, did).get("status") == "settled", "the released owner never settled it")
+    assert owner.sessions == ["bc-live"] and len(_full_rows(db, "bc-live")) == 1, db.get_messages("bc-live")
+
+
+def _ac19_no_authority(request):
+    from hermes_state import SessionDB
+    from tools import bot_live_delivery as mailbox
+    from tools import bot_mode_dm
+    from tools.process_registry import process_registry
+
+    world = request.getfixturevalue("bot_world")
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/fleet_f62_h_rig.py) is not at this head"
+    _f62h._seed_bot_chat(world.root, _f62h.SENDER_SID)
+    agent = _f62h._make_sender_agent()
+    agent._session_db = SessionDB(db_path=world.root / "state.db")
+    world.closers.append(agent._session_db.close)
+    agent._session_db_created = True
+    messages = []
+    agent._execute_tool_calls_sequential(_f62h._assistant_turn(f"@{_BOT}", _DM_BODY, "call-ac19-none"), messages,
+                                         "turn-ac19-none")
+    agent._flush_messages_to_session_db(messages)
+    rows = [m for m in agent._session_db.get_messages(_f62h.SENDER_SID) if m.get("role") == "tool"]
+    assert len(rows) == 1, rows
+    result = json.loads(rows[0]["content"])
+    assert result.get("reason") == "runtime_unavailable" and result.get("delivery_id"), result
+    assert "the message was NOT sent" in result.get("error", ""), result
+    assert not [s for s in process_registry.list_sessions(task_id="turn-ac19-none") if "--run-delivery" in str(s)]
+    assert not list(mailbox._root(world.target).glob("*.json")), "a receipt without an authority"
+    assert not [p for p in bot_mode_dm._dm_dir().iterdir() if p.is_file()], "the payload or its intent was left behind"
+    assert not (world.target / "state.db").exists(), "a target transcript row without an authority"
+
+
+def _ac19_restart_before_accept(request):
+    """The target authority admits and answers, then dies before it schedules the turn."""
+    from tools.process_registry import process_registry
+
+    world = request.getfixturevalue("bot_world")
+    reply = "REPLY_R8_19_recovered"
+    authority = _real_authority(world, reply)
+    admitted_mark = _runner_admitted(world, request.getfixturevalue("monkeypatch"))
+    authority.model.gate.set()
+    authority.start(hold="TAIL_R8")
+    out = _send(_bot_sender(), "turn-ac19-restart")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id, did = out["process_id"], out["delivery_id"]
+    admitted = _receipt(world, did)
+    assert admitted.get("status") == "queued" and admitted.get("admission_id"), admitted
+    assert [a[1] for a in _admissions_for(world, "TAIL_R8")] == ["queued"]
+    assert not authority.model.chats() and not _queued_completion(process_registry, proc_id)
+    _wait_for(admitted_mark.exists, "core's runner never reached its wait")
+    authority.kill()
+    authority.start()
+    mine = _completions(process_registry, proc_id)
+    assert len(mine) == 1 and _settled_completion(mine[0]) and reply in (mine[0].get("output") or ""), mine
+    final = _receipt(world, did)
+    assert (final.get("status"), final.get("delivery_id"), final.get("admission_id")) == (
+        "settled", did, admitted["admission_id"]), final
+    assert [a[1] for a in _admissions_for(world, "TAIL_R8")] == ["terminal"]
+    db = _target_db(world)
+    assert len(_full_rows(db, _resumed_bot_chat(db))) == 1
+
+
+def _ac19_restart_mid_turn(request):
+    """The target authority dies inside the delivery's turn: never re-executed, and its `ambiguous` stays last."""
+    from tools.process_registry import process_registry
+
+    world = request.getfixturevalue("bot_world")
+    authority = _real_authority(world, "REPLY_R8_19_never")
+    admitted_mark = _runner_admitted(world, request.getfixturevalue("monkeypatch"))
+    authority.start()
+    out = _send(_bot_sender(), "turn-ac19-midturn")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id, did = out["process_id"], out["delivery_id"]
+    _wait_for(authority.model.chats, "the delivery's turn never reached its model")
+    _wait_for(admitted_mark.exists, "core's runner never reached its wait")
+    assert not _queued_completion(process_registry, proc_id)
+    authority.kill()
+    authority.start()
+    mine = _completions(process_registry, proc_id)
+    assert len(mine) == 1 and mine[0].get("exit_code") == 1, mine
+    payload = json.loads((mine[0].get("output") or "").strip().splitlines()[-1])
+    assert (payload.get("status"), payload.get("delivery_id")) == ("ambiguous", did), payload
+    assert "Do not resend" in payload.get("detail", ""), payload
+    first = _admissions_for(world, "TAIL_R8")
+    authority.model.gate.set()
+    authority.kill()
+    authority.start()
+    assert _receipt(world, did).get("status") == "ambiguous", _receipt(world, did)
+    assert _admissions_for(world, "TAIL_R8") == first and first[0][2] != "completed", (first, _admissions_for(world, "TAIL_R8"))
+    assert sum("TAIL_R8" in json.dumps(r["messages"]) for r in authority.model.chats()) == 1
+
+
+def _ac19_transient_retry(request):
+    """The delivery's turn fails transiently (429), and core's one derived retry (`bot:<id>:retry`) answers it."""
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND
+    from tools.process_registry import process_registry
+
+    world = request.getfixturevalue("bot_world")
+    reply = "REPLY_R8_19_retry"
+    authority = _real_authority(world, reply)
+    authority.model.errors[:] = [429]
+    authority.model.gate.set()
+    authority.start()
+    out = _send(_bot_sender(), "turn-ac19-retry")
+    assert out.get("status") == "queued" and out.get("delivery_id"), out
+    proc_id, did = out["process_id"], out["delivery_id"]
+    mine = _completions(process_registry, proc_id)
+    assert len(mine) == 1 and _settled_completion(mine[0]) and reply in (mine[0].get("output") or ""), mine
+    final = _receipt(world, did)
+    assert final.get("status") == "settled" and final.get("retry_admission_id"), final
+    admissions = _admissions_for(world, "TAIL_R8")
+    assert admissions == [(f"bot:{did}", "terminal", "failed"), (f"bot:{did}:retry", "terminal", "completed")], admissions
+    db = _target_db(world)
+    messages = db.get_messages(_resumed_bot_chat(db))
+    full = [i for i, m in enumerate(messages) if _is_full(m)]
+    assert len(full) == 2, messages
+    failed_turn, retry_turn = messages[full[0] + 1:full[1]], messages[full[1] + 1:]
+    assert [m.get("role") for m in failed_turn if m.get("display_kind") == FAILED_TURN_DISPLAY_KIND] == ["assistant"]
+    assert not [m for m in failed_turn if m.get("role") == "assistant" and reply in str(m.get("content"))], failed_turn
+    assert [m.get("content") for m in retry_turn if m.get("role") == "assistant"] == [reply], retry_turn
+
+
+def _ac19_notes(world, did, kind=None):
+    """The plugin's notices for `did` to the sender and to the orchestrator, optionally of one `notice_kind`."""
+    def of(who):
+        notes = _f62h._notices(world, who, did)
+        return [n for n in notes if kind is None or n["display_metadata"]["nv_delivery_redrive"]["notice_kind"] == kind]
+    return of("default"), of(_f62h.ORCH)
+
+
+def _ac19_tracked_send(world, body):
+    ack = world.send(body)
+    did = ack["delivery_id"]
+    assert ack.get("redrive", {}).get("tracked") is True and world.ticket(did)["path"] == "live", ack
+    return ack, did
+
+
+def _ac19_kill_core_runner(world, ack):
+    """Kill core's runner once it is inside its own wait (it has replayed the pinned intent from its own pid)."""
+    did = ack["delivery_id"]
+    assert world.until(lambda: [c for c in world.authority.calls(did=did) if c["pid"] != os.getpid()], ticks=False,
+                       timeout=60.0), world.authority.calls(did=did)
+    world.registry.kill_process(ack["process_id"], consume_output=True)
+    _f62h._wait_runner_done(world, ack["process_id"])
+    world.tick(2, pause=0.3)
+    assert world.ticket(did)["state"] == "pending" and world.authority.receipt(did)["status"] == "queued"
+
+
+def _ac19_assert_untouched(world, did, body, rows):
+    assert [r["delivery_id"] for r in _f62h._admissions(world.homes[_f62h.TARGET], body)] == [did]
+    assert len(world.authority.tool_admissions(did)) == 1
+    assert len(world.rows(_f62h.TARGET, body)) == rows
+
+
+def _ac19_tracked_runner_killed(request):
+    world = _redrive(request)
+    ack, did = _ac19_tracked_send(world, "status? PAYLOAD_F68_19_killed")
+    _ac19_kill_core_runner(world, ack)
+    world.authority.settle(did, reply="REPLY-F68-19-KILLED")
+    assert world.until(lambda: world.ticket(did)["state"] == "settled"), world.ticket(did)
+    assert world.until(lambda: [len(n) for n in _ac19_notes(world, did)] == [1, 1], timeout=30.0)
+    world.tick(3, pause=0.3)
+    for notes in _ac19_notes(world, did):
+        assert len(notes) == 1 and did in str(notes[0]["content"]) and "REPLY-F68-19-KILLED" in str(notes[0]["content"])
+    _ac19_assert_untouched(world, did, "PAYLOAD_F68_19_killed", rows=1)
+
+
+def _ac19_tracked_runner_killed_unknown(request):
+    world = _redrive(request)
+    world.settings(redrive_window_seconds=8)
+    ack, did = _ac19_tracked_send(world, "status? PAYLOAD_F68_19_unknown")
+    _ac19_kill_core_runner(world, ack)
+    assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=60.0), world.ticket(did)
+    t = world.ticket(did)
+    assert (t["state"], t["reason"], t["late_open"]) == ("ambiguous", "unknown", 1), t
+    assert world.until(lambda: [len(n) for n in _ac19_notes(world, did, "final")] == [1, 1], timeout=30.0)
+    assert world.authority.receipt(did)["status"] == "queued", "an admitted receipt is never cancelled"
+    world.authority.settle(did, reply="LATE-F68-19")
+    assert world.until(lambda: world.ticket(did)["late_open"] == 0, timeout=30.0), world.ticket(did)
+    assert world.until(lambda: [len(n) for n in _ac19_notes(world, did, "late")] == [1, 1], timeout=30.0)
+    world.tick(4, pause=0.5)
+    assert [len(n) for n in _ac19_notes(world, did)] == [2, 2], _ac19_notes(world, did)
+    _ac19_assert_untouched(world, did, "PAYLOAD_F68_19_unknown", rows=1)
+
+
+def _ac19_unpersisted_tracked(request, *, late_row=False):
+    world = _redrive(request)
+    ack, did = _ac19_tracked_send(world, "status? PAYLOAD_F68_19_unpersisted")
+    world.authority.claim(did)
+    world.authority.settle(did, reply="UNPERSISTED-F68-19", row_first=False)
+    _f62h._wait_runner_done(world, ack["process_id"], timeout=40.0)
+    assert world.until(lambda: world.registry.get(ack["process_id"])._completion_event.is_set(), ticks=False)
+    out = _f62h._completion_output(world, ack["process_id"])
+    assert json.loads(out.strip().splitlines()[-1]).get("status") == "ambiguous" and "Do NOT resend" in out, out
+    assert '"status": "settled"' not in out and "UNPERSISTED-F68-19" not in out, out
+    assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=60.0), world.ticket(did)
+    assert (world.ticket(did)["state"], world.ticket(did)["reason"]) == ("ambiguous", "unknown"), world.ticket(did)
+    assert world.until(lambda: [len(n) for n in _ac19_notes(world, did, "final")] == [1, 1], timeout=30.0)
+    if late_row:
+        world.authority.row(did)                     # the owner's row lands after the FINAL: one VERIFIED, then final
+        assert world.until(lambda: [len(n) for n in _ac19_notes(world, did, "verified")] == [1, 1], timeout=30.0)
+    world.tick(4, pause=0.5)
+    assert [len(n) for n in _ac19_notes(world, did)] == ([2, 2] if late_row else [1, 1]), _ac19_notes(world, did)
+    _ac19_assert_untouched(world, did, "PAYLOAD_F68_19_unpersisted", rows=1 if late_row else 0)
+
+
+def _ac19_unpersisted_non_push(request):
+    """A tracked sender that cannot receive completions: core's raw `settled` row (waived, D-2), then the plugin's one
+    correction notice (required)."""
+    import contextvars
+
+    from gateway.session_context import declare_stateless_channel
+    from hermes_state import SessionDB
+
+    world = _redrive(request)
+    world.agent = _f62h._make_sender_agent()
+    world.agent._session_db = SessionDB(db_path=world.root / "state.db")   # arms core's durable row (bot_mode_dm.py:739)
+
+    def stateless_send():
+        declare_stateless_channel()
+        return _ac19_tracked_send(world, "status? PAYLOAD_F68_19_nonpush")
+
+    ack, did = contextvars.copy_context().run(stateless_send)
+    world.authority.claim(did)
+    world.authority.settle(did, reply="UNPERSISTED-F68-19", row_first=False)
+    _f62h._wait_runner_done(world, ack["process_id"], timeout=40.0)
+    assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=60.0), world.ticket(did)
+    assert world.until(lambda: [len(n) for n in _ac19_notes(world, did, "final")] == [1, 1], timeout=30.0)
+    world.tick(3, pause=0.5)
+    assert [len(n) for n in _ac19_notes(world, did)] == [1, 1], _ac19_notes(world, did)
+    assert "Do NOT resend" in str(_ac19_notes(world, did)[0][0]["content"])
+    _ac19_assert_untouched(world, did, "PAYLOAD_F68_19_nonpush", rows=0)
+
+
+_AC19 = {"sender_turn_end": _ac19_sender_turn_end, "no_authority": _ac19_no_authority,
+         "restart_before_accept": _ac19_restart_before_accept, "restart_mid_turn": _ac19_restart_mid_turn,
+         "transient_retry": _ac19_transient_retry, "tracked_runner_killed": _ac19_tracked_runner_killed,
+         "tracked_runner_killed_unknown": _ac19_tracked_runner_killed_unknown,
+         "unpersisted_tracked": _ac19_unpersisted_tracked,
+         "unpersisted_late_row": lambda request: _ac19_unpersisted_tracked(request, late_row=True),
+         "unpersisted_non_push": _ac19_unpersisted_non_push}
+_AC19_RIG = ("tracked_runner_killed", "tracked_runner_killed_unknown", "unpersisted_tracked", "unpersisted_late_row",
+             "unpersisted_non_push")
+
+
+@pytest.mark.parametrize("case", [pytest.param(c, marks=pytest.mark.platforms("linux" if c in _AC19_RIG else "posix"))
+                                  for c in _AC19])
+def test_ac_upg_f68_19(request, case):
+    """(R4 re-spec of AC-FLEET-F62.g-11) A pending local delivery survives its sender process and a killed runner, because a durable owner holds it. If the target exits before accepting, exits 0 without persisting, or its runner is killed, the delivery ends in a re-attempt on the same `delivery_id` or in one typed final failure in the sender's session. Before target acceptance, no success completion and no target transcript row exist. If a re-attempt then succeeds, exactly one target row and one final outcome exist.
+
+    Rulings applied (msg 596; E4′ §E4.6):
+    - D-2: "waive -19 (b) on exactly these paths: E7.1a's three paths plus the raw row a tracked non-push sender sees.
+      F62.h-17's correction notice stays required."
+    - D-3: "a final `ambiguous` counts as the one typed final failure only when it really is the last outcome."
+    - D-4: "waive exactly upstream's retry path (#107070). The failed row stays closed, and the retry's row is the one
+      answered row."
+    - D-5 (§E4.6): the untracked/stale-sender path is waived: an untracked sender gets no final outcome in its session
+      once its runner is dead or has hit core's 30-minute wait. A tracked sender's final outcome stays required.
+
+    At v0.22.5 the durable owner is the target profile's session authority. `sender_turn_end`: the rig's stub authority
+    holds the receipt `queued` through the sender's lifecycle sweeps and an explicit kill of core's runner, with no
+    success and no row, then settles it with one row. `no_authority`: the target authority is down, so the sender's own
+    persisted tool row is the one typed final failure. `restart_before_accept`: the real authority admits and answers,
+    dies before scheduling the turn, and after a restart runs the same admission once. `restart_mid_turn`: it dies
+    inside the turn, which is never re-executed, and its `ambiguous` survives a second restart. `transient_retry`: a 429
+    fails the turn and core's one `bot:<id>:retry` answers it (D-4). The rig cases are tracked senders: core's runner
+    killed (the plugin's FINAL with the reply, or `unknown` at the bound and then one late notice); an owner that
+    settles without its row (one `ambiguous`/`unknown` FINAL that stays last, or one VERIFIED once the row lands); and
+    a non-push sender's one correction notice."""
+    _AC19[case](request)
+
+
 _AC21_SHAPES = ("fresh", "continuation", "compressed", "duplicate", "prefix_collision")
 
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize(("shape", "path"), [
-    *((shape, path) for path in ("cli_fallback", "live_owner") for shape in _AC21_SHAPES),
+    *((shape, "live_owner") for shape in _AC21_SHAPES),
+    ("fresh", "real_turn"),
     ("fresh", "live_owner_unpersisted"),
 ])
 def test_ac_upg_f68_21(bot_world, shape, path):
     """(R4 re-spec of AC-FLEET-F62.g-13) A delivery's success outcome is reported only once the target's resumed Bot Chat holds a `role='user'` row with the entire delivered attributed content, newer than the delivery's baseline. The resumed Bot Chat is the latest continuation, taken at its compression tip. An earlier identical message never yields that outcome, and neither does a newer row holding only a prefix (cases: fresh / continuation / compressed / duplicate / prefix_collision).
 
-    At v0.22.2 the success outcome is the runner's one exit-0 completion carrying the reply, `settled` on the live path (E6.3). Both 0.22.2
-    paths: `cli_fallback` (no live owner: a real `hermes -p researcher chat -c 'Bot Chat'` turn under the turn lock,
-    its loopback model held until the test releases it) and `live_owner` (a real consumer lease, the real mailbox poll
-    and claim; only the owner's turn body is stood in). `fresh` on `live_owner` has no chat to own, so its owner holds
-    a Bot Chat with no prior rows. `live_owner_unpersisted`: the owner's turn completes but its user row never lands
-    (both turn-start and turn-end persists log and continue, `agent/turn_context.py:508-524`,
-    `agent/turn_finalizer.py:635-637`); no success outcome may follow. For the unpersisted case, this node's world loads
-    nv-delivery-redrive with tracking live and sends through the real tool executor, a push sender, so the plugin's gate is
-    what keeps core's `settled` from reaching the sender."""
+    Waived (E7.1a, carried unchanged by ruling D-1, msg 596): the three core-only paths (non-push raw settled, hook
+    fail-open, untracked/stale senders). At v0.22.5 every local delivery goes through the target profile's session
+    authority (`bot_relay.deliver`), and the success outcome is core's runner's one exit-0 `settled` completion carrying
+    the reply. `live_owner`: the authority is the F62.h rig's stub at core's seam, so core's own `find_canonical_live_owner`
+    picks the session the owner's row lands in; `fresh` there is an existing Bot Chat with no rows. `real_turn`: the
+    target's own `python -m gateway.run` authority and a loopback model; the target has no Bot Chat, so core creates it
+    for this first delivery and its turn persists the row. `live_owner_unpersisted`: the owner settles and its user row
+    never lands (both turn-start and turn-end persists log and continue, `agent/turn_context.py:509-525`); this node's
+    world loads nv-delivery-redrive with tracking live and sends through the real tool executor, a push sender, so the
+    plugin's gate is what keeps core's `settled` from reaching the sender."""
     from tools.process_registry import process_registry
 
+    if path == "real_turn":
+        _ac21_real_turn(bot_world)
+        return
     db = _target_db(bot_world)
     landing, never = _seed_shape(db, shape)
-    if path.startswith("live_owner") and landing is None:
-        db.create_session("bc-live", source="desktop")
-        db.set_session_title("bc-live", "Bot Chat")
-        landing = "bc-live"
+    if landing is None:
+        db.create_session("bc-fresh", source="cli")
+        db.set_session_title("bc-fresh", "Bot Chat")
+        landing = "bc-fresh"
     baseline = len(_full_rows(db, landing))
     reply = f"REPLY_R8_21_{shape}"
-    if path == "cli_fallback":
-        gate = _model_for_target(bot_world, reply).gate
-    else:
-        owner = _live_owner(bot_world, db, landing, reply, persist_row=path == "live_owner")
-        gate = owner.gate
-
+    owner = bot_world.authority_owner(reply, persist_row=path == "live_owner")
     if path == "live_owner_unpersisted":
         out = bot_world.with_redrive()(f"turn-ac21-{shape}-{path}")
     else:
@@ -1024,7 +1496,7 @@ def test_ac_upg_f68_21(bot_world, shape, path):
         from tools.bot_live_delivery import read_delivery_result
 
         assert out.get("redrive", {}).get("tracked") is True, out
-        gate.set()
+        owner.gate.set()
         mine = _completions(process_registry, proc_id)
         receipt = read_delivery_result(bot_world.target, out["delivery_id"]) or {}
         assert owner.claims and receipt.get("status") == "settled", ("core must have settled the turn", owner.claims, receipt)
@@ -1037,20 +1509,16 @@ def test_ac_upg_f68_21(bot_world, shape, path):
         return
     if shape == "prefix_collision":
         db.append_message(landing, "user", content=_delivered()[: len(_delivered()) // 2])
-    _wait_for(lambda: len(_full_rows(db, landing or _resumed_bot_chat(db))) > baseline,
-              "the target turn never persisted the delivered row")
+    _wait_for(lambda: len(_full_rows(db, landing)) > baseline, "the owner's turn never persisted the delivered row")
     assert not process_registry.get(proc_id).exited and not _queued_completion(process_registry, proc_id), (
         "a success outcome before the target turn finished")
 
-    gate.set()
+    owner.gate.set()
     mine = _completions(process_registry, proc_id)
-    assert len(mine) == 1 and mine[0].get("exit_code") == 0 and reply in (mine[0].get("output") or ""), mine
-    if path == "live_owner":
-        assert _settled_completion(mine[0]), mine[0]
-    target = _resumed_bot_chat(db)
-    assert target == (landing or target) and target is not None, (target, landing)
-    rows = _full_rows(db, target)
-    assert len(rows) == baseline + 1, db.get_messages(target)
+    assert len(mine) == 1 and _settled_completion(mine[0]) and reply in (mine[0].get("output") or ""), mine
+    assert owner.sessions == [landing] and owner.claims == [_delivered()], (owner.sessions, owner.claims)
+    assert _resumed_bot_chat(db) == landing, (_resumed_bot_chat(db), landing)
+    assert len(_full_rows(db, landing)) == baseline + 1, db.get_messages(landing)
     for sid in never:
         assert not [m for m in db.get_messages(sid) if "TAIL_R8" in (m.get("content") or "")], sid
 
