@@ -134,14 +134,14 @@ A	plugins/nv-coworker-compose/plugin.yaml	in-surface	replay	F68
 A	plugins/nv-coworker-compose/route_scripts/check_gate.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/route_scripts/pr_ci_gate.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/tools.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/__init__.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/drain.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/notify.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/plugin.yaml	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/probe.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/send.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/settings.py	in-surface	replay	F68	
-A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68	
+A	plugins/nv-delivery-redrive/__init__.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/drain.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/notify.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/plugin.yaml	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/probe.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/send.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/settings.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
 A	plugins/nv-fleet-gates/__init__.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/aliases.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/cli.py	in-surface	replay	F68	
@@ -285,15 +285,6 @@ A	tests/e2e-scenarios/FLEET-F62.c/spec/openshell/workflows/triage-issue/SKILL.md
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-17.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62.d/AC-FLEET-F62.d-18.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62.e/AC-FLEET-F62.e-13.md	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/AC-FLEET-F62.h-16.md	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/SOUL.md	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/config.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/distribution.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-a/profile.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/SOUL.md	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/config.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/distribution.yaml	in-surface	replay	F68	
-A	tests/e2e-scenarios/FLEET-F62.h/fixtures/fleet-f62-h-bot-b/profile.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62/AC-CRED-F28-2.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-5.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/FLEET-F62/AC-FLEET-F62-6.md	in-surface	replay	F68	
@@ -671,7 +662,7 @@ A	tests/plugins/fixtures/sched-f33/overlays/.gitkeep	in-surface	replay	F68
 A	tests/plugins/fixtures/sched-f33/skills/.gitkeep	in-surface	replay	F68	
 A	tests/plugins/fixtures/sched-f33/spines/base.yaml	in-surface	replay	F68	
 A	tests/plugins/fixtures/sched-f33/workflows/.gitkeep	in-surface	replay	F68	
-A	tests/plugins/fleet_f62_h_rig.py	in-surface	replay	F68	
+A	tests/plugins/fleet_f62_h_rig.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + E4′ d3c4f3ff item 9: authority stub at core's T test seam (UPG-F69 D-6)
 A	tests/plugins/test_a2a_f18_wired_messaging_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_a2a_f19_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_ch_f51_acceptance.py	in-surface	replay	F68	
@@ -686,7 +677,7 @@ A	tests/plugins/test_fleet_f62_d_installer_unit.py	in-surface	replay	F68
 A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	replay	F68	
-A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-1..5 msg 1162 (-1/-2/-3/-6/-11 WITHDRAWN) + DN-E4-6 orch msg 122 (-10) + E4′ d3c4f3ff §E4.3 + DN-E4-9/-11 opt 1 (msg 1288) + E4″ 31ef5b36 AC-UPG-F69-7 (UPG-F69 D-6)
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_gov_f22_guard_catalog_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	replay	F68	
@@ -722,8 +713,8 @@ A	tests/plugins/test_nv_coworker_compose_session_driver_acceptance.py	in-surface
 A	tests/plugins/test_nv_coworker_compose_session_modes_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_transport.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_yaml_compat_unit.py	in-surface	replay	F68	
-A	tests/plugins/test_nv_delivery_redrive_bind.py	in-surface	replay	F68	
-A	tests/plugins/test_nv_delivery_redrive_safety.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_delivery_redrive_bind.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 + E4′ d3c4f3ff + E4″ 31ef5b36 (architect msg 82 + E4″.4) (UPG-F69 D-6)
+A	tests/plugins/test_nv_delivery_redrive_safety.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 + E4′ d3c4f3ff + E4″ 31ef5b36 (architect msg 82 + E4″.4) (UPG-F69 D-6)
 A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	replay	F68	
@@ -755,7 +746,7 @@ A	tests/plugins/test_self_f54_doc_contract.py	in-surface	replay	F68
 A	tests/plugins/test_self_f56_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	replay	F68	
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206 + F68 E4 C1: AC-UPG-F67-15 re-spec (UPG-F69 3)
-A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3)
+A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3); DN-E4-7/-8 opt 1 (msg 1288): AC-UPG-F68-18/-20 on the authority stub (UPG-F69 D-6)
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
 A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68	

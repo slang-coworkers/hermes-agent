@@ -19,6 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "heartbeat_stale_seconds": 180.0,
     "orchestrator_profile": None,
     "retention_seconds": 604800.0,
+    "late_verify_seconds": 300.0,
 }
 
 _ctx: Any = None

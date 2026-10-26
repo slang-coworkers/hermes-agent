@@ -1,8 +1,14 @@
-"""The FLEET-F62.h fleet harness: a Bot-Mode-managed root with the plugin loaded through real discovery, a fake target
-CLI, the delivery-runner shim, and the db, process and completion helpers the acceptance tests and their siblings share.
+"""The FLEET-F62.h fleet harness at v0.22.5: a Bot-Mode-managed root with the plugin loaded through real discovery, an
+authority stub at core's own test seam, the delivery-runner shim, and the db, process and completion helpers the
+acceptance tests and their siblings share.
 
-Its fixtures are registered by name as ``fleet`` and ``live_owner``: a module imports ``fleet_fixture`` /
-``live_owner_fixture`` and its tests take ``fleet`` / ``live_owner``.
+Its fixture is registered by name as ``fleet``: a module imports ``fleet_fixture`` and its tests take ``fleet``.
+
+A local ``message_agent`` DM at v0.22.5 is admitted by the target profile's session authority (a durable FIFO) over its
+``bot_relay.deliver`` RPC. The stub stands in for that RPC exactly where core's own tests do
+(``tests/tools/test_bot_live_owner_delivery.py``: ``authority_delivery`` plus a ready ``discover_gateway_endpoint``),
+keeping its whole state in the mailbox receipt files, so the test process and core's runner processes (which install
+it too, through the shim) see one authority. It never writes a transcript row unless a test asks it to.
 """
 
 from __future__ import annotations
@@ -11,7 +17,6 @@ import json
 import os
 import shutil
 import sqlite3
-import sys
 import textwrap
 import time
 from pathlib import Path
@@ -28,48 +33,9 @@ PLUGIN_SRC = _REPO / "plugins" / PLUGIN_KEY
 TARGET = "researcher"
 ORCH = "orchestrator"
 SENDER_SID = "bc-hermes"
+TARGET_SID = "bc-live"
 # Every wait below is a ceiling, never a window: under load (>= 6.5x measured) one runner boot can use most of 30 s.
 _WAIT_FLOOR = 180.0
-
-_FAKE_TARGET = textwrap.dedent('''\
-    #!{python}
-    """Fake `hermes -p <profile> chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <f>`."""
-    import json, os, sys, time, uuid
-    sys.path.insert(0, {repo!r})
-    argv = sys.argv[1:]
-    profile = argv[argv.index("-p") + 1]
-    query = open(argv[argv.index("--query-file") + 1], encoding="utf-8-sig").read()
-    spec = json.load(open({cfg!r}, encoding="utf-8"))
-    spec = spec.get(profile, spec.get("*", {{}}))
-    with open({pidlog!r}, "a", encoding="utf-8") as f:
-        f.write(json.dumps({{"profile": profile, "pid": os.getpid()}}) + "\\n")
-    time.sleep(spec.get("pre", 0.1))
-    if spec.get("hold") and os.path.exists(spec["hold"]):
-        open(spec["hold"] + ".in", "w", encoding="utf-8").close()
-        while os.path.exists(spec["hold"]):
-            time.sleep(0.05)
-    if spec.get("mode") == "not_owned":
-        print("hermes-refusal-reason: SESSION_NOT_OWNED", file=sys.stderr)
-        sys.exit(1)
-    if spec.get("mode") == "exit0_unpersisted":
-        print("REPLY-FROM-" + profile)
-        sys.exit(0)
-    from hermes_state import SessionDB
-    root = {root!r}
-    home = root if profile == "default" else os.path.join(root, "profiles", profile)
-    db = SessionDB(db_path=__import__("pathlib").Path(home) / "state.db")
-    row = db.get_session_by_title("Bot Chat")
-    sid = (db.get_compression_tip(row["id"]) or row["id"]) if row else None
-    if not sid:
-        sid = db.create_session(uuid.uuid4().hex, source="cli")
-        db.set_session_title(sid, "Bot Chat")
-    db.append_message(sid, role="user", content=query)      # turn-start persistence
-    if spec.get("mode") == "hang_after_row":
-        time.sleep(3600)
-    time.sleep(spec.get("post", 0.0))
-    db.append_message(sid, role="assistant", content="ACK " + profile)
-    print("REPLY-FROM-" + profile)
-''')
 
 
 def _profile(root, name):
@@ -81,8 +47,8 @@ def _profile(root, name):
 
 
 def _bot_chat(home):
-    """(session id, every message) of the Bot Chat lineage the CLI resolves in ``home``. A db the fake CLI has created
-    but not yet given its schema reads as empty; every other db error still fails the test."""
+    """(session id, every message) of the Bot Chat lineage in ``home``. A db without its schema yet reads as empty;
+    every other db error still fails the test."""
     from hermes_state import SessionDB
 
     if not (Path(home) / "state.db").exists():
@@ -108,7 +74,7 @@ def _append_user_row(home, session_id, content, **fields):
 
     db = SessionDB(db_path=Path(home) / "state.db")
     try:
-        db.append_message(session_id, role="user", content=content, **fields)
+        return db.append_message(session_id, role="user", content=content, **fields)
     finally:
         db.close()
 
@@ -122,6 +88,106 @@ def _seed_bot_chat(home, session_id):
         db.set_session_title(session_id, "Bot Chat")
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# The authority stub (core's T test seam)
+# --------------------------------------------------------------------------- #
+_AUTHORITY_CFG = "authority.json"
+_AUTHORITY_LOG = "authority-calls.jsonl"
+
+
+def _profile_of(home) -> str:
+    home = Path(home).resolve()
+    return home.name if home.parent.name == "profiles" else "default"
+
+
+def _authority_cfg(state_dir) -> dict:
+    path = Path(state_dir) / _AUTHORITY_CFG
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+
+
+def _log_call(state_dir, method, home, params):
+    with open(Path(state_dir) / _AUTHORITY_LOG, "a", encoding="utf-8") as log:
+        log.write(json.dumps({"method": method, "profile": _profile_of(home), "id": params.get("id"),
+                              "pid": os.getpid()}) + "\n")
+
+
+def _answer(record):
+    return {k: record[k] for k in ("status", "delivery_id", "profile_home", "session_id", "reply", "refused", "reason")
+            if k in record}
+
+
+def _stub_deliver(state_dir, home, params):
+    """``bot_relay.deliver``: a same-id replay returns the existing admission; a changed payload is a conflict.
+    ``authority.json`` ``modes[<profile>]`` picks the answer to a new id: ``admit`` (default), ``legacy`` (a queued
+    record with no ``admission_id``), ``held`` (the session-writer refusal), ``refuse:<reason>`` (an owner-state
+    refusal), ``terminal:<status>:<reason>`` (a receipt already ended)."""
+    from hermes_cli.gateway_client import GatewayRPCError
+    from tools import bot_live_delivery as mailbox
+    from tools.bot_failure_reasons import HELD_NOT_SENT
+
+    _log_call(state_dir, "deliver", home, params)
+    mode = _authority_cfg(state_dir).get("modes", {}).get(_profile_of(home), "admit")
+    with mailbox._locked(home) as root:
+        path = root / f"{params['id']}.json"
+        record = mailbox._read(path)
+        if record is not None:
+            if record["message"] != params["message"] or record.get("author") != params.get("author"):
+                raise GatewayRPCError("admission_conflict")
+            return _answer(record)
+        if mode == "held":
+            raise GatewayRPCError(HELD_NOT_SENT, data={"admitted": False})
+        if mode.startswith("refuse:"):
+            raise GatewayRPCError(mode.split(":", 1)[1])
+        record = dict(status="queued", delivery_id=params["id"], profile_home=str(Path(home).resolve()),
+                      session_id=params.get("session_id") or TARGET_SID, message=params["message"], reply="",
+                      **({"author": params["author"]} if "author" in params else {}))
+        if mode != "legacy":
+            record["admission_id"] = "adm-" + params["id"][:6]
+        if mode.startswith("terminal:"):
+            _, status, reason = mode.split(":", 2)
+            record.update(status=status, reason=reason, error=f"stub receipt {status} ({reason})",
+                          completed_at=time.time_ns())
+        mailbox._write(path, record)
+    return _answer(record)
+
+
+def _stub_settle(state_dir, home, params):
+    """``bot_relay.settle``: the never-admitted id's terminal not-sent receipt (``gateway/session_bot.py``
+    ``_not_sent_record``), or the existing one."""
+    from tools import bot_live_delivery as mailbox
+    from tools.bot_failure_reasons import HELD_NOT_SENT
+
+    _log_call(state_dir, "settle", home, params)
+    with mailbox._locked(home) as root:
+        path = root / f"{params['id']}.json"
+        record = mailbox._read(path)
+        if record is None:
+            record = dict(delivery_id=params["id"], profile_home=str(Path(home).resolve()), session_id=TARGET_SID,
+                          message=params["message"], status="failed", refused=True, reply="",
+                          error="Settled as not sent after a session-writer refusal", reason=HELD_NOT_SENT,
+                          completed_at=time.time_ns())
+            mailbox._write(path, record)
+    return dict(record)
+
+
+def install_authority(state_dir, setattr_=setattr):
+    """Every profile named in ``authority.json`` ``ready`` (default: the target and the orchestrator) has a ready
+    authority; every other home keeps core's real discovery."""
+    import hermes_cli.gateway_runtime as runtime
+    from tools import bot_live_delivery as mailbox
+
+    real = runtime.discover_gateway_endpoint
+
+    def discover(profile_home, *, timeout=2.0):
+        if _profile_of(profile_home) not in _authority_cfg(state_dir).get("ready", [TARGET, ORCH]):
+            return real(profile_home, timeout=timeout)
+        return SimpleNamespace(state="ready", endpoint=SimpleNamespace(instance_id="authority-1"))
+
+    setattr_(runtime, "discover_gateway_endpoint", discover)
+    setattr_(mailbox, "authority_delivery", lambda home, params: _stub_deliver(state_dir, home, params))
+    setattr_(mailbox, "authority_settle", lambda home, params: _stub_settle(state_dir, home, params))
 
 
 def _make_sender_agent():
@@ -164,6 +230,8 @@ _RUNNER_SHIM = textwrap.dedent('''\
     gate = Path({state_dir!r}) / "runner.gate"
     while gate.exists():
         time.sleep(0.05)
+    from tests.plugins.fleet_f62_h_rig import install_authority
+    install_authority({state_dir!r})
     from tools import bot_mode_dm
     overrides = Path({state_dir!r}) / "runner.json"
     if overrides.exists():
@@ -174,9 +242,10 @@ _RUNNER_SHIM = textwrap.dedent('''\
 
 
 def install_runner_shim(shim_path, setattr_=setattr):
-    """Core's delivery runner is a separate process: start it through a shim that can shorten its live-wait bounds
-    (``runner.json``) and hold it before core's code runs while ``runner.gate`` exists. The real ``terminal_tool`` /
-    process registry / completion path still runs it."""
+    """Core's delivery runner is a separate process: start it through a shim that installs the authority stub, can
+    shorten core's live-wait bounds (``runner.json``) and holds it before core's code runs while ``runner.gate``
+    exists. The real ``terminal_tool`` / process registry / completion path still runs it, and the runner is core's own
+    ``_wait_live_dm``."""
     import shlex
     import tools.terminal_tool as terminal_tool_module
 
@@ -193,9 +262,11 @@ def install_runner_shim(shim_path, setattr_=setattr):
 
 @pytest.fixture(name="fleet")
 def fleet_fixture(tmp_path, monkeypatch):
-    """A Bot-Mode-managed root: sender = default ('hermes'), target 'researcher', orchestrator; plugin enabled."""
+    """A Bot-Mode-managed root: sender = default ('hermes'), target 'researcher', orchestrator; plugin enabled; the
+    target's and the orchestrator's authorities are the stub."""
     from hermes_cli import plugins as plugins_mod
-    from tools import bot_mode_dm, bot_mode_probe, bot_relay
+    from tools import bot_live_delivery as mailbox
+    from tools import bot_mode_dm, bot_mode_probe
     from tools.process_registry import process_registry
 
     assert PLUGIN_SRC.is_dir(), "plugin source missing"
@@ -205,12 +276,10 @@ def fleet_fixture(tmp_path, monkeypatch):
     (root / "profile.yaml").write_text(
         "description: sender\nui_meta:\n  hermes-bots:\n    shape: cloud\n", encoding="utf-8")
     homes = {"default": root, TARGET: _profile(root, TARGET), ORCH: _profile(root, ORCH)}
-    # The rig ticks by hand and boots runners under load, so neither a tick-free wait (D8 staleness) nor a re-drive
-    # chain (the window) may outrun these; the cases that test either bound set their own.
-    settings = {"redrive_window_seconds": 300, "max_attempts": 6, "retry_backoff_seconds": 1,
-                "heartbeat_stale_seconds": 600, "orchestrator_profile": ORCH}
-    cfg = {"plugins": {"enabled": [PLUGIN_KEY], "entries": {PLUGIN_KEY: {"settings": settings}}},
-           "bot_mode": {"turn_wait_seconds": 1}}
+    # The rig ticks by hand and boots runners under load, so a tick-free wait (D8 staleness) and the follow bound must
+    # outlast both; the cases that test either bound set their own.
+    settings = {"redrive_window_seconds": 300, "heartbeat_stale_seconds": 600, "orchestrator_profile": ORCH}
+    cfg = {"plugins": {"enabled": [PLUGIN_KEY], "entries": {PLUGIN_KEY: {"settings": settings}}}}
     for home in homes.values():
         shutil.copytree(PLUGIN_SRC, home / "plugins" / PLUGIN_KEY)
         (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -222,27 +291,20 @@ def fleet_fixture(tmp_path, monkeypatch):
     dm_dir = tmp_path / "dm"
     dm_dir.mkdir(mode=0o700)
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: dm_dir)
-    target_cfg = tmp_path / "fake-target.json"
-    target_cfg.write_text(json.dumps({"*": {}}), encoding="utf-8")
-    pidlog = tmp_path / "target-pids.jsonl"
-    fake = tmp_path / "bin" / "hermes"
-    fake.parent.mkdir()
-    fake.write_text(_FAKE_TARGET.format(python=sys.executable, repo=str(_REPO), cfg=str(target_cfg),
-                                        pidlog=str(pidlog), root=str(root)), encoding="utf-8")
-    fake.chmod(0o755)
-    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: str(fake))
     state_dir = tmp_path / "runner-state"
     state_dir.mkdir()
+    install_authority(state_dir, setattr_=monkeypatch.setattr)
     shim = tmp_path / "runner_shim.py"
     shim.write_text(_RUNNER_SHIM.format(repo=str(_REPO), state_dir=str(state_dir)), encoding="utf-8")
     install_runner_shim(shim, setattr_=monkeypatch.setattr)
     _seed_bot_chat(root, SENDER_SID)
+    _seed_bot_chat(homes[TARGET], TARGET_SID)            # the owner's Bot Chat: find_canonical_live_owner needs a store
     _seed_bot_chat(homes[ORCH], "bc-orchestrator")
     task_id = f"f62h-{os.urandom(8).hex()}"              # owns every registry spawn of this test (owner_task_id)
 
-    ns = SimpleNamespace(root=root, homes=homes, dm_dir=dm_dir, pidlog=pidlog, fake=fake, state_dir=state_dir,
-                         shim=shim, registry=process_registry, task_id=task_id,
-                         bot_relay=bot_relay, bot_mode_dm=bot_mode_dm, agent=None, manager=None, loaded=None)
+    ns = SimpleNamespace(root=root, homes=homes, dm_dir=dm_dir, state_dir=state_dir, shim=shim,
+                         registry=process_registry, task_id=task_id, bot_mode_dm=bot_mode_dm, agent=None,
+                         manager=None, loaded=None)
 
     def load():
         plugins_mod._reset_plugin_managers_for_tests()
@@ -257,17 +319,10 @@ def fleet_fixture(tmp_path, monkeypatch):
         ns.manager, ns.loaded = manager, loaded
         return manager, loaded
 
-    def configure(profile="*", **spec):
-        data = json.loads(target_cfg.read_text(encoding="utf-8-sig"))
-        data[profile] = spec
-        target_cfg.write_text(json.dumps(data), encoding="utf-8")
-
     def settings_(**overrides):
         for home in homes.values():
             data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig"))
             data["plugins"]["entries"][PLUGIN_KEY]["settings"].update(overrides)
-            if "turn_wait_seconds" in overrides:
-                data["bot_mode"]["turn_wait_seconds"] = overrides["turn_wait_seconds"]
             (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
         load()
         tick()
@@ -308,10 +363,10 @@ def fleet_fixture(tmp_path, monkeypatch):
             time.sleep(pause)
         return predicate()
 
-    ns.load, ns.configure, ns.settings, ns.send, ns.tick, ns.rows, ns.until = (
-        load, configure, settings_, send, tick, rows, until)
+    ns.load, ns.settings, ns.send, ns.tick, ns.rows, ns.until = load, settings_, send, tick, rows, until
     ns.ticket = lambda did: ns.loaded.module.store.ticket(did)
     ns.attempts = lambda did: ns.loaded.module.store.attempts(did)
+    ns.authority = _authority_helpers(state_dir, homes, mailbox)
     load()
     tick()                                               # a live drainer: fresh heartbeat before any send (D8)
     yield ns
@@ -324,10 +379,69 @@ def fleet_fixture(tmp_path, monkeypatch):
     bot_mode_probe._reset_cache_for_tests()
 
 
+def _authority_helpers(state_dir, homes, mailbox):
+    """The owner's side of a stubbed authority: what a profile's FIFO does with an admitted delivery."""
+    cfg_path = Path(state_dir) / _AUTHORITY_CFG
+
+    def configure(**changes):
+        data = _authority_cfg(state_dir)
+        data.update(changes)
+        cfg_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def mode(value, profile=TARGET):
+        data = _authority_cfg(state_dir)
+        data.setdefault("modes", {})[profile] = value
+        cfg_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def receipt(did, profile=TARGET):
+        return mailbox.read_delivery_result(homes[profile], did)
+
+    def claim(did, profile=TARGET):
+        with mailbox._locked(homes[profile]) as root:
+            path = root / f"{did}.json"
+            record = mailbox._read(path)
+            assert record is not None and record["status"] == "queued", record
+            record.update(status="claimed", claimed_at=time.time_ns())
+            mailbox._write(path, record)
+        return record
+
+    def row(did, profile=TARGET):
+        """The owner's turn persisted the delivery's role='user' row, as a persisting owner does before it settles."""
+        record = receipt(did, profile)
+        assert record is not None and record.get("message"), record
+        sid, _msgs = _bot_chat(homes[profile])
+        return _append_user_row(homes[profile], sid, record["message"])
+
+    def settle(did, reply="LIVE-REPLY", *, row_first=True, profile=TARGET):
+        if (receipt(did, profile) or {}).get("status") == "queued":
+            claim(did, profile)
+        if row_first:
+            row(did, profile)
+        return mailbox.complete_delivery(homes[profile], did, status="settled", reply=reply)
+
+    def fail(did, reason, error="", *, status="failed", profile=TARGET):
+        if (receipt(did, profile) or {}).get("status") == "queued":
+            claim(did, profile)
+        return mailbox.complete_delivery(homes[profile], did, status=status, reason=reason, error=error)
+
+    def calls(method="deliver", did=None):
+        path = Path(state_dir) / _AUTHORITY_LOG
+        found = [json.loads(ln) for ln in path.read_text(encoding="utf-8-sig").splitlines()] if path.exists() else []
+        return [c for c in found if c["method"] == method and (did is None or c["id"] == did)]
+
+    def tool_admissions(did):
+        """``bot_relay.deliver`` calls for ``did`` from this (the gateway) process: the tool's own admission. The
+        plugin runs in this process too, so a plugin re-send would add one; core's runner replays from its own pid."""
+        return [c for c in calls(did=did) if c["pid"] == os.getpid()]
+
+    return SimpleNamespace(configure=configure, mode=mode, receipt=receipt, claim=claim, row=row, settle=settle,
+                           fail=fail, calls=calls, tool_admissions=tool_admissions)
+
+
 def _kill_own_processes(tmp_path):
     """Stop every process this test started, and only those. Each one names the test's own pytest ``tmp_path`` in its
-    argv (fake target CLIs, shim-started registry runners, the drainer's runners, the one-shot sender); nothing else
-    can. Rescans, because a runner can start a child mid-sweep. Polls instead of reaping: the registry owns its Popens."""
+    argv (shim-started registry runners, the one-shot sender); nothing else can. Rescans, because a runner can start a
+    child mid-sweep. Polls instead of reaping: the registry owns its Popens."""
     import psutil
 
     base = str(tmp_path)
@@ -354,26 +468,6 @@ def _kill_own_processes(tmp_path):
             time.sleep(0.05)
 
 
-def _target_pids(fleet):
-    """Every target CLI pid the fake ever logged (an orphaned one outlives its runner)."""
-    if not fleet.pidlog.exists():
-        return []
-    return [int(json.loads(line)["pid"]) for line in fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()]
-
-
-def _pidlog_profiles(fleet):
-    """Every profile a fake target CLI logged, in start order (written once it has read its spec)."""
-    if not fleet.pidlog.exists():
-        return []
-    return [json.loads(line)["profile"] for line in fleet.pidlog.read_text(encoding="utf-8-sig").splitlines()]
-
-
-def _spec_read(fleet, started):
-    """Whether a target CLI sent after ``started`` TARGET pidlog lines has read its spec. A reconfigure is safe only then:
-    the CLI's process (``_has_query_child``) exists before its ``json.load``, so an earlier reconfigure can reach it."""
-    return _pidlog_profiles(fleet).count(TARGET) > started
-
-
 def _alive(pid):
     import psutil
 
@@ -381,24 +475,6 @@ def _alive(pid):
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
-
-
-def _has_query_child(runner):
-    """Whether the runner has started its target CLI. A process that exits mid-scan, reaped or not, is skipped: psutil
-    raises NoSuchProcess (ZombieProcess is one) for it, and that means "not this one", never a failed wait."""
-    import psutil
-
-    try:
-        children = runner.children(recursive=True)
-    except psutil.NoSuchProcess:
-        return False
-    for child in children:
-        try:
-            if "--query-file" in " ".join(child.cmdline()):
-                return True
-        except psutil.NoSuchProcess:
-            continue
-    return False
 
 
 def _kill(runner, *, tree=True):
@@ -420,8 +496,15 @@ def _kill(runner, *, tree=True):
 
 
 def _busy(fleet, profile=TARGET):
-    """Hold ``profile``'s real cross-process turn lock (core's flock), as a long target turn does."""
-    return fleet.bot_relay.acquire_turn_lock(fleet.root, profile, timeout_seconds=0)
+    """Hold ``profile``'s real cross-process turn lock (core's flock), as a long turn of that profile does."""
+    from tools.bot_relay import acquire_turn_lock
+
+    return acquire_turn_lock(fleet.root, profile, timeout_seconds=0)
+
+
+def _runner_sessions(fleet):
+    """Every delivery runner this test's registry ever spawned: core's, one per admitted send (the plugin spawns none)."""
+    return [s for s in fleet.registry.list_sessions(task_id=fleet.task_id) if "--run-delivery" in str(s.get("command"))]
 
 
 def _wait_runner_done(fleet, process_id, timeout=30.0):
@@ -494,24 +577,3 @@ def _queued_completion(fleet, process_id):
 def _completion_output(fleet, process_id):
     evt = _queued_completion(fleet, process_id)
     return str(evt.get("output") or evt.get("output_preview") or "")
-
-
-def _attempt_ids(fleet, delivery_id):
-    """The delivery id core derives from every attempt's DM path (all attempts must reuse attempt 1's path)."""
-    return {fleet.bot_mode_dm._dm_delivery_id(a["dm_path"]) for a in fleet.attempts(delivery_id)}
-
-
-@pytest.fixture(name="live_owner")
-def live_owner_fixture(fleet):
-    """The target's Bot Chat is held by a live, delivery-capable owner (core's own lease API)."""
-    from hermes_cli.active_sessions import try_acquire_active_session
-    from tools import bot_live_delivery as mailbox
-
-    _seed_bot_chat(fleet.homes[TARGET], "bc-live")
-    lease, refusal = try_acquire_active_session(
-        session_id="bc-live", surface="desktop", config={}, registry_home=fleet.homes[TARGET],
-        metadata={"live_session_id": "live-h8", "bot_live_delivery_consumer": True})
-    assert refusal is None and lease is not None
-    assert mailbox.find_canonical_live_owner(fleet.homes[TARGET]) is not None
-    yield lease
-    lease.release()

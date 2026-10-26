@@ -1223,46 +1223,56 @@ def _sender_outcomes(world, ack):
     return mine, _f62h._notices(world, "default", ack["delivery_id"])
 
 
+def _busy_past_runner(world):
+    """The target's turn outlasts core's runner: the runner's live wait (shortened inside the runner process) ends with
+    "Delivery remains pending", so only the drainer is left to report the outcome."""
+    (world.state_dir / "runner.json").write_text(
+        json.dumps({"_LIVE_WAIT_SECONDS": 0.2, "_LIVE_WAIT_MAX_SECONDS": 0.5}), encoding="utf-8")
+
+
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("case", ["stays_busy", "delivered_once"])
+@pytest.mark.parametrize("case", ["queued_at_bound", "delivered_once"])
 def test_ac_upg_f68_18(request, case):
-    """(R4 re-spec of AC-FLEET-F62.g-10; item 4) A local delivery to a target whose Bot Chat stays busy is never silently dropped. Within the bounded re-attempts on its `delivery_id`, it is either delivered once or ends in one typed final failure with reason `queued_expired`, and that failure reaches the sender's session and the orchestrator profile."""
+    """A local delivery admitted to the FIFO while its target's Bot Chat is busy is never silently dropped: the sender's session and the orchestrator profile each receive exactly one final outcome for its delivery_id: settled with the reply, a typed failure from the receipt, or unknown at the bound followed by at most one late notice."""
     world = _redrive(request)
-    if case == "stays_busy":
-        world.settings(redrive_window_seconds=12)
+    if case == "queued_at_bound":
+        world.settings(redrive_window_seconds=8)
+    _busy_past_runner(world)
     body = f"status? PAYLOAD_F68_18_{case}"
-    with _f62h._busy(world):
-        ack = world.send(body)
-        did = ack["delivery_id"]
-        assert ack.get("status") == "queued" and did, ack
-        completions, _ = _sender_outcomes(world, ack)
-        assert len(completions) == 1, completions
-        assert json.loads(_f62h._completion_output(world, ack["process_id"])).get("status") == "queued", completions
-        if case == "stays_busy":
-            assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=90.0)
+    ack = world.send(body)
+    did = ack["delivery_id"]
+    assert ack.get("status") == "queued" and ack.get("redrive", {}).get("tracked") is True, ack
+    completions, _ = _sender_outcomes(world, ack)
+    assert len(completions) == 1 and _outcome_completions(completions) == [], completions   # core's "pending"
+    assert world.authority.receipt(did)["status"] == "queued"
     if case == "delivered_once":
+        world.authority.settle(did, reply="REPLY-F68-18")
         assert world.until(lambda: world.ticket(did)["state"] == "settled", timeout=60.0), world.ticket(did)
-    t = world.ticket(did)
-    assert len(world.attempts(did)) <= 6 and _f62h._attempt_ids(world, did) == {did}, world.attempts(did)
-    world.tick(3, pause=0.5)
-    landed = world.rows(_f62h.TARGET, body)
-    to_sender = _f62h._notices(world, "default", did)
-    if case == "delivered_once":
-        assert t["state"] == "settled" and len(landed) == 1 and len(world.attempts(did)) >= 2, (t, landed)
-        assert len(to_sender) == 1 and "REPLY-FROM-researcher" in str(to_sender[0]["content"]), to_sender
-        return
-    assert (t["state"], t["reason"]) == ("failed", "queued_expired") and landed == [], (t, landed)
-    assert world.until(lambda: len(_f62h._notices(world, _f62h.ORCH, did)) >= 1, timeout=15.0)
-    world.tick(2, pause=0.5)
+    else:
+        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=60.0), world.ticket(did)
+        t = world.ticket(did)
+        assert (t["state"], t["reason"], t["late_open"]) == ("ambiguous", "unknown", 1), t
+        assert world.authority.receipt(did)["status"] == "queued"
+    assert world.until(lambda: len(_f62h._notices(world, "default", did)) == 1
+                       and len(_f62h._notices(world, _f62h.ORCH, did)) == 1, timeout=30.0)
+    world.tick(3, pause=0.3)
     for who in ("default", _f62h.ORCH):
         notes = _f62h._notices(world, who, did)
-        assert len(notes) == 1, (who, notes)
-        assert did in str(notes[0]["content"]) and "queued_expired" in str(notes[0]["content"]), notes[0]
+        assert len(notes) == 1 and did in str(notes[0]["content"]), (who, notes)
+        if case == "delivered_once":
+            assert "REPLY-F68-18" in str(notes[0]["content"]), notes
+    if case == "queued_at_bound":                         # at most one late notice follows
+        world.authority.settle(did, reply="LATE-F68-18")
+        assert world.until(lambda: world.ticket(did)["late_open"] == 0, timeout=30.0), world.ticket(did)
+        world.tick(3, pause=0.3)
+        for who in ("default", _f62h.ORCH):
+            assert len(_f62h._notices(world, who, did)) == 2, who
+    assert [r["delivery_id"] for r in _f62h._admissions(world.homes[_f62h.TARGET], body)] == [did]
+    assert len(world.rows(_f62h.TARGET, body)) == 1
 
 
 def _outcome_completions(completions):
-    """Core completions that carry a delivery outcome: the target's reply or a typed live/CLI result. A killed runner's
-    bare exit, or the tracked `queued` busy rewrite, carries none."""
+    """Core completions that carry a delivery outcome: a typed live result other than "still pending"."""
     found = []
     for evt in completions:
         out = str(evt.get("output") or "")
@@ -1270,73 +1280,49 @@ def _outcome_completions(completions):
             payload = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
         except ValueError:
             payload = {}
-        if "REPLY-FROM-" in out or (isinstance(payload, dict) and payload.get("status") not in (None, "queued")):
+        if isinstance(payload, dict) and payload.get("status") not in (None, "queued", "claimed"):
             found.append(evt)
     return found
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("case", ["late_alive_runner", "late_orphan_target", "queued_expired_final", "may_still_land"])
+@pytest.mark.parametrize("case", ["same_id_once", "receipt_failed_final", "may_still_land"])
 def test_ac_upg_f68_20(request, case):
-    """(R4 re-spec of AC-FLEET-F62.g-12) When a first attempt is accepted late, while the re-drive owner is already deciding on the same delivery, the target transcript holds exactly one copy of the message and the sender receives exactly one outcome. A delivery that has reached its terminal failure `queued_expired` after a clean refusal (its re-attempts exhausted, each one refused busy) is final: its message never appears in the target transcript afterwards, even once the target is free. An attempt that may still land never reaches that failure: at the bound it ends `ambiguous`/`unknown` (AC-FLEET-F62.h-13)."""
+    """The plugin never copies a tracked delivery: it makes no admission, and a same-id replay returns the existing admission. A delivery that settles with a claimed row leaves exactly one copy of the message in the target transcript. The sender receives exactly one final outcome, followed by at most one late notice. A delivery the plugin reports as a final failure is one whose receipt core itself ended `failed` or `cancelled`, and no copy of its message appears in the target transcript after that failure. An attempt that may still land never reaches a failure: at the bound it ends `ambiguous`/`unknown` (AC-FLEET-F62.h-13)."""
     import time
-
-    import psutil
 
     world = _redrive(request)
     body = f"status? PAYLOAD_F68_20_{case}"
-    if case in ("late_alive_runner", "late_orphan_target"):
-        world.configure(_f62h.TARGET, pre=6.0)            # attempt 1's writer is alive and has not written its row
-        ack = world.send(body)
-        did = ack["delivery_id"]
-        runner = psutil.Process(world.registry.get(ack["process_id"]).pid)
-        if case == "late_orphan_target":
-            assert world.until(lambda: any("--query-file" in " ".join(c.cmdline())
-                                           for c in runner.children(recursive=True)), ticks=False, timeout=10.0)
-            runner.kill()                                 # attempt 1 lost its outcome; only its orphaned writer lives
-        else:
-            assert world.until(lambda: _f62h._target_pids(world), ticks=False, timeout=20.0)
-        world.tick(4, pause=0.5)                          # the re-drive owner decides on this id during the acceptance
-        assert any(_f62h._alive(p) for p in _f62h._target_pids(world)), "the acceptance must still be in flight"
-        assert world.rows(_f62h.TARGET, body) == [], "the acceptance must come late"
-        assert world.until(lambda: world.ticket(did)["state"] == "settled", timeout=30.0), world.ticket(did)
-        world.tick(3, pause=0.5)
-        completions, to_sender = _sender_outcomes(world, ack)
-        assert len(world.rows(_f62h.TARGET, body)) == 1 and len(world.attempts(did)) == 1, world.attempts(did)
-        assert len(_outcome_completions(completions)) + len(to_sender) == 1, (completions, to_sender)
-        return
     if case == "may_still_land":
-        world.settings(redrive_window_seconds=10)
-        world.configure(_f62h.TARGET, pre=15.0)           # attempt 1 is a live writer across the whole bound
-        ack = world.send(body)
-        did = ack["delivery_id"]
-        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=40.0)
+        world.settings(redrive_window_seconds=8)
+    if case != "same_id_once":
+        _busy_past_runner(world)
+    ack = world.send(body)
+    did = ack["delivery_id"]
+    if case == "same_id_once":
+        # Core's runner re-delivers under the same id from its pinned intent: the authority answers with the existing
+        # admission, so one receipt stands for both calls.
+        assert world.until(lambda: len(world.authority.calls(did=did)) >= 2, ticks=False, timeout=60.0)
+        world.authority.settle(did, reply="REPLY-F68-20")
+        assert world.until(lambda: world.ticket(did)["state"] == "settled", timeout=60.0), world.ticket(did)
+    elif case == "receipt_failed_final":
+        _sender_outcomes(world, ack)                      # core's runner is gone ("Delivery remains pending")
+        world.authority.fail(did, "provider_rate_limit", "429 from the provider")
+        assert world.until(lambda: world.ticket(did)["state"] == "failed", timeout=60.0), world.ticket(did)
+        assert world.ticket(did)["reason"] == "provider_rate_limit", world.ticket(did)
+        world.tick(4, pause=1.0)
+        time.sleep(2.0)  # health: allow HX013 -- absence of a copy has no event to await; the window lets a wrongly scheduled re-send land first
+    else:
+        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=60.0), world.ticket(did)
         t = world.ticket(did)
         assert (t["state"], t["reason"]) == ("ambiguous", "unknown"), t
-        # Attempt 1 lands after the bound; end once it has (as AC-FLEET-F62.h-13 does), so teardown never kills a live tree.
-        assert world.until(lambda: (pids := _f62h._target_pids(world)) and not any(_f62h._alive(p) for p in pids),
-                           ticks=False, timeout=30.0)
-        return
-    world.settings(redrive_window_seconds=12)
-    with _f62h._busy(world):
-        ack = world.send(body)
-        did = ack["delivery_id"]
-        completions, _ = _sender_outcomes(world, ack)
-        assert len(completions) == 1, completions
-        assert json.loads(_f62h._completion_output(world, ack["process_id"])).get("reason") == "target_busy", completions
-        assert world.until(lambda: world.ticket(did)["state"] != "pending", timeout=90.0)
-        t = world.ticket(did)
-        assert (t["state"], t["reason"]) == ("failed", "queued_expired"), t
-        attempts = world.attempts(did)
-        assert 2 <= len(attempts) <= 6 and _f62h._attempt_ids(world, did) == {did}, attempts
-        for attempt in attempts:
-            out = str(attempt["outcome"] or "")
-            if not out and attempt["out_path"] and Path(attempt["out_path"]).exists():
-                out = Path(attempt["out_path"]).read_text(encoding="utf-8")
-            assert attempt["state"] == "over" and "target_busy" in out, [dict(a) for a in attempts]
-    world.tick(4, pause=1.0)
-    time.sleep(2.0)  # health: allow HX013 -- absence of a late delivery has no event to await; the window lets a wrongly scheduled re-drive land first
-    assert world.rows(_f62h.TARGET, body) == [] and world.ticket(did)["state"] == "failed", world.ticket(did)
+    world.tick(3, pause=0.3)
+    completions, to_sender = _sender_outcomes(world, ack)
+    assert len(_outcome_completions(completions)) + len([n for n in to_sender if (
+        n.get("display_metadata") or {})["nv_delivery_redrive"]["notice_kind"] == "final"]) == 1, (completions, to_sender)
+    assert [r["delivery_id"] for r in _f62h._admissions(world.homes[_f62h.TARGET], body)] == [did]
+    assert len(world.authority.tool_admissions(did)) == 1                    # no plugin admission
+    assert len(world.rows(_f62h.TARGET, body)) == (1 if case == "same_id_once" else 0)
 
 
 def _with_redrive(world, monkeypatch):

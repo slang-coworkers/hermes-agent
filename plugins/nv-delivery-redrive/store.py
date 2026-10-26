@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS inflight (
 );
 CREATE TABLE IF NOT EXISTS published (dm_path TEXT PRIMARY KEY, status TEXT NOT NULL, at REAL NOT NULL);
 """
+# Added after v0.22.2: ``CREATE TABLE IF NOT EXISTS`` never adds a column to an existing db (E4′ item 6a).
+_ADDED_COLUMNS = (("final_suffix", "TEXT"), ("late_verify_until", "REAL"))
 
 _lock = threading.RLock()
 _conns: dict[str, sqlite3.Connection] = {}
@@ -129,8 +131,24 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.isolation_level = None
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     _conns[key] = conn
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """One write transaction, so two processes opening a v0.22.2 db at once cannot both add a column."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        have = {row[1] for row in conn.execute("PRAGMA table_info(tickets)")}
+        for name, kind in _ADDED_COLUMNS:
+            if name not in have:
+                conn.execute(f"ALTER TABLE tickets ADD COLUMN {name} {kind}")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def close_all() -> None:
@@ -187,21 +205,15 @@ def attempts(delivery_id: str) -> list[dict[str, Any]]:
 
 
 def open_tickets() -> list[dict[str, Any]]:
-    """Pending tickets, tickets with an attempt still open after their bound, and D5a-unverified tickets (a later
-    row claimed for them still settles them until they are collected)."""
+    """Pending tickets, tickets whose receipt was still open at their bound, and D5a-unverified tickets with no late
+    outcome yet (a later row claimed for them still settles them until they are collected)."""
     return _read("SELECT * FROM tickets WHERE state = 'pending' OR late_open = 1 OR (state = 'ambiguous' "
-                 "AND unverified = 1 AND matched_row_id IS NULL) ORDER BY seq")
+                 "AND unverified = 1 AND matched_row_id IS NULL AND late_outcome IS NULL) ORDER BY seq")
 
 
 def ticket_by_dm_path(dm_path: str) -> Optional[dict[str, Any]]:
     rows = _read("SELECT * FROM tickets WHERE dm_path = ? ORDER BY seq DESC LIMIT 1", (dm_path,))
     return rows[0] if rows else None
-
-
-def cohort_peers(sender_home: str, target_home: str) -> list[dict[str, Any]]:
-    """Unmatched ``ambiguous`` tickets of a pair: still part of their cohort for row attribution."""
-    return _read("SELECT * FROM tickets WHERE sender_home = ? AND target_home = ? AND state = 'ambiguous' "
-                 "AND matched_row_id IS NULL ORDER BY seq", (sender_home, target_home))
 
 
 def undecided_notices(epoch: str) -> list[dict[str, Any]]:
@@ -242,6 +254,15 @@ def commit_ticket(fields: dict[str, Any], attempt: Optional[dict[str, Any]],
                          (fields["delivery_id"], inflight_id))
 
 
+def record_core_ticket(fields: dict[str, Any]) -> None:
+    """A DM core answered untracked (DN-E4-12): one row per ``delivery_id``, born terminal; a tracked ticket wins."""
+    with txn() as conn:
+        seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM tickets").fetchone()[0]
+        row = {**fields, "seq": seq}
+        conn.execute(f"INSERT OR IGNORE INTO tickets ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                     tuple(row.values()))
+
+
 def set_published(delivery_id: str, status: str) -> None:
     """What a transformed runner result told the sender. ``ambiguous`` is sticky: a later poll of the same runner
     that passes core's text never un-says the rewrite the sender already read."""
@@ -272,6 +293,42 @@ def update_ticket(delivery_id: str, conn: Optional[sqlite3.Connection] = None, *
         return
     with txn() as own:
         own.execute(f"UPDATE tickets SET {sets} WHERE delivery_id = ?", params)
+
+
+def _sets(fields: dict[str, Any]) -> str:
+    return ", ".join(f"{k} = ?" for k in fields)
+
+
+def finish_ticket(conn: sqlite3.Connection, delivery_id: str, fields: dict[str, Any]) -> bool:
+    """The single terminal writer: True only for the update that ended a still-pending ticket."""
+    cur = conn.execute(f"UPDATE tickets SET {_sets(fields)} WHERE delivery_id = ? AND state = 'pending'",
+                       (*fields.values(), delivery_id))
+    return cur.rowcount == 1
+
+
+def claim_late(conn: sqlite3.Connection, delivery_id: str, fields: dict[str, Any]) -> bool:
+    """True only for the update that wrote the ticket's one late outcome."""
+    cur = conn.execute(f"UPDATE tickets SET {_sets(fields)} WHERE delivery_id = ? AND late_outcome IS NULL",
+                       (*fields.values(), delivery_id))
+    return cur.rowcount == 1
+
+
+def start_verify_window(delivery_id: str, until: float) -> Optional[float]:
+    """Set the DN-E4-9 verify deadline once; a later tick never moves it. Returns the stored deadline."""
+    with txn() as conn:
+        conn.execute("UPDATE tickets SET late_verify_until = ? WHERE delivery_id = ? AND late_verify_until IS NULL",
+                     (until, delivery_id))
+        row = conn.execute("SELECT late_verify_until FROM tickets WHERE delivery_id = ?", (delivery_id,)).fetchone()
+    return row[0] if row else None
+
+
+def backfill_final_suffix() -> None:
+    """A ticket closed before the upgrade gets its FINAL sentence from its flags, once (``""`` = none promised)."""
+    with txn() as conn:
+        conn.execute("UPDATE tickets SET final_suffix = CASE WHEN path != 'live' THEN '' "
+                     "WHEN late_open = 1 THEN 'owner_settles' "
+                     "WHEN unverified = 1 AND matched_row_id IS NULL THEN 'verifiable' ELSE '' END "
+                     "WHERE state != 'pending' AND final_suffix IS NULL")
 
 
 def verify_content(delivery_id: str, content: str) -> None:
@@ -381,44 +438,6 @@ def _alive(pid: Optional[int], boot: Optional[float]) -> bool:
 def _insert_attempt(conn: sqlite3.Connection, attempt: dict[str, Any]) -> None:
     cols = ", ".join(attempt)
     conn.execute(f"INSERT INTO attempts ({cols}) VALUES ({', '.join('?' for _ in attempt)})", tuple(attempt.values()))
-
-
-def commit_launching(delivery_id: str, n: int, *, dm_path: str, baseline: int, out_path: str) -> None:
-    """Committed BEFORE the out file is opened and the runner spawned (D2 crash safety)."""
-    with txn() as conn:
-        _insert_attempt(conn, {"delivery_id": delivery_id, "n": n, "state": "launching", "dm_path": dm_path,
-                               "baseline": baseline, "out_path": out_path, "spawned_at": time.time()})
-
-
-def commit_running(delivery_id: str, n: int, *, pid: int, pid_create_time: Optional[float],
-                   next_attempt_at: float) -> None:
-    with txn() as conn:
-        conn.execute("UPDATE attempts SET state = 'running', pid = ?, pid_create_time = ? "
-                     "WHERE delivery_id = ? AND n = ? AND state = 'launching'", (pid, pid_create_time, delivery_id, n))
-        conn.execute("UPDATE tickets SET next_attempt_at = ? WHERE delivery_id = ?", (next_attempt_at, delivery_id))
-
-
-def update_attempt(delivery_id: str, n: int, conn: Optional[sqlite3.Connection] = None, **fields: Any) -> None:
-    sets = ", ".join(f"{k} = ?" for k in fields)
-    params = (*fields.values(), delivery_id, n)
-    if conn is not None:
-        conn.execute(f"UPDATE attempts SET {sets} WHERE delivery_id = ? AND n = ?", params)
-        return
-    with txn() as own:
-        own.execute(f"UPDATE attempts SET {sets} WHERE delivery_id = ? AND n = ?", params)
-
-
-def record_attempt_outcome(delivery_id: str, n: int, outcome: str) -> None:
-    """The attempt-1 outcome the completion transform saw (core's runner stdout). First write wins."""
-    with txn() as conn:
-        conn.execute("UPDATE attempts SET outcome = ? WHERE delivery_id = ? AND n = ? AND outcome IS NULL",
-                     (outcome, delivery_id, n))
-
-
-def attempt_by_dm_path(dm_path: str) -> Optional[dict[str, Any]]:
-    rows = _read("SELECT a.* FROM attempts a JOIN tickets t ON t.delivery_id = a.delivery_id "
-                 "WHERE a.n = 1 AND t.dm_path = ?", (dm_path,))
-    return rows[0] if rows else None
 
 
 # --- notices ----------------------------------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Send side (ADR D3) and the busy completion (D7, AC-10).
+"""Send side (ADR D3) and the completion gate (D5a).
 
 The ``tool_execution`` middleware never short-circuits and never alters arguments: every ``message_agent`` call
 reaches core's complete authorization and core's own delivery. It only observes the ack and records a ticket.
@@ -193,6 +193,12 @@ def _send(args: dict, next_call: Any, task_id: str, session_id: str) -> Any:
         process_id, dm_path, retargeted = _dispatched(out, target, target_home)
         _bind(inflight, fallback, process_id, dm_path, untracked=retargeted)
         bound = True
+        try:
+            _note_core_answer(out, retargeted, me=me, sender_home=Path(home), target=target,
+                              target_home=target_home, session_id=session_id)
+        except Exception:
+            logger.warning("nv-delivery-redrive: untracked answer not noted; core's ack returned unchanged",
+                           exc_info=True)
         if not retargeted and inflight is not None:
             try:
                 tracked_out = _track(out, args, me=me, root=root, sender_home=Path(home), target=target,
@@ -234,6 +240,66 @@ def _dispatched(out: Any, target: str, target_home: Path) -> tuple[Optional[str]
     receipt = bot_live_delivery.read_delivery_result(target_home, ack["delivery_id"])
     confirmed = receipt is not None and ack.get("to") == f"@{_handle(target)}"
     return None, _live_dm_path(ack["delivery_id"]) if confirmed else None, not confirmed
+
+
+def _intent_names(evidence_file: Any, target_home: Path) -> bool:
+    """Whether the live intent pinned beside ``evidence_file`` names ``target_home``'s own Bot Chat owner."""
+    from tools.bot_mode_dm import _live_intent_file
+
+    if not isinstance(evidence_file, str) or not evidence_file:
+        return False
+    text = _read_text(Path(_live_intent_file(evidence_file)))
+    try:
+        owner = (json.loads(text) if text else {}).get("owner") or {}
+    except (ValueError, AttributeError):
+        return False
+    home = owner.get("profile_home") if isinstance(owner, dict) else None
+    return bool(home) and Path(home).resolve() == Path(target_home).resolve()
+
+
+def _core_answer(out: Any, retargeted: bool, target_home: Path) -> Optional[tuple[str, str, str]]:
+    """E4″.1: ``(state, reason, error)`` of a DM core answered without tracking, once its answered recipient is
+    confirmed to be ``target_home``'s own profile (a ``pre_tool_call`` modify may have sent it elsewhere)."""
+    from tools import bot_live_delivery
+    from tools.bot_failure_reasons import HELD_NOT_SENT
+    from tools.bot_mode_dm import _held_disposition
+
+    try:
+        ack = json.loads(out) if isinstance(out, str) else None
+    except ValueError:
+        return None
+    did = ack.get("delivery_id") if isinstance(ack, dict) else None
+    if not did:
+        return None
+    status, error = ack.get("status"), str(ack.get("error") or "")
+    if status is None and ack.get("reason") == HELD_NOT_SENT:
+        receipt = bot_live_delivery.read_delivery_result(target_home, did)
+        return ("failed", HELD_NOT_SENT, error) if _held_disposition(receipt) else None
+    if status in ("failed", "cancelled"):
+        receipt = bot_live_delivery.read_delivery_result(target_home, did) or {}
+        if retargeted and receipt.get("status") != status:
+            return None
+        return status, str(receipt.get("reason") or "unknown"), error or str(receipt.get("error") or "")
+    if status == "ambiguous":
+        if _intent_names(ack.get("evidence_file"), target_home) or (
+                bot_live_delivery.read_delivery_result(target_home, did) is not None):
+            return "ambiguous", "unknown", error
+    return None
+
+
+def _note_core_answer(out: Any, retargeted: bool, *, me: str, sender_home: Path, target: str, target_home: Path,
+                      session_id: str) -> None:
+    """DN-E4-12: one orchestrator-only, born-terminal ticket for a DM core answered without the plugin tracking it."""
+    found = _core_answer(out, retargeted, target_home)
+    if found is None:
+        return
+    state, reason, error = found
+    now = time.time()
+    store.record_core_ticket({
+        "delivery_id": json.loads(out)["delivery_id"], "sender": me, "target": target,
+        "target_home": str(target_home), "sender_home": str(sender_home), "sender_session_id": session_id or None,
+        "path": "core", "state": state, "reason": reason, "error": error, "created_at": now, "deadline": now,
+        "resolved_at": now, "final_suffix": ""})
 
 
 def _bind(inflight: Optional[int], fallback: Optional[dict[str, Any]], process_id: Optional[str],
@@ -288,17 +354,13 @@ def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: 
     did = ack.get("delivery_id") if isinstance(ack, dict) else None
     if not did or ack.get("status") not in ("queued", "claimed", "settled"):
         return out
+    receipt = bot_live_delivery.read_delivery_result(target_home, did)
+    if receipt is None:
+        return out
     dm_path, content, pid, create_time = _capture(ack)
-    path = "cli"
     if not ack.get("process_id"):
-        receipt = bot_live_delivery.read_delivery_result(target_home, did)
-        if receipt is None:
-            return out
-        path = "live"
         dm_path = _live_dm_path(did)
         content = receipt.get("message")
-    elif bot_live_delivery.read_delivery_result(target_home, did) is not None:
-        path = "live"
     verified = content is not None and dm_path is not None and bot_mode_dm._dm_delivery_id(dm_path) == did
     if content is None:
         content = build_content(me, sender_home, args.get("message"))
@@ -309,9 +371,8 @@ def _track(out: Any, args: dict[str, Any], *, me: str, root: Path, sender_home: 
         "delivery_id": did, "kind": "message", "sender": me, "target": target, "target_home": str(target_home),
         "sender_home": str(sender_home), "sender_session_id": session_id or None,
         "author_json": json.dumps(author, separators=(",", ":")), "content": content,
-        "content_verified": 1 if verified else 0, "dm_path": dm_path, "path": path, "state": "pending",
+        "content_verified": 1 if verified else 0, "dm_path": dm_path, "path": "live", "state": "pending",
         "process_id": ack.get("process_id"), "created_at": now, "deadline": now + window,
-        "next_attempt_at": now + settings.get("retry_backoff_seconds"),
         "db_seen": 0 if baseline_state == probe.COLD else 1,
     }
     attempt = {"state": "running" if ack.get("process_id") else "over", "dm_path": dm_path, "pid": pid,
@@ -342,7 +403,8 @@ def post_tool_call(tool_name: str = "", args: Any = None, result: Any = None, **
 
 
 def clean_refusal(output: str) -> bool:
-    """Core's runner refused before the target turn started: ``{"reason": "target_busy", "error": …}``."""
+    """A v0.22.2 runner refused before the target turn started: ``{"reason": "target_busy", "error": …}``. Read only
+    for a legacy ``cli`` ticket's completion (``notify.core_carried``)."""
     for line in reversed([ln for ln in str(output or "").split("\n") if ln.strip()]):
         try:
             payload = json.loads(line)
@@ -444,14 +506,12 @@ def _claims_row(ticket: dict[str, Any]) -> bool:
     return isinstance(drain.verdict_for(ticket, view), tuple)
 
 
-def reported_success(output: str, returncode: Any) -> bool:
-    """A runner completion that reports the delivery as done: a live ``settled`` payload or a CLI exit-0 reply."""
+def reported_success(output: str) -> bool:
+    """A runner completion that reports the delivery as done: core's ``settled`` payload."""
     from . import drain
 
     payload = drain._last_json(output)
-    if payload and payload.get("delivery_id") and payload.get("status"):
-        return payload["status"] == "settled"
-    return drain.classify({"rc": returncode, "out": output}) == "exit0"
+    return bool(payload and payload.get("delivery_id") and payload.get("status") == "settled")
 
 
 def _gate(command: str, dm_path: str, output: str, returncode: Any) -> Optional[str]:
@@ -482,39 +542,22 @@ def _gate(command: str, dm_path: str, output: str, returncode: Any) -> Optional[
 
 
 def transform_terminal_output(command: str = "", output: str = "", returncode: Any = None, **kwargs: Any) -> Any:
-    """Record attempt 1's outcome; rewrite a tracked clean refusal into the truthful queued shape, and a reported
-    success whose row is unproven into the D5a unverified shape."""
+    """Rewrite a reported success whose row is unproven into the D5a unverified shape."""
     if "--run-delivery" not in str(command or "") or returncode is None:
         return None
     try:
         dm_path = _runner_dm_path(command)
         if not dm_path:
             return None
-        outcome = json.dumps({"rc": returncode, "out": output})
-        attempt = store.attempt_by_dm_path(dm_path)
-        if attempt is not None:
-            store.record_attempt_outcome(attempt["delivery_id"], 1, outcome)
-        if reported_success(output, returncode):
-            if not settings.tracking_live(store.root()):
-                return None
-            try:
-                gated = _gate(command, dm_path, output, returncode)
-            finally:
-                _drop_fallback(dm_path)
-            if attempt is None and (attempt := store.attempt_by_dm_path(dm_path)) is not None:
-                store.record_attempt_outcome(attempt["delivery_id"], 1, outcome)
-            return gated
-        _drop_fallback(dm_path)
-        if attempt is None or not clean_refusal(output) or not settings.tracking_live(store.root()):
+        if not reported_success(output):
+            _drop_fallback(dm_path)
             return None
-        ticket = store.ticket(attempt["delivery_id"]) or {}
-        did = attempt["delivery_id"]
-        return json.dumps({
-            "status": "queued", "delivery_id": did, "to": f"@{ticket.get('target', '')}", "reason": REFUSAL_REASON,
-            "redrive": {"tracked": True, "delivery_id": did, "deadline": ticket.get("deadline")},
-            "detail": (f"Queued for automatic re-delivery under {did}; do NOT resend. "
-                       "The outcome follows as a delivery notice."),
-        })
+        if not settings.tracking_live(store.root()):
+            return None
+        try:
+            return _gate(command, dm_path, output, returncode)
+        finally:
+            _drop_fallback(dm_path)
     except Exception:
         logger.warning("nv-delivery-redrive: completion transform failed; core output kept", exc_info=True)
         return None

@@ -1,14 +1,11 @@
-"""Three-state transcript probe and live-writer scan (ADR D5).
+"""Three-state transcript probe (ADR D5).
 
-An attempt's writers are the processes whose command line carries its DM file path: core's runner, the shell
-that wraps it, and the target CLI it starts (``--query-file <dm file>``). The probe reads the target's
-``state.db`` read-only and never creates it.
+The probe reads the target's ``state.db`` read-only and never creates it.
 """
 
 from __future__ import annotations
 
 import contextlib
-import itertools
 import logging
 import os
 import sqlite3
@@ -104,71 +101,3 @@ def first_assistant_after(home: str | os.PathLike, row_id: int) -> str:
             conn.close()
         return str(row[0] or "") if row else ""
     return ""
-
-
-def scan_processes() -> Optional[list[tuple[int, list[str]]]]:
-    """``(pid, argv)`` of every live, non-zombie process; None when the listing itself fails (fail-safe alive)."""
-    try:
-        import psutil
-
-        me = os.getpid()
-        found = []
-        for proc in psutil.process_iter(["pid", "cmdline", "status"]):
-            info = proc.info
-            if info.get("pid") == me or info.get("status") == psutil.STATUS_ZOMBIE:
-                continue
-            found.append((int(info["pid"]), list(info.get("cmdline") or ())))
-        return found
-    except Exception:
-        logger.warning("nv-delivery-redrive: process listing failed; treating attempts as alive", exc_info=True)
-        return None
-
-
-def writer_pid(procs: Optional[list[tuple[int, list[str]]]], dm_path: Optional[str]) -> Optional[int]:
-    """A pid whose argv carries ``dm_path``; ``-1`` when the listing failed (fail-safe: alive)."""
-    if not dm_path:
-        return None
-    if procs is None:
-        return -1
-    for pid, argv in procs:
-        if any(dm_path in part for part in argv):
-            return pid
-    return None
-
-
-def target_turn_pid(procs: Optional[list[tuple[int, list[str]]]], dm_path: Optional[str]) -> Optional[int]:
-    """A target CLI turn on ``dm_path``: the consecutive argv pair ``--query-file <dm_path>``. Core's runner carries
-    ``--run-delivery query-file <dm_path>`` (no dashes), so it never matches. ``-1`` when the listing failed."""
-    if not dm_path:
-        return None
-    if procs is None:
-        return -1
-    for pid, argv in procs:
-        if any(a == "--query-file" and b == dm_path for a, b in itertools.pairwise(argv)):
-            return pid
-    return None
-
-
-def target_lock_held(root: str | os.PathLike, profile: str) -> bool:
-    """Whether core's per-profile turn lock is held right now (a non-blocking probe, released at once)."""
-    try:
-        import fcntl
-
-        from tools.bot_relay import turn_lock_path
-
-        path = turn_lock_path(root, profile)
-        if not path.exists():
-            return False
-        fd = os.open(path, os.O_RDWR)
-    except (ImportError, OSError):
-        return False
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return True
-    else:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)

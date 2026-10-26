@@ -6,6 +6,7 @@ idempotent: the recipient's lineage is searched first for a row carrying the sam
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import uuid
@@ -24,14 +25,26 @@ VERIFIED = "verified"
 _META_KEY = "nv_delivery_redrive"
 UNVERIFIED = ("Could not verify your message in the target's Bot Chat; delivery outcome is unknown. Do NOT resend. "
               "Check the target before considering another send.")
+# The D-3 sentence a FINAL carries while a late path is open, by the ticket's ``final_suffix`` snapshot.
+_LATER = {"owner_settles": "A later outcome will be reported if the owner settles.",
+          "verifiable": "A later outcome will be reported if the message becomes verifiable."}
 
 
 def text_for(ticket: dict[str, Any], state: str, reason: Optional[str], reply: str, error: str, *,
              late: bool = False) -> str:
     did, target = ticket["delivery_id"], ticket["target"]
+    if ticket.get("path") == "core":
+        detail = error.rstrip().removesuffix(".")
+        if state == "ambiguous":
+            return (f"Delivery {did} to @{target} outcome unknown [reason: unknown]: {detail}. The sender was told not "
+                    "to resend; the plugin does not track this delivery.")
+        return (f"Delivery {did} to @{target} {state} [reason: {reason or 'unknown'}]: {detail}. The sender has core's "
+                "own answer; the plugin does not re-send it.")
     head = "Late outcome: delivery" if late else "Delivery"
+    later = "" if late else _LATER.get(ticket.get("final_suffix") or "", "")
+    later = f" {later}" if later else ""
     if state == "ambiguous" and ticket.get("unverified"):
-        return f"{head} {did} to @{target}: {UNVERIFIED}"
+        return f"{head} {did} to @{target}: {UNVERIFIED}{later}"
     if state == "settled":
         verdict, detail = "settled — reply follows", reply or "(empty reply)"
     elif state == "ambiguous":
@@ -41,7 +54,7 @@ def text_for(ticket: dict[str, Any], state: str, reason: Optional[str], reply: s
     tail = " Do NOT resend."
     if state == "ambiguous":
         tail = " Do NOT resend; check their Bot Chat before resending."
-    return f"{head} {did} to @{target} {verdict}: {detail}.{tail}"
+    return f"{head} {did} to @{target} {verdict}: {detail}.{tail}{later}"
 
 
 def queue(conn, ticket: dict[str, Any], recipient: str, kind: str, state: str, reason: Optional[str],
@@ -104,17 +117,48 @@ def append(notice: dict[str, Any], ticket: dict[str, Any], orchestrator: Optiona
     return True
 
 
-def deliver_pending(orchestrator: Optional[tuple[str, Path]]) -> None:
-    for notice in store.pending_notices():
-        ticket = store.ticket(notice["delivery_id"])
-        if ticket is None:
-            continue
+@contextlib.contextmanager
+def _delivery_lock():
+    """One delivery pass at a time per install root: the appended-check, the append and the mark span three
+    databases, so overlapping ticks could otherwise both pass the check before either appends."""
+    import fcntl
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from plugins.plugin_storage import plugin_data_dir
+
+    token = set_hermes_home_override(store.root())
+    try:
+        path = plugin_data_dir(store.PLUGIN_NAME) / "notices.lock"
+    finally:
+        reset_hermes_home_override(token)
+    with open(path, "a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
         try:
-            if append(notice, ticket, orchestrator):
-                store.mark_notice_appended(notice["delivery_id"], notice["recipient"], notice["notice_kind"])
-        except Exception:
-            logger.warning("nv-delivery-redrive: notice %s/%s for %s not appended yet; retrying next tick",
-                           notice["recipient"], notice["notice_kind"], notice["delivery_id"], exc_info=True)
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def deliver_pending(orchestrator: Optional[tuple[str, Path]]) -> None:
+    with _delivery_lock():
+        pending = store.pending_notices()
+        # A failed FINAL append is retried next tick while later rows go on: its LATE/VERIFIED waits behind it.
+        final_due = {(n["delivery_id"], n["recipient"]) for n in pending if n["notice_kind"] == FINAL}
+        for notice in pending:
+            key = (notice["delivery_id"], notice["recipient"])
+            if notice["notice_kind"] != FINAL and key in final_due:
+                continue
+            ticket = store.ticket(notice["delivery_id"])
+            if ticket is None:
+                continue
+            try:
+                if append(notice, ticket, orchestrator):
+                    store.mark_notice_appended(notice["delivery_id"], notice["recipient"], notice["notice_kind"])
+                    if notice["notice_kind"] == FINAL:
+                        final_due.discard(key)
+            except Exception:
+                logger.warning("nv-delivery-redrive: notice %s/%s for %s not appended yet; retrying next tick",
+                               notice["recipient"], notice["notice_kind"], notice["delivery_id"], exc_info=True)
 
 
 def _payload_settled(text: str, delivery_id: str) -> bool:

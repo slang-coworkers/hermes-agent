@@ -1,7 +1,6 @@
 """nv-delivery-redrive's per-call hook identity (ADR D5a.5): the ``tool_execution`` middleware binds a ``tool_call_id``
-around ``next_call`` so each delivery runner's completion transform gets its own hook gate key, and the drainer's own
-re-drives never enter core's registry. Each test loads the plugin through the shared ``fleet`` fixture
-(real discovery); the id tests call the loaded middleware directly, the drainer test runs a real send and re-drive.
+around ``next_call`` so each delivery runner's completion transform gets its own hook gate key. Each test loads the
+plugin through the shared ``fleet`` fixture (real discovery) and calls the loaded middleware directly.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import re
 
 import pytest
 
-from tests.plugins.fleet_f62_h_rig import TARGET, _busy, _wait_runner_done, fleet_fixture
+from tests.plugins.fleet_f62_h_rig import fleet_fixture
 
 _MINTED = re.compile(r"nv-redrive:[0-9a-f]{32}")
 
@@ -76,16 +75,3 @@ def test_other_tools_are_not_bound(fleet, monkeypatch):
     """A call of any other tool passes through with the caller's ids untouched."""
     seen, _after = _seen_ids(fleet, monkeypatch, ("terminal", "call-9"))
     assert seen == [("call-outer", "turn-outer", "sess-outer")], seen
-
-
-@pytest.mark.platforms("linux")
-def test_drainer_redrive_adds_no_registry_session(fleet):
-    """A drainer re-drive (spawn_attempt) runs outside core's process registry, so it never reaches the transform."""
-    with _busy(fleet):
-        ack = fleet.send("status? PAYLOAD_BIND_DRAIN")
-        _wait_runner_done(fleet, ack["process_id"])
-    before = set(fleet.registry._running) | set(fleet.registry._finished)
-    assert fleet.until(lambda: len(fleet.attempts(ack["delivery_id"])) >= 2, timeout=30.0)
-    assert set(fleet.registry._running) | set(fleet.registry._finished) == before
-    assert fleet.until(lambda: fleet.ticket(ack["delivery_id"])["state"] == "settled", timeout=60.0)
-    assert len(fleet.rows(TARGET, "PAYLOAD_BIND_DRAIN")) == 1
