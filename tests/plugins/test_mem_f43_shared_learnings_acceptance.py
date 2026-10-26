@@ -62,7 +62,7 @@ def _bind_local_skills(monkeypatch, home: Path) -> Path:
 
 
 def test_ac_mem_f43_1(home, monkeypatch):
-    """AC-MEM-F43-1: A shared-learnings skill placed in one directory that a profile lists in `skills.external_dirs` (and has no local copy of) is discoverable across that profile's surfaces: it appears in the skills catalog (`_find_all_skills`) and as a `/skill-name` slash command (`scan_skill_commands`), and `skill_view` returns its body."""
+    """AC-MEM-F43-1: A shared-learnings skill placed in one directory that a profile lists in `skills.external_dirs` (and has no local copy of) is discoverable across that profile's surfaces: it appears in the skills catalog (`find_all_skills`) and as a `/skill-name` slash command (`scan_skill_commands`), and `skill_view` returns its body."""
     ext = home.parent / "learnings-clone" / "skills"
     _make_skill(ext, "fleet-postmortem",
                 description="Fleet postmortem learning",
@@ -73,10 +73,10 @@ def test_ac_mem_f43_1(home, monkeypatch):
     from agent.skill_utils import _external_dirs_cache_clear
     _external_dirs_cache_clear()
 
-    from tools.skills_tool import _find_all_skills, skill_view
+    from tools.skills_tool import find_all_skills, skill_view
     from agent.skill_commands import scan_skill_commands
 
-    names = [s["name"] for s in _find_all_skills()]
+    names = [s["name"] for s in find_all_skills()]
     assert "fleet-postmortem" in names, "external skill absent from the discovery catalog"
 
     commands = scan_skill_commands()
@@ -141,8 +141,8 @@ def test_ac_mem_f43_4(tmp_path, monkeypatch):
         monkeypatch.setattr("tools.skills_tool.SKILLS_DIR", h / "skills", raising=False)
         from agent.skill_utils import _external_dirs_cache_clear
         _external_dirs_cache_clear()
-        from tools.skills_tool import _find_all_skills
-        names = [s["name"] for s in _find_all_skills()]
+        from tools.skills_tool import find_all_skills
+        names = [s["name"] for s in find_all_skills()]
         local_copy = (h / "skills" / "fleet-postmortem").exists()
         return names, local_copy
 
@@ -169,8 +169,8 @@ def test_ac_mem_f43_5(tmp_path, monkeypatch):
         monkeypatch.setattr("tools.skills_tool.SKILLS_DIR", h / "skills", raising=False)
         from agent.skill_utils import _external_dirs_cache_clear
         _external_dirs_cache_clear()
-        from tools.skills_tool import _find_all_skills
-        return [s["name"] for s in _find_all_skills()]
+        from tools.skills_tool import find_all_skills
+        return [s["name"] for s in find_all_skills()]
 
     names_a = _catalog_for("profile-a", fleet_a)
     names_b = _catalog_for("profile-b", fleet_b)

@@ -12,7 +12,7 @@ import textwrap
 from pathlib import Path
 
 from tools import skills_tool
-from tools.skills_tool import _find_all_skills
+from tools.skills_tool import find_all_skills
 from agent.skill_utils import _external_dirs_cache_clear
 
 
@@ -72,7 +72,7 @@ def test_ac_self_f57_b_1(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     _reset_skill_caches()
 
-    names = {s["name"] for s in _find_all_skills()}
+    names = {s["name"] for s in find_all_skills()}
     assert "self-f57b-inside" in names, "external-dir skill was not discovered"
     assert "self-f57b-outside" not in names, "unconfigured-dir skill leaked into discovery"
 
@@ -94,7 +94,7 @@ def test_ac_self_f57_b_2(tmp_path, monkeypatch):
     for label, home in (("a", home_a), ("b", home_b)):
         monkeypatch.setenv("HERMES_HOME", str(home))
         _reset_skill_caches()  # _SKILLS_CACHE is module-level, keyed by view not by home
-        names = {s["name"] for s in _find_all_skills()}
+        names = {s["name"] for s in find_all_skills()}
         discovered[label] = "self-f57b-shared" in names
 
     assert discovered["a"] and discovered["b"], (
@@ -122,7 +122,7 @@ def test_ac_self_f57_b_3(tmp_path, monkeypatch):
     monkeypatch.setattr(skills_tool.time, "monotonic", lambda: clock["t"])
 
     # Prime the cache at t=1000: description is "v1".
-    primed = {s["name"]: s for s in _find_all_skills()}
+    primed = {s["name"]: s for s in find_all_skills()}
     assert primed["self-f57b-ttl"]["description"] == "v1"
 
     # In-place edit -> "v2". Preserve dir mtimes so the scan signature stays identical
@@ -138,13 +138,13 @@ def test_ac_self_f57_b_3(tmp_path, monkeypatch):
 
     # Just under the 30 s bound (age 29 s): signature unchanged -> still cached "v1".
     clock["t"] = 1029.0
-    within = {s["name"]: s for s in _find_all_skills()}
+    within = {s["name"]: s for s in find_all_skills()}
     assert within["self-f57b-ttl"]["description"] == "v1"
 
     # At the 30 s bound (age 30 s, not < 30): cache is stale -> rescan surfaces "v2",
     # no restart, no clear. Pins the exact TTL, not a looser 31-40 s window.
     clock["t"] = 1030.0
-    after = {s["name"]: s for s in _find_all_skills()}
+    after = {s["name"]: s for s in find_all_skills()}
     assert after["self-f57b-ttl"]["description"] == "v2"
 
 
@@ -228,5 +228,5 @@ def test_ac_self_f57_b_4(tmp_path, monkeypatch):
         assert "no_agent" in doc
 
     _reset_skill_caches()
-    names = {s["name"] for s in _find_all_skills()}
+    names = {s["name"] for s in find_all_skills()}
     assert "self-f57b-fetched" in names, "the refresh script's skill did not mirror into the bot"

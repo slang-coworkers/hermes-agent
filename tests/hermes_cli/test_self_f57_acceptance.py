@@ -88,14 +88,14 @@ def test_ac_self_f57_1(tmp_path, hermes_home):
     _write_skill(unscanned, "skill-negative")
     _set_external_dirs(hermes_home, [scanned])
 
-    first = st._find_all_skills()
+    first = st.find_all_skills()
     assert "skill-one" in _names(first)
     assert "skill-negative" not in _names(first)
 
     # Adding a skill *directory* bumps the scan-root signature, so the live
     # index picks it up on the next call without any _SKILLS_CACHE.clear().
     _write_skill(scanned, "skill-two")
-    second = st._find_all_skills()
+    second = st.find_all_skills()
     assert {"skill-one", "skill-two"} <= _names(second)
     assert "skill-negative" not in _names(second)
 
@@ -116,7 +116,7 @@ def test_ac_self_f57_2(tmp_path, hermes_home, monkeypatch):
     def _desc(skills):
         return next(s for s in skills if s["name"] == "skill-one")["description"]
 
-    assert _desc(st._find_all_skills()) == "old-desc"
+    assert _desc(st.find_all_skills()) == "old-desc"
 
     # In-place content edit bumps only the file mtime, which is not part of the
     # directory signature — so the change is bounded by the TTL, not immediate.
@@ -126,10 +126,10 @@ def test_ac_self_f57_2(tmp_path, hermes_home, monkeypatch):
     )
 
     clock["t"] = 1000.0 + ttl / 2
-    assert _desc(st._find_all_skills()) == "old-desc"
+    assert _desc(st.find_all_skills()) == "old-desc"
 
     clock["t"] = 1000.0 + ttl
-    assert _desc(st._find_all_skills()) == "new-desc"
+    assert _desc(st.find_all_skills()) == "new-desc"
 
 
 # --- Profile-distribution update behavior ----------------------------------
