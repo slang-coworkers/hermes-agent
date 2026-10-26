@@ -8,6 +8,7 @@ nothing under the real home. Plugins load through the real `PluginManager` disco
 import asyncio
 import contextlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -610,30 +611,63 @@ def _served_profile(tmp_path, monkeypatch, name, config_text="model: {}\n"):
     return root, home
 
 
-def _spawned_bot_chat_env(home, monkeypatch):
+def _bot_chat_target(home, monkeypatch):
+    """Fire a bare `deliver: bot-chat` from a tick bound to the served home: (owner home, RPC params).
+
+    Any child process the delivery tries to start is recorded and refused."""
     import cron.scheduler_delivery as delivery
+    from tools import bot_live_delivery as live
 
-    spawned = []
+    seen, spawned = [], []
 
-    def record_turn(argv, env, report_path, timeout):
-        spawned.append((list(argv), dict(env)))
-        return subprocess.CompletedProcess(argv, 0, "", "")
+    def owner_of(profile_home):
+        return dict(profile_home=str(Path(profile_home).resolve()), session_id="bot-chat", canonical=True,
+                    lease_id="authority-1", live_session_id="bot-chat")
 
-    monkeypatch.setattr(delivery, "_run_bot_chat_turn", record_turn)
-    with _Override(home, multiplex=True):
-        delivery._deliver_to_bot_chat({"id": "job-1", "name": "supervise-issues"}, "brief", "")
-    assert len(spawned) == 1
-    return spawned[0]
+    def rpc(target_home, params):
+        seen.append((Path(target_home).resolve(), dict(params)))
+        return {"status": "settled", "delivery_id": params["id"], "message": params["message"]}
+
+    def no_spawn(*args, **kwargs):
+        spawned.append(args[0] if args else kwargs.get("args"))
+        raise AssertionError("a bot-chat delivery to a live owner must not spawn a child process")
+
+    monkeypatch.setattr(live, "find_canonical_live_owner", owner_of)
+    monkeypatch.setattr(live, "authority_delivery", rpc)
+    with _Override(home, multiplex=True), pytest.MonkeyPatch.context() as guard:
+        guard.setattr(subprocess, "run", no_spawn)
+        guard.setattr(subprocess, "Popen", no_spawn)
+        assert delivery._deliver_to_bot_chat({"id": "job-1", "name": "supervise-issues"}, "brief", "") is None
+    assert spawned == [], f"no child process may be spawned, got {spawned}"
+    assert len(seen) == 1, f"exactly one authority delivery, got {len(seen)}"
+    return seen[0]
 
 
-def _live_provider_ok(child_home, expected):
-    """The provider block the child reads at its own HERMES_HOME: the scenario's live endpoint, the inline-key form."""
-    cfg = yaml.safe_load((Path(child_home) / "config.yaml").read_text(encoding="utf-8")) or {}
-    name = (cfg.get("model") or {}).get("provider")
-    block = (cfg.get("providers") or {}).get(name) if name else None
-    if not isinstance(block, dict):
-        return False
-    return (name == "coworkers-live"
+def _executed_provider(home):
+    """The provider block an admission for `home` executes under: the authority's own owner-scope resolution.
+
+    Inside that scope the process's proxy and CA variables (`_EGRESS_ENV`, set by the caller) are unchanged."""
+    from gateway.session_ingress import _execution_scope
+    from hermes_cli.config import load_config
+
+    authority = SimpleNamespace(runner=SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True)),
+                                profile_id=str(home.resolve()))
+
+    async def run():
+        with await _execution_scope(authority, None):
+            cfg = load_config()
+            egress = {k: os.environ.get(k) for k in _EGRESS_ENV}
+        name = (cfg.get("model") or {}).get("provider")
+        return name, (cfg.get("providers") or {}).get(name) if name else None, egress
+
+    name, block, egress = asyncio.run(run())
+    assert egress == _EGRESS_ENV, f"the admission's scope changed the proxy/CA environment: {egress}"
+    return name, block
+
+
+def _live_provider_ok(name, block, expected):
+    """The provider block the admission executes under: the scenario's live endpoint, the inline-key form."""
+    return (name == "coworkers-live" and isinstance(block, dict)
             and block.get("base_url") == expected["base_url"]
             and block.get("api_mode") == "anthropic_messages"
             and block.get("default_model") == expected["default_model"]
@@ -641,7 +675,7 @@ def _live_provider_ok(child_home, expected):
 
 
 def test_ac_upg_f67_15(tmp_path, monkeypatch):
-    """(derived; adopt-proof for AC-LOOP-F39-6) A bare `deliver: bot-chat` cron delivery fired from a multiplexed tick bound to a served profile spawns its turn with `HERMES_HOME` = that profile's home and no `-p`. The child env keeps the egress proxy and CA variables, so the child reads that profile's own inline-key provider config."""
+    """(derived; adopt-proof for AC-LOOP-F39-6) A bare `deliver: bot-chat` cron delivery fired from a multiplexed tick bound to a served profile is delivered to that profile's authority: `deliver_to_live_owner` targets that profile's home, the `bot_relay.deliver` params name that profile, and no child process is spawned. The admission executes under that profile's own runtime scope, inside which the process's proxy and CA environment variables are unchanged, and whose effective provider is that profile's: with the scenario's orchestrator fixture it is `providers.coworkers-live` with the fixture's `base_url`, `api_mode: anthropic_messages`, `default_model` and a non-empty inline key field. A `model: {}` control profile fails that check."""
     fixture_text = LIVE_FIXTURE_CONFIG.read_text(encoding="utf-8")
     fixture = yaml.safe_load(fixture_text)["providers"]["coworkers-live"]
     expected = {"base_url": fixture["base_url"], "default_model": fixture["default_model"]}
@@ -649,16 +683,15 @@ def test_ac_upg_f67_15(tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
 
     _root, home = _served_profile(tmp_path, monkeypatch, "orchestrator", fixture_text)
-    argv, env = _spawned_bot_chat_env(home, monkeypatch)
-    assert Path(env["HERMES_HOME"]).resolve() == home.resolve()
-    assert "-p" not in argv and "--profile" not in argv
-    assert {k: env.get(k) for k in _EGRESS_ENV} == _EGRESS_ENV
-    assert _live_provider_ok(env["HERMES_HOME"], expected) is True
+    target, params = _bot_chat_target(home, monkeypatch)
+    assert target == home.resolve(), f"delivered to {target}, not the served profile's home"
+    assert params["profile"] == "orchestrator", params
+    assert _live_provider_ok(*_executed_provider(home), expected) is True
 
     _root2, bare = _served_profile(tmp_path / "control", monkeypatch, "orchestrator")
-    _argv2, env2 = _spawned_bot_chat_env(bare, monkeypatch)
-    assert Path(env2["HERMES_HOME"]).resolve() == bare.resolve()
-    assert _live_provider_ok(env2["HERMES_HOME"], expected) is False
+    target2, params2 = _bot_chat_target(bare, monkeypatch)
+    assert target2 == bare.resolve() and params2["profile"] == "orchestrator"
+    assert _live_provider_ok(*_executed_provider(bare), expected) is False
 
 
 def test_ac_upg_f67_16(tmp_path, monkeypatch):
