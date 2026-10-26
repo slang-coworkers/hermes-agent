@@ -1122,12 +1122,12 @@ def test_ac_fleet_f62_g_14(bot_world, monkeypatch, arming):
     assert not process_registry.is_completion_consumed(proc_id)
 
 
-_F62H_MODULE = "tests.plugins.test_fleet_f62_h_acceptance"
+_F62H_MODULE = "tests.plugins.fleet_f62_h_rig"
 try:
     import importlib
 
     _f62h = importlib.import_module(_F62H_MODULE)
-    fleet = _f62h.fleet  # registers F62.h's fixture in this module
+    fleet_fixture = _f62h.fleet_fixture  # registers F62.h's `fleet` fixture in this module
 except ModuleNotFoundError as exc:
     if exc.name != _F62H_MODULE:
         raise
@@ -1137,7 +1137,7 @@ except ModuleNotFoundError as exc:
 def _redrive(request):
     """F62.h's `fleet`: nv-delivery-redrive enabled, a real AIAgent sender (the root profile), the target `researcher`
     behind a fake CLI, the profile `orchestrator`, core's real runner and turn flock, drainer ticks via the real hook."""
-    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/test_fleet_f62_h_acceptance.py) is not at this head"
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/fleet_f62_h_rig.py) is not at this head"
     return request.getfixturevalue("fleet")
 
 
@@ -1277,7 +1277,7 @@ def _with_redrive(world, monkeypatch):
     sender is a push sender (`reply_delivery: "notification"`). Returns `send(task_id) -> ack`."""
     from hermes_cli import plugins as plugins_mod
 
-    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/test_fleet_f62_h_acceptance.py) is not at this head"
+    assert _f62h is not None, "the FLEET-F62.h carry (tests/plugins/fleet_f62_h_rig.py) is not at this head"
     orch = _f62h._profile(world.root, _f62h.ORCH)
     (world.root / "profile.yaml").write_text("description: sender\nui_meta:\n  hermes-bots:\n    shape: cloud\n",
                                              encoding="utf-8")
