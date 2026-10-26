@@ -1,4 +1,4 @@
-# UPG-F69 core paths changed d923a5eb→ad99872c ∪ bf0203a7→candidate (ADR §D2 rule 1-4).
+# UPG-F69 core paths changed d923a5eb→107c85eb ∪ bf0203a7→candidate (ADR §D2 rule 1-4).
 # Carried paths keep UPG-F68's authority; F69's own reason follows `;`.
 key	authority	disposition
 agent/session_persistence.py	GOV-F25 (UPG-F68 carry)	replay

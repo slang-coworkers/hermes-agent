@@ -1,5 +1,5 @@
 # Class `ruled`: an upstream-added step with no v0.22.2 counterpart; the architect's review is its authority.
-# Class `replay`: a path UPG-F68 changed (#85 ad99872c), replayed by [UPG-F69 replay]; F69's own reason follows `;`.
+# Class `replay`: a path UPG-F68 changed (#85 107c85eb), replayed by [UPG-F69 replay]; F69's own reason follows `;`.
 status	path	surface	class	origin	authority
 M	.github/actionlint.yaml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a
 M	.github/actions/setup-pm/README.md	fork-ci	fork-ci	UPG-F69	msg-206:5a,arch-msg-20
