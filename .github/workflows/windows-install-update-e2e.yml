@@ -101,7 +101,6 @@ jobs:
           NOUS_API_KEY: ''
 
       - name: Every crash cell ran
-        if: matrix.slice == 1  # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1
         # run_tests.sh passes a file whose tests were all deselected (pytest exit 5) or skipped,
         # so a lost marker or opt-in would run zero crash cells green. The crash journey writes
         # this manifest only when it ran (tests/e2e/core/windows_update/test_crash_cells.py).
@@ -110,6 +109,11 @@ jobs:
           HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
         run: |
           $manifest = Join-Path $env:HERMES_E2E_ARTIFACTS 'crash-cells-ran.txt'
+          # run_tests.sh's sorted round-robin puts test_crash_cells.py in slice 1, so slice 2 must not have run it.
+          if ('${{ matrix.slice }}' -ne '1') {
+            if (Test-Path -LiteralPath $manifest) { throw "test_crash_cells.py ran in slice ${{ matrix.slice }}, not slice 1" }
+            exit 0
+          }
           if (-not (Test-Path -LiteralPath $manifest)) {
             throw "test_crash_cells.py ran no crash cells: $manifest is missing"
           }
