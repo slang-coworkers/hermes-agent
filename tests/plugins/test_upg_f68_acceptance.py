@@ -39,8 +39,8 @@ F62C_GOLDEN = F62C / "fixtures" / "openshell"
 OSH_F64_SPEC = REPO / "tests" / "e2e-scenarios" / "OSH-F64" / "spec" / "coworker-types.yaml"
 HOME_TOKEN = "@HERMES_HOME@"
 SHA40 = "a" * 40
-# v0.22.2: an ancestor of every candidate head, so present in any full clone.
-TAG_COMMIT = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+# v0.22.5: an ancestor of every candidate head, so present in any full clone.
+TAG_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
 TRUST_SOURCE = "openshell_trust"
 CA_ENV_NAMES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "HERMES_CA_BUNDLE",
                 "DENO_CERT")
