@@ -569,7 +569,7 @@ def test_ac_fleet_f62_h_9(fleet, case, monkeypatch):
 @pytest.mark.parametrize("case", ["idle", "settle_during_runner", "transform_missed", "publish_lost_after_persist",
                                   "detached_pruned"])
 def test_ac_fleet_f62_h_12(fleet, case, monkeypatch):
-    """(regression for idle, settle_during_runner and transform_missed; publish_lost_after_persist and detached_pruned need the plugin's (b′) notice) A delivery to an idle target behaves as on 0.22: the ack keeps core's status, delivery_id, process_id and reply_delivery values, the reply completion text is unchanged, the message lands once, and no notice is written. One sender notice, never two (E1 F5): no plugin notice when a live receipt settles while core's runner is completing and a drainer tick lands between core's exited mark and its output transform, or when the plugin's transform does not run. When core's publication fails after its result write, no plugin notice is written in-process (the documented residual), and exactly one after a gateway restart. When a crash leaves the attempt-1 runner to be recovered as a detached session that core later prunes (_completion_event set, no completion queued), exactly one plugin sender notice is written on that restarted gateway."""
+    """(regression for idle, settle_during_runner and transform_missed; publish_lost_after_persist and detached_pruned need the plugin's (b′) notice) A delivery to an idle target behaves as on 0.22: the ack keeps core's status, delivery_id, process_id and reply_delivery values, the reply completion text is unchanged, the message lands once, and no notice is written. One sender notice, never two (E1 F5): no plugin notice when a live receipt settles while core's runner is completing and a drainer tick lands between core's exited mark and its output transform, or when the plugin's transform records nothing. When core's publication fails after its result write, no plugin notice is written in-process (the documented residual), and exactly one after a gateway restart. When a crash leaves the attempt-1 runner to be recovered as a detached session that core later prunes (_completion_event set, no completion queued), exactly one plugin sender notice is written on that restarted gateway."""
     import re
     import threading
 
@@ -577,8 +577,8 @@ def test_ac_fleet_f62_h_12(fleet, case, monkeypatch):
 
     real_redact = pr_mod._redact_process_result
     if case == "transform_missed":
-        # The plugin's transform does not run for this runner; core still publishes the completion, and the
-        # one-notice rule keys on _completion_event, not on the transform.
+        # The plugin's transform records nothing for this runner (timed out / skipped); core still publishes the
+        # completion, and the one-notice rule keys on _completion_event, not on the transform.
         fleet.settings(heartbeat_stale_seconds=2)
         monkeypatch.setattr(fleet.loaded.module.send, "reported_success", lambda *a, **k: False)
     elif case == "publish_lost_after_persist":
