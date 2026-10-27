@@ -767,11 +767,11 @@ A	website/docs/developer-guide/plugins/nv-fleet-gates.md	in-surface	replay	F68
 A	website/docs/developer-guide/plugins/nv-workflow-modes.md	in-surface	replay	F68	
 A	website/docs/developer-guide/plugins/router-seams.md	in-surface	replay	F68	
 A	website/docs/developer-guide/podman-onecli-plugin.md	in-surface	replay	F68	
-M	website/docs/user-guide/bot-mode.md	in-surface	replay	F68	
+M	website/docs/user-guide/bot-mode.md	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-13 opt (a) (operator msg 1782, orch msg 212): follow-and-verify docs (UPG-F69 D-6)
 M	website/docs/user-guide/configuration.md	in-surface	replay	F68	
 A	website/docs/user-guide/cross-session-context.md	in-surface	replay	F68	
 M	website/docs/user-guide/docker.md	in-surface	replay	F68	
-A	website/docs/user-guide/features/bot-mode-redrive.md	in-surface	replay	F68	
+A	website/docs/user-guide/features/bot-mode-redrive.md	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-13 opt (a) (operator msg 1782, orch msg 212): follow-and-verify docs (UPG-F69 D-6)
 M	website/docs/user-guide/features/built-in-plugins.md	in-surface	replay	F68	
 A	website/docs/user-guide/features/cost-accounting.md	in-surface	replay	F68	
 A	website/docs/user-guide/features/coworker-fleet-dashboard.md	in-surface	replay	F68	
