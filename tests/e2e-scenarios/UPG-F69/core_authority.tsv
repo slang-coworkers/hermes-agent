@@ -9,7 +9,7 @@ gateway/kanban_watchers_notifier.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
 gateway/platforms/api_server.py	GOV-F25,GOV-F25.b,WP-D1 (UPG-F68 carry)	replay
 gateway/platforms/api_server_openai_routes.py	GOV-F25,GOV-F25.b (UPG-F68 carry); ADR §D1 union + 1a/msg-206 + E1.4 + architect msg 38 (UPG-F69 ack)	replay
 gateway/platforms/api_server_runs.py	WP-D1 (UPG-F68 carry); 1a/msg-206 + E1.4 + architect msg 38 (UPG-F69 ack)	replay
-gateway/run_notifications.py	FLEET-F62.h (UPG-F68 carry); 2a/msg-206 + E2.1 re-cut (UPG-F69 F62.h-recut); decision-g1-waiver-drop-2026-10-26 (3f19efc4)	replay
+gateway/run_notifications.py	FLEET-F62.h (UPG-F68 carry); 2a/msg-206 + E2.1 re-cut (UPG-F69 F62.h-recut); decision-g1-waiver-drop-2026-10-26 (3f19efc4); user msg 1790 (orch msg 214): DN-E4-15 option 1, the waiver line on _run_process_watcher (UPG-F69 F62.h-recut)	replay
 gateway/wake.py	GOV-F25,GOV-F25.b,WP-D1 (UPG-F68 carry)	replay
 hermes_cli/kanban_db.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
 hermes_cli/kanban_db_connect.py	GOV-F25,GOV-F25.b (UPG-F68 carry)	replay
