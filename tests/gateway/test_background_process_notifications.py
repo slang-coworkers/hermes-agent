@@ -517,6 +517,7 @@ async def test_agent_notify_refused_completion_backs_off_then_sends_plain_notice
 
     exited = SimpleNamespace(
         output_buffer="done\n", exited=True, exit_code=0, command="echo done", started_at=1.0,
+        _completion_event=_published(),
     )
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry([exited] * 20, consumed=False))
     sleeps = []

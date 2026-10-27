@@ -537,7 +537,7 @@ A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/distribution.yaml	in-surfac
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/config.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/distribution.yaml	in-surface	replay	F68	
 A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	replay	F68	
-M	tests/gateway/test_background_process_notifications.py	in-surface	replay	F68	architect msg 38 import union
+M	tests/gateway/test_background_process_notifications.py	in-surface	replay	F68+UPG-F69	architect msg 38 import union; user msg 1790 (orch msg 214): DN-CI-4 option 1, the sixth F1-shape fixture kwarg (UPG-F69 F62.h-recut)
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	replay	F68	
 M	tests/gateway/test_child_notice_profile_admission.py	in-surface	replay	F68	
 M	tests/gateway/test_completion_delivery.py	in-surface	replay	F68	
