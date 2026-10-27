@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools import bot_mode_dm, bot_mode_probe
-from tests.tools.test_bot_mode_dm import _runner_parts
+from tests.tools.test_bot_mode_dm import _canonical_target, _runner_parts
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +94,7 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
     later as a completion notification, not synchronously)."""
     calls = _capture_spawn(monkeypatch, tmp_path)
     home = _managed_home(tmp_path)
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home, title="Bot Chat")
     origin_task = "a2a-origin-7f91"
 

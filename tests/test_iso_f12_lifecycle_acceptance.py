@@ -407,7 +407,7 @@ def test_ac_iso_f12_9(kanban_conn, monkeypatch):
     assert task_id in result.reconciled_orphans
     assert task_id in [s[0] for s in result.spawned]
 
-    assert captured["cmd"][-3:] == ["chat", "-q", f"work kanban task {task_id}"]
+    assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
     assert captured["env"]["HERMES_KANBAN_TASK"] == task_id
 
     ctx = kb.build_worker_context(conn, task_id)

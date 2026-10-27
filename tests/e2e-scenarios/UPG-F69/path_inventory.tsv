@@ -536,7 +536,7 @@ A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/config.yaml	in-surface	repl
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/distribution.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/config.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/distribution.yaml	in-surface	replay	F68	
-A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	replay	F68	
+A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 1 (UPG-F69 3)
 M	tests/gateway/test_background_process_notifications.py	in-surface	replay	F68+UPG-F69	architect msg 38 import union; user msg 1790 (orch msg 214): DN-CI-4 option 1, the sixth F1-shape fixture kwarg (UPG-F69 F62.h-recut)
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	replay	F68	
 M	tests/gateway/test_child_notice_profile_admission.py	in-surface	replay	F68	
@@ -546,7 +546,7 @@ A	tests/gateway/test_gov_f25b_hardening.py	in-surface	replay	F68
 M	tests/gateway/test_internal_event_bypass_pairing.py	in-surface	replay	F68	
 A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	replay	F68	
 A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	replay	F68	
-M	tests/gateway/test_plugin_message_injection.py	in-surface	replay	F68	ADR §D1 union
+M	tests/gateway/test_plugin_message_injection.py	in-surface	replay	F68+UPG-F69	ADR §D1 union; user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 4-6 (fork-added GOV-F25 section only) (UPG-F69 3)
 A	tests/gateway/test_rt_f05_admission_acceptance.py	in-surface	replay	F68	
 A	tests/gateway/test_rt_f07_outbound_addressing_acceptance.py	in-surface	replay	F68	
 M	tests/gateway/test_wake_delivery.py	in-surface	replay	F68	
@@ -582,7 +582,7 @@ M	tests/hermes_cli/test_kanban_notify.py	in-surface	replay	F68
 A	tests/hermes_cli/test_loop_f36_doc_contract.py	in-surface	replay	F68	
 A	tests/hermes_cli/test_loop_f39_compose_cron_fields.py	in-surface	replay	F68	
 A	tests/hermes_cli/test_loop_f39_supervise_reaping_acceptance.py	in-surface	replay	F68	
-A	tests/hermes_cli/test_obs_f45_dashboard_acceptance.py	in-surface	replay	F68	
+A	tests/hermes_cli/test_obs_f45_dashboard_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 15 (UPG-F69 3)
 A	tests/hermes_cli/test_obs_f47_transcript_viewing_acceptance.py	in-surface	replay	F68	
 A	tests/hermes_cli/test_ops_f58_acceptance.py	in-surface	replay	F68	
 A	tests/hermes_cli/test_ops_f58a_acceptance.py	in-surface	replay	F68	
@@ -749,12 +749,12 @@ A	tests/plugins/test_upg_f67_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3); DN-E4-7/-8 opt 1 (msg 1288): AC-UPG-F68-18/-20 on the authority stub (UPG-F69 D-6); msg 72/78 + memo item3c §2/§3/§6 + E4′ §E4.6 + E7.1a/D-1..D-4 (msg 596, architect msg 94): AC-UPG-F68-19/-21 off the retired lease consumer (UPG-F69 3); orch msg 194 (architect msg 112): AC-UPG-F68-12 TAG_COMMIT re-pinned to v0.22.5 bf0203a7, criterion text unchanged (UPG-F69 3)
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
 A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
-A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68	
+A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 16 (UPG-F69 3)
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	replay	F68	
 M	tests/test_tests_tree_layout.py	in-surface	replay	F68	
-A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	replay	F68	
+A	tests/tools/test_bot_mode_dm_path_resolution.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 3 and 18 (UPG-F69 3)
 A	tests/tools/test_cross_session_context_acceptance.py	in-surface	replay	F68	
-A	tests/tools/test_dm_spawn_persists.py	in-surface	replay	F68	
+A	tests/tools/test_dm_spawn_persists.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 2 (UPG-F69 3)
 A	tests/tools/test_iso_f10_session_isolation_adopt.py	in-surface	replay	F68	
 A	tests/tools/test_rt_f08_doc_contract.py	in-surface	replay	F68	
 M	tools/bot_mode_dm.py	core	replay	F68	F62.g (UPG-F68 carry)

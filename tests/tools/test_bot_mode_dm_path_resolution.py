@@ -8,6 +8,7 @@ bare "hermes" that raises FileNotFoundError in the background runner.
 
 import json
 import os
+import shlex
 import shutil
 import sys
 import textwrap
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tools import bot_mode_dm, bot_mode_probe
-from tests.tools.test_bot_mode_dm import _runner_parts
+from tests.tools.test_bot_mode_dm import _canonical_target, _runner_parts
 
 
 @pytest.fixture(autouse=True)
@@ -98,7 +99,14 @@ def _service_context_cli(tmp_path, monkeypatch):
     sibling = bin_dir / ("hermes.exe" if sys.platform == "win32" else "hermes")
     sibling.touch()
     sibling.chmod(0o755)
-    monkeypatch.setattr("sys.executable", str(bin_dir / "python"))
+    python = bin_dir / "python"
+    python.touch()
+    python.chmod(0o755)
+    monkeypatch.setattr("sys.executable", str(python))
+    # An install without a published launcher keeps the sibling fallback; keep this
+    # checkout's own published launcher out of the resolution (#124868).
+    from tools import bot_relay
+    monkeypatch.setattr(bot_relay, "__file__", str(tmp_path / "tools" / "bot_relay.py"))
     empty = tmp_path / "empty-path"
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
@@ -129,6 +137,7 @@ def test_ac_msg_deliv_1(tmp_path, monkeypatch):
     sibling = _service_context_cli(tmp_path, monkeypatch)
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home, title="Bot Chat")
 
     result = json.loads(
@@ -140,10 +149,13 @@ def test_ac_msg_deliv_1(tmp_path, monkeypatch):
     assert result["delivery_id"]
     assert len(calls) == 1
 
-    _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
+    _mode, _dm_file, transport_argv, _home = _runner_parts(calls[0]["command"])
     assert transport_argv[1:3] == ["-p", "researcher"]
-    assert "chat" in transport_argv
     _assert_resolves_without_path(transport_argv, sibling)
+    # The queued command executes this runner, not the transport argv parsed above.
+    runner = shlex.split(calls[0]["command"])
+    assert all(os.path.isabs(part) and os.path.exists(part) for part in runner[:2]), runner[:2]
+    assert Path(runner[1]).name == "bot_mode_dm.py", runner[:2]
 
 
 def test_ac_msg_deliv_2(tmp_path, monkeypatch):
@@ -163,6 +175,6 @@ def test_ac_msg_deliv_2(tmp_path, monkeypatch):
     assert result["delivery_id"]
     assert len(calls) == 1
 
-    _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
+    _mode, _dm_file, transport_argv, _home = _runner_parts(calls[0]["command"])
     assert "peer" in transport_argv and "dm" in transport_argv
     _assert_resolves_without_path(transport_argv, sibling)

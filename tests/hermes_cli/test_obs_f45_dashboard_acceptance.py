@@ -1,6 +1,7 @@
 """Acceptance coverage for Hermes dashboard surfaces adopted by OBS-F45."""
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,25 @@ def _client():
 def _isolated(_isolate_hermes_home):
     # Sandboxes HERMES_HOME and patches DEFAULT_DB_PATH to the temp home.
     yield
+
+
+@pytest.fixture
+def mutation_owner(monkeypatch, _isolate_hermes_home):
+    from gateway.session_authority import SessionAuthority
+    from hermes_constants import get_hermes_home
+    from hermes_cli.web_server import app
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch
+
+    home = get_hermes_home()
+    db = SessionDB(db_path=home / 'state.db')
+    authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id=str(home),
+        instance_id='test-owner', db=db, epoch=begin_runtime_epoch(db, instance_id='test-owner'))
+    monkeypatch.setattr(app.state, 'session_authority', authority, raising=False)
+    try:
+        yield authority
+    finally:
+        db.close()
 
 
 def _seed_session(session_id, *, input_tokens=0, output_tokens=0, estimated_cost_usd=None):
@@ -82,8 +102,12 @@ def test_ac_obs_f45_2():
     assert "default" in names
 
 
-def test_ac_obs_f45_3():
+def test_ac_obs_f45_3(mutation_owner):
     """Timeline (Sessions): the dashboard lists a session and its archive verb moves it between views."""
+    from uuid import uuid4
+
+    from gateway.session_authority import LiveSession
+
     sid = "obs-f45-sessions-test"
     _seed_session(sid)
     client = _client()
@@ -92,7 +116,11 @@ def test_ac_obs_f45_3():
     assert resp.status_code == 200
     assert sid in resp.text
 
-    archived = client.patch(f"/api/sessions/{sid}", json={"archived": True})
+    mutation_owner.sessions.setdefault(sid, LiveSession(None, "route"))
+    row = mutation_owner.db.get_session(sid)
+    archived = client.patch(f"/api/sessions/{sid}", json={
+        "archived": True, "request_id": uuid4().hex, "expected_revision": row["runtime_revision"],
+        "expected_generation": row["runtime_generation"]})
     assert archived.status_code == 200
     assert archived.json()["archived"] is True
 

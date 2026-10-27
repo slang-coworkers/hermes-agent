@@ -5,7 +5,7 @@ kill_processes(source="agent_close") SIGTERM'd the runner mid-boot and the DM di
 with termination_source=agent_close (observed live 2026-10-01 12:36:38)."""
 import json
 
-from tests.tools.test_bot_mode_dm import _capture_spawn, _FakeAgent, _managed_home
+from tests.tools.test_bot_mode_dm import _canonical_target, _capture_spawn, _FakeAgent, _managed_home
 
 
 def test_spawn_delivery_sets_persist_on_release(tmp_path, monkeypatch):
@@ -15,6 +15,7 @@ def test_spawn_delivery_sets_persist_on_release(tmp_path, monkeypatch):
     from tools import bot_mode_dm
 
     home = _managed_home(tmp_path, teammates=("researcher",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home, title="Bot Chat")
 
     out = json.loads(bot_mode_dm.message_agent_tool(

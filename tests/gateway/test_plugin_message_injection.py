@@ -930,10 +930,12 @@ def _message_count(home, session_id) -> int:
     return len(SessionDB(db_path).get_messages_as_conversation(session_id))
 
 
-def _build_wake_adapter(tmp_path, monkeypatch, state):
+def _build_wake_adapter(tmp_path, monkeypatch, state, *, in_process=False):
     """Wire a REAL APIServerAdapter (multiplex on) + its real app + a persisting
     stub agent, in an isolated HERMES_HOME. Returns (adapter, app, owner_home,
-    default_home)."""
+    default_home). ``in_process`` leaves ``adapter.gateway_runner`` unset, as
+    upstream's in-process wake test does: a runner makes the adapter's store
+    admit only through the runner's session authority."""
     from aiohttp import web
 
     import agent.secret_scope as _ss
@@ -947,7 +949,8 @@ def _build_wake_adapter(tmp_path, monkeypatch, state):
     runner_stub = SimpleNamespace(config=GatewayConfig(multiplex_profiles=True))
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
     adapter._api_key = _WAKE_KEY
-    adapter.gateway_runner = runner_stub
+    if not in_process:
+        adapter.gateway_runner = runner_stub
     adapter._host = "127.0.0.1"
     adapter._model_name = "hermes-agent"
 
@@ -1040,7 +1043,7 @@ def test_real_cross_profile_wake_lands_on_owner_not_default_and_gates_on_ack(tmp
     from gateway.wake import deliver_wake
 
     state = {"persist": True, "calls": []}
-    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state, in_process=True)
     _own_real_session(owner_home)
 
     async def run():
@@ -1080,7 +1083,7 @@ def test_real_notifier_advances_cursor_only_on_persist_ack(tmp_path, monkeypatch
     from gateway.wake import deliver_wake  # ensure real (unmocked)
 
     state = {"persist": False, "calls": []}
-    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state)
+    adapter, app, owner_home, default_home = _build_wake_adapter(tmp_path, monkeypatch, state, in_process=True)
     _own_real_session(owner_home)
     task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-B")
     _publish(task_id, "review submitted on o/r#77 [B]", "o/r#77:B1")
@@ -1113,7 +1116,7 @@ def test_real_crash_before_ack_redelivers_then_no_rerun(tmp_path, monkeypatch):
     RE-DELIVERS; after a true ack the cursor has advanced, so a later tick does
     NOT re-run the already-delivered owner turn."""
     state = {"persist": False, "calls": []}
-    adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state)
+    adapter, app, owner_home, _default = _build_wake_adapter(tmp_path, monkeypatch, state, in_process=True)
     _own_real_session(owner_home)
     task_id = _mk_real_durable_sub(idem="gh-pr-gov-f25-77-C")
     _publish(task_id, "review submitted on o/r#77 [C]", "o/r#77:C1")
