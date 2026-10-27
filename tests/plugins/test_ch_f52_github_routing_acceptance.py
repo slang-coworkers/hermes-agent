@@ -15,8 +15,9 @@ import hmac
 import json
 import logging
 import shutil
+from contextlib import suppress
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 import hermes_yaml as yaml
@@ -157,31 +158,71 @@ def _github_sig(body: bytes, secret: str) -> str:
 
 
 def _multiplex_app(monkeypatch, tmp_path, routes: dict):
-    """Wire a WebhookAdapter over `routes` with the /p/<profile>/ multiplex prefix and capture
-    dispatched agent runs. Returns (app, captured)."""
+    """Wire a WebhookAdapter over `routes` into a real multiplexed GatewayRunner serving the SERVED
+    profiles (default = HERMES_HOME, the rest under its profiles/, where install_distribution puts
+    them) and capture what each profile authority admits; admitted runs are never executed.
+    Returns (app, captured)."""
+    from gateway import run
+    from gateway.config import GatewayConfig, Platform
+    from gateway.run import GatewayRunner
+    from gateway.run_runtime import initialize_gateway_runtime, start_gateway_runtime_api
+    from gateway.runtime_ownership import process_ownership
+    from gateway.session_authorities import all_authorities
+    from hermes_constants import get_hermes_home
+
     adapter = WebhookAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1", "port": 0, "routes": routes}))
-
     captured = []
+    root = get_hermes_home()
+    homes = [(name, root if name == "default" else root / "profiles" / name) for name in SERVED]
+    for _, home in homes:
+        home.mkdir(parents=True, exist_ok=True)
 
-    async def _capture(event):
-        captured.append(event)
+    async def _api(_runner):
+        return SimpleNamespace(api_origin="http://127.0.0.1:1")
 
-    adapter.handle_message = _capture
+    import hermes_state
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", hermes_state._IMPORT_DEFAULT_DB_PATH)
+    monkeypatch.setattr(run, "_load_gateway_config", lambda *a: {"platform_toolsets": {"cli": []}})
+    monkeypatch.setattr("gateway.run_api.start_gateway_api", _api)
+    served = {}
 
-    runner = MagicMock()
-    runner.config.multiplex_profiles = True
-    adapter.gateway_runner = runner
-    monkeypatch.setattr(
-        "hermes_cli.profiles.profiles_to_serve",
-        lambda multiplex, profile_allowlist=None: [
-            (name, tmp_path / "profiles" / name) for name in SERVED
-        ],
-        raising=False,
-    )
+    async def start(app):
+        config = GatewayConfig(sessions_dir=tmp_path / "sessions")
+        config.multiplex_profiles = True
+        config._runtime_profile_homes = tuple(homes)
+        runner = served["runner"] = GatewayRunner(config)
+        process_ownership.reserve([home for _, home in homes])
+        await initialize_gateway_runtime(runner)
+        await start_gateway_runtime_api(runner)
+        adapter.gateway_runner = runner
+        runner.adapters[Platform.WEBHOOK] = adapter
+        runner._wire_adapter_handlers(adapter)
+        for authority in all_authorities(runner):
+            authority._schedule = lambda ref: None
+            original = authority.admit_native
+
+            async def capture(event, _original=original):
+                receipt = await _original(event)
+                captured.append(event)
+                return receipt
+
+            authority.admit_native = capture
+
+    async def cleanup(app):
+        for task in list(adapter._background_tasks):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        for authority in all_authorities(served["runner"]):
+            authority.db.close()
+        for _, home in homes:
+            process_ownership.release(home)
 
     app = web.Application(client_max_size=adapter._max_body_bytes)
     app.router.add_post("/p/{profile}/webhooks/{route_name}", adapter._handle_webhook)
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
+    app.on_startup.append(start)
+    app.on_cleanup.append(cleanup)
     return app, captured
 
 

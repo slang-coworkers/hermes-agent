@@ -666,7 +666,7 @@ A	tests/plugins/fleet_f62_h_rig.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21
 A	tests/plugins/test_a2a_f18_wired_messaging_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_a2a_f19_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_ch_f51_acceptance.py	in-surface	replay	F68	
-A	tests/plugins/test_ch_f52_github_routing_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_ch_f52_github_routing_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1936 (orch msg 252): DN-CI-3 rows 7-10 (UPG-F69 3)
 A	tests/plugins/test_channel_adapter_registry_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_c_acceptance.py	in-surface	replay	F68	

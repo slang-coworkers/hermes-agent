@@ -51,3 +51,4 @@ tests/hermes_cli/test_obs_f45_dashboard_acceptance.py	bed730b269e3dd57317614d2b2
 tests/test_iso_f12_lifecycle_acceptance.py	63f26c94c5094fda6a400ab1c9fb1ad08d49c93fd6aa438b6bb9792379f07124	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 16 (UPG-F69 3)
 tests/gateway/test_iso_f11_lifecycle_acceptance.py	d7cebdb872036456682f7179605bc8447b56ba5882bb05950a1ddd9bccf0ca33	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 19 (UPG-F69 3)
 tests/plugins/test_sched_f33_acceptance.py	403c9b9d634b2dc6a5b32fbb61f586cca3482b3078e85b4ca6a686c4436db51d	user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 11-14 (UPG-F69 3)
+tests/plugins/test_ch_f52_github_routing_acceptance.py	0b9e0137b25d378a74538779beeb1fd00e32729de45d9d0fa3a3523866e7a3ff	user msg 1936 (orch msg 252): DN-CI-3 rows 7-10 (UPG-F69 3)
