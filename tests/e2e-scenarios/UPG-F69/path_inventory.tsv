@@ -141,7 +141,7 @@ A	plugins/nv-delivery-redrive/plugin.yaml	in-surface	replay	F68+UPG-F69	D-6 team
 A	plugins/nv-delivery-redrive/probe.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
 A	plugins/nv-delivery-redrive/send.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
 A	plugins/nv-delivery-redrive/settings.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
-A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6)
+A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68+UPG-F69	D-6 team-lead msg 888 (21c11095) + E4′ d3c4f3ff + DN-E4-7..11 opt 1 (msg 1288) + E4″ 31ef5b36 (UPG-F69 D-6) + N3 comment reword, reviewer 87-r1-findings e2a80dfe via architect msg 164
 A	plugins/nv-fleet-gates/__init__.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/aliases.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/cli.py	in-surface	replay	F68	

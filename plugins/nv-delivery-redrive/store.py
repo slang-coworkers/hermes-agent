@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS inflight (
 );
 CREATE TABLE IF NOT EXISTS published (dm_path TEXT PRIMARY KEY, status TEXT NOT NULL, at REAL NOT NULL);
 """
-# Added after v0.22.2: ``CREATE TABLE IF NOT EXISTS`` never adds a column to an existing db (E4′ item 6a).
+# A db created by the v0.22.2 plugin lacks these: CREATE TABLE IF NOT EXISTS never adds a column to an existing table.
 _ADDED_COLUMNS = (("final_suffix", "TEXT"), ("late_verify_until", "REAL"))
 
 _lock = threading.RLock()
