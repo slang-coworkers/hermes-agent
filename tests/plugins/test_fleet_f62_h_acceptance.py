@@ -1366,6 +1366,21 @@ _RETARGET_INIT = textwrap.dedent('''\
 ''')
 
 
+def _install_retarget_gate(fleet):
+    """Load ``_RETARGET_INIT`` as a real plugin: core runs its modify inside the executor, after the plugin's
+    middleware has read the pre-modify target."""
+    gate_dir = fleet.root / "plugins" / "f62h-retarget-gate"
+    gate_dir.mkdir(parents=True)
+    (gate_dir / "plugin.yaml").write_text(_GATE_YAML.replace("f62h-test-gate", "f62h-retarget-gate"),
+                                          encoding="utf-8")
+    (gate_dir / "__init__.py").write_text(_RETARGET_INIT, encoding="utf-8")
+    cfg = yaml.safe_load((fleet.root / "config.yaml").read_text(encoding="utf-8-sig"))
+    cfg["plugins"]["enabled"].append("f62h-retarget-gate")
+    (fleet.root / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    fleet.load()
+    fleet.tick()
+
+
 def _overlap(fleet, monkeypatch, *, retarget, sibling_target="sibling-target", bind_during_poll=False):
     """E9.2-E9.4: a same-task in-flight row is opened after this call's D3 row and before its spawn, and the call
     stalls before its bind. Ordinary call: fails closed, sibling row never bound or marked. Re-target whose real
@@ -1378,16 +1393,7 @@ def _overlap(fleet, monkeypatch, *, retarget, sibling_target="sibling-target", b
     from tools.process_registry import _completion_output as core_tail
 
     if retarget:
-        gate_dir = fleet.root / "plugins" / "f62h-retarget-gate"
-        gate_dir.mkdir(parents=True)
-        (gate_dir / "plugin.yaml").write_text(_GATE_YAML.replace("f62h-test-gate", "f62h-retarget-gate"),
-                                              encoding="utf-8")
-        (gate_dir / "__init__.py").write_text(_RETARGET_INIT, encoding="utf-8")
-        cfg = yaml.safe_load((fleet.root / "config.yaml").read_text(encoding="utf-8-sig"))
-        cfg["plugins"]["enabled"].append("f62h-retarget-gate")
-        (fleet.root / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        fleet.load()
-        fleet.tick()
+        _install_retarget_gate(fleet)
     store = fleet.loaded.module.store
     gate, acks, sibling, sibling_snap, own, core_acks = threading.Event(), [], [], [], [], []
     real_open = store.open_inflight
@@ -1596,10 +1602,41 @@ def _probe_shape(fleet, shape):
 _F69_7_MODES = {"held_not_sent": "held", "already_failed": "terminal:failed:provider_rate_limit",
                 "already_cancelled": "terminal:cancelled:runtime_offline", "queue_full": "refuse:queue_full",
                 "draining": "refuse:runtime_draining", "same_id_twice": "terminal:failed:provider_rate_limit"}
+_F69_7_NEGATIVES = ("modified_target", "unconfirmed_recipient")
+
+
+def _f69_7_no_notice(fleet, case, raw):
+    """E4″.2's negatives: core answered, but nothing confirms the recipient was the target's own profile, so the
+    plugin records no ticket and writes no notice."""
+    from tools.bot_failure_reasons import HELD_NOT_SENT
+
+    if case == "modified_target":                        # the modify sends it to the orchestrator, which refuses
+        _install_retarget_gate(fleet)
+        fleet.authority.mode("held", profile=ORCH)
+        body, reason = "status? RETARGET_ME_H17 PAYLOAD_F69_7", HELD_NOT_SENT
+    else:                                                # no ready authority: core's own runtime_unavailable
+        fleet.authority.configure(ready=[ORCH])
+        body, reason = "status? PAYLOAD_F69_7", "runtime_unavailable"
+    out = fleet.send(body, raw=True)
+    assert [out] == raw, (out, raw)                      # byte-for-byte core's tool result
+    ack = json.loads(out)
+    did = ack["delivery_id"]
+    assert ack["reason"] == reason and not {"status", "to", "redrive"} & set(ack), ack
+    assert fleet.authority.receipt(did) is None          # nothing under the target's home confirms it
+    if case == "modified_target":
+        assert fleet.authority.receipt(did, profile=ORCH) is not None
+    else:
+        assert not [p for p in fleet.dm_dir.iterdir()    # _settled_no_send took the payload and the intent
+                    if p.name.endswith(".live.json") or fleet.bot_mode_dm._dm_delivery_id(p) == did]
+    fleet.tick(3, pause=0.3)
+    assert fleet.ticket(did) is None
+    assert fleet.loaded.module.store.notices(did) == []
+    assert all(_notices(fleet, name, did) == [] for name in fleet.homes), {n: _notices(fleet, n, did)
+                                                                            for n in fleet.homes}
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("case", list(_F69_7_MODES))
+@pytest.mark.parametrize("case", [*_F69_7_MODES, *_F69_7_NEGATIVES])
 def test_ac_upg_f69_7(fleet, case, monkeypatch):
     """(DN-E4-12, msg 1288) While tracking is live, a local `message_agent` DM that core answers without the plugin tracking it gives the orchestrator profile exactly one notice per `delivery_id`: a typed FINAL for a recipient-confirmed held no-send or a receipt already `failed`/`cancelled`, and an `unknown` notice for a recipient-confirmed uncertain admission refusal. A `runtime_unavailable` no-send, or any answer whose recipient cannot be confirmed, gets no notice. The sender's tool result is byte-for-byte core's, and the plugin writes no sender notice."""
     from tools.bot_failure_reasons import HELD_NOT_SENT
@@ -1608,6 +1645,9 @@ def test_ac_upg_f69_7(fleet, case, monkeypatch):
     real_start = fleet.bot_mode_dm._start_delivery
     monkeypatch.setattr(fleet.bot_mode_dm, "_start_delivery",
                         lambda *a, **k: raw.append(real_start(*a, **k)) or raw[-1])
+    if case in _F69_7_NEGATIVES:
+        _f69_7_no_notice(fleet, case, raw)
+        return
     if case == "same_id_twice":                          # a same-id resend of a delivery core already finished
         real_write, fixed = fleet.bot_mode_dm._write_dm_file, []
 

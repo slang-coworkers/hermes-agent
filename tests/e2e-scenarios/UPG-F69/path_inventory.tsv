@@ -677,7 +677,7 @@ A	tests/plugins/test_fleet_f62_d_installer_unit.py	in-surface	replay	F68
 A	tests/plugins/test_fleet_f62_d_workdir_floor.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_e_trust_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_g_acceptance.py	in-surface	replay	F68	
-A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-1..5 msg 1162 (-1/-2/-3/-6/-11 WITHDRAWN) + DN-E4-6 orch msg 122 (-10) + E4′ d3c4f3ff §E4.3 + DN-E4-9/-11 opt 1 (msg 1288) + E4″ 31ef5b36 AC-UPG-F69-7 (UPG-F69 D-6)
+A	tests/plugins/test_fleet_f62_h_acceptance.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 (21c11095) + DN-E4-1..5 msg 1162 (-1/-2/-3/-6/-11 WITHDRAWN) + DN-E4-6 orch msg 122 (-10) + E4′ d3c4f3ff §E4.3 + DN-E4-9/-11 opt 1 (msg 1288) + E4″ 31ef5b36 AC-UPG-F69-7 + DN-E4-14 opt 1 (operator msg 1782, orch msg 212): AC-UPG-F69-7 negatives modified_target / unconfirmed_recipient (UPG-F69 D-6)
 A	tests/plugins/test_fleet_f62e_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_gov_f22_guard_catalog_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_gov_f23_approvals_acceptance.py	in-surface	replay	F68	
