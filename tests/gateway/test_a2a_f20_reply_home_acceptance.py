@@ -24,6 +24,7 @@ import pytest
 
 from tools import bot_mode_dm, bot_mode_probe
 from tests.tools.test_bot_mode_dm import _canonical_target, _runner_parts
+from tests.tools.test_bot_live_owner_delivery import _FakeAuthority, _ready
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +71,19 @@ class _FakeAgent:
         self._bot_mode_protocol = True
         self.tools: list = []
         self.valid_tool_names: set = set()
+
+
+class _BotChatDoor:
+    def __init__(self, session_id):
+        self.session_id, self.door, self.requested, self.admitted = session_id, _FakeAuthority(), [], []
+
+    def __call__(self, home, params):
+        self.requested.append(params.get("session_id"))
+        if params.get("session_id") != self.session_id:
+            raise ValueError("not the canonical Bot Chat")
+        record = {**self.door(home, params), "session_id": self.session_id}
+        self.admitted.append(record)
+        return record
 
 
 def _capture_spawn(monkeypatch, tmp_path):
@@ -121,17 +135,30 @@ def test_ac_a2a_f20_1(tmp_path, monkeypatch):
 def test_ac_a2a_f20_2(tmp_path, monkeypatch):
     """The target answers only in its single canonical "Bot Chat" session, per
     invocation; the message body is delivered verbatim off the command line."""
+    import hermes_cli.gateway_runtime as runtime
+    from hermes_state import SessionDB
+    from tools import bot_live_delivery as live
+
     calls = _capture_spawn(monkeypatch, tmp_path)
     home = _managed_home(tmp_path)
+    db = SessionDB(db_path=home / "profiles" / "researcher" / "state.db")
+    try:
+        db.create_session(session_id="researcher-bot-chat", source="cli")
+        db.set_session_title("researcher-bot-chat", "Bot Chat")
+    finally:
+        db.close()
+    monkeypatch.setattr(runtime, "discover_gateway_endpoint", _ready("authority-1"))
+    door = _BotChatDoor("researcher-bot-chat")
+    monkeypatch.setattr(live, "authority_delivery", door)
     agent = _FakeAgent(home, title="Bot Chat")
 
     body = 'give me the "PAYLOAD_SENTINEL_7A91" numbers $(not shell)'
     bot_mode_dm.message_agent_tool(target="@researcher", message=body, agent=agent)
 
     command = calls[0]["command"]
-    _mode, dm_file, transport_argv = _runner_parts(command)
-    ci = transport_argv.index("-c")
-    assert transport_argv[ci + 1] == "Bot Chat"
+    _mode, dm_file, _transport_argv, _home = _runner_parts(command)
+    assert door.requested == ["researcher-bot-chat"]
+    assert door.admitted[0]["session_id"] == "researcher-bot-chat"
     # the body must travel verbatim inside the temp file, never on the command
     # line; the full body is the suffix after the attribution prefix — a mutant
     # that drops OR truncates the body flips the content check (rstrip tolerates
@@ -139,6 +166,7 @@ def test_ac_a2a_f20_2(tmp_path, monkeypatch):
     assert "PAYLOAD_SENTINEL_7A91" not in command
     content = Path(dm_file).read_text(encoding="utf-8")
     assert content.rstrip().endswith(body)
+    assert door.door.calls[0][1]["message"] == content
 
 
 def _build_runner(monkeypatch, tmp_path):

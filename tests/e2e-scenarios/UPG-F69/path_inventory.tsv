@@ -536,7 +536,7 @@ A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/config.yaml	in-surface	repl
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-bot-b/distribution.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/config.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/p0-loop/fixtures/p0-loop-hello/distribution.yaml	in-surface	replay	F68	
-A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 1 (UPG-F69 3)
+A	tests/gateway/test_a2a_f20_reply_home_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 1 and 17 (UPG-F69 3)
 M	tests/gateway/test_background_process_notifications.py	in-surface	replay	F68+UPG-F69	architect msg 38 import union; user msg 1790 (orch msg 214): DN-CI-4 option 1, the sixth F1-shape fixture kwarg (UPG-F69 F62.h-recut)
 A	tests/gateway/test_ch_f50_acceptance.py	in-surface	replay	F68	
 M	tests/gateway/test_child_notice_profile_admission.py	in-surface	replay	F68	
@@ -544,7 +544,7 @@ M	tests/gateway/test_completion_delivery.py	in-surface	replay	F68
 M	tests/gateway/test_completion_session_boundary.py	in-surface	replay	F68	
 A	tests/gateway/test_gov_f25b_hardening.py	in-surface	replay	F68	
 M	tests/gateway/test_internal_event_bypass_pairing.py	in-surface	replay	F68	
-A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	replay	F68	
+A	tests/gateway/test_iso_f11_lifecycle_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 19 (UPG-F69 3)
 A	tests/gateway/test_iso_f17_supervision_acceptance.py	in-surface	replay	F68	
 M	tests/gateway/test_plugin_message_injection.py	in-surface	replay	F68+UPG-F69	ADR §D1 union; user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 4-6 (fork-added GOV-F25 section only) (UPG-F69 3)
 A	tests/gateway/test_rt_f05_admission_acceptance.py	in-surface	replay	F68	
@@ -739,7 +739,7 @@ A	tests/plugins/test_podman_onecli_secret_source.py	in-surface	replay	F68
 A	tests/plugins/test_podman_onecli_wrapper.py	in-surface	replay	F68	
 A	tests/plugins/test_rt_f01_compose_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_rt_f01_entity_privilege_acceptance.py	in-surface	replay	F68	
-A	tests/plugins/test_sched_f33_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_sched_f33_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, rows 11-14 (UPG-F69 3)
 A	tests/plugins/test_sched_f34a_timezone_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_self_f54_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_self_f54_doc_contract.py	in-surface	replay	F68	

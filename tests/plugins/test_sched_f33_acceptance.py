@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 import hermes_yaml as yaml
 
+from tests.cron.conftest import owner_execution_runner
+
 PLUGIN_KEY = "nv-coworker-compose"
 # The plugin is installed into an isolated HERMES_HOME (not discovered from the
 # repo bundled dir), so the test runs the same way whether or not it is bundled.
@@ -115,6 +117,7 @@ def agent_env(tmp_path, monkeypatch):
     import cron.scheduler
 
     importlib.reload(cron.scheduler)
+    monkeypatch.setattr("cron.scheduler_authority.run_canonical_job", owner_execution_runner())
     return home
 
 
@@ -649,6 +652,7 @@ def test_rendered_cron_job_loads_and_fires_through_run_job(tmp_path, monkeypatch
     import cron.scheduler
 
     importlib.reload(cron.scheduler)
+    monkeypatch.setattr("cron.scheduler_authority.run_canonical_job", owner_execution_runner())
 
     from cron.jobs import load_jobs
     from cron.scheduler import SILENT_MARKER, run_job

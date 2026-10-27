@@ -11,8 +11,13 @@ in-repository page. No network, no live gateway, no ~/.hermes writes.
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
+
+from gateway.session_contract import Principal
+from tests.gateway.test_session_bot_retry import _admissions, _settle_quietly
 
 
 def test_ac_iso_f11_1(tmp_path):
@@ -382,27 +387,75 @@ def test_ac_iso_f11_8(kanban_conn):
     assert kb._retry_status_for_run(conn, review) == "review"
 
 
-class _Proc:
-    def __init__(self, returncode, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+@pytest_asyncio.fixture
+async def bot(tmp_path, monkeypatch):
+    from gateway import run
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_local import create_local_session
+    from gateway.session_local_title import title_new_session
+    from hermes_state import SessionDB
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: {'platform_toolsets': {'cli': []}})
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    store._db = SessionDB(db_path=tmp_path / 'state.db')
+    runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
+                             _evict_cached_agent=lambda route: None)
+    runner._adapter_for_source = lambda source: runner.adapters.get(source.platform)
+    authority = await initialize_session_authority(runner, profile_id='default', instance_id='fixture')
+    owner = Principal('uid:1000', 'default', frozenset({'session:create', 'session:read', 'session:submit'}), 'native')
+    chat = create_local_session(authority, owner, {'request_id': 'bot', 'source': 'gui', 'cwd': str(tmp_path),
+                                                    'model': 'fixture', 'toolsets': []})
+    title_new_session(authority, chat, 'Bot Chat')
+    errors = []
+
+    async def execute(authority, ref, row):
+        error = errors.pop(0) if errors else None
+        if error is None:
+            return 'pong'
+        authority.pending_results[row['admission_id']] = {
+            'result': {'final_response': '', 'messages': [], 'failed': True, 'error': error}, 'usage': {}}
+        return ''
+
+    monkeypatch.setattr('gateway.session_finite.execute_finite_admission', execute)
+    try:
+        yield SimpleNamespace(authority=authority, chat=chat.session_id, errors=errors, home=tmp_path,
+                              connection=SimpleNamespace(authority=authority, actor=owner))
+    finally:
+        store._db.close()
 
 
-def test_ac_iso_f11_9(tmp_path, monkeypatch):
+async def _bot_delivery(bot, key, errors, admissions):
+    """One Bot Chat delivery whose finite executions fail with ``errors`` in turn, settled once the
+    session holds ``admissions`` terminal rows and nothing can admit another: (receipt, its rows)."""
+    from gateway.session_bot import _result, deliver
+    from tools.bot_live_delivery import read_delivery_result
+
+    bot.errors[:] = errors
+    await deliver(bot.connection, dict(id=key, profile='default', message='hello'))
+    for _ in range(200):
+        await asyncio.sleep(0.02)
+        rows = _admissions(bot)
+        if len(rows) >= admissions and all(r['status'] == 'terminal' for r in rows):
+            break
+    await _settle_quietly(bot)
+    receipt = _result(bot.authority, await asyncio.to_thread(read_delivery_result, bot.home, key))
+    return receipt, [r for r in _admissions(bot) if r['request_id'].startswith('bot:' + key)]
+
+
+@pytest.mark.asyncio
+async def test_ac_iso_f11_9(bot, monkeypatch):
     """AC-ISO-F11-9: Bot-to-bot delivery retries exactly once for a transient (retryable)
     failure and does not retry a non-retryable one; the retry decision is keyed on a
     machine-readable failure code, not on string-matching at the call site."""
     from tools import bot_failure_reasons as bfr
-    from tools import bot_mode_dm
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     assert bfr.retry_action(bfr.classify_agent_error("server error - overloaded")) != bfr.RETRY_NONE
     assert bfr.retry_action(bfr.classify_agent_error("No LLM provider configured")) == bfr.RETRY_NONE
 
-    # _run_delivery imports classify_agent_error inside the function, so patch its source
-    # module; opaque stderr tokens (matching no substring rule) force it to key on the code.
+    # Opaque error tokens match no substring rule, so core's retry gate can only decide on the code.
     def _fake_classify(text):
         if "XX_TRANSIENT_XX" in text:
             return bfr.PROVIDER_SERVER_ERROR   # AUTO_RETRYABLE -> retry_action != RETRY_NONE
@@ -412,48 +465,21 @@ def test_ac_iso_f11_9(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bfr, "classify_agent_error", _fake_classify)
 
-    dm = tmp_path / "dm-transient.txt"
-    dm.write_text("hello", encoding="utf-8")
-    calls = []
+    key = "a" * 32
+    receipt, rows = await _bot_delivery(bot, key, ["XX_TRANSIENT_XX"], 2)
+    assert [r["request_id"] for r in rows] == ["bot:" + key, "bot:" + key + ":retry"]
+    assert [r["payload"]["text"] for r in rows] == ["hello", "hello"]
+    assert (receipt["status"], receipt["reply"]) == ("settled", "pong"), receipt
 
-    def _fake_run(argv, **kw):
-        calls.append(list(argv))
-        if len(calls) == 1:
-            return _Proc(1, stderr="XX_TRANSIENT_XX")
-        return _Proc(0, stdout="the reply text")
+    fatal = "b" * 32
+    receipt, rows = await _bot_delivery(bot, fatal, ["XX_FATAL_XX"], 3)
+    assert [r["request_id"] for r in rows] == ["bot:" + fatal]
+    assert receipt["status"] == "failed", receipt
 
-    monkeypatch.setattr(bot_mode_dm.subprocess, "run", _fake_run)
-    rc = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm), stdin_file=False)
-    assert rc == 0
-    assert len(calls) == 2                         # retried once on the CODE (opaque stderr)
-    assert calls[0] == calls[1]                    # the retry replays the same session, not a new one
-
-    dm2 = tmp_path / "dm-fatal.txt"
-    dm2.write_text("hello", encoding="utf-8")
-    calls2 = []
-
-    def _fake_run2(argv, **kw):
-        calls2.append(list(argv))
-        return _Proc(1, stderr="XX_FATAL_XX")
-
-    monkeypatch.setattr(bot_mode_dm.subprocess, "run", _fake_run2)
-    rc2 = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm2), stdin_file=False)
-    assert rc2 == 1
-    assert len(calls2) == 1
-
-    dm3 = tmp_path / "dm-transient-exhausted.txt"
-    dm3.write_text("hello", encoding="utf-8")
-    exhausted = []
-
-    def _always_transient(argv, **kw):
-        exhausted.append(list(argv))
-        return _Proc(1, stderr="XX_TRANSIENT_XX")
-
-    monkeypatch.setattr(bot_mode_dm.subprocess, "run", _always_transient)
-    rc3 = bot_mode_dm._run_delivery(["hermes", "-p", "ops", "chat"], str(dm3), stdin_file=False)
-    assert rc3 == 1
-    assert len(exhausted) == 2
-    assert exhausted[0] == exhausted[1]
+    exhausted = "e" * 32
+    receipt, rows = await _bot_delivery(bot, exhausted, ["XX_TRANSIENT_XX", "XX_TRANSIENT_XX"], 5)
+    assert [r["request_id"] for r in rows] == ["bot:" + exhausted, "bot:" + exhausted + ":retry"]
+    assert receipt["status"] == "failed", receipt
 
 
 def test_iso_f11_doc_contract():
