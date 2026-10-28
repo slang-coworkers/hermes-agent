@@ -1,0 +1,4 @@
+# sha256 of the blob at the candidate, or `deleted` for a deleted path.
+path	sha256	authority
+contributors/emails/harsh1492@gmail.com	1b6deb4db386774d9ed74099818f18ec216f59b73134b658b9a135da8b327b9d	msg-990
+contributors/emails/hermes-builder@slang-coworkers.local	f3ba42c35db5e0969270d18cfda827de7a45adff0806656f6b4b65d6a942fc3d	msg-990

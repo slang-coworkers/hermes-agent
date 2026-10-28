@@ -372,6 +372,7 @@ def cleanup_bot_dm_cache(max_age_hours: float = _DM_STALE_SECONDS / 3600, *, now
     with contextlib.suppress(OSError):
         dm_dir = _dm_dir()
         locations.append((dm_dir, "*.txt"))
+        locations += [(dm_dir, "*.signal"), (dm_dir, "*.signal.tmp")]
         # Live-delivery intents (``<dm file>.live.json``, message plaintext included) outlive
         # their runner on purpose — a retry replays the same delivery id from them — so the
         # orphans of runners that never settled are swept here too.
@@ -736,7 +737,8 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
 
         raw = terminal_tool(command, background=True, notify_on_complete=True, task_id=task_id,
                             workdir=str(Path(__file__).resolve().parent.parent), _host_local=True,
-                            _completion_output_chars=REPLY_COMPLETION_CHARS)
+                            _completion_output_chars=REPLY_COMPLETION_CHARS,
+                            persist_on_release=True)
         try:
             parsed = json.loads(raw)
         except (ValueError, TypeError):

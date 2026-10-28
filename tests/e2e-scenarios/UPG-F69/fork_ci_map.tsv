@@ -1,0 +1,17 @@
+# An action row's match and replacement each carry the line's trailing version comment.
+kind	match	replacement	authority
+label	blacksmith-2vcpu-ubuntu-2404	ubuntu-latest	msg-596,msg-206:5a
+label	blacksmith-4vcpu-ubuntu-2404	ubuntu-latest	msg-596,msg-206:5a
+label	blacksmith-32vcpu-ubuntu-2404	ubuntu-latest	msg-596,msg-206:5a
+label	blacksmith-4vcpu-ubuntu-2404-arm	ubuntu-24.04-arm	msg-596,msg-206:5a
+label	blacksmith-32vcpu-ubuntu-2404-arm	ubuntu-24.04-arm	msg-596,msg-206:5a
+label	blacksmith-2vcpu-windows-2025	windows-latest	msg-596,msg-206:5a
+label	blacksmith-4vcpu-windows-2025	windows-latest	msg-596,msg-206:5a
+label	blacksmith-32vcpu-windows-2025	windows-latest	msg-596,msg-206:5a
+label	blacksmith-6vcpu-macos-latest	macos-latest	msg-596,msg-206:5a
+label	blacksmith-12vcpu-macos-latest	macos-latest	msg-596,msg-206:5a
+label	windows-latest-32-core	windows-latest	msg-596
+label	windows-latest-32-arm-core	windows-11-arm	msg-596
+action	useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1	actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1	msg-206:5a,arch-msg-20
+action	useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2	docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3	msg-206:5a,arch-msg-20
+action	useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850  # v2	docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0	msg-206:5a,arch-msg-20

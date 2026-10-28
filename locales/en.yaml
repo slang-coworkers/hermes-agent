@@ -107,6 +107,7 @@ gateway:
     started: "🔄 Background task started: \"{preview}\"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done."
     task_finished: "✅ Background task finished"
     task_failed: "❌ Background task failed"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "exit {code}"
     last_output: ". Last output:\n```\n{tail}\n```"
     rerun_hint: "\nAsk me to rerun it or show the full log."

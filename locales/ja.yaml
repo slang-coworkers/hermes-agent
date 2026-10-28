@@ -104,6 +104,7 @@ gateway:
     started: "🔄 バックグラウンドタスクを開始しました: 「{preview}」\nタスク ID: {task_id}\nチャットを続けられます — 完了したらここに結果が表示されます。"
     task_finished: "✅ バックグラウンドタスクが終了しました"
     task_failed: "❌ バックグラウンドタスクが失敗しました"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "終了コード {code}"
     last_output: "。最後の出力:\n```\n{tail}\n```"
     rerun_hint: "\n再実行や完全なログの表示が必要な場合はお知らせください。"

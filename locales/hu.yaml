@@ -104,6 +104,7 @@ gateway:
     started: "🔄 Háttérfeladat elindítva: \"{preview}\"\nFeladatazonosító: {task_id}\nFolytathatod a beszélgetést — az eredmények itt jelennek meg, amint elkészülnek."
     task_finished: "✅ A háttérfeladat befejeződött"
     task_failed: "❌ A háttérfeladat sikertelen"
+    unverified_exit: "⚠️ Background task {session_id} exited, but its result was not published yet; its outcome is unknown."
     exit_code: "kilépési kód: {code}"
     last_output: ". Utolsó kimenet:\n```\n{tail}\n```"
     rerun_hint: "\nKérd, hogy futtassam újra, vagy mutassam meg a teljes naplót."

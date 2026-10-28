@@ -93,10 +93,12 @@ def _stamp_gateway_routing(proc_session, get_session_env) -> None:
 
 
 def _spawn(process_registry, *, env, env_type, command, cwd, effective_task_id, task_id,
-           session_key, effective_pty, persist_on_release: bool = False):
+           session_key, effective_pty, persist_on_release: bool = False, notify_on_complete: bool = False,
+           completion_output_chars: int = 0):
     common = dict(command=command, cwd=cwd, task_id=effective_task_id,
                   owner_task_id=task_id or effective_task_id, session_key=session_key,
-                  persist_on_release=persist_on_release)
+                  persist_on_release=persist_on_release, notify_on_complete=notify_on_complete,
+                  completion_output_chars=completion_output_chars)
     if env_type == "local":
         return process_registry.spawn_local(
             env_vars=env.env if hasattr(env, 'env') else None, use_pty=effective_pty, **common)
@@ -175,10 +177,15 @@ def spawn_background_process(
         env=env,
     )
     try:
+        from gateway.session_context import async_delivery_supported
+
+        # Set before the reader starts: a process that exits before the arm below would publish no completion.
+        notify_early = bool(notify_on_complete) and async_delivery_supported()
         proc_session = _spawn(
             process_registry, env=env, env_type=env_type, command=command, cwd=effective_cwd,
             effective_task_id=effective_task_id, task_id=task_id, session_key=session_key,
-            effective_pty=effective_pty, persist_on_release=persist_on_release,
+            effective_pty=effective_pty, persist_on_release=persist_on_release, notify_on_complete=notify_early,
+            completion_output_chars=int(completion_output_chars or 0) if notify_early else 0,
         )
         result_data = {"output": "Background process started", "session_id": proc_session.id,
                        "pid": proc_session.pid, "exit_code": 0, "error": None}

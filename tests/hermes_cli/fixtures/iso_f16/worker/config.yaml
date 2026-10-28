@@ -1,0 +1,38 @@
+# ISO-F16 reference profile distribution — worker role.
+#
+# Disjoint from the sibling orchestrator fixture (see that file's header for the
+# rationale). Every value is a literal (no ${ENV}); endpoints are
+# *.example.invalid and carry no credentials.
+model:
+  default: worker-cheap
+  provider: work-gateway
+providers:
+  work-gateway:
+    api: https://worker-gateway.example.invalid/v1
+    transport: openai_chat
+    discover_models: false
+    models:
+      - worker-cheap
+fallback_providers:
+  - provider: openrouter
+    model: openai/gpt-4o-mini
+agent:
+  reasoning_effort: low
+  service_tier: normal
+toolsets:
+  - terminal
+  - coding
+  - file
+terminal:
+  backend: docker
+  docker_image: registry.example.invalid/hermes-worker:2026.8.31
+  docker_volumes:
+    - /srv/worker/scratch:/workspace/scratch
+  docker_mount_cwd_to_workspace: false
+mcp_servers:
+  work-search:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-brave-search"
+timezone: Asia/Tokyo

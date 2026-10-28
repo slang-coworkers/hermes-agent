@@ -9,6 +9,7 @@ Contributed by @PeterFile (PR #593), reimplemented on current main.
 
 import asyncio
 import contextlib
+import contextvars
 import queue
 import threading
 from types import SimpleNamespace
@@ -90,6 +91,13 @@ def _watch_event(session_id="proc_watch", thread_id="42"):
     }
 
 
+def _published():
+    """The completion event of a session whose owner already published its result (the watcher waits for it)."""
+    event = threading.Event()
+    event.set()
+    return event
+
+
 # ---------------------------------------------------------------------------
 # _load_background_notifications_mode unit tests
 # ---------------------------------------------------------------------------
@@ -134,7 +142,7 @@ async def test_consumed_completion_skips_raw_notification(monkeypatch, tmp_path)
     import tools.process_registry as pr_module
 
     sessions = [SimpleNamespace(
-        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1; echo done",
+        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1; echo done", _completion_event=_published(),
     )]
     monkeypatch.setattr(
         pr_module, "process_registry", _FakeRegistry(sessions, consumed=True)
@@ -169,6 +177,7 @@ async def test_agent_notify_receipt_only_while_launching_turn_is_busy(
 
     sessions = [SimpleNamespace(
         output_buffer="done\n", exited=True, exit_code=0, command="echo done", started_at=None,
+        _completion_event=_published(),
     )]
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions, consumed=False))
 
@@ -223,7 +232,7 @@ async def test_consumed_completion_skips_raw_notification_without_agent_notify(
     import tools.process_registry as pr_module
 
     sessions = [SimpleNamespace(
-        output_buffer="done\n", exited=True, exit_code=0, command="echo done",
+        output_buffer="done\n", exited=True, exit_code=0, command="echo done", _completion_event=_published(),
     )]
     monkeypatch.setattr(
         pr_module, "process_registry", _FakeRegistry(sessions, consumed=True)
@@ -508,6 +517,7 @@ async def test_agent_notify_refused_completion_backs_off_then_sends_plain_notice
 
     exited = SimpleNamespace(
         output_buffer="done\n", exited=True, exit_code=0, command="echo done", started_at=1.0,
+        _completion_event=_published(),
     )
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry([exited] * 20, consumed=False))
     sleeps = []
@@ -560,7 +570,7 @@ async def test_concise_mode_no_interim_output_updates(monkeypatch, tmp_path):
     )
     done = SimpleNamespace(
         output_buffer="chunk one\nchunk two\n", exited=True, exit_code=0,
-        command="sleep 100", started_at=None,
+        command="sleep 100", started_at=None, _completion_event=_published(),
     )
     monkeypatch.setattr(
         pr_module, "process_registry", _FakeRegistry([running, done], consumed=False)
@@ -859,7 +869,7 @@ async def test_raw_output_modes_are_human_facing(monkeypatch, tmp_path):
     running = SimpleNamespace(output_buffer="\x1b[32mstep 1 ok\x1b[0m\n", exited=False, exit_code=None,
                               command="make -j8 all", started_at=None)
     done = SimpleNamespace(output_buffer="\x1b[32mstep 1 ok\x1b[0m\n\x1b[31mlinker error\x1b[0m\n", exited=True,
-                           exit_code=2, command="make -j8 all", started_at=None)
+                           exit_code=2, command="make -j8 all", started_at=None, _completion_event=_published())
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry([running, done]))
 
     async def _instant_sleep(*_a, **_kw):
@@ -879,3 +889,364 @@ async def test_raw_output_modes_are_human_facing(monkeypatch, tmp_path):
         assert "proc_deadbeef" not in text and "[Background process" not in text and "~" not in text
         assert "\x1b[" not in text
         assert "make -j8 all" in text
+
+
+# ---------------------------------------------------------------------------
+# The watcher waits for its process's publish (FLEET-F62.h E11 (vi))
+# ---------------------------------------------------------------------------
+
+def _unpublished(output="done\n", exit_code=0, command="echo done"):
+    """An exited process whose owner has not finished publishing its result yet."""
+    return SimpleNamespace(output_buffer=output, exited=True, exit_code=exit_code, command=command, started_at=None,
+                           _completion_event=threading.Event())
+
+
+class _HeldRegistry:
+    """Always returns the same session; never consumed."""
+
+    def __init__(self, session):
+        self.session = session
+
+    def get(self, session_id):
+        return self.session
+
+    def is_completion_consumed(self, session_id):
+        return False
+
+
+def _ticking(monkeypatch, on_tick):
+    """Replace asyncio.sleep: ``on_tick(n)`` runs before each watcher tick n (1-based); other sleeps still yield."""
+    real_sleep = asyncio.sleep
+    ticks = {"n": 0}
+
+    async def _sleep(delay, *a, **kw):
+        if delay == 0:
+            ticks["n"] += 1
+            on_tick(ticks["n"])
+        await real_sleep(0)
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    return ticks
+
+
+def _agent_watcher():
+    return {**_watcher_dict(), "session_key": "agent:main:telegram:dm:123", "notify_on_complete": True}
+
+
+@pytest.mark.asyncio
+async def test_watcher_defers_an_exit_until_its_publish_is_done(monkeypatch, tmp_path):
+    """An exited process whose result is not yet published gets no completion and no notice; once the owner's
+    publish sets the event, exactly one normal completion follows."""
+    import tools.process_registry as pr_module
+
+    session = _unpublished()
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    seen = []
+
+    def on_tick(n):
+        seen.append((n, runner._enqueue_process_completion_notification.await_count, adapter.send.await_count))
+        if n == 4:
+            session._completion_event.set()
+    _ticking(monkeypatch, on_tick)
+
+    await runner._run_process_watcher(_agent_watcher())
+
+    assert [s[1:] for s in seen[:4]] == [(0, 0)] * 4, seen
+    runner._enqueue_process_completion_notification.assert_awaited_once()
+    adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_watcher_sends_one_output_free_notice_when_the_publish_is_late(monkeypatch, tmp_path):
+    """Held beyond 12 ticks: exactly one unverified-exit notice (no output, command or exit code), then the normal
+    completion once the event is set."""
+    import tools.process_registry as pr_module
+
+    session = _unpublished(output="SECRET-OUTPUT\n", exit_code=3, command="make release")
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    def on_tick(n):
+        if n == 20:
+            assert runner._enqueue_process_completion_notification.await_count == 0
+            session._completion_event.set()
+    _ticking(monkeypatch, on_tick)
+
+    await runner._run_process_watcher(_agent_watcher())
+
+    notices = [call.args[1] for call in adapter.send.await_args_list]
+    assert len(notices) == 1, notices
+    assert "proc_test" in notices[0] and "outcome is unknown" in notices[0], notices[0]
+    for leak in ("SECRET-OUTPUT", "make release", "3"):
+        assert leak not in notices[0].replace("proc_test", ""), notices[0]
+    runner._enqueue_process_completion_notification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_watcher_on_a_never_published_exit_sends_one_notice_and_ends_on_cancel(monkeypatch, tmp_path):
+    """A registered session whose event is never set: one notice, no completion over N + 2 ticks; the watcher keeps
+    polling until its task is cancelled, and then ends with nothing more sent."""
+    import tools.process_registry as pr_module
+    from gateway.run_notifications import _UNPUBLISHED_EXIT_NOTICE_TICKS as N
+
+    session = _unpublished()
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    reached = asyncio.Event()
+    ticks = _ticking(monkeypatch, lambda n: reached.set() if n >= N + 2 else None)
+
+    task = asyncio.create_task(runner._run_process_watcher(_agent_watcher()))
+    await asyncio.wait_for(reached.wait(), timeout=30)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ticks["n"] >= N + 2
+    assert adapter.send.await_count == 1, adapter.send.await_args_list
+    runner._enqueue_process_completion_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_watcher_deferral_never_blocks_the_loop(monkeypatch, tmp_path):
+    """While the watcher defers, a concurrent coroutine keeps running on the same loop."""
+    import tools.process_registry as pr_module
+
+    session = _unpublished()
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    beats, deferred_ticks = [], []
+    unpatched_sleep = asyncio.sleep
+
+    def on_tick(n):
+        deferred_ticks.append(n)
+        if n >= 4 and len(beats) >= 5:
+            session._completion_event.set()
+    _ticking(monkeypatch, on_tick)
+
+    async def heartbeat():
+        while not session._completion_event.is_set():
+            beats.append(len(deferred_ticks))
+            await unpatched_sleep(0)
+
+    await asyncio.wait_for(asyncio.gather(runner._run_process_watcher(_agent_watcher()), heartbeat()), timeout=30)
+
+    assert len(deferred_ticks) >= 4 and len(beats) >= 5 and len(set(beats)) > 1, (beats, deferred_ticks)
+    runner._enqueue_process_completion_notification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_notify, expected", [(True, 1), (False, 0)])
+async def test_notify_off_watcher_notice_follows_agent_notify(monkeypatch, tmp_path, agent_notify, expected):
+    """notify_mode=off with agent_notify defers like any non-silent watcher, so a late publish gets the safety notice;
+    off without agent_notify is silent and never sends anything."""
+    import tools.process_registry as pr_module
+
+    session = _unpublished()
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "off")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    _ticking(monkeypatch, lambda n: session._completion_event.set() if n == 20 else None)
+    watcher = {**_agent_watcher(), "notify_on_complete": agent_notify}
+
+    await asyncio.wait_for(runner._run_process_watcher(watcher), timeout=30)
+
+    sent = [call.args[1] for call in adapter.send.await_args_list]
+    assert len(sent) == expected, sent
+    assert all("outcome is unknown" in text for text in sent), sent
+
+
+@pytest.mark.asyncio
+async def test_named_profile_unverified_notice(monkeypatch, tmp_path):
+    """A named profile's deferred notice is rendered from that profile's catalog (its display.language)."""
+    import tools.process_registry as pr_module
+    from agent.i18n import reset_language_cache, t
+    from hermes_cli.profiles import get_profile_dir
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(tmp_path))
+    work = get_profile_dir("work")
+    (work / "locales").mkdir(parents=True)
+    (work / "config.yaml").write_text("display:\n  language: en\n", encoding="utf-8")
+    (work / "locales" / "en.yaml").write_text(
+        "gateway:\n  background:\n    unverified_exit: \"WORK-CATALOG {session_id}\"\n", encoding="utf-8")
+    reset_language_cache()
+    session = _unpublished()
+    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner._profile_adapters = {"work": {Platform.TELEGRAM: adapter}}   # a named profile sends through its own map
+    _ticking(monkeypatch, lambda n: session._completion_event.set() if n == 20 else None)
+    watcher = {**_agent_watcher(), "session_key": "agent:work:telegram:dm:123"}
+
+    try:
+        await asyncio.wait_for(runner._run_process_watcher(watcher), timeout=60)
+        default_text = t("gateway.background.unverified_exit", session_id="proc_test")
+    finally:
+        reset_language_cache()
+
+    sent = [call.args[1] for call in adapter.send.await_args_list]
+    assert sent == ["WORK-CATALOG proc_test"], (sent, default_text)
+    assert default_text != sent[0]
+
+
+def _install_held_transform(monkeypatch, home, release, entered):
+    """A real transform_terminal_output plugin that rewrites ``"status": "settled"`` and holds the first call (the
+    reader's publish) until ``release``: the watcher's own call then shares the reader's hook identity."""
+    import hermes_yaml as yaml
+    from hermes_cli import plugins as plugins_mod
+
+    plugin = home / "plugins" / "held_transform"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text("name: held_transform\n", encoding="utf-8")
+    (plugin / "__init__.py").write_text(
+        "def register(ctx):\n"
+        "    def _transform(output='', **kw):\n"
+        "        import tests.gateway.test_background_process_notifications as t\n"
+        "        t._HELD_HOOK['calls'] += 1\n"
+        "        if t._HELD_HOOK['calls'] == 1:\n"
+        "            t._HELD_HOOK['entered'].set()\n"
+        "            t._HELD_HOOK['release'].wait(60)\n"
+        "        return output.replace('\"status\": \"settled\"', '\"status\": \"rewritten\"')\n"
+        "    ctx.register_hook('transform_terminal_output', _transform)\n",
+        encoding="utf-8")
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "plugins": {"enabled": ["held_transform"], "hook_callback_timeout": 120},
+        "display": {"background_process_notifications": "concise"},
+    }), encoding="utf-8")
+    _HELD_HOOK.update(calls=0, entered=entered, release=release)
+    monkeypatch.setattr(plugins_mod, "_plugin_manager", plugins_mod.PluginManager())
+    plugins_mod.discover_plugins()
+
+
+_HELD_HOOK: dict = {}
+
+
+def _settled_session(registry, monkeypatch):
+    """A real registry session that prints a settled payload, spawned under one bound call id as a tool call is.
+    Returns it with the spawning context: core arms the live watcher from that thread (``arm_process_watcher`` →
+    ``run_coroutine_threadsafe``), so the watcher's task runs in a copy of it and carries the same call id."""
+    import shlex
+    import sys
+
+    from tools import process_registry as pr_module
+    from tools.approval_context import set_current_observability_context
+
+    monkeypatch.setattr(pr_module, "process_registry", registry)
+    spawn_ctx = contextvars.Context()
+    spawn_ctx.run(set_current_observability_context, tool_call_id="call-watcher-test")
+    script = 'import json; print(json.dumps({"status": "settled", "reply": "R"}))'
+    session = spawn_ctx.run(registry.spawn_local, f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
+                            task_id="t-watch")
+    session.notify_on_complete = True
+    return session, spawn_ctx
+
+
+@pytest.mark.asyncio
+async def test_watcher_builds_from_the_published_transform_not_its_own_racing_call(monkeypatch, tmp_path):
+    """The reader's publish transform is held under the call's hook identity while the watcher ticks with the session
+    exited: the watcher must wait for the publish, so the agent is fed the transformed text, never raw settled."""
+    import os
+
+    from tools.process_registry import ProcessRegistry
+
+    home = __import__("pathlib").Path(os.environ["HERMES_HOME"])
+    release, entered = threading.Event(), threading.Event()
+    _install_held_transform(monkeypatch, home, release, entered)
+    registry = ProcessRegistry()
+    session, spawn_ctx = _settled_session(registry, monkeypatch)
+    runner = _build_runner(monkeypatch, home, "concise")
+    injected, unset_ticks = [], []
+    runner._enqueue_process_completion_notification = AsyncMock(
+        side_effect=lambda text, evt: injected.append(text) or True)
+    assert await asyncio.to_thread(entered.wait, 30), "the reader's publish never reached the transform"
+
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay, *a, **kw):
+        if delay == 0 and session.exited and not session._completion_event.is_set():
+            unset_ticks.append(1)
+            if len(unset_ticks) == 3:
+                release.set()
+        await real_sleep(0.01)
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    watcher = _agent_watcher() | {"session_id": session.id}
+    task = asyncio.get_running_loop().create_task(runner._run_process_watcher(watcher), context=spawn_ctx.copy())
+    try:
+        await asyncio.wait_for(task, timeout=60)
+    finally:
+        release.set()
+
+    assert unset_ticks, "the watcher never ticked while the publish was held"
+    assert len(injected) == 1, injected
+    output = injected[0].split("Output:", 1)[1]                  # the command line quotes the script itself
+    assert '"status": "rewritten"' in output and '"status": "settled"' not in output, injected[0]
+
+
+@pytest.mark.asyncio
+async def test_prune_during_publish(monkeypatch, tmp_path):
+    """A finished session older than the TTL whose publish is still running is not pruned by a concurrent spawn: the
+    registry keeps the same object (no reload), the watcher sends nothing until the event is set, then exactly one
+    completion built from that session; the next prune, with the session published, removes it."""
+    import shlex
+    import sys
+
+    from tools import process_registry as pr_module
+    from tools.process_registry import ProcessRegistry, ProcessSession
+
+    registry = ProcessRegistry()
+    monkeypatch.setattr(pr_module, "process_registry", registry)
+    session = ProcessSession(id="proc_prunehold", command="echo done", task_id="t-prune", output_buffer="done\n",
+                             notify_on_complete=True, started_at=__import__("time").time() - pr_module.FINISHED_TTL_SECONDS - 60)
+    registry._running[session.id] = session
+    gate, in_publish = threading.Event(), threading.Event()
+    real_publish = registry._publish_finished
+
+    def held_publish(s, *a, **k):
+        if s is session:
+            in_publish.set()
+            assert gate.wait(timeout=60), "publish gate never released"
+        return real_publish(s, *a, **k)
+    monkeypatch.setattr(registry, "_publish_finished", held_publish)
+    finisher = threading.Thread(target=registry._finish_exited, args=(session, 0), daemon=True)
+    finisher.start()
+    assert await asyncio.to_thread(in_publish.wait, 30)
+    assert registry._finished.get(session.id) is session and not session._completion_event.is_set()
+
+    other = registry.spawn_local(f"{shlex.quote(sys.executable)} -c pass", task_id="t-prune-other")
+    assert registry._finished.get(session.id) is session, "an unpublished session was pruned"
+    assert registry.get(session.id) is session, "get returned a reload, not the live session"
+
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    injected = []
+    runner._enqueue_process_completion_notification = AsyncMock(
+        side_effect=lambda text, evt: injected.append((text, evt)) or True)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    held_ticks = []
+
+    def on_tick(n):
+        if n <= 5:
+            held_ticks.append((n, len(injected), adapter.send.await_count))
+        if n == 5:                                    # several ticks while held, fewer than the notice's 12
+            gate.set()
+            assert session._completion_event.wait(timeout=30), "the publish never set the event"
+    _ticking(monkeypatch, on_tick)
+    await asyncio.wait_for(runner._run_process_watcher(_agent_watcher() | {"session_id": session.id}), timeout=30)
+    finisher.join(timeout=30)
+    assert held_ticks == [(n, 0, 0) for n in range(1, 6)], held_ticks
+    assert not adapter.send.await_count, adapter.send.await_args_list
+    assert len(injected) == 1 and injected[0][1]["session_id"] == session.id, injected
+    assert "done" in injected[0][0]
+    await asyncio.to_thread(lambda: other._reader_thread.join(timeout=30))
+    with registry._lock:
+        registry._prune_if_needed()
+    assert session.id not in registry._finished, "a published, aged session is pruned as usual"

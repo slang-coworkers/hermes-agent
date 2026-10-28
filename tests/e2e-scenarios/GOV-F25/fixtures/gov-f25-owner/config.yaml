@@ -1,0 +1,48 @@
+# gov-f25-owner — the worker profile for AC-GOV-F25-7 (live).
+#
+# Its session runs a `gh pr create` that the nv-artifact post_tool_call observer
+# turns into the first claim of (repo, pr): it establishes the owning card, binds
+# tasks.session_id, and registers the ONE durable-retry wake sub. When a later PR
+# delivery arrives at the default profile, the notifier wakes THIS profile's
+# owning session via the api_server profile-scoped mirror.
+#
+# The live provider block is self-contained on disk (the delivery subprocess
+# strips ANTHROPIC_* — the LOOP-F35 fixture lesson): the operator-pinned
+# canonical live tier, real key injected at the egress-proxy hop. The api_key
+# literal is a placeholder, never a real secret.
+model:
+  provider: coworkers-live
+  default: aws/anthropic/bedrock-claude-opus-4-8
+providers:
+  coworkers-live:
+    base_url: https://inference-api.nvidia.com
+    api_mode: anthropic_messages
+    api_key: dummy-gov-f25-not-a-real-key
+    default_model: aws/anthropic/bedrock-claude-opus-4-8
+timezone: Asia/Kolkata
+platforms:
+  api_server:
+    # gov-f25-owner is a SECONDARY multiplex profile and shares the default
+    # profile's api_server listener; it must NOT bind its own port. Under
+    # multiplex, config-load reads THIS profile's scoped .env (gateway/config.py
+    # _getenv:287-302 prefers the installed secret scope and does not fall back
+    # to os.environ), and Setup provisions the same API_SERVER_KEY into this
+    # profile's .env — whose presence would otherwise force-enable this listener
+    # and trip the multiplex check. This explicit `enabled: false` is exactly the
+    # guard gateway/config.py:2311-2323 documents (a secondary cannot bind its
+    # own api_server, gateway/run.py:9242-9244). The owner's session is reached
+    # only through the default's mirror at /p/gov-f25-owner/v1/chat/completions,
+    # which the durable notifier wakes.
+    enabled: false
+sessions:
+  auto_prune: false
+plugins:
+  enabled:
+    - nv-artifact
+  entries:
+    nv-artifact:
+      settings:
+        # Same single fleet ledger as gov-f25-default (pinned to the shared root).
+        ledger_profile: default
+        orchestrator_profile: gov-f25-default
+        notify_route: gh-pr
