@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import logging
 import os
 import re
@@ -48,7 +49,9 @@ yaml = _load_yaml_compat()
 FORK_REPO = "slang-coworkers/hermes-agent"
 _PLUGIN_SRC = FORK_REPO + "/plugins/{name}"
 # The three OSH-owned plugins whose entries/enabled the launch-profile edit owns.
-# Everything else in the default config is left exactly as the operator had it.
+# Outside these, gateway.multiplex_profiles, the OneCLI/trust secrets.* keys and, under
+# egress.inference_provider, the rendered route/auth surface (_route_reconcile), the default
+# config is left exactly as the operator had it.
 _OSH_PLUGINS = ("nv-coworker-compose", "nv-fleet-gates", "podman-onecli")
 # OSH-owned managed paths: the veto's role map + the openshell ssh-host anchor.
 _FLEET_GATES = "nv-fleet-gates"
@@ -288,8 +291,8 @@ _DELETE = object()
 
 def _del_dotted(cfg: dict[str, Any], dotted: str) -> bool:
     """Remove ``dotted`` from ``cfg`` if present. Returns True when something was removed.
-    Prunes a parent mapping only when it becomes empty AND it is one this edit created the leaf
-    under, so an operator's sibling key never drags an unrelated parent away."""
+    Then prunes, innermost first, every parent mapping the delete left empty, stopping at the
+    first parent that still holds a key, so an operator's sibling key keeps its parent."""
     parts = dotted.split(".")
     stack = []
     cur: Any = cfg
@@ -301,7 +304,6 @@ def _del_dotted(cfg: dict[str, Any], dotted: str) -> bool:
     if not isinstance(cur, dict) or parts[-1] not in cur:
         return False
     del cur[parts[-1]]
-    # Walk back up pruning now-empty mappings this delete emptied.
     for parent, key in reversed(stack):
         if isinstance(parent.get(key), dict) and not parent[key]:
             del parent[key]
@@ -318,7 +320,8 @@ def _desired_default(
     operator already had, so an unrelated enabled plugin is never dropped; each enabled
     plugin's spine ``settings`` are set under ``plugins.entries.<name>.settings`` so the
     default home carries what the veto/OneCLI need (e.g. ``edges_db_path``) — sibling keys
-    on those entries and unrelated entries are left untouched."""
+    on those entries and unrelated entries are left untouched. Under ``egress.inference_provider``
+    it also carries the route reconcile (``_route_reconcile``)."""
     roles = _coworker_roles(spec)
     egress = spec.get("egress") or {}
     gated = "inference_provider" in egress
@@ -394,7 +397,64 @@ def _desired_default(
         else:
             desired[f"{own}.{_trust.FLEET_MARKER}"] = True
         desired.update(_trust_keys(existing, spec))
+    if gated:
+        desired.update(_route_reconcile(existing, spec))
     return desired
+
+
+@functools.cache
+def _load_compose():
+    # By path like _load_trust: the staged planner runs as a script beside compose.py. Cached per
+    # installer instance so it is always the compose beside THIS file. compose's frozen @dataclass
+    # resolves cls.__module__ through sys.modules, so register it before exec.
+    import importlib.util
+    name = "_nv_compose_installer"
+    path = Path(__file__).resolve().parent.parent / "compose.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# Top-level subtrees _desired_default already owns (plugin set, OneCLI deletes, trust keys).
+_ROUTE_EXCLUDED = ("plugins", "secrets")
+
+
+def _route_reconcile(existing: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """The dotted-key edit that makes the existing default's route/auth surface equal to the
+    render's: compose's own validator and enforcer run on a copy of ``existing``, and only the
+    difference is returned (``_DELETE`` for a key the enforcer removed)."""
+    compose = _load_compose()
+    provider = compose._validate_openshell_inference_provider(spec["egress"]["inference_provider"])
+    enforced = copy.deepcopy(existing)
+    compose._enforce_openshell_inference_provider(enforced, spec.get("default_profile", "default"), provider)
+    out: dict[str, Any] = {}
+    _route_walk(
+        "",
+        {k: v for k, v in existing.items() if k not in _ROUTE_EXCLUDED},
+        {k: v for k, v in enforced.items() if k not in _ROUTE_EXCLUDED},
+        out,
+    )
+    return out
+
+
+def _route_walk(prefix: str, have: dict[Any, Any], want: dict[Any, Any], out: dict[str, Any]) -> None:
+    for key, cur in have.items():
+        if key not in want:
+            out[prefix + key] = _DELETE
+        elif cur != want[key]:
+            sub = want[key]
+            # providers is replaced whole (a fresh map). A child key the dotted vocabulary cannot
+            # spell (a dot, a non-str) sets its parent whole, else _del_dotted would miss it.
+            if (prefix + key != "providers" and isinstance(cur, dict) and isinstance(sub, dict)
+                    and all(isinstance(k, str) and "." not in k for k in (*cur, *sub))):
+                _route_walk(f"{prefix}{key}.", cur, sub, out)
+            else:
+                out[prefix + key] = sub
+    for key, val in want.items():
+        if key not in have:
+            out[prefix + key] = val
 
 
 def _trust_keys(existing: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
