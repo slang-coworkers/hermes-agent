@@ -729,6 +729,7 @@ A	tests/plugins/test_osh_f63_regressions.py	in-surface	replay	F68
 A	tests/plugins/test_osh_f64_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_b_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_cli_transport.py	in-surface	replay	F68	
+A	tests/plugins/test_osh_f64_f_acceptance.py	in-surface	new	OSH-F64.f	user ruling O1 msg 2890 (orch msg 8, thread hermes-OSH-F64.f): OSH-F64.f, the default-profile route reconcile; user dashboard msg 3012 (orch msg 52): option 1, the F69 data rows for OSH-F64.f
 A	tests/plugins/test_osh_f64_installer_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_onboard_cli.py	in-surface	replay	F68	
 A	tests/plugins/test_osh_f64_pinned_offline_lane.py	in-surface	replay	F68	
