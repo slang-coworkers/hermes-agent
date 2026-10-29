@@ -442,6 +442,19 @@ plan is byte-for-byte unchanged. The script:
   It must **never run `profile install default`**: `get_profile_dir("default")` resolves
   to `$HERMES_HOME` itself (the user's running Hermes), so the default is edited, never
   reinstalled.
+  Under `egress.inference_provider` the edit also makes the default's route/auth surface
+  equal to the rendered `default/config.yaml`. It replaces `providers` whole with the one
+  rendered provider block, sets `model.provider`, `model.default` and `attribution_tag`, and
+  removes every inherited route and credential the render removes: the `model.*` route/auth
+  keys, `custom_providers`, a root `provider`/`base_url`/`api_base`, the `delegation` route
+  keys, `fallback_model`/`fallback_providers` and each auxiliary task's route keys.
+  `model.context_length`, `delegation.model` and its limits, an auxiliary task's bare `model`
+  and every other operator key stay as they were. A spec without `egress.inference_provider`
+  leaves the default's route as it was. The backup `config.yaml.osh-f64.bak` is taken once,
+  by the first install that edits the default, and is never overwritten. **A `providers.*`
+  entry you add after the first install is removed by the next install run, and it is not in
+  `config.yaml.osh-f64.bak`.** Re-running the install reconciles a home installed before this
+  fix and keeps its first backup.
 - On a rerun it **deletes and re-creates** any existing worker sandbox whose recorded policy
   digest (`<home>/.osh-f64/sandbox-policy/<name>.sha256`) is missing or differs from the current
   render, discarding that sandbox's local state. A box installed by an older installer has no
