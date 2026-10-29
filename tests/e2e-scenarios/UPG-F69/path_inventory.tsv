@@ -859,6 +859,7 @@ A	tests/plugins/test_nv_fleet_gates_unit.py	in-surface	replay	F68
 A	tests/plugins/test_nv_ingress_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_nv_ingress_admission_v2.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4); user msg 3162 (orch msg 40): erratum E1 D12, the real-admission node of AC-ING-F66-2
 A	tests/plugins/test_nv_ingress_openshell_contract.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
+A	tests/plugins/test_nv_ingress_stage_snapshot.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4); user msg 3214 (orch msg 58): erratum E3 D14/D14.b, the stage-settings snapshot nodes of AC-ING-F66-3
 A	tests/plugins/test_nv_ingress_unit.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_nv_path_guard_base_oracle.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_workflow_modes_acceptance.py	in-surface	replay	F68	

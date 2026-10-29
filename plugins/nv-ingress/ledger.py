@@ -89,12 +89,22 @@ def ledger_home():
     return get_profile_dir("default")
 
 
+def _db_path():
+    return ledger_home() / "plugin-data" / PLUGIN_KEY / "data.db"
+
+
 def exists() -> bool:
-    return (ledger_home() / "plugin-data" / PLUGIN_KEY / "data.db").is_file()
+    return _db_path().is_file()
 
 
-def connect() -> sqlite3.Connection:
-    """Open the fleet ledger (schema ensured), pinned to the DEFAULT home."""
+def connect(*, keep_journal_mode: bool = False) -> sqlite3.Connection:
+    """Open the fleet ledger (schema ensured), pinned to the DEFAULT home.
+
+    ``keep_journal_mode`` opens an existing ledger without the core journal-mode step, which
+    imports the config loader (seconds in the route script's fresh interpreter); the file keeps
+    the mode the gateway's own open set. A missing ledger always gets ``plugin_db``'s policy.
+    """
+    from hermes_cli.sqlite_util import open_db
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from plugins.plugin_storage import plugin_db
 
@@ -104,7 +114,12 @@ def connect() -> sqlite3.Connection:
         try:
             token = set_hermes_home_override(str(ledger_home()))
             try:
-                conn = plugin_db(PLUGIN_KEY)
+                path = _db_path()
+                if keep_journal_mode and path.is_file():
+                    conn = open_db(path, db_label=f"plugin-data/{PLUGIN_KEY}/data.db", wal=False, foreign_keys=True,
+                                   row_factory=None, check_same_thread=False)
+                else:
+                    conn = plugin_db(PLUGIN_KEY)
             finally:
                 reset_hermes_home_override(token)
             conn.execute("PRAGMA busy_timeout=5000")
@@ -135,7 +150,11 @@ def _qualifying_issue(env: dict[str, Any], labels: list[str]) -> bool:
     return env.get("action") in ("opened", "labeled") and bool(wanted & have)
 
 
-def stage(env: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+# The settings keys stage() reads; the plugin snapshots exactly these for the route script.
+STAGE_SETTINGS = ("self_logins", "issue_labels")
+
+
+def stage(env: dict[str, Any], settings: dict[str, Any], *, keep_journal_mode: bool = False) -> dict[str, Any]:
     """Durably stage one envelope (D4) and return it with ``stage`` + ``self_authored``.
 
     One transaction: the outbox row (idempotent on the delivery id), the issue's
@@ -143,7 +162,7 @@ def stage(env: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     """
     out = dict(env)
     out["self_authored"] = _is_self_authored(env, settings.get("self_logins") or [])
-    conn = connect()
+    conn = connect(keep_journal_mode=keep_journal_mode)
     try:
         conn.execute("BEGIN IMMEDIATE")
         dup = conn.execute("SELECT stage FROM outbox WHERE source = ? AND delivery_id = ?",

@@ -21,6 +21,7 @@ import functools
 import importlib
 import json
 import logging
+import os
 import sys
 import threading
 import uuid
@@ -47,6 +48,59 @@ def _settings() -> dict[str, Any]:
             "drain_interval_seconds", "max_group_rows", "max_group_prompt_bytes", "webhook_guard")
     return {k: ctx.get_config(k) for k in keys}
 
+
+_STAGE_SNAPSHOT = "stage-settings.json"
+_SNAPSHOTS_WRITTEN: dict[str, str] = {}
+
+
+def _config_sources() -> list[dict[str, Any]]:
+    """The config files the loader reads, each with its mtime (None while absent)."""
+    from hermes_cli import managed_scope
+    from hermes_cli.config import get_config_path
+
+    paths = [get_config_path()]
+    managed = managed_scope.get_managed_dir()
+    if managed is not None:
+        paths.append(managed / "config.yaml")
+    sources = []
+    for path in paths:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            mtime_ns = None
+        sources.append({"path": str(path), "mtime_ns": mtime_ns})
+    return sources
+
+
+def _refresh_stage_snapshot() -> None:
+    """Write the loader's view of the settings the route script stages with (UPG-F69.c E3 D14).
+
+    The script runs in a fresh interpreter per delivery, where importing the core config
+    loader costs seconds; it reads this file instead while every recorded source is unchanged.
+    """
+    ctx = _CTX
+    if ctx is None:
+        return
+    from plugins.plugin_storage import plugin_data_dir
+
+    sources = _config_sources()  # stat before reading, so an edit in between reads as stale
+    body = json.dumps({"sources": sources, "settings": {k: ctx.get_config(k) for k in ledger.STAGE_SETTINGS}},
+                      sort_keys=True)
+    target = plugin_data_dir(PLUGIN_KEY) / _STAGE_SNAPSHOT
+    if _SNAPSHOTS_WRITTEN.get(str(target)) == body and target.is_file():
+        return
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, target)
+    _SNAPSHOTS_WRITTEN[str(target)] = body
+
+
+def _refresh_stage_snapshot_safely(level: int = logging.DEBUG) -> None:
+    try:
+        _refresh_stage_snapshot()
+    except Exception:
+        # Without a current snapshot the script reads the loader itself: slower, never wrong.
+        logger.log(level, "nv-ingress: stage settings snapshot not refreshed", exc_info=True)
 
 def _active_profile() -> str:
     try:
@@ -155,6 +209,7 @@ def _chat_route(chat_id: str) -> str | None:
 def _on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, **kwargs):
     """The ingress route never mints a one-shot webhook session: the event is
     already staged, so kick the drain and skip. Every other route is untouched."""
+    _refresh_stage_snapshot_safely()
     try:
         from gateway.config import Platform
 
@@ -378,6 +433,7 @@ def register(ctx) -> None:
     _require_core_symbols()
     _CTX = ctx
     _LOAD_ID = uuid.uuid4().hex[:12]
+    _refresh_stage_snapshot_safely(logging.WARNING)
     ctx.register_tool(name="ingress_remap", toolset=_TOOLSET, schema=_REMAP_SCHEMA, handler=_tool_remap,
                       check_fn=_is_orchestrator, description=_REMAP_SCHEMA["description"])
     ctx.register_tool(name="ingress_claim_replacement", toolset=_TOOLSET, schema=_REPLACEMENT_SCHEMA,
