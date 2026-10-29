@@ -1819,6 +1819,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                         async with self._completion_event_scope(watcher):
                             notice = t("gateway.background.unverified_exit", session_id=session_id)
                         await self._send_watcher_message(platform_name, chat_id, thread_id, notice, watcher)
+                        break
                     continue
                 # Agent-notify: inject a synthetic message unless the agent already consumed the result via
                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).

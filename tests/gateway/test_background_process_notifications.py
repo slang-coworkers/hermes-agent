@@ -960,8 +960,8 @@ async def test_watcher_defers_an_exit_until_its_publish_is_done(monkeypatch, tmp
 
 @pytest.mark.asyncio
 async def test_watcher_sends_one_output_free_notice_when_the_publish_is_late(monkeypatch, tmp_path):
-    """Held beyond 12 ticks: exactly one unverified-exit notice (no output, command or exit code), then the normal
-    completion once the event is set."""
+    """Held beyond 12 ticks: exactly one unverified-exit notice (no output, command or exit code); the watcher then
+    ends, so a publish that lands just after the notice gets no completion from it (UPG-F69.a)."""
     import tools.process_registry as pr_module
 
     session = _unpublished(output="SECRET-OUTPUT\n", exit_code=3, command="make release")
@@ -969,47 +969,15 @@ async def test_watcher_sends_one_output_free_notice_when_the_publish_is_late(mon
     runner = _build_runner(monkeypatch, tmp_path, "concise")
     runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
     adapter = runner.adapters[Platform.TELEGRAM]
+    adapter.send.side_effect = lambda *a, **kw: session._completion_event.set()
 
-    def on_tick(n):
-        if n == 20:
-            assert runner._enqueue_process_completion_notification.await_count == 0
-            session._completion_event.set()
-    _ticking(monkeypatch, on_tick)
-
-    await runner._run_process_watcher(_agent_watcher())
+    await asyncio.wait_for(runner._run_process_watcher(_agent_watcher()), timeout=30)
 
     notices = [call.args[1] for call in adapter.send.await_args_list]
     assert len(notices) == 1, notices
     assert "proc_test" in notices[0] and "outcome is unknown" in notices[0], notices[0]
     for leak in ("SECRET-OUTPUT", "make release", "3"):
         assert leak not in notices[0].replace("proc_test", ""), notices[0]
-    runner._enqueue_process_completion_notification.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_watcher_on_a_never_published_exit_sends_one_notice_and_ends_on_cancel(monkeypatch, tmp_path):
-    """A registered session whose event is never set: one notice, no completion over N + 2 ticks; the watcher keeps
-    polling until its task is cancelled, and then ends with nothing more sent."""
-    import tools.process_registry as pr_module
-    from gateway.run_notifications import _UNPUBLISHED_EXIT_NOTICE_TICKS as N
-
-    session = _unpublished()
-    monkeypatch.setattr(pr_module, "process_registry", _HeldRegistry(session))
-    runner = _build_runner(monkeypatch, tmp_path, "concise")
-    runner._enqueue_process_completion_notification = AsyncMock(return_value=True)
-    adapter = runner.adapters[Platform.TELEGRAM]
-    reached = asyncio.Event()
-    ticks = _ticking(monkeypatch, lambda n: reached.set() if n >= N + 2 else None)
-
-    task = asyncio.create_task(runner._run_process_watcher(_agent_watcher()))
-    await asyncio.wait_for(reached.wait(), timeout=30)
-    assert not task.done()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert ticks["n"] >= N + 2
-    assert adapter.send.await_count == 1, adapter.send.await_args_list
     runner._enqueue_process_completion_notification.assert_not_awaited()
 
 
