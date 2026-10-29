@@ -15,7 +15,7 @@ import json
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 API = "https://api.github.com"
 PASS, REFUSE = 0, 3
@@ -28,11 +28,11 @@ class ReadUnavailable(Exception):
     """The checks API could not be read; the gate refuses and names the operator lane."""
 
 
-def evaluate(runs: List[Dict[str, Any]], pinned_sha: str, current_head: Optional[str],
-             waivers: List[str]) -> Dict[str, Any]:
+def evaluate(runs: list[dict[str, Any]], pinned_sha: str, current_head: str | None,
+             waivers: list[str]) -> dict[str, Any]:
     """Pure verdict over the check runs read at ``pinned_sha``."""
     waived = set(waivers or [])
-    refused: List[Dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
     if current_head != pinned_sha:
         refused.append({"reason": "head moved", "pinned": pinned_sha, "current": current_head})
     if not runs:
@@ -80,7 +80,7 @@ def _anonymous_get(path: str) -> Any:
 
 def read(repo: str, pr: int, sha: str, mode: str) -> tuple:
     get = _provider_get if mode == "provider" else _anonymous_get
-    runs: List[Dict[str, Any]] = []
+    runs: list[dict[str, Any]] = []
     for page in range(1, MAX_PAGES + 1):
         data = get(f"/repos/{repo}/commits/{sha}/check-runs?per_page={PER_PAGE}&page={page}")
         batch = (data or {}).get("check_runs") if isinstance(data, dict) else None
@@ -94,7 +94,7 @@ def read(repo: str, pr: int, sha: str, mode: str) -> tuple:
     return runs, head
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="checks_gate.py")
     parser.add_argument("repo")
     parser.add_argument("pr", type=int)

@@ -77,7 +77,7 @@ def _hermes(tmp_path: Path, *argv: str) -> subprocess.CompletedProcess:
     home = _home(tmp_path) if not (tmp_path / "home").exists() else tmp_path / "home" / ".hermes"
     env = dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home),
                HERMES_BUNDLED_PLUGINS=str(tmp_path / "bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
-    return subprocess.run([sys.executable, "-m", "hermes_cli.main", *argv], capture_output=True, text=True,
+    return subprocess.run([sys.executable, "-m", "hermes_cli.main", *argv], check=False, capture_output=True, text=True,
                           encoding="utf-8", env=env, cwd=str(REPO_ROOT), timeout=300)
 
 
@@ -212,7 +212,7 @@ def test_drain_runs_only_on_the_driver_thread_and_never_blocks_the_loop(tmp_path
             beats = 0
             t0 = time.monotonic()
             while time.monotonic() - t0 < 2.0:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.05)  # health: allow HX013 -- counts event-loop beats while the driver pass runs
                 beats += 1
             return verdict, hook_seconds, beats
 
@@ -242,7 +242,7 @@ def test_driver_idles_without_the_runtime_lock_and_stops_on_unload(tmp_path, mon
     assert len(consults) >= 3, "the driver never consulted the gateway runtime lock"
     assert passes == [], "a process without the gateway runtime lock ran a drain pass"
     assert _drain_threads(), "the load started no driver thread"
-    for manager in list(_MANAGERS):
+    for manager in _MANAGERS:
         manager.unload()
     _MANAGERS.clear()
     assert not _drain_threads(), "unload left the driver thread running"
@@ -934,7 +934,7 @@ def test_a_group_staged_before_a_crash_is_one_turn_after_the_next_load(tmp_path,
     _event(fleet, "d-pre-2")
     assert fleet.turns == []
     name = fleet.module.__name__
-    for manager in list(_MANAGERS):
+    for manager in _MANAGERS:
         manager.unload()
     _MANAGERS.clear()
     for mod in [m for m in sys.modules if m == name or m.startswith(name + ".")]:
@@ -1189,7 +1189,7 @@ def test_gateway_boot_inspection_reads_a_real_proc():
     """The one-line inspection still parses: run on the host, it lists this pid in a 4-field row (E16 (D))."""
     boot = _boot_module()
     assert "\n" not in boot._INSPECT_SCRIPT and "\r" not in boot._INSPECT_SCRIPT
-    proc = subprocess.run(["sh", "-c", boot._INSPECT_SCRIPT], capture_output=True, text=True, encoding="utf-8",
+    proc = subprocess.run(["sh", "-c", boot._INSPECT_SCRIPT], check=False, capture_output=True, text=True, encoding="utf-8",
                           timeout=60)
     lines = proc.stdout.rstrip("\n").split("\n")
     assert proc.returncode == 0 and lines[-1] == "#end", proc.stdout[-300:]

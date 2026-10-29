@@ -293,7 +293,7 @@ def test_ac_osh_f64_e_5(loaded, tmp_path):
     implicit, explicit = _render_variant("implicit", None), _render_variant("explicit", "managed")
     assert implicit and implicit == explicit, "an absent mode must render exactly as mode: managed (OSH-F64.b)"
 
-    ip = lambda c: c["egress"]["inference_provider"]  # noqa: E731
+    ip = lambda c: c["egress"]["inference_provider"]
     # From the MANAGED spec: it renders on base, so only a real mode check makes this raise.
     _compose_bad(loaded, tmp_path, "unknown-mode", lambda c: ip(c).update(mode="bypass"),
                  source=MANAGED_SPEC)

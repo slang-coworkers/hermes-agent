@@ -139,7 +139,7 @@ def test_openshell_lint_cli_exits_by_finding(tmp_path):
     """(B) `python3 -m edge.openshell_lint` exits 1 naming each finding, 0 on a clean tree, 2 on a missing path."""
     def run(*paths):
         return subprocess.run([sys.executable, "-m", "edge.openshell_lint", *map(str, paths)], cwd=PLUGIN_SRC,
-                              capture_output=True, text=True, encoding="utf-8", timeout=120)
+                              check=False, capture_output=True, text=True, encoding="utf-8", timeout=120)
     bad = run(F767641, C16D47C)
     assert bad.returncode == 1 and ":45: positional-name" in bad.stdout and ":51: multiline-arg" in bad.stdout
     assert run(PLUGIN_SRC).returncode == 0
@@ -164,7 +164,7 @@ def test_openshell_lint_cli_exits_by_finding(tmp_path):
 def test_fake_openshell_enforces_the_0_0_72_contract(tmp_path, argv, refused, reason):
     """(A) The fake accepts only the two 0.0.72 calls gateway-boot makes, and records every call."""
     fake = fake_openshell.install(tmp_path)
-    proc = subprocess.run([fake.bin, *argv], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    proc = subprocess.run([fake.bin, *argv], check=False, capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert fake.calls() == [argv]
     if refused:
         assert proc.returncode != 0

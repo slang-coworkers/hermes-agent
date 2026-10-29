@@ -30,7 +30,7 @@ _DIR_ENV = "NV_FAKE_OPENSHELL_DIR"
 _LIST_TABLE = "NAME PHASE\ning-f66-gw Ready\n"
 
 
-def refusal(argv: "list[str]") -> "tuple[int, str] | None":
+def refusal(argv: list[str]) -> tuple[int, str] | None:
     """``(exit code, reason)`` when 0.0.72 would refuse ``argv`` (the program name excluded), else None."""
     command_at = argv.index("--") + 1 if argv[:2] == ["sandbox", "exec"] and "--" in argv else len(argv)
     for i, arg in enumerate(argv):
@@ -59,7 +59,7 @@ def refusal(argv: "list[str]") -> "tuple[int, str] | None":
     return None
 
 
-def _kind(argv: "list[str]") -> str:
+def _kind(argv: list[str]) -> str:
     if argv[1] == "list":
         return "list"
     command = argv[argv.index("--") + 1:]
@@ -88,7 +88,7 @@ def _append(path: str, record: dict) -> None:
         log.write(json.dumps(record) + "\n")
 
 
-def main(argv: "list[str]") -> int:
+def main(argv: list[str]) -> int:
     d = os.environ[_DIR_ENV]
     refused = refusal(argv)
     _append(os.path.join(d, "calls.jsonl"), {"argv": argv, "kind": None if refused else _kind(argv)})
@@ -105,7 +105,7 @@ def main(argv: "list[str]") -> int:
         sys.stderr.buffer.write(proc.stderr)
         return proc.returncode
     if answer.get("sleep"):
-        time.sleep(float(answer["sleep"]))
+        time.sleep(float(answer["sleep"]))  # health: allow HX013 -- the fake models a slow openshell call in wall-clock time
     sys.stdout.buffer.write(answer.get("stdout", "").encode("utf-8", "surrogateescape"))
     sys.stderr.buffer.write(answer.get("stderr", "").encode("utf-8", "surrogateescape"))
     return int(answer.get("rc", 0))
@@ -124,15 +124,15 @@ class FakeOpenshell:
         (self.dir / "answers.json").write_text(json.dumps(queues), encoding="utf-8")
         (self.dir / "state.json").unlink(missing_ok=True)
 
-    def _read(self, name: str) -> "list[dict]":
+    def _read(self, name: str) -> list[dict]:
         path = self.dir / name
         return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
-    def calls(self, kind: "str | None" = None) -> "list[list[str]]":
+    def calls(self, kind: str | None = None) -> list[list[str]]:
         """Every recorded argv, or only the accepted calls of ``kind`` (``probe``, ``inspect``, ``list``)."""
         return [c["argv"] for c in self._read("calls.jsonl") if kind is None or c["kind"] == kind]
 
-    def refusals(self) -> "list[dict]":
+    def refusals(self) -> list[dict]:
         return self._read("refusals.jsonl")
 
     def launches(self, expect: int = 0, timeout: float = 10.0) -> int:

@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- one test per carried ING-F66 id; the 8.31 file is already 2007 lines
 """Acceptance tests for ING-F66 — the inbound gateway (plugin ``nv-ingress``).
 
 Ships to ``tests/plugins/test_nv_ingress_acceptance.py``. One ``test_ac_ing_f66_<n>``
@@ -834,7 +835,7 @@ def test_ac_ing_f66_9(ingress, monkeypatch, event, action, conclusion):
 def test_ac_ing_f66_10(ingress, monkeypatch, capsys):
     """Remapping an owner (CLI verb and model tool) is orchestrator-only AND passes the human-approval gate before any mutation; denial, timeout or no-human context refuses with no ledger change (floor f)."""
     import hermes_cli.plugins as hp
-    import tools.approval as approval
+    from tools import approval
 
     for prof, sid in ((OWNER, "S-fix"), (OTHER, "S-rev")):
         _seed_session(ingress.root / "profiles" / prof, sid)
@@ -909,7 +910,7 @@ def _render(tmp_path, out: Path, provision_dry_run: bool = False) -> subprocess.
     proc = subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", "compose",
                            str(ING_SPEC), "--out", str(out),
                            *(["--provision-dry-run"] if provision_dry_run else [])],
-                          capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                          check=False, capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
     assert proc.returncode == 0, proc.stderr
     return proc
 
@@ -985,7 +986,7 @@ def test_ac_ing_f66_11(ingress, tmp_path, monkeypatch):
         for name in ("gh", "curl"):
             _fake_cli(bindir, name, log, fixtures)
         proc = subprocess.run([sys.executable, str(gate_path), REPO, "7", sha, "--read", mode],
-                              capture_output=True, text=True, env=env, timeout=60)
+                              check=False, capture_output=True, text=True, env=env, timeout=60)
         assert proc.returncode == 3, mode + ": " + proc.stdout + proc.stderr
         verdict = json.loads(proc.stdout.strip().splitlines()[-1])
         assert verdict["pass"] is False and "check" in json.dumps(verdict["refused"]), mode
@@ -1005,7 +1006,7 @@ def test_ac_ing_f66_11(ingress, tmp_path, monkeypatch):
                 assert all(v.upper() == "GET" for v in verbs), verbs
     (bindir / "curl").write_text("#!" + sys.executable + "\nimport sys\nsys.exit(4)\n", encoding="utf-8")
     proc = subprocess.run([sys.executable, str(gate_path), REPO, "7", sha, "--read", "anonymous"],
-                          capture_output=True, text=True, env=env, timeout=60)
+                          check=False, capture_output=True, text=True, env=env, timeout=60)
     assert proc.returncode == 3 and "L-CHK" in proc.stdout
 
 
@@ -1065,7 +1066,7 @@ def _legacy_route_parity(tmp_path, monkeypatch) -> None:
                    HERMES_BUNDLED_PLUGINS=str(tmp_path / f"legacy-home-{row}" / "render-bundled"),
                    HERMES_ENABLE_PROJECT_PLUGINS="0")
         proc = subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(spec),
-                               "--out", str(out)], capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                               "--out", str(out)], check=False, capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
         assert proc.returncode == 0, f"{row}: {proc.stderr}"
         default_dir = next(p.parent for p in out.glob("*/config.yaml") if p.parent.name.endswith("default"))
         extra = (((yaml.safe_load((default_dir / "config.yaml").read_text(encoding="utf-8")) or {})
@@ -1153,7 +1154,7 @@ def test_ac_ing_f66_13(ingress, tmp_path, monkeypatch, capsys):
                HERMES_BUNDLED_PLUGINS=str(tmp_path / "render-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     refused = subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", "compose",
                               str(spec_dir / ING_SPEC.name), "--out", str(tmp_path / "out-bad")],
-                             capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                             check=False, capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
     assert refused.returncode != 0 and "replace_routes" in (refused.stderr + refused.stdout)
     widened = dict(extra, host="0.0.0.0")
     with pytest.raises(ValueError):
@@ -1236,7 +1237,7 @@ def test_ac_ing_f66_13(ingress, tmp_path, monkeypatch, capsys):
 
 def test_ac_ing_f66_14(ingress, tmp_path, monkeypatch):
     """No model-driven tool in the gateway sandbox can reach the loopback route: the rendered fleet keeps sandbox enforcement on with the ssh backend for every profile, no profile config or env template enables any of the three private-URL switches, and the release URL guard refuses the ingress loopback URL under the rendered config; the running gateway process's own env override is checked live by AC-20 step 1 (trust point 3, derived)."""
-    import tools.url_safety as url_safety
+    from tools import url_safety
 
     out = tmp_path / "out"
     _render(tmp_path, out)
@@ -1281,7 +1282,7 @@ def test_ac_ing_f66_15(ingress, tmp_path):
     env = dict(os.environ, HOME=str(home.parent), HERMES_HOME=str(home),
                HERMES_BUNDLED_PLUGINS=str(tmp_path / "render-bundled"), HERMES_ENABLE_PROJECT_PLUGINS="0")
     proc = subprocess.run([sys.executable, "-m", "hermes_cli.main", "coworker", "compose", str(spec_path),
-                           "--out", str(out)], capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+                           "--out", str(out)], check=False, capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
     assert proc.returncode == 0, proc.stderr
     rendered = _files(out)
     assert rendered
@@ -1791,7 +1792,7 @@ def _load_installer():
 
 
 def _render_bytes(role: str) -> bytes:
-    return f"version: 1\n# {role} render\n".encode("utf-8")
+    return f"version: 1\n# {role} render\n".encode()
 
 
 class _NoPopen:
@@ -1920,7 +1921,7 @@ def _ac27_install(tmp_path, monkeypatch, inst, case: str, broker: _LaneBroker, p
                        policy_root=None if policy_root is None else str(policy_root))
         except _HARNESS_ERRORS:
             raise
-        except Exception as exc:  # noqa: BLE001 - any installer refusal; programming errors re-raise above
+        except Exception as exc:
             return exc
     assert any(c[:3] == ["hermes", "coworker", "compose"] for c in broker.calls), "the install never composed"
     return None

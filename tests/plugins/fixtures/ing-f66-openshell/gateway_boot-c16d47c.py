@@ -38,20 +38,20 @@ def decide(gateway_healthy: bool, start_in_flight: bool) -> str:
     return "start"
 
 
-def _run(argv: List[str]) -> subprocess.CompletedProcess:
+def _run(argv: list[str]) -> subprocess.CompletedProcess:
     # surrogateescape: a sandbox process's argv may hold non-UTF-8 bytes; they must not crash the
     # supervisor, and the ASCII Hermes tokens still compare exactly.
     return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                           errors="surrogateescape", timeout=_EXEC_TIMEOUT_SECONDS, check=False)
 
 
-def _sandbox_sh(gw: Dict[str, Any], script: str) -> subprocess.CompletedProcess:
+def _sandbox_sh(gw: dict[str, Any], script: str) -> subprocess.CompletedProcess:
     # openshell takes the sandbox only as `-n <name>`: a positional name falls back to the
     # last-used sandbox and is run as the command (exit 127).
     return _run([gw["openshell_bin"], "sandbox", "exec", "-n", gw["sandbox"], "--no-tty", "--", "sh", "-c", script])
 
 
-def gateway_healthy(gw: Dict[str, Any]) -> bool:
+def gateway_healthy(gw: dict[str, Any]) -> bool:
     probe = f"curl -fsS --max-time 5 http://127.0.0.1:{int(gw['port'])}/health"
     try:
         return _sandbox_sh(gw, probe).returncode == 0
@@ -83,7 +83,7 @@ _ENTRY_NAMES = ("hermes", "hermes.real")
 _PYTHON = re.compile(r"python(3(\.\d+)?)?")
 
 
-def _command_args(argv: List[str]) -> Optional[List[str]]:
+def _command_args(argv: list[str]) -> Optional[list[str]]:
     """The Hermes CLI arguments of ``argv``, or None when it is not a Hermes entry point.
 
     Entry points: a ``hermes``/``hermes.real`` executable, or a python interpreter running one
@@ -108,12 +108,12 @@ def _command_args(argv: List[str]) -> Optional[List[str]]:
     return None
 
 
-def is_gateway_argv(argv: List[str]) -> bool:
+def is_gateway_argv(argv: list[str]) -> bool:
     """A Hermes ``gateway run|restart`` (or bare ``gateway``) invocation, by the release's token rules."""
     args = _command_args(argv)
     if args is None:
         return False
-    rest: List[str] = []
+    rest: list[str] = []
     skip = False
     for tok in args:
         if skip:
@@ -128,7 +128,7 @@ def is_gateway_argv(argv: List[str]) -> bool:
     return i + 1 == len(rest) or rest[i + 1] in ("run", "restart")
 
 
-def gateway_processes(gw: Dict[str, Any]) -> Tuple[Optional[List[int]], str]:
+def gateway_processes(gw: dict[str, Any]) -> tuple[Optional[list[int]], str]:
     """``(pids, reason)``: the live non-zombie Hermes gateway pids in the sandbox.
 
     ``pids`` is None when the inspection failed or its result is ambiguous; ``reason`` says why.
@@ -148,7 +148,7 @@ def gateway_processes(gw: Dict[str, Any]) -> Tuple[Optional[List[int]], str]:
     if proc.returncode != 0 or not lines or lines[-1] != "#end":
         tail = lines[-1][:120] if lines else (proc.stderr or "").strip()[:120]
         return None, f"the process inspection failed (exit {proc.returncode}, last output {tail!r})"
-    pids: List[int] = []
+    pids: list[int] = []
     for line in lines[:-1]:
         parts = line.split("\t", 3)
         if len(parts) != 4 or not parts[0].isdigit() or len(parts[1]) != 1:
@@ -166,7 +166,7 @@ def gateway_processes(gw: Dict[str, Any]) -> Tuple[Optional[List[int]], str]:
     return pids, f"inspected {len(lines) - 1} processes"
 
 
-def sandbox_listed(gw: Dict[str, Any]) -> bool:
+def sandbox_listed(gw: dict[str, Any]) -> bool:
     try:
         proc = _run([gw["openshell_bin"], "sandbox", "list"])
     except (OSError, subprocess.TimeoutExpired):
@@ -192,7 +192,7 @@ def _warn_once(key: tuple, msg: str, *args: Any) -> None:
     _last_block = key
 
 
-def tick(gw: Dict[str, Any], now: float) -> str:
+def tick(gw: dict[str, Any], now: float) -> str:
     global _last_block
     lock = Path(os.path.expanduser(gw["lock_file"]))
     if gateway_healthy(gw):
@@ -237,7 +237,7 @@ def main() -> int:
         gw = json.load(handle)["gateway"]
     while True:
         tick(gw, time.time())
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        time.sleep(CHECK_INTERVAL_SECONDS)  # health: allow HX013 -- frozen capture of the shipped supervisor loop
 
 
 if __name__ == "__main__":

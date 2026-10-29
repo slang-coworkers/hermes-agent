@@ -72,7 +72,7 @@ def _project():
 
 
 def _render_bytes(role: str) -> bytes:
-    return f"version: 1\n# {role} render\n".encode("utf-8")
+    return f"version: 1\n# {role} render\n".encode()
 
 
 def _want(roles):
@@ -209,7 +209,7 @@ def _install(tmp_path, monkeypatch, inst, case, broker, policy_root, *, unreadab
                        policy_root=None if policy_root is None else str(policy_root))
         except _HARNESS_ERRORS:
             raise
-        except Exception as exc:  # noqa: BLE001 - any installer refusal; programming errors re-raise above
+        except Exception as exc:
             return exc
     assert any(c[:3] == ["hermes", "coworker", "compose"] for c in broker.calls), "the install never composed"
     return None

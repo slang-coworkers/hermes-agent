@@ -34,12 +34,12 @@ def decide(gateway_healthy: bool, start_in_flight: bool) -> str:
     return "start"
 
 
-def _run(argv: List[str]) -> subprocess.CompletedProcess:
+def _run(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                           timeout=_EXEC_TIMEOUT_SECONDS, check=False)
 
 
-def gateway_healthy(gw: Dict[str, Any]) -> bool:
+def gateway_healthy(gw: dict[str, Any]) -> bool:
     probe = f"curl -fsS --max-time 5 http://127.0.0.1:{int(gw['port'])}/health"
     try:
         return _run([gw["openshell_bin"], "sandbox", "exec", gw["sandbox"], "--", "sh", "-c", probe]).returncode == 0
@@ -47,7 +47,7 @@ def gateway_healthy(gw: Dict[str, Any]) -> bool:
         return False
 
 
-def sandbox_listed(gw: Dict[str, Any]) -> bool:
+def sandbox_listed(gw: dict[str, Any]) -> bool:
     try:
         proc = _run([gw["openshell_bin"], "sandbox", "list"])
     except (OSError, subprocess.TimeoutExpired):
@@ -62,7 +62,7 @@ def start_in_flight(lock: Path, now: float) -> bool:
         return False
 
 
-def tick(gw: Dict[str, Any], now: float) -> str:
+def tick(gw: dict[str, Any], now: float) -> str:
     lock = Path(os.path.expanduser(gw["lock_file"]))
     action = decide(gateway_healthy(gw), start_in_flight(lock, now))
     if action != "start":
@@ -89,7 +89,7 @@ def main() -> int:
         gw = json.load(handle)["gateway"]
     while True:
         tick(gw, time.time())
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        time.sleep(CHECK_INTERVAL_SECONDS)  # health: allow HX013 -- frozen capture of the shipped supervisor loop
 
 
 if __name__ == "__main__":
