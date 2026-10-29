@@ -747,6 +747,7 @@ A	tests/plugins/test_self_f56_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	replay	F68	
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206 + F68 E4 C1: AC-UPG-F67-15 re-spec (UPG-F69 3)
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3); DN-E4-7/-8 opt 1 (msg 1288): AC-UPG-F68-18/-20 on the authority stub (UPG-F69 D-6); msg 72/78 + memo item3c §2/§3/§6 + E4′ §E4.6 + E7.1a/D-1..D-4 (msg 596, architect msg 94): AC-UPG-F68-19/-21 off the retired lease consumer (UPG-F69 3); orch msg 194 (architect msg 112): AC-UPG-F68-12 TAG_COMMIT re-pinned to v0.22.5 bf0203a7, criterion text unchanged (UPG-F69 3)
+A	tests/plugins/test_upg_f69_a_acceptance.py	in-surface	new	UPG-F69.a	user msg 2018 (orch msg 2, thread hermes-UPG-F69.a)
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
 A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 16 (UPG-F69 3)
