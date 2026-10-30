@@ -201,7 +201,10 @@ endpoints:
 
 The gateway policy's `binaries` allow-list adds the in-process Hermes model-call interpreter
 `/opt/hermes/.venv/bin/python` (the served model call is a Python HTTP request, not a `curl`
-shell-out) on top of the base `/usr/bin/curl`. The gateway policy also grants the Hermes runtime
+shell-out) on top of the base `/usr/bin/curl`. OpenShell matches the resolved executable, so the list
+also carries the exact path that venv python resolves to on the v0.22.5 image,
+`/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14`. That entry changes when the
+image's uv-python build changes. The gateway policy also grants the Hermes runtime
 paths its `filesystem_policy` needs to run the model-call process — read-only `/opt/hermes`,
 `/proc`, `/dev/urandom` and read-write `/sandbox`, `/dev/null`, `/dev/pts` — on top of the base
 read-only (`/usr /bin /lib /etc`) + read-write (`/tmp`) lanes; **these grants are gateway-only, and <!-- no-tmp: ok — the sandbox's own read-write lane -->
@@ -238,14 +241,19 @@ providers:
 `sk-OPENSHELL-PROXY-REWRITE` is **identical across every profile** — it is the token that
 fires the OpenShell L7 **credential rewrite**, NOT an identity. The real credential lives
 OpenShell-side as `COMPATIBLE_API_KEY` and **never appears in any sandbox config**. So
-OpenShell + APF is the sole authority for destination, method, path, and credential: a
-per-profile badge can never supersede APF.
+OpenShell, not the profile, decides the destination and the credential: a per-profile badge
+can never supersede it. The PATH is a different matter: OpenShell intercepts
+`inference.local` before the policy engine runs, so the rendered four-path rules never see a
+managed-route request. The managed route's own protocol list is the only path gate there
+(UA-36); [direct mode](#direct-mode-inference-osh-f64e) moves the route to where APF decides it.
 
 **Per-profile attribution.** Both profile children share the one gateway (model-call)
-sandbox, so a per-request header — not a per-sandbox identity — distinguishes them in the
-OpenShell / inference logs: the render sets a distinct non-secret
-`X-Hermes-Profile: osh-f64b-<role>` request header per served profile. It is applied under
-`chat_completions`, the mode in which a custom provider's `extra_headers` reach the request.
+sandbox, so only a per-request field could tell them apart: the render sets a distinct
+non-secret `X-Hermes-Profile: osh-f64b-<role>` request header per served profile, applied
+under `chat_completions`, the mode in which a custom provider's `extra_headers` reach the
+request. The header reaches the upstream, but OpenShell v0.0.72 logs no request header, so
+`openshell logs` cannot attribute a request to a profile (UA-37). Hermes' own
+`session_model_usage` rows in each profile's `state.db` are the attribution of record.
 
 **COST-F30 metering (replacement path).** With the OneCLI tunnel dropped, the model call
 goes direct to the OpenShell provider, whose response carries token usage that Hermes
@@ -285,7 +293,74 @@ The installer (`hermes coworker install-openshell` and `install-into-sandbox.sh`
 refuses a spec without `pinned_offline_lane: true` before it touches any state, so render a
 non-lane `openshell` fleet with `coworker compose`.
 
+### Direct-mode inference (OSH-F64.e)
+
+On the pinned OpenShell, `https://inference.local` is intercepted **before** the policy engine
+runs: the managed route fixes the destination and injects the credential, but the rendered
+four-path rules never see its requests. Setting `egress.inference_provider.mode: direct` moves the
+model route onto the upstream itself, an ordinary `protocol: rest` endpoint where APF decides every
+request's method and path. An absent `mode` means
+`managed`, the render described above, unchanged.
+
+In direct mode `egress.inference_route` must equal the upstream host:port
+(`inference-api.nvidia.com:443`), and `egress.broker_addr` stays `172.17.0.1:18777`. The
+`egress.inference_provider` block then reads:
+
+```yaml
+inference_provider:
+  mode: direct
+  provider: direct-endpoint                       # the Hermes config provider key
+  base_url: "https://inference-api.nvidia.com/v1"
+  upstream_base_url: "https://inference-api.nvidia.com/v1"
+  api_mode: chat_completions
+  model_id: aws/anthropic/bedrock-claude-opus-5-5
+  credential_provider: f64e-inference             # the OpenShell provider (see below)
+  credential_env: NV_INFERENCE_KEY                # the credential key NAME, never a value
+  gateway_image: "osh-f64-gateway:<tag>"
+  attribution_tag_prefix: osh-f64b
+```
+
+What the render does differently in direct mode:
+
+- **Policy.** The gateway policy's model-route endpoint is the upstream host:port as
+  `protocol: rest` / `enforcement: enforce`, with exactly the four rules. `inference.local` appears
+  in no rendered policy or config, and the broker stays the only `tls: skip` hop.
+- **Provider config.** Each served profile's and the gateway default's `api_key` is OpenShell's
+  resolve placeholder for the `credential_env` key, `openshell:resolve:env:NV_INFERENCE_KEY`.
+  It is a placeholder, safe to render and log. The L7 relay resolves it at the boundary for an
+  attached provider, and refuses a request whose placeholder it cannot resolve. `rewrite_placeholder`
+  is refused in direct mode.
+- **Plan.** `coworker compose --provision-dry-run` emits one gateway line first:
+  `openshell sandbox create --name <project>-gw --from <gateway_image> --policy policy-gateway.yaml
+  --provider <credential_provider>`. Workers never get the provider: a worker type whose
+  `providers:` list names `credential_provider` is refused at compose time.
+
+What the operator configures:
+
+1. Create a `generic` OpenShell provider named by `credential_provider` that holds the credential
+   under the key named by `credential_env`. The user places the value; it appears in no spec,
+   render, test or doc. Don't reuse `compatible-endpoint` (the managed route) or `github`; compose
+   refuses both.
+2. Create the gateway sandbox with the plan's gateway line, so the provider attaches at CREATE.
+   Legacy attachment is fixed at creation, and `providers_v2_enabled` stays unset.
+   Then point the gateway default profile's `model` and `providers` at the rendered
+   `default/config.yaml`. The installer edits only the OSH-owned keys of an existing default
+   profile, so without this step that profile keeps serving its own provider.
+3. Check the effective policy with `openshell policy get <project>-gw --full`. The upstream
+   endpoint must carry exactly the four rendered rules.
+
+**Residual (UA-36).** While the OpenShell gateway still has a managed inference route configured
+(`openshell inference set`), `inference.local` stays reachable from every sandbox, and no
+rendered rule governs it. Direct mode moves the fleet's own route off it but can't remove it; only
+a gateway with no managed route, or the upstream fix, does. The operator accepted this residual: the
+fleet's path authority is met by the APF-governed direct route plus a render that never targets
+`inference.local`, and the residual stays tracked on UA-36 rather than gating a fleet.
+
 ## Operator prerequisites
+
+Inbound platform events (GitHub, GitLab) reach an OpenShell fleet through a signed host
+edge and a loopback forward, with no secret in any sandbox: see
+[Fleet inbound gateway](./fleet-ingress.md).
 
 Before a fleet can be provisioned, the operator must satisfy these prerequisites:
 
@@ -387,14 +462,26 @@ On a lane where the OpenShell broker validates `--policy` as a HOST path it read
 `--policy-root <host dir>`: each worker `sandbox create --policy` is then rebased to
 `<host dir>/render/<role>/policy-<role>.yaml` (the operator mirrors the rendered per-worker
 policies under that root first); with it unset, the gateway-internal render path is used and the
-plan is byte-for-byte unchanged. The script:
+plan is byte-for-byte unchanged. A rooted install verifies every worker policy against the broker's
+digest of the host file it binds, and does not require access to the host root from inside the
+gateway sandbox (`brev-hermes` has no host mount). After compose and before any sandbox operation
+it asks `openshell policy digest --policy <file>` for every role and compares the answer with the
+render's sha256; when the installer can read a mirror, it also compares it byte for byte with the
+render. Each `sandbox create` then carries `--policy-sha256 <render sha>`, so the broker binds only
+those bytes, and a drifted sandbox is re-created with one `sandbox replace … --policy-sha256 <sha>`
+call that refuses before it deletes anything. A digest that disagrees with the render refuses the
+install and names that role's sandbox. Any answer that is not a digest refuses too, readable mirror
+or not, and names `openshell policy digest`; `flag not allowed: policy digest` (exit 2) means the
+broker must enable that verb for this sandbox prefix. A path the installer can read, such as an
+alias or a copy of the mirror, attests nothing about the broker's file. A digest is recorded only
+after a successful create or replace. The script:
 
 - **Phase A** installs the spine's `plugins.enabled` set at the pinned commit so `hermes coworker`
-  exists. The set is the spine's, not posture-derived: the shipped legacy §D7 spine lists
-  `nv-coworker-compose`, `nv-fleet-gates` **and** `podman-onecli` (the OneCLI chain-dial needs the
-  last); the shipped OSH-F64.b single-authority spine lists only `nv-coworker-compose` and
-  `nv-fleet-gates` (`podman-onecli` is inert under `egress.inference_provider` and the spine does
-  not enable it).
+  exists. The set is the spine's, minus `podman-onecli` under the single-authority posture: the
+  shipped legacy §D7 spine lists `nv-coworker-compose`, `nv-fleet-gates` **and** `podman-onecli`
+  (the OneCLI chain-dial needs the last); with `egress.inference_provider` present the installer
+  drops `podman-onecli` from whatever the spine lists (it is inert there), and the shipped
+  OSH-F64.b single-authority spine already lists only `nv-coworker-compose` and `nv-fleet-gates`.
 - **Before Phase A's first `plugins install`**, the script writes `plugins.scan_on_install:
   false` into the managed config (the §D6 install-scan guard). Without it the install-time
   scanner returns a DANGEROUS verdict on these first-party plugins — false positives that

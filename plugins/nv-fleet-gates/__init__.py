@@ -337,21 +337,33 @@ def register(ctx) -> None:
         # coordinate on one gateway. _wiring_block still gates message_agent to WIRED targets.
         if not enforce_sandbox or canon == "message_agent":
             return None
-        # TERMINAL_* stays process-global at this pin (terminal_scope.py absent), so a
-        # non-launch gateway turn would inherit the LAUNCH profile's frozen sandbox
-        # config; refuse before any TERMINAL_* value is trusted. Read live (never
-        # captured at register(), which re-runs on a force reload); get_process_hermes_home
-        # is override-immune so it stays the launch scope even inside a per-turn override.
+        # A non-launch gateway turn is sandboxed only through the per-turn terminal scope
+        # (tools/terminal_scope.py), which the gateway binds from the same profile home as the
+        # home override. With no scope bound, TERMINAL_* is the LAUNCH profile's process-global
+        # config, so refuse before any TERMINAL_* value is trusted. Read live (never captured
+        # at register(), which re-runs on a force reload); get_process_hermes_home is
+        # override-immune so it stays the launch scope even inside a per-turn override.
         active = get_hermes_home()
         launch = get_process_hermes_home()
+        terminal_value = os.getenv
         if hermes_home_key(active) != hermes_home_key(launch):
-            return _block(
-                f"sandbox: cross-profile refused — active profile {Path(active).name!r} is not "
-                f"the launch profile {Path(launch).name!r}; the process-global terminal.* config "
-                f"belongs to {Path(launch).name!r}, so this gateway turn cannot be sandboxed for "
-                f"{Path(active).name!r} (tool-bearing work runs on the kanban board)"
-            )
-        backend = os.getenv("TERMINAL_ENV", "local")
+            from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, terminal_env
+
+            scope = get_terminal_scope()
+            if isinstance(scope, TerminalPolicyRefusal):
+                return _block(
+                    f"sandbox: refused — the terminal policy of {Path(active).name!r} could not be "
+                    f"resolved for this turn ({scope.reason})"
+                )
+            if scope is None:
+                return _block(
+                    f"sandbox: cross-profile refused — active profile {Path(active).name!r} is not "
+                    f"the launch profile {Path(launch).name!r}; the process-global terminal.* config "
+                    f"belongs to {Path(launch).name!r}, so this gateway turn cannot be sandboxed for "
+                    f"{Path(active).name!r} (tool-bearing work runs on the kanban board)"
+                )
+            terminal_value = terminal_env
+        backend = terminal_value("TERMINAL_ENV", "local")
         if backend != expected_backend:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
@@ -359,7 +371,7 @@ def register(ctx) -> None:
         # Check the managed host before readiness because ensure_task_env()
         # eagerly connects to and caches TERMINAL_SSH_HOST.
         if expected_backend == "ssh":
-            resolved = os.getenv("TERMINAL_SSH_HOST")
+            resolved = terminal_value("TERMINAL_SSH_HOST")
             expected = (_managed_expected_ssh_host() or {}).get(_current_profile())
             if not expected or resolved != expected:
                 return _block(

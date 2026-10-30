@@ -1,0 +1,7 @@
+name: ing-f66-ui-default
+version: 0.1.0
+description: 'ING-F66 AC-21: DEFAULT multiplexer overlay (nv-ingress, the loopback ingress route, the guard)'
+distribution_owned:
+- config.yaml
+- scripts
+- distribution.yaml
