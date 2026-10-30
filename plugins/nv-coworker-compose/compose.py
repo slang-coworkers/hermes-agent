@@ -1149,6 +1149,10 @@ _OSH_F64B_ROUTING_PLACEHOLDER = "sk-OPENSHELL-PROXY-REWRITE"
 # executable allow-list must permit this binary or the policy-allowed REST endpoint is
 # unreachable by the actual process.
 _OSH_F64B_MODEL_CALL_BINARY = "/opt/hermes/.venv/bin/python"
+# UPG-F69.c (D15): OpenShell matches the RESOLVED executable, and on the v0.22.5 lane image the venv python
+# resolves here (on 8.31 it was /usr/bin/python3.13, which /usr/bin/python3* covers). Exact path, never a glob:
+# change it when the image's uv-python build changes.
+_OSH_F64B_MODEL_CALL_BINARY_V0225 = "/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14"
 # OSH-F64.b: the per-request attribution carrier. Under chat_completions custom-provider
 # extra_headers reach the request (run_agent.py:6437 skips them only for anthropic_messages/
 # bedrock_converse); both profile children share the one gateway sandbox, so a per-request
@@ -4763,8 +4767,9 @@ def compose(spec: str, out: str) -> dict[str, str]:
         # allow-list MUST permit the venv interpreter (§D2) whether or not egress.binaries listed
         # it — else the policy-allowed REST endpoint is unreachable by the actual process.
         gateway_binaries = list(openshell_params["binaries"] or [])
-        if _OSH_F64B_MODEL_CALL_BINARY not in gateway_binaries:
-            gateway_binaries.append(_OSH_F64B_MODEL_CALL_BINARY)
+        for binary in (_OSH_F64B_MODEL_CALL_BINARY, _OSH_F64B_MODEL_CALL_BINARY_V0225):
+            if binary not in gateway_binaries:
+                gateway_binaries.append(binary)
         _enforce_openshell_policy(
             ddir, "gateway",
             [openshell_params["inference_route"], openshell_params["broker_addr"]],

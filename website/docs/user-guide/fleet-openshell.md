@@ -201,7 +201,10 @@ endpoints:
 
 The gateway policy's `binaries` allow-list adds the in-process Hermes model-call interpreter
 `/opt/hermes/.venv/bin/python` (the served model call is a Python HTTP request, not a `curl`
-shell-out) on top of the base `/usr/bin/curl`. The gateway policy also grants the Hermes runtime
+shell-out) on top of the base `/usr/bin/curl`. OpenShell matches the resolved executable, so the list
+also carries the exact path that venv python resolves to on the v0.22.5 image,
+`/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14`. That entry changes when the
+image's uv-python build changes. The gateway policy also grants the Hermes runtime
 paths its `filesystem_policy` needs to run the model-call process — read-only `/opt/hermes`,
 `/proc`, `/dev/urandom` and read-write `/sandbox`, `/dev/null`, `/dev/pts` — on top of the base
 read-only (`/usr /bin /lib /etc`) + read-write (`/tmp`) lanes; **these grants are gateway-only, and <!-- no-tmp: ok — the sandbox's own read-write lane -->
