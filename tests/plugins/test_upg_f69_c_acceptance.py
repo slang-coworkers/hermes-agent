@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import importlib
 import json
 import os
@@ -568,3 +569,37 @@ def test_ac_upg_f69_c_15(tmp_path, monkeypatch):
     assert refused and "cross-profile refused" not in refused
     unscoped = _served_block(f62, manager, role_home, None)
     assert unscoped and "cross-profile refused" in unscoped
+
+
+_V0225_MODEL_CALL_EXE = "/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14"
+_SIBLING_EXES = (
+    "/sandbox/.hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14",
+    "/opt/hermes/uv-python/cpython-3.14.5-linux-x86_64-gnu/bin/python3.14",
+)
+
+
+def test_ac_upg_f69_c_16(tmp_path, monkeypatch):
+    """Under both the direct-mode and the managed spec, the rendered gateway policy admits the v0.22.5 image's resolved model-call interpreter by that exact entry, keeps the 8.31 `.venv` entry, and admits no sibling interpreter."""
+    home = tmp_path / "home"
+    (home / "plugins").mkdir(parents=True)
+    shutil.copytree(COMPOSE_SRC, home / "plugins" / COMPOSE_KEY, ignore=shutil.ignore_patterns("__pycache__"))
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": [COMPOSE_KEY]}}), encoding="utf-8")
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "0")
+    module = _load((COMPOSE_KEY,))._plugins[COMPOSE_KEY].module
+    for name, spec_path in (("direct", DIRECT_SPEC), ("managed", MANAGED_SPEC)):
+        out = tmp_path / f"out-{name}"
+        module.compose(str(spec_path), str(out))
+        gateways = [p for n in ("policy-gateway.yaml", "policy-default.yaml") for p in out.rglob(n)]
+        assert len(gateways) == 1, (name, gateways)
+        doc = yaml.safe_load(gateways[0].read_text(encoding="utf-8"))
+        bins = [b["path"] for net in doc["network_policies"].values() for b in net.get("binaries", [])]
+        # admitted by the literal entry itself, never by a glob that happens to cover it
+        assert [e for e in bins if fnmatch.fnmatchcase(_V0225_MODEL_CALL_EXE, e)] == [_V0225_MODEL_CALL_EXE], (name, bins)
+        assert "/opt/hermes/.venv/bin/python" in bins, (name, bins)
+        for sibling in _SIBLING_EXES:
+            assert not any(fnmatch.fnmatchcase(sibling, e) for e in bins), (name, sibling, bins)
