@@ -52,7 +52,7 @@ Every command runs inside `( source $TB/harness.env && cd $WT && … )`. `SCN` i
 3. **The owner session.**
    - Seed one session for the owner with a seed marker that differs from every
      token asserted below:
-     `hermes -p ing-f66-ui-owner -z "ING-F66 seed turn: hold for CI results"` (stub reply).
+     `hermes -p ing-f66-ui-owner chat -q "ING-F66 seed turn: hold for CI results" --oneshot --source cli` (stub reply).
    - Record its id:
      `S=$(python3 -c "import sqlite3,os;d=sqlite3.connect(os.environ['HERMES_HOME']+'/profiles/ing-f66-ui-owner/state.db');print(d.execute('select id from sessions order by started_at desc limit 1').fetchone()[0])")`.
    - Record the session count as `N0` (`select count(*) from sessions`). Expect `N0 = 1`.
