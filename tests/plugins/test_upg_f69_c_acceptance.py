@@ -572,14 +572,18 @@ def test_ac_upg_f69_c_15(tmp_path, monkeypatch):
 
 
 _V0225_MODEL_CALL_EXE = "/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14"
+# E6: v0.22.5 core respawns the gateway on PM's store python (hermes_cli/_launchers.py:49); the lane
+# image bakes that store read-only at /opt/hermes/tools, so this is the binary that makes the model call.
+_V0225_STORE_PYTHON_EXE = "/opt/hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14"
 _SIBLING_EXES = (
     "/sandbox/.hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14",
+    "/opt/hermes/tools/python-3.14.10+20261101-linux-x64/bin/python3.14",
     "/opt/hermes/uv-python/cpython-3.14.5-linux-x86_64-gnu/bin/python3.14",
 )
 
 
 def test_ac_upg_f69_c_16(tmp_path, monkeypatch):
-    """Under both the direct-mode and the managed spec, the rendered gateway policy admits the v0.22.5 image's resolved model-call interpreter by that exact entry, keeps the 8.31 `.venv` entry, and admits no sibling interpreter."""
+    """Under both the direct-mode and the managed spec, the rendered gateway policy admits the read-only PM store interpreter `/opt/hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14` by that exact entry, keeps the D15 entries, and admits no sibling interpreter (the writable `/sandbox/.hermes/tools` store python, another store build)."""
     home = tmp_path / "home"
     (home / "plugins").mkdir(parents=True)
     shutil.copytree(COMPOSE_SRC, home / "plugins" / COMPOSE_KEY, ignore=shutil.ignore_patterns("__pycache__"))
@@ -599,7 +603,8 @@ def test_ac_upg_f69_c_16(tmp_path, monkeypatch):
         doc = yaml.safe_load(gateways[0].read_text(encoding="utf-8"))
         bins = [b["path"] for net in doc["network_policies"].values() for b in net.get("binaries", [])]
         # admitted by the literal entry itself, never by a glob that happens to cover it
-        assert [e for e in bins if fnmatch.fnmatchcase(_V0225_MODEL_CALL_EXE, e)] == [_V0225_MODEL_CALL_EXE], (name, bins)
+        assert [e for e in bins if fnmatch.fnmatchcase(_V0225_STORE_PYTHON_EXE, e)] == [_V0225_STORE_PYTHON_EXE], (name, bins)
         assert "/opt/hermes/.venv/bin/python" in bins, (name, bins)
+        assert _V0225_MODEL_CALL_EXE in bins, (name, bins)
         for sibling in _SIBLING_EXES:
             assert not any(fnmatch.fnmatchcase(sibling, e) for e in bins), (name, sibling, bins)
