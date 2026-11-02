@@ -1153,6 +1153,10 @@ _OSH_F64B_MODEL_CALL_BINARY = "/opt/hermes/.venv/bin/python"
 # resolves here (on 8.31 it was /usr/bin/python3.13, which /usr/bin/python3* covers). Exact path, never a glob:
 # change it when the image's uv-python build changes.
 _OSH_F64B_MODEL_CALL_BINARY_V0225 = "/opt/hermes/uv-python/cpython-3.14.4-linux-x86_64-gnu/bin/python3.14"
+# UPG-F69.c (D16): v0.22.5 core respawns the gateway on PM's store python (hermes_cli/_launchers.py:49), and the
+# lane image bakes that store read-only at /opt/hermes/tools, so this is the binary that makes the model call.
+# Exact path, never a glob: change it when the image's store build changes.
+_OSH_F64B_MODEL_CALL_STORE_PYTHON = "/opt/hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14"
 # OSH-F64.b: the per-request attribution carrier. Under chat_completions custom-provider
 # extra_headers reach the request (run_agent.py:6437 skips them only for anthropic_messages/
 # bedrock_converse); both profile children share the one gateway sandbox, so a per-request
@@ -4767,7 +4771,8 @@ def compose(spec: str, out: str) -> dict[str, str]:
         # allow-list MUST permit the venv interpreter (§D2) whether or not egress.binaries listed
         # it — else the policy-allowed REST endpoint is unreachable by the actual process.
         gateway_binaries = list(openshell_params["binaries"] or [])
-        for binary in (_OSH_F64B_MODEL_CALL_BINARY, _OSH_F64B_MODEL_CALL_BINARY_V0225):
+        for binary in (_OSH_F64B_MODEL_CALL_BINARY, _OSH_F64B_MODEL_CALL_BINARY_V0225,
+                       _OSH_F64B_MODEL_CALL_STORE_PYTHON):
             if binary not in gateway_binaries:
                 gateway_binaries.append(binary)
         _enforce_openshell_policy(
