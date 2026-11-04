@@ -29,7 +29,6 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -345,10 +344,12 @@ def register(ctx) -> None:
         # override-immune so it stays the launch scope even inside a per-turn override.
         active = get_hermes_home()
         launch = get_process_hermes_home()
-        terminal_value = os.getenv
-        if hermes_home_key(active) != hermes_home_key(launch):
-            from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, terminal_env
+        # Read TERMINAL_* through the scope in both branches: a kanban worker runs AS its profile
+        # (active == launch) with TERMINAL_* stripped from its env, so its policy exists only in the
+        # per-turn scope. With no scope bound terminal_env is the plain process-env read.
+        from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, terminal_env
 
+        if hermes_home_key(active) != hermes_home_key(launch):
             scope = get_terminal_scope()
             if isinstance(scope, TerminalPolicyRefusal):
                 return _block(
@@ -362,8 +363,7 @@ def register(ctx) -> None:
                     f"belongs to {Path(launch).name!r}, so this gateway turn cannot be sandboxed for "
                     f"{Path(active).name!r} (tool-bearing work runs on the kanban board)"
                 )
-            terminal_value = terminal_env
-        backend = terminal_value("TERMINAL_ENV", "local")
+        backend = terminal_env("TERMINAL_ENV", "local")
         if backend != expected_backend:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
@@ -371,7 +371,7 @@ def register(ctx) -> None:
         # Check the managed host before readiness because ensure_task_env()
         # eagerly connects to and caches TERMINAL_SSH_HOST.
         if expected_backend == "ssh":
-            resolved = terminal_value("TERMINAL_SSH_HOST")
+            resolved = terminal_env("TERMINAL_SSH_HOST")
             expected = (_managed_expected_ssh_host() or {}).get(_current_profile())
             if not expected or resolved != expected:
                 return _block(
