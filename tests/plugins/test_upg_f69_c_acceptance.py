@@ -608,3 +608,54 @@ def test_ac_upg_f69_c_16(tmp_path, monkeypatch):
         assert _V0225_MODEL_CALL_EXE in bins, (name, bins)
         for sibling in _SIBLING_EXES:
             assert not any(fnmatch.fnmatchcase(sibling, e) for e in bins), (name, sibling, bins)
+
+
+def _kanban_worker(tmp_path, monkeypatch):
+    """The carried OSH-F63 openshell render (ssh backend, managed expected_ssh_host) with the veto loaded from the
+    builder's rendered home, the way a multiplexed kanban worker launches AS its assignee profile: active == launch,
+    ambient TERMINAL_* stripped, the profile's terminal policy bound only in the per-turn terminal scope."""
+    from tests.plugins import test_osh_f63_acceptance as f63
+    import tools.terminal_tool as tt
+
+    home = f63._bootstrap_home(tmp_path)
+    out = tmp_path / "out-openshell"
+    assert f63._render(f63.OPENSHELL_SPEC, out, home).returncode == 0
+    own_host = f63._dotted(f63._profile_config(out, "builder"), "terminal.ssh_host")
+    veto_home = f63._rendered_veto_home(out, "builder", tmp_path, monkeypatch, "f69c-worker")
+    manager = f63._load_veto(veto_home)
+    for name in ("TERMINAL_ENV", "TERMINAL_SSH_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: object())
+    return f63, manager, veto_home, own_host
+
+
+def _scoped_block(f63, manager, scope):
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+
+    token = set_terminal_scope(scope)
+    try:
+        return f63._block_message(manager, "terminal", {"command": "echo scope probe"})
+    finally:
+        reset_terminal_scope(token)
+
+
+def test_ac_upg_f69_c_17(tmp_path, monkeypatch):
+    """(derived, DN-17, E7) A multiplexed kanban worker launched as its own profile (active == launch, ambient TERMINAL_* absent) whose terminal policy is bound only in v0.22.5's per-turn terminal scope passes nv-fleet-gates' backend and ssh-host checks."""
+    f63, manager, veto_home, own_host = _kanban_worker(tmp_path, monkeypatch)
+    f63._scope(manager, monkeypatch, active=veto_home, launch=veto_home)
+    assert _scoped_block(f63, manager, {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": own_host}) is None
+    # the host check still reads the scope: a scope naming another host is refused, not waved through
+    sibling = _scoped_block(f63, manager, {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "sibling.invalid"})
+    assert sibling and "ssh target host" in sibling
+
+
+def test_ac_upg_f69_c_18(tmp_path, monkeypatch):
+    """(derived, DN-17, E7) With no terminal scope bound and the active profile different from the launch profile, nv-fleet-gates still refuses a sandbox-consuming call as cross-profile, even when the ambient TERMINAL_* would pass."""
+    f63, manager, veto_home, own_host = _kanban_worker(tmp_path, monkeypatch)
+    launch = tmp_path / "launch-home"
+    launch.mkdir()
+    f63._scope(manager, monkeypatch, active=veto_home, launch=launch)
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_SSH_HOST", own_host)
+    unscoped = _scoped_block(f63, manager, None)
+    assert unscoped and "cross-profile refused" in unscoped
