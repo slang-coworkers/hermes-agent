@@ -1154,26 +1154,85 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
         _atomic_write_text(main, include + "".join(kept))
 
 
+_DIGEST_VERB_ABSENT = "flag not allowed: policy digest"
+
+
+def _mirror_bytes(bound: Path) -> Optional[bytes]:
+    try:
+        return bound.read_bytes()
+    except OSError:
+        return None
+
+
 def _record_policy_digest(home: Path, sandbox: str) -> Path:
     return home / ".osh-f64" / "sandbox-policy" / f"{sandbox}.sha256"
 
 
-def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
-    """Create a worker sandbox, or re-create it when the policy it was created with differs from
-    the current render. The rendered policy's digest is recorded after each create; a sandbox
-    with no record (an older install) counts as drifted. A ``--policy-root`` mirror must match
-    the render byte for byte, else the install halts before any delete or create."""
+def _rendered_policy(cmd: list[str], step: Step) -> tuple[str, Path, Path, bytes]:
+    """The sandbox name, the rendered policy, the ``--policy`` path the create binds and the
+    rendered bytes. A readable mirror must match the render byte for byte; a broker-only mirror
+    (the broker's host-side root, absent from the gateway sandbox) requires broker verification."""
     name = cmd[cmd.index("--name") + 1]
-    exists = _sandbox_exists(name)
     rendered = Path((step.data or {}).get("rendered_policy") or cmd[cmd.index("--policy") + 1])
     bound = Path(cmd[cmd.index("--policy") + 1])
     if not rendered.is_file():
         raise ValueError(f"{name}: rendered policy {rendered} is missing; run the compose step first")
     want = rendered.read_bytes()
-    if bound != rendered and (not bound.is_file() or bound.read_bytes() != want):
+    if bound != rendered and _mirror_bytes(bound) not in (None, want):
         raise ValueError(
             f"{name}: --policy {bound} does not match the rendered policy {rendered}; refresh the "
             "host mirror before installing (a stale mirror would bind an old policy)")
+    return name, rendered, bound, want
+
+
+def _broker_policy_digest(name: str, bound: Path) -> str:
+    """The broker's sha256 of the host file it will bind (``openshell policy digest``). A deny,
+    an unreadable file, an unknown verb or unparsable output refuses: an unverified mirror is
+    never a pass."""
+    import subprocess
+    proc = subprocess.run(["openshell", "policy", "digest", "--policy", str(bound)], check=False,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
+    # One sha256sum line for exactly the requested file; any other answer is not a verification.
+    line = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]" + re.escape(str(bound)) + r"\n?", proc.stdout or "")
+    if proc.returncode != 0 or line is None:
+        if proc.returncode == 2 and not proc.stdout and (proc.stderr or "").strip() == _DIGEST_VERB_ABSENT:
+            raise ValueError(f"{name}: the broker does not offer `openshell policy digest` for --policy {bound}; "
+                             "enable or allow it for this sandbox prefix (a rooted install needs it); "
+                             "no sandbox was changed")
+        reason = ((proc.stderr or "").strip().splitlines() or [f"unparsable output {proc.stdout!r}"])[-1]
+        raise ValueError(f"{name}: the broker could not verify --policy {bound} "
+                         f"(exit {proc.returncode}: {reason}); a rooted install needs the host file's sha256 "
+                         "from `openshell policy digest`; no sandbox was changed")
+    return line.group(1).lower()
+
+
+def _preflight_rooted_policies(steps: list[Step]) -> None:
+    """Verify every rooted worker policy before the first sandbox operation, so a stale, missing
+    or unverifiable host mirror refuses the whole install with nothing deleted, created or
+    recorded. Readable mirrors are compared before broker digests; then the broker digests each
+    host file and it must equal the render's."""
+    import hashlib
+    rooted = []
+    for step in steps:
+        name, _rendered, bound, want = _rendered_policy(list(step.command), step)
+        rooted.append((name, bound, hashlib.sha256(want).hexdigest()))
+    for name, bound, digest in rooted:
+        got = _broker_policy_digest(name, bound)
+        if got != digest:
+            raise ValueError(f"{name}: host policy {bound} is stale (broker sha256 {got} != rendered "
+                             f"{digest}); refresh the host mirror before installing")
+
+
+def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
+    """Create a worker sandbox, or re-create it when the policy it was created with differs from
+    the current render. The rendered policy's digest is recorded after each successful create; a
+    sandbox with no record (an older install) counts as drifted. Under ``--policy-root`` the
+    broker binds a host mirror the installer may not be able to read, so each create carries the
+    render's digest for the broker's compare-at-bind, and a drifted sandbox is replaced in one
+    broker call that refuses before its delete, never deleted first."""
+    exists = _sandbox_exists(cmd[cmd.index("--name") + 1])
+    name, rendered, bound, want = _rendered_policy(cmd, step)
     import hashlib
     digest = hashlib.sha256(want).hexdigest()
     record = _record_policy_digest(Path(ctx["home"]), name)
@@ -1181,8 +1240,13 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
         recorded = record.read_text(encoding="utf-8-sig").strip() if record.is_file() else None
         if recorded == digest:
             return
-        _run(["openshell", "sandbox", "delete", name])
-    _run(cmd)
+    if ctx.get("policy_root") or bound != rendered:
+        verb = "replace" if exists else "create"
+        _run(["openshell", "sandbox", verb, *cmd[3:], "--policy-sha256", digest])
+    else:
+        if exists:
+            _run(["openshell", "sandbox", "delete", name])
+        _run(cmd)
     record.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(record, digest + "\n")
 
@@ -1397,7 +1461,12 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
         present = [rid for rid in spec_rooms if room_exists(rid)]
         state["rooms"] = "all" if spec_rooms and len(present) == len(spec_rooms) else present
     ctx = _apply_ctx(spec, spec_path, room_creator=room_creator, parker=parker)
-    for step in build_plan(state, spec_path, ref, policy_root=policy_root):
+    ctx["policy_root"] = bool(policy_root)
+    steps = build_plan(state, spec_path, ref, policy_root=policy_root)
+    creates = [step for step in steps if step.tag == "provision_create"]
+    for step in steps:
+        if policy_root and creates and step is creates[0]:
+            _preflight_rooted_policies(creates)
         _execute_step(step, ctx)
 
 

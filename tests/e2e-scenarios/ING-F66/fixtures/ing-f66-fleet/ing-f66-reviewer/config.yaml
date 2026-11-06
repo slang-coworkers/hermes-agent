@@ -1,0 +1,80 @@
+model:
+  provider: compatible-endpoint
+  default: aws/anthropic/bedrock-claude-opus-5-5
+providers:
+  compatible-endpoint:
+    base_url: https://inference.local/v1
+    api_mode: chat_completions
+    api_key: sk-OPENSHELL-PROXY-REWRITE
+    default_model: aws/anthropic/bedrock-claude-opus-5-5
+    extra_headers:
+      X-Hermes-Profile: ing-f66-reviewer
+timezone: Asia/Kolkata
+plugins:
+  enabled:
+  - nv-coworker-compose
+  - nv-fleet-gates
+  - nv-ingress
+  entries:
+    nv-fleet-gates:
+      settings:
+        enforce_sandbox: true
+        edges_db_path: /tmp/hermes-nanoclaw-base/edges.db
+        admin_tools:
+        - onboard_coworker
+        - onboard_project
+        - create_agent
+        expected_backend: ssh
+        mcp_scope:
+          orchestrator: {}
+          triager: {}
+          fixer: {}
+          reviewer: {}
+          approver: {}
+          default: {}
+    nv-coworker-compose:
+      settings:
+        orchestrator_profile: orchestrator
+    nv-ingress:
+      settings:
+        orchestrator_profile: orchestrator
+  disabled:
+  - web-firecrawl
+  - browser-firecrawl
+terminal:
+  backend: ssh
+  ssh_host: openshell-ing-f66-reviewer
+  ssh_user: sandbox
+  ssh_port: 22
+  ssh_key: @HERMES_HOME@/openshell/keys/reviewer
+sessions:
+  auto_prune: false
+  auto_archive: true
+compression:
+  in_place: true
+checkpoints:
+  auto_prune: false
+memory:
+  memory_char_limit: 4000
+  user_char_limit: 2000
+  write_approval: false
+curator:
+  enabled: true
+  backup:
+    enabled: true
+    keep: 5
+approvals:
+  deny:
+  - git *push* --forc*
+  - git *push* -f
+  - git *push* -f *
+  - git *push* -f[!- ]*
+  - git *push* -[!- ]f*
+  - git *push* -[!- ][!- ]f*
+  - git push* *+*
+  - git -*push* *+*
+  - git tag *
+  - git -* tag *
+  - gh release *
+  - gh -* release *
+attribution_tag: ing-f66-reviewer

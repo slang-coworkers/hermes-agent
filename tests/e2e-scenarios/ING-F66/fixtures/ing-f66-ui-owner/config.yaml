@@ -1,0 +1,5 @@
+# ING-F66 AC-21 owner bot. The tester's model stub provider block is merged in at
+# setup (model: stub); nv-ingress is enabled so the claim verb is available.
+plugins:
+  enabled:
+  - nv-ingress
