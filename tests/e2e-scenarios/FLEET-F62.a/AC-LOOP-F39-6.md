@@ -98,14 +98,31 @@ source "$TB/fleet-f62a.env"
    (`hermes_cli/main.py:11995` `cmd_dashboard`), a SEPARATE process that does not load gateway platforms and
    returns HTTP 405 (`allow: GET`) on the `/p/.../api/jobs/{id}/run` route. Wait for `GET
    http://127.0.0.1:$PORT/health` → 200 (the api_server listener is up; the api_server registers `/health`,
-   `/health/detailed`, `/v1/health` — `gateway/platforms/api_server.py:2217-2219` — not `/api/health`). A dashboard SPA is launched
-   separately (on `$DASH_PORT`, against the same `$HERMES_HOME`) only AFTER a successful sweep, for the
-   required post-sweep UI screenshots in §Evidence.
+   `/health/detailed`, `/v1/health` — `gateway/platforms/api_server.py:2217-2219` — not `/api/health`). The
+   run's one dashboard is launched in §Setup 2b on `$DASH_PORT`, against the same `$HERMES_HOME`: it serves the
+   onboard WS in step 3 and, after the oracle, the §Evidence screenshots. The fire still goes to `$PORT`.
+2b. **One dashboard, launched before step 3 and kept up through the C5 screenshots** (ADR erratum E2.2). Launch it
+   from the same sourced `harness.live.env`, after `GET http://127.0.0.1:$PORT/health` → 200. It is the one
+   dashboard of the run, with no relaunch. Each bound below is a recorded line in
+   `$ART/scenario-AC-LOOP-F39-6/setup.log`; a miss on any of them is **FAIL(setup)**, with no re-run.
+   ```bash
+   ( source "$TB/harness.live.env" && source "$TB/fleet-f62a.env"
+     S="$ART/scenario-AC-LOOP-F39-6"; mkdir -p "$S"
+     if test "$(env | grep -c '^HERMES_DESKTOP=')" = 0; then echo "bound(a) OK: HERMES_DESKTOP unset" >> "$S/setup.log"
+     else echo "bound(a) FAIL(setup): HERMES_DESKTOP set" >> "$S/setup.log"; exit 1; fi
+     echo "dashboard token present=$([ -n "${HERMES_DASHBOARD_SESSION_TOKEN:-}" ] && echo yes || echo no)" >> "$S/setup.log"
+     HERMES_BUNDLED_PLUGINS="$WT/plugins" nohup hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open \
+       > "$S/dashboard.log" 2>&1 < /dev/null &
+     echo "DASH_PID=$!" >> "$TB/fleet-f62a.env" )
+   ```
+   Wait until `curl -fsS -o /dev/null "http://127.0.0.1:$DASH_PORT/"` succeeds. The token value is never logged.
+   - **(b)** No browser, agent-browser, desktop app or TUI attaches to this dashboard until `oracle.py` has run.
+   - **(c)** and **(e)** are checked before the fire, at the end of §Setup 5; **(d′)** after the oracle, in step 3.
 3. **Onboard-render the canonical spec** over the loopback WS (renders the cron + skill + Bot Chats):
    ```bash
    ( source "$TB/fleet-f62a.env" && source "$TB/harness.live.env" && cd "$WT"
      hermes onboard coworker tests/hermes_cli/fixtures/loop-f39/coworker-types.yaml \
-       --gateway-url "ws://127.0.0.1:$PORT/api/ws?token=$GATEWAY_TOKEN" \
+       --gateway-url "ws://127.0.0.1:$DASH_PORT/api/ws?token=${HERMES_DASHBOARD_SESSION_TOKEN:?dashboard token unset}" \
        > "$ART/scenario-AC-LOOP-F39-6/onboard.log" 2>&1 ; echo onboard_exit=$? )
    ```
    → expect `orchestrator/skills/supervise-issues/SKILL.md` present and `orchestrator/cron/jobs.json` with
@@ -138,8 +155,8 @@ source "$TB/fleet-f62a.env"
    the merged `orchestrator/config.yaml`, so the live provider takes effect for the fire.
    ```bash
    for p in orchestrator worker; do
-     python3 - "$SCN/fixtures/$p/config.yaml" "$HERMES_HOME/profiles/$p/config.yaml" <<'PY'
-   import sys, yaml
+     "$WT/.venv/bin/python" - "$SCN/fixtures/$p/config.yaml" "$HERMES_HOME/profiles/$p/config.yaml" <<'PY'
+   import sys, hermes_yaml as yaml
    src, dst = sys.argv[1], sys.argv[2]
    fix = yaml.safe_load(open(src, encoding="utf-8")) or {}
    cur = yaml.safe_load(open(dst, encoding="utf-8")) or {}
@@ -154,8 +171,8 @@ source "$TB/fleet-f62a.env"
    ```
    Then assert the merge landed AND the render survived — fail the scenario here rather than waste the fire:
    ```bash
-   python3 - <<'PY'
-   import os, json, yaml
+   "$WT/.venv/bin/python" - <<'PY'
+   import os, json, hermes_yaml as yaml
    H = os.environ["HERMES_HOME"]
    o = yaml.safe_load(open(f"{H}/profiles/orchestrator/config.yaml", encoding="utf-8"))
    assert o["model"]["provider"] == "coworkers-live", o.get("model")
@@ -234,6 +251,35 @@ source "$TB/fleet-f62a.env"
    ```
    The rendered tab itself is proven only by `step-3b.png`.
 
+   **Pre-fire bounds (c) and (e)** (ADR erratum E2.2), recorded in `setup.log`; a miss is **FAIL(setup)**:
+   - **(c)** 0 `Desktop cron scheduler started` lines before the fire, in `$HERMES_HOME/logs/gui.log` and in the
+     dashboard's stdout:
+     ```bash
+     S="$ART/scenario-AC-LOOP-F39-6"
+     n=$(cat "$HERMES_HOME/logs/gui.log" "$S/dashboard.log" 2>/dev/null | grep -c 'Desktop cron scheduler started')
+     if test "$n" = 0; then echo "bound(c) OK: 0 desktop cron scheduler lines" >> "$S/setup.log"
+     else echo "bound(c) FAIL(setup): $n desktop cron scheduler lines" >> "$S/setup.log"; exit 1; fi
+     ```
+   - **(e)** The orchestrator profile's authority is the multiplexed gateway, it is ready, and a Bot Chat owner is
+     deliverable. Without this the cron delivery would park, not run. It must exit 0 and print exactly
+     `authority=ready control_home=root bot_chat_owner=present` (append that line to `setup.log`):
+     ```bash
+     "$WT/.venv/bin/python" - <<'PY'
+     import os
+     from pathlib import Path
+     from hermes_cli.gateway_runtime import discover_gateway_endpoint
+     from tools.bot_live_delivery import find_canonical_live_owner
+     root = Path(os.environ["HERMES_HOME"]).resolve()
+     orch = root / "profiles" / "orchestrator"
+     r = discover_gateway_endpoint(orch, timeout=5)
+     assert r.state == "ready" and r.endpoint is not None, r.state
+     assert r.endpoint.control_home, "no multiplexer control home"
+     assert Path(r.endpoint.control_home).resolve() == root, "not served by the root multiplexer"
+     assert find_canonical_live_owner(orch) is not None, "no profile store, so no Bot Chat owner"
+     print("authority=ready control_home=root bot_chat_owner=present")
+     PY
+     ```
+
 ## Steps
 
 1. **Baseline** (db-local, BEFORE firing — never reuse a baseline across profiles). Write
@@ -299,6 +345,27 @@ source "$TB/fleet-f62a.env"
    ```bash
    python3 "$SCN/oracle.py" --home "$HERMES_HOME" --kanban-db "$KANBAN_DB" \
      --job-id "$JOB_ID" --nonce "$NONCE" --baselines "$TB/f62a-baselines.json"
+   ```
+   Then bound **(d′)** (ADR erratum E2.2; a miss is **FAIL(setup)**). At v0.22.5 a `deliver: bot-chat` delivery is
+   admitted only to the target profile's authority, with no second-writer fallback, and it logs
+   `Job '<id>': Bot Chat (own) receipt=<key> status=<s>` (`cron/scheduler_delivery.py`). The root
+   `$HERMES_HOME/logs/agent.log` and the orchestrator profile's `agent.log` together hold exactly one such record,
+   and `executions.db` holds exactly one new `source='builtin'` row:
+   ```bash
+   S="$ART/scenario-AC-LOOP-F39-6"
+   n=$(cat "$HERMES_HOME/logs/agent.log" "$HERMES_HOME/profiles/orchestrator/logs/agent.log" 2>/dev/null \
+       | grep -cF "Job '$JOB_ID': Bot Chat (own) receipt=")
+   e=$(python3 - "$HERMES_HOME" "$JOB_ID" "$TB/f62a-baselines.json" <<'PY'
+   import json, sqlite3, sys
+   home, job, bl = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3], encoding="utf-8"))
+   c = sqlite3.connect(f"file:{home}/profiles/orchestrator/cron/executions.db?mode=ro", uri=True)
+   base = set(bl.get("exec_base") or [])
+   print(sum(1 for (i,) in c.execute("SELECT id FROM executions WHERE job_id=? AND source='builtin'", (job,))
+             if i not in base))
+   PY
+   )
+   if test "$n" = 1 && test "$e" = 1; then echo "bound(d') OK: receipt records=1 new builtin executions=1" >> "$S/setup.log"
+   else echo "bound(d') FAIL(setup): receipt records=$n new builtin executions=$e" >> "$S/setup.log"; exit 1; fi
    ```
 
 ## Pass
@@ -374,11 +441,12 @@ screenshots below corroborate it and are captured from a separately-launched das
   call counter before/after (each < 40; cost recorded, may read `unknown_pricing`).
 
 **Required UI corroboration (post-sweep):** the screenshots require the web SPA, which is a SEPARATE server
-(`hermes dashboard`, `hermes_cli/main.py:11995`) — it does not serve the fire route, so it is launched only
-AFTER `oracle.py` passes, from the same sourced harness env (so `HERMES_KANBAN_HOME` resolves the same board),
-against the same `$HERMES_HOME` on its own port, with the bundled plugins pointed at the worktree so the
+(`hermes dashboard`, `hermes_cli/main.py:11995`) that does not serve the fire route. They come from the one
+dashboard launched in §Setup 2b from the same sourced harness env (so `HERMES_KANBAN_HOME` resolves the same
+board), against the same `$HERMES_HOME` on its own port, with the bundled plugins pointed at the worktree so the
 Kanban tab exists:
-`HERMES_BUNDLED_PLUGINS="$WT/plugins" hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open`
+`HERMES_BUNDLED_PLUGINS="$WT/plugins" hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open`.
+Nothing attaches to it until `oracle.py` has run (bound (b)), and it is not relaunched
 (resume the exact session by id, mirroring AC-FLEET-F62-7's UI + state.db pairing). `oracle.py` remains the
 semantic state gate, but the AC row remains **FAIL** if any of the four required screenshots below cannot be
 captured (the live-scenario contract requires user-visible artifacts). On the 503-blocked run there were no
