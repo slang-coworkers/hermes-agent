@@ -30,6 +30,7 @@ plugins/nv-fleet-gates/outbound.py
 plugins/nv-fleet-gates/placeholder_redact.py
 plugins/nv-fleet-gates/plugin.yaml
 plugins/nv-fleet-gates/predicates.py
+plugins/nv-fleet-gates/product_hooks.py
 plugins/nv-fleet-gates/stores.py
 
 # Their tests
