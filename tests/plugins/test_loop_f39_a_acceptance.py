@@ -13,7 +13,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +24,7 @@ NONCE = "f39-1793055854"
 TOK_A, TOK_B = f"F39A-{NONCE}", f"F39B-{NONCE}"
 CARD_A, CARD_B = f"f39a-{NONCE}", f"f39b-{NONCE}"
 MARK_B = f"F39-ESC:{TOK_B}"
-CLAIMED = datetime(2026, 11, 12, 14, 0, 0, 250000, tzinfo=timezone.utc)
+CLAIMED = datetime(2026, 11, 12, 14, 0, 0, 250000, tzinfo=UTC)
 FINISHED = CLAIMED + timedelta(minutes=3)
 LO, HI = math.floor(CLAIMED.timestamp()), math.ceil(FINISHED.timestamp())
 BLOCKED_AT = LO - 25 * 3600
@@ -164,7 +164,7 @@ def _third_nudge(spec):
 
 def test_ac_loop_f39_a_1(tmp_path):
     """The re-specified oracle PASSes a recorded-good store. It FAILs that store when exactly one escalation correlation is broken: no act, wrong author, a bot destination, the wrong card, no prior non-response, or outside the cron turn. A valid act never FAILs on reply wording, marker position or a repeated failed call."""
-    no_act = lambda s: _without_act(s)  # noqa: E731
+    no_act = lambda s: _without_act(s)
     valid = {
         "act in the cron session": _variant(),
         "reply carries no marker": _variant(turn=_reply("Sweep done: one nudge sent, one card escalated.")),
