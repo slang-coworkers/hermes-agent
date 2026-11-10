@@ -37,7 +37,7 @@ managed scope so a per-profile config cannot widen them.
 | setting | meaning |
 |---|---|
 | `profile_roles` | map of profile name → role; a profile is the orchestrator when its role is `orchestrator`. Read from the managed-scope merge, so a per-profile override cannot escalate a worker. |
-| `edges_db_path` | absolute path to the **fleet-shared** SQLite edges store (outside any profile home), written by `hermes wire` and read by every profile's predicate. |
+| `edges_db_path` | path to the **fleet-shared** SQLite edges store, written by `hermes wire` and read by every profile's predicate. An absolute path is used as given; a relative one resolves under the gateway's Hermes root (`get_default_hermes_root()`), the same file for the root and every `<root>/profiles/<name>` home. |
 | `enforce_sandbox` | when true, the SANDBOX predicate first hard-fails any turn whose active per-turn profile differs from the launch profile (cross-profile refusal, see below), then checks the resolved backend, brings up the container task env, and re-asserts the dangerous-command floor; and the MCP-SCOPE predicate additionally denies any non-`remote` (stdio/unknown-transport) `mcp_*` call. Off by default. |
 | `expected_backend` | the container backend a profile's tool calls must resolve to when `enforce_sandbox` is true. |
 | `mcp_scope` | the full profile-keyed MCP allow-list the compose plugin renders into **every** profile: `{profile: {mcp__<server>__<tool>: transport}}`. The MCP-SCOPE predicate selects the calling profile's entry by identity and denies any `mcp_*` tool absent from it (a profile absent from the map is denied all MCP — fail-closed); under `enforce_sandbox` a non-`remote` transport is also denied. The whole map is copied into each profile because `ctx.get_config` resolves against the active profile home. |
@@ -181,8 +181,8 @@ per-pair layer, gating the stock `message_agent_tool` entry point through the si
   A wired **gated** edge escalates to Hermes' own **human approval** gate: `_wiring_approve`
   returns an `approve` directive carrying a stable `rule_key` of the form `wire:<from>:<to>`
   and the message `gated edge <from>-><to> requires human approval`. The edges live in a
-  fleet-shared SQLite store at the managed-scope `edges_db_path` setting (outside any profile
-  home), keyed `PRIMARY KEY (from_profile, to_profile)`. Because the covering surface is on
+  fleet-shared SQLite store at the `edges_db_path` setting (absolute, or relative to the
+  gateway's Hermes root), keyed `PRIMARY KEY (from_profile, to_profile)`. Because the covering surface is on
   the fork baseline `release/v2026.8.31-e2e-fixed` (merged by LOOP-F37 / PR #5, not present in
   the pinned release tree), its anchors are baseline-only:
   - baseline: `plugins/nv-fleet-gates/__init__.py:331` (_wiring_block, unwired → block)
