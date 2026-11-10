@@ -52,6 +52,7 @@ SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 GLOB_CHARS = frozenset("*?[")
 NO_FILES = "-"
 LOCAL_TIMEOUT = 120.0
+KILL_WAIT = 10.0  # seconds to reap a killed git before giving up on it
 PATHS_PER_DIFF = 500
 PIN_HEADER = """\
 # The other repository's commit that common/COMMON_PATHS is compared with (scripts/common_drift.py).
@@ -111,6 +112,24 @@ def git_env(isolated_home: Path | None) -> dict[str, str]:
     return env
 
 
+def kill_and_reap(proc: subprocess.Popen) -> None:
+    """Kill a timed-out git and its session (POSIX: the process group start_new_session made; elsewhere the
+    process alone), then wait a bounded time for it. Its pipes are neither drained nor closed here (no Popen
+    context manager on this path): a grandchild that still holds them must not block the caller."""
+    killpg = getattr(os, "killpg", None)
+    try:
+        if killpg is not None:
+            killpg(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=KILL_WAIT)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def git(repo: Path, *args: str, timeout: float = LOCAL_TIMEOUT, isolated_home: Path | None = None) -> bytes:
     command = next((arg for arg in args if not arg.startswith("-")), "")
     try:
@@ -118,16 +137,11 @@ def git(repo: Path, *args: str, timeout: float = LOCAL_TIMEOUT, isolated_home: P
                                 env=git_env(isolated_home), start_new_session=True)
     except OSError as exc:
         raise GitFailed(f"cannot run git {command}: {exc.strerror}") from None
-    with proc:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.communicate()
-            raise GitFailed(f"git {command} timed out after {timeout:g}s", timed_out=True) from None
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_and_reap(proc)
+        raise GitFailed(f"git {command} timed out after {timeout:g}s", timed_out=True) from None
     if proc.returncode:
         stderr = err.decode("utf-8", "replace")
         lines = [line.strip() for line in stderr.splitlines() if line.strip()]
@@ -418,7 +432,7 @@ def find_root(root: Path | None) -> Path:
 
 def read_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc.strerror}") from None
     except UnicodeError:
