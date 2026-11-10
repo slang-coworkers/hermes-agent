@@ -69,7 +69,7 @@ def _drift(env, root: Path, *args: str, extra_env: dict | None = None):
     report_file.unlink(missing_ok=True)
     proc = subprocess.run([sys.executable, str(SCRIPT), "--root", str(root), "--json", str(report_file), *args],
                           env={**env, **(extra_env or {})}, capture_output=True, encoding="utf-8", check=False)
-    report = json.loads(report_file.read_text(encoding="utf-8")) if report_file.exists() else None
+    report = json.loads(report_file.read_text(encoding="utf-8-sig")) if report_file.exists() else None
     return proc, report
 
 
@@ -170,7 +170,7 @@ def test_record_pin_then_compare_offline(pair, git_env, tmp_path):
     local, other, sha = pair
     proc, _ = _drift(git_env, local, "--record-pin")
     assert proc.returncode == 0, proc.stderr
-    pin_text = (local / "common" / "COMMON_PIN").read_text(encoding="utf-8")
+    pin_text = (local / "common" / "COMMON_PIN").read_text(encoding="utf-8-sig")
     assert f"repo={other.as_uri()}\nsha={sha}\n" in pin_text
     assert pin_text.count("\nentry ") == 3
     assert _drift(git_env, local)[1]["pin_hashes"] == "ok"
@@ -190,10 +190,10 @@ def test_stale_recorded_hashes_warn(pair, git_env):
     local, _other, _sha = pair
     assert _drift(git_env, local, "--record-pin")[0].returncode == 0
     pin_file = local / "common" / "COMMON_PIN"
-    entry_line = next(line for line in pin_file.read_text(encoding="utf-8").splitlines()
+    entry_line = next(line for line in pin_file.read_text(encoding="utf-8-sig").splitlines()
                       if line.endswith(" plugins/demo"))
-    pin_file.write_text(pin_file.read_text(encoding="utf-8").replace(entry_line, "entry 0000 plugins/demo"),
-                        encoding="utf-8")
+    pin_text = pin_file.read_text(encoding="utf-8-sig")
+    pin_file.write_text(pin_text.replace(entry_line, "entry 0000 plugins/demo"), encoding="utf-8")
     proc, report = _drift(git_env, local)
     assert report["pin_hashes"] == "stale"
     assert report["status"] == "DRIFT"
@@ -277,3 +277,83 @@ def test_redact_masks_credentials(monkeypatch):
     assert "pass1234" not in text
     assert "abc.def.ghi" not in text
     assert "https://***@example.invalid/x.git/" in text
+
+
+def _load(monkeypatch):
+    spec = importlib.util.spec_from_file_location("common_drift", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "common_drift", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeProc:
+    def __init__(self, pid=424242, hang=False):
+        self.pid, self.hang, self.calls = pid, hang, []
+
+    def kill(self):
+        self.calls.append("kill")
+
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        if self.hang:
+            raise subprocess.TimeoutExpired("git", timeout)
+        return -9
+
+
+def test_kill_falls_back_to_the_process_without_killpg(monkeypatch):
+    module = _load(monkeypatch)
+    monkeypatch.delattr(module.os, "killpg", raising=False)
+    proc = _FakeProc()
+    module.kill_and_reap(proc)
+    assert proc.calls == ["kill", ("wait", module.KILL_WAIT)]
+
+
+def test_kill_signals_the_session_and_tolerates_a_gone_process(monkeypatch):
+    module = _load(monkeypatch)
+    sent = []
+
+    def killpg(pid, sig):
+        sent.append((pid, sig))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(module.os, "killpg", killpg, raising=False)
+    proc = _FakeProc(pid=4242)
+    module.kill_and_reap(proc)
+    assert sent == [(4242, getattr(module.signal, "SIGKILL", module.signal.SIGTERM))]
+    assert proc.calls == [("wait", module.KILL_WAIT)]
+
+
+def test_reap_wait_is_bounded(monkeypatch):
+    module = _load(monkeypatch)
+    monkeypatch.delattr(module.os, "killpg", raising=False)
+    proc = _FakeProc(hang=True)
+    module.kill_and_reap(proc)
+    assert proc.calls == ["kill", ("wait", module.KILL_WAIT)]
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg") or not __import__("shutil").which("setsid"),
+                    reason="needs a POSIX session and setsid to hold the pipe")
+def test_git_timeout_returns_while_a_grandchild_holds_the_pipe(monkeypatch, tmp_path):
+    import time
+
+    module = _load(monkeypatch)
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    # The grandchild leaves the session, so the session kill misses it and it keeps the pipes open for 15 s;
+    # it exits by itself. Draining or closing the pipes would make the caller wait for it.
+    (fake / "git").write_text("#!/bin/sh\nsetsid sleep 15 &\nsleep 30\n", encoding="utf-8")
+    (fake / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    started = time.monotonic()
+    with pytest.raises(module.GitFailed) as err:
+        module.git(tmp_path, "status", timeout=0.5)
+    assert err.value.timed_out
+    assert time.monotonic() - started < 5
+
+
+def test_read_text_tolerates_a_bom(monkeypatch, tmp_path):
+    module = _load(monkeypatch)
+    paths = tmp_path / "COMMON_PATHS"
+    paths.write_bytes(b"\xef\xbb\xbfplugins/demo\n")
+    assert module.read_text(paths) == "plugins/demo\n"  # windows-footgun: ok (the script's own read_text, not Path.read_text)
