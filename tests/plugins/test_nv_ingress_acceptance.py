@@ -1806,6 +1806,9 @@ class _NoPopen:
         return 0
 
 
+_LANE_SH = ["/bin/sh", "-c", '. "$0" && exec "$@"']
+
+
 class _LaneBroker:
     """Stands in for every subprocess the installer starts, modelling the lane broker. A `--policy` path under
     `root` resolves to `view`, the broker's host-side policy root, which the installer cannot read unless `root` is
@@ -1838,6 +1841,8 @@ class _LaneBroker:
 
     def run(self, cmd, *_args, **kwargs):
         cmd = [str(c) for c in cmd]
+        if cmd[:3] == _LANE_SH:  # the spec's ssh_lane: sh sources the env file, the interpreter runs the shim
+            cmd = ["openshell", *cmd[6:]]
         self.calls.append(cmd)
         head = cmd[:3]
         if head == ["hermes", "coworker", "compose"]:
@@ -1902,6 +1907,22 @@ def _sandbox_digests(home: Path) -> dict:
 _HARNESS_ERRORS = (AssertionError, AttributeError, IndexError, KeyError, NameError, TypeError)
 
 
+def _ac27_spec(tmp_path) -> Path:
+    """The ING-F66 lane spec with its ssh_lane bundle staged under tmp_path (the installer refuses an unstaged one)."""
+    spec_dir = tmp_path / "ing-spec"
+    if not spec_dir.is_dir():
+        shutil.copytree(ING_SPEC.parent, spec_dir)
+        data = yaml.safe_load((spec_dir / ING_SPEC.name).read_text(encoding="utf-8"))
+        bundle = tmp_path / "osh-lane"
+        data["ssh_lane"]["bundle"] = str(bundle)
+        lane = data["ssh_lane"]
+        for rel in (lane["env_file"], lane["shim"], *lane["members"]):
+            (bundle / rel).parent.mkdir(parents=True, exist_ok=True)
+            (bundle / rel).write_text("staged\n", encoding="utf-8")
+        (spec_dir / ING_SPEC.name).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return spec_dir / ING_SPEC.name
+
+
 def _ac27_install(tmp_path, monkeypatch, inst, case: str, broker: _LaneBroker, policy_root):
     """One `apply()` of the ING-F66 lane spec in the home `<tmp>/<case>`, every subprocess answered by `broker`.
     Returns the refusal, or None when the install completed."""
@@ -1917,7 +1938,7 @@ def _ac27_install(tmp_path, monkeypatch, inst, case: str, broker: _LaneBroker, p
         mp.setattr(subprocess, "Popen", _NoPopen)
         mp.setattr(time, "sleep", lambda _s: None)
         try:
-            inst.apply(str(ING_SPEC), "a" * 40, room_creator=lambda *_a: None, room_exists=lambda _rid: False,
+            inst.apply(str(_ac27_spec(tmp_path)), "a" * 40, room_creator=lambda *_a: None, room_exists=lambda _rid: False,
                        policy_root=None if policy_root is None else str(policy_root))
         except _HARNESS_ERRORS:
             raise
