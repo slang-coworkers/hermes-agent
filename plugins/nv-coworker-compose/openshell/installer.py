@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- the installer is loaded standalone by file path (inside the sandbox, by install-into-sandbox.sh and the tests), so its helpers cannot live in sibling modules it imports relatively
 """Two-phase OpenShell fleet installer — a pure, state-aware planner plus its executor.
 
 Targets an EXISTING Hermes sandbox: the default profile is edited in place (never
@@ -47,8 +48,10 @@ def _load_yaml_compat():
 
 yaml = _load_yaml_compat()
 
+# Where `hermes plugins install` fetches the fork's plugins from: the spec's top-level `plugin_source`, an
+# owner/repo shorthand or a full git URL ending in .git (that keeps the "<repo>.git/plugins/<name>" subdir form
+# hermes_cli.plugins_cmd._resolve_git_url understands), for a gateway that cannot reach github.com.
 FORK_REPO = "slang-coworkers/hermes-agent"
-_PLUGIN_SRC = FORK_REPO + "/plugins/{name}"
 # The three OSH-owned plugins whose entries/enabled the launch-profile edit owns.
 # Outside these, gateway.multiplex_profiles, the OneCLI/trust secrets.* keys and, under
 # egress.inference_provider, the rendered route/auth surface (_route_reconcile), the default
@@ -70,8 +73,6 @@ _ABSENT_SUFFIX = ".osh-f64.absent"
 # Names this install parked (one per line, at the home root): rollback unparks exactly these.
 _PARKED_RECORD = "gateway.osh-f64.parked"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
-# The git URL `hermes plugins install <FORK_REPO>/plugins/<name>` clones (plugins_cmd.py owner/repo shorthand).
-_FORK_URL = f"https://github.com/{FORK_REPO}.git"
 # openshell 0.0.72 SGR-colours its tables and digests even when piped; every parsed or persisted read strips them.
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # Lane values are spliced unquoted into `/bin/sh -c` argv and the persisted ProxyCommand, so only a plain path
@@ -79,6 +80,23 @@ _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _LANE_VALUE_RE = re.compile(r"[A-Za-z0-9_./-]+")
 _LANE_KEYS = ("bundle", "env_file", "shim", "interpreter", "members")
 _WIRE_MANIFEST = "wire-manifest.txt"
+
+
+def _plugin_source(spec: Optional[dict[str, Any]]) -> str:
+    """The spec's ``plugin_source``, default :data:`FORK_REPO`."""
+    source = spec.get("plugin_source") if isinstance(spec, dict) else None
+    if source is None:
+        return FORK_REPO
+    if isinstance(source, str) and "://" in source and source.endswith(".git") and "/plugins/" not in source:
+        return source
+    if isinstance(source, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source):
+        return source
+    raise ValueError(f"plugin_source must be owner/repo or a git URL ending in .git (spec has {source!r})")
+
+
+def _plugin_git_url(source: str) -> str:
+    """The git URL `hermes plugins install <source>/plugins/<name>` clones (plugins_cmd.py owner/repo shorthand)."""
+    return source if "://" in source else f"https://github.com/{source}.git"
 
 
 def _strip_ansi(text: Optional[str]) -> str:
@@ -138,9 +156,50 @@ def _preflight_ssh_lane(lane: Optional[dict[str, Any]]) -> None:
 _ACTIVE_LANE: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar("osh_ssh_lane", default=None)
 
 
-def _openshell_argv(args: list[str]) -> list[str]:
-    """One openshell invocation: bare without a lane, else the lane's shim run by its interpreter after
-    sourcing its env file (the shape of the lane ProxyCommand)."""
+def _openshell_env() -> dict[str, str]:
+    return {**os.environ, "NO_COLOR": "1"}
+
+# OpenShell CLI generation. "0.0" is the 0.0.72 box lane (unchanged); "0.1" is the
+# OpenShell 0.1.2 CLI (refs/OpenShell@v0.1.2 crates/openshell-cli). The two cannot be mixed
+# against one gateway (docs/upgrade/0-1-0.mdx:25), so the spec selects one.
+OPENSHELL_API_LEGACY = "0.0"
+OPENSHELL_API_V01 = "0.1"
+_DEFAULT_WORKSPACE = "default"
+# 0.1: the trailing command IS the sandbox main process; exit 0 leaves it Completed and
+# unusable (overview.mdx:23-33), so workers run a non-listening long-running command.
+V01_MAIN_COMMAND = ("sleep", "infinity")
+# 0.1 delete is asynchronous (DELETION_OUTCOME_ACCEPTED); a create while the record still
+# exists fails AlreadyExists (run.rs:686-693). Bounded wait before re-create.
+_DELETE_WAIT_POLLS = 60
+_DELETE_WAIT_INTERVAL_S = 2.0
+_LIST_PAGE_LIMIT = 100  # safety bound on `sandbox list` pagination
+_V01_CREATE_TIMEOUT_S = 900
+
+
+def openshell_api(spec: dict[str, Any]) -> str:
+    egress = spec.get("egress") if isinstance(spec, dict) else None
+    api = egress.get("openshell_api", OPENSHELL_API_LEGACY) if isinstance(egress, dict) else OPENSHELL_API_LEGACY
+    if api not in (OPENSHELL_API_LEGACY, OPENSHELL_API_V01):
+        raise ValueError(f"egress.openshell_api must be '0.0' or '0.1' (spec has {api!r})")
+    return api
+
+
+def _workspace(spec: dict[str, Any]) -> str:
+    egress = spec.get("egress") if isinstance(spec, dict) else None
+    ws = egress.get("workspace", _DEFAULT_WORKSPACE) if isinstance(egress, dict) else _DEFAULT_WORKSPACE
+    return ws if isinstance(ws, str) and ws else _DEFAULT_WORKSPACE
+
+
+def _openshell_argv(spec: Optional[dict[str, Any]], *args: str) -> list[str]:
+    """One openshell invocation, ``openshell [--workspace W] <args>``. 0.1 ALWAYS passes the
+    workspace, the same shape as compose's provision plan: without the flag the CLI falls back to
+    OPENSHELL_WORKSPACE from the caller's env (crates/openshell-cli/src/main.rs:436-477), and the
+    sandbox could land in a workspace other than the one the rendered ssh alias names. ``spec=None``
+    takes ``args`` as given: a planned step already carries the flag. Inside an install whose ssh
+    lane the preflight admitted, the call runs the lane's shim by its interpreter after sourcing its
+    env file (the shape of the lane ProxyCommand); a plan never sees a lane, so its steps stay bare."""
+    if spec is not None and openshell_api(spec) == OPENSHELL_API_V01:
+        args = ("--workspace", _workspace(spec), *args)
     lane = _ACTIVE_LANE.get()
     if lane is None:
         return ["openshell", *args]
@@ -149,8 +208,33 @@ def _openshell_argv(args: list[str]) -> list[str]:
             f"{bundle}/{lane['shim']}", *args]
 
 
-def _openshell_env() -> dict[str, str]:
-    return {**os.environ, "NO_COLOR": "1"}
+def _main_command(spec: dict[str, Any]) -> list[str]:
+    """0.1: the sandbox main process, ``egress.sandbox_command`` (default ``sleep infinity``,
+    the broker's default ``sandbox_command``). compose validates the same key."""
+    egress = spec.get("egress") if isinstance(spec, dict) else None
+    cmd = egress.get("sandbox_command") if isinstance(egress, dict) else None
+    if cmd is None:
+        return list(V01_MAIN_COMMAND)
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) and c for c in cmd):
+        raise ValueError(f"egress.sandbox_command must be a non-empty argv list (spec has {cmd!r})")
+    return list(cmd)
+
+
+def _ssh_alias(sandbox: str, spec: Optional[dict[str, Any]] = None) -> str:
+    """The Host alias ``openshell sandbox ssh-config`` emits: ``openshell-<name>`` on 0.0.72,
+    ``openshell-<name>.<workspace>`` on 0.1 (crates/openshell-cli/src/ssh.rs:1980-1982)."""
+    if spec is not None and openshell_api(spec) == OPENSHELL_API_V01:
+        return f"openshell-{sandbox}.{_workspace(spec)}"
+    return f"openshell-{sandbox}"
+
+
+def _legacy_seccomp():
+    import importlib.util
+    path = Path(__file__).resolve().parent / "legacy_seccomp.py"
+    spec = importlib.util.spec_from_file_location("_osh_installer_legacy_seccomp", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _load_trust():
@@ -268,6 +352,14 @@ def _require_openshell(spec: dict[str, Any]) -> None:
     substrate = spec.get("substrate")
     if substrate != "openshell":
         raise ValueError(f"install-openshell requires substrate: openshell (spec has {substrate!r})")
+    if openshell_api(spec) == OPENSHELL_API_V01:
+        # An OpenShell 0.1 fleet has no box lane; compose enforces the rest of the 0.1
+        # contract (pullable image, provider profile inference, no lane keys).
+        image = (spec.get("egress") or {}).get("sandbox_image")
+        if not isinstance(image, str) or not image or image.startswith("localhost/"):
+            raise ValueError("install-openshell (openshell_api 0.1) requires a pullable "
+                             f"egress.sandbox_image (spec has {image!r})")
+        return
     egress = spec.get("egress")
     lane = egress.get("pinned_offline_lane") if isinstance(egress, dict) else None
     if lane is not True:
@@ -394,6 +486,50 @@ def _del_dotted(cfg: dict[str, Any], dotted: str) -> bool:
     return True
 
 
+_WEBHOOK_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+_WEBHOOK_ROUTE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _default_webhook_keys(spec: dict[str, Any]) -> dict[str, Any]:
+    """R2-a: the dotted ``platforms.webhook.*`` keys the 0.1 default edit owns, from the spec's
+    ``default_config.platforms.webhook``. ``{}`` when the spec declares none (the edit is then
+    byte-unchanged). Fails closed on anything it would otherwise drop or widen: the bind must be
+    loopback (G2: no Route in the MVP; the GitLab poller forwards on pod loopback), the port numeric,
+    and only ``enabled`` / ``extra.{host,port,routes}`` are carried. Each route is replaced whole,
+    other routes on the operator's config are kept."""
+    platforms = (spec.get("default_config") or {}).get("platforms")
+    block = platforms.get("webhook") if isinstance(platforms, dict) else None
+    if block is None:
+        return {}
+    if not isinstance(block, dict) or set(block) - {"enabled", "extra"}:
+        raise ValueError("default_config.platforms.webhook may carry only 'enabled' and 'extra'")
+    enabled = block.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("default_config.platforms.webhook.enabled must be true or false")
+    extra = block.get("extra") or {}
+    if not isinstance(extra, dict) or set(extra) - {"host", "port", "routes"}:
+        raise ValueError("default_config.platforms.webhook.extra may carry only host, port and routes")
+    host, port, routes = extra.get("host"), extra.get("port"), extra.get("routes") or {}
+    if host not in _WEBHOOK_LOOPBACK_HOSTS:
+        raise ValueError(
+            f"default_config.platforms.webhook.extra.host must be loopback {list(_WEBHOOK_LOOPBACK_HOSTS)} "
+            f"(the gateway-agent pod has no Route or Service for it), got {host!r}")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError(f"default_config.platforms.webhook.extra.port must be 1..65535, got {port!r}")
+    if not isinstance(routes, dict):
+        raise ValueError("default_config.platforms.webhook.extra.routes must be a mapping")
+    keys: dict[str, Any] = {
+        "platforms.webhook.enabled": enabled,
+        "platforms.webhook.extra.host": host,
+        "platforms.webhook.extra.port": port,
+    }
+    for name, route in routes.items():
+        if not isinstance(name, str) or not _WEBHOOK_ROUTE_NAME.fullmatch(name) or not isinstance(route, dict):
+            raise ValueError(f"default_config.platforms.webhook.extra.routes: bad route {name!r}")
+        keys[f"platforms.webhook.extra.routes.{name}"] = copy.deepcopy(route)
+    return keys
+
+
 def _desired_default(
     existing: dict[str, Any], spec: dict[str, Any], enabled: list[str], entries: dict[str, Any]
 ) -> dict[str, Any]:
@@ -450,6 +586,12 @@ def _desired_default(
         if name not in merged_disabled:
             merged_disabled.append(name)
     desired["plugins.disabled"] = merged_disabled
+    # On a 0.1 fleet the gateway default IS the hermes-gateway-agent pod's root
+    # config, and the only webhook listener of the fleet lives there (legacy seccomp: none in workers).
+    # Carry the spec's default_config.platforms.webhook (loopback bind + named routes, e.g. the GitLab
+    # poller's `gitlab` route) into the in-place edit; compose validates the routes themselves.
+    if openshell_api(spec) == OPENSHELL_API_V01:
+        desired.update(_default_webhook_keys(spec))
     # onecli-onboard reads profile_secret_sets from this gateway default, which is edited in
     # place here, not installed from the render. Carry the served-role grants under openshell,
     # retaining any operator-managed identity, stripped to match the render's validated value.
@@ -648,11 +790,12 @@ def managed_config_diff(
     return merged
 
 
-def _plugin_step(prefix: list[str], name: str, ref: str, state: Optional[dict[str, Any]]) -> Optional[Step]:
+def _plugin_step(prefix: list[str], name: str, ref: str, state: Optional[dict[str, Any]],
+                 source: str = FORK_REPO) -> Optional[Step]:
     """One state-aware plugin step. ``state`` is ``{ref, enabled}`` for an already
     installed plugin, or None if absent. Returns None when nothing is needed (present +
     enabled at the pinned ref), so a re-run of an installed home plans no plugin work."""
-    src = _PLUGIN_SRC.format(name=name)
+    src = f"{source}/plugins/{name}"
     if state is None:
         return Step(prefix + ["plugins", "install", src, "--ref", ref, "--enable"], "plugin_install")
     if state.get("ref") != ref:
@@ -712,6 +855,7 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
     """
     spec = load_spec(spec_path)
     plugins = enabled_plugins(spec, spec_path)
+    source = _plugin_source(spec)
     roles = _coworker_roles(spec)
     home = str(_require_home())
     managed_dir = _managed_dir() or ""
@@ -778,7 +922,7 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
 
     # Phase A — bootstrap: install the port's plugins into the default home.
     for name in plugins:
-        step = _plugin_step(["hermes"], name, ref, installed.get(name))
+        step = _plugin_step(["hermes"], name, ref, installed.get(name), source)
         if step:
             if step.tag == "plugin_force":
                 steps.append(_snapshot_step(f"{home}/plugins", name))
@@ -798,7 +942,21 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
     # install plan. Sandbox names mirror compose's <project>-<role> ssh_host. A profile can
     # exist without its sandbox, so _sandbox_exists is checked at apply time.
     project = spec.get("project") or "fleet"
-    image = (spec.get("egress") or {}).get("sandbox_image") or "localhost/hermes-openshell-sandbox:pinned"
+    v01 = openshell_api(spec) == OPENSHELL_API_V01
+    image = (spec.get("egress") or {}).get("sandbox_image") or (
+        None if v01 else "localhost/hermes-openshell-sandbox:pinned")
+    if v01:
+        if not image:
+            raise ValueError("openshell_api 0.1 requires egress.sandbox_image (a pullable registry ref)")
+        # 0.1 has no built-in provider profiles and `sandbox create` never auto-creates a missing
+        # provider non-interactively, so verify every bound provider exists BEFORE any create.
+        # Inference is bound gateway-side (the hermes-gateway-agent pod), not on workers.
+        needed = sorted({name for role in roles for name in _type_provider_names(spec, role)})
+        if needed:
+            steps.append(Step(_openshell_argv(spec, "provider", "list", "-o", "json"),
+                              "provider_check", data={"providers": needed}))
+        main_command = _main_command(spec)
+        _legacy_seccomp().assert_command_not_a_tcp_server(main_command)
     for role in roles:
         sandbox = f"{project}-{role}"
         # OpenShell validates --policy on the broker host, so an explicit root selects the
@@ -811,6 +969,18 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
         # --no-tty: an executed create must not open an interactive session. Providers bind at
         # create, the same set compose's provisioning plan prints.
         providers = [tok for name in _type_provider_names(spec, role) for tok in ("--provider", name)]
+        if v01:
+            # 0.1 (5e): --detach + a long-running main command (a trailing `true` would leave the
+            # sandbox Completed); -o json so the executor reads the phase instead of a table.
+            steps.append(Step(_openshell_argv(spec, "sandbox", "create", "--name", sandbox,
+                                              "--from", image, "--policy", policy, *providers,
+                                              "--detach", "-o", "json", "--", *main_command),
+                              "provision_create",
+                              data={"rendered_policy": f"{out}/{role}/policy-{role}.yaml",
+                                    "openshell_api": OPENSHELL_API_V01}))
+            steps.append(Step(_openshell_argv(spec, "sandbox", "ssh-config", sandbox),
+                              "provision_sshconfig"))
+            continue
         steps.append(Step(["openshell", "sandbox", "create", "--name", sandbox, "--from", image,
                            "--policy", policy, "--no-tty", *providers], "provision_create",
                           data={"rendered_policy": f"{out}/{role}/policy-{role}.yaml"}))
@@ -830,7 +1000,7 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
     for role in roles:
         scope = profile_plugins.get(role) or {}
         for name in plugins:
-            step = _plugin_step(["hermes", "-p", role], name, ref, scope.get(name))
+            step = _plugin_step(["hermes", "-p", role], name, ref, scope.get(name), source)
             if step:
                 if step.tag == "plugin_force":
                     steps.append(_snapshot_step(f"{home}/profiles/{role}/plugins", name))
@@ -1213,17 +1383,43 @@ def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
     }
 
 
-def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None, fork_source: Optional[str] = None) -> str:
+def _remote_module():
+    """The sibling ``remote.py`` (remote-gateway mode), loaded by path like this module."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "remote.py"
+    mspec = importlib.util.spec_from_file_location("_osh_remote", path)
+    mod = importlib.util.module_from_spec(mspec)
+    mspec.loader.exec_module(mod)
+    return mod
+
+
+def _refuse_remote_mode(spec: dict[str, Any], openshell_mode: Optional[str] = None) -> None:
+    """The entry points below are the LOCAL path (a local Docker gateway or the box lane).
+    A spec or environment that selects ``openshell mode: remote`` must go through ``remote.py``,
+    so a local run can never provision against the wrong gateway. ``openshell_mode`` is an
+    explicit CLI choice and wins over env/spec (``local`` forces the local path)."""
+    mode, source = _remote_module().resolve_mode(spec, None, openshell_mode)
+    if mode != "local":
+        raise ValueError(
+            f"openshell mode is {mode!r} ({source}); this is the local installer path. Use "
+            "`hermes coworker install-openshell --openshell-mode remote` or `installer.py ... "
+            "--openshell-mode remote`")
+
+
+def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None, fork_source: Optional[str] = None,
+              openshell_mode: Optional[str] = None) -> str:
     """The dry-run transcript. Read-only: the lane shape is validated and the fork-mirror work a real run
     would do is reported before the first plugin step, but nothing is fetched or written."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
+    _refuse_remote_mode(spec, openshell_mode)
     _ssh_lane(spec)
     state = collect_home_state(spec, spec_path)
     steps = build_plan(state, spec_path, ref, policy_root=policy_root)
     first = next((i for i, step in enumerate(steps) if step.tag in _PLUGIN_GIT_TAGS), None)
     if first is not None:
-        line = _fork_preflight(_require_home(), ref, fork_source, plan_only=True)
+        line = _fork_preflight(_require_home(), ref, fork_source, fork_url=_plugin_git_url(_plugin_source(spec)),
+                               plan_only=True)
         if line:
             steps.insert(first, Step(line, "fork_mirror"))
     return render_transcript(steps)
@@ -1263,6 +1459,81 @@ def _gateway_restart_env() -> dict[str, str]:
     return env
 
 
+def _list_sandbox_names_v01(spec: Optional[dict[str, Any]] = None) -> list[str]:
+    """0.1: every sandbox name via ``sandbox list -o json``, following ``next_page_token``
+    (the JSON envelope is ``{"sandboxes": [...], "next_page_token": ""}``,
+    crates/openshell-cli/src/output.rs:44-96). Never parses the table."""
+    import json
+    names: list[str] = []
+    token = ""
+    for _ in range(_LIST_PAGE_LIMIT):
+        args = ["sandbox", "list", "-o", "json"]
+        if token:
+            args += ["--page-token", token]
+        payload = json.loads(_run_capture(_openshell_argv(spec or {}, *args)) or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError(f"unexpected `openshell sandbox list -o json` output: {payload!r}")
+        for item in payload.get("sandboxes") or []:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+        token = payload.get("next_page_token") or ""
+        if not token:
+            return names
+    raise ValueError("openshell sandbox list: pagination did not terminate")
+
+
+def _sandbox_exists_v01(name: str, spec: Optional[dict[str, Any]] = None) -> bool:
+    return name in _list_sandbox_names_v01(spec)
+
+
+def _wait_sandbox_gone_v01(name: str, spec: Optional[dict[str, Any]] = None) -> None:
+    import time
+    for _ in range(_DELETE_WAIT_POLLS):
+        if not _sandbox_exists_v01(name, spec):
+            return
+        time.sleep(_DELETE_WAIT_INTERVAL_S)
+    raise ValueError(f"{name}: sandbox still present after delete was accepted; not re-creating")
+
+
+def _sandbox_phase_v01(name: str, create_stdout: str, spec: Optional[dict[str, Any]] = None) -> str:
+    """The sandbox phase after ``create --detach -o json``. JSON is printed only on the Ready
+    path (run.rs:1134-1140); a detached create of a main process that already exited returns
+    rc 0 with NO JSON (run.rs:1190-1197), so fall back to ``sandbox get -o json``."""
+    import json
+    for text in (create_stdout, None):
+        if text is None:
+            text = _run_capture(_openshell_argv(spec or {}, "sandbox", "get", name, "-o", "json"))
+        try:
+            payload = json.loads(text) if text and text.strip() else None
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("phase"), str):
+            return payload["phase"]
+    return "Unknown"
+
+
+def _check_providers_v01(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
+    import json
+    needed = list((step.data or {}).get("providers") or [])
+    present: list[str] = []
+    token = ""
+    for _ in range(_LIST_PAGE_LIMIT):
+        argv = cmd + (["--page-token", token] if token else [])
+        payload = json.loads(_run_capture(_openshell_argv(None, *argv[1:]), env=_openshell_env()) or "{}")
+        for item in (payload.get("providers") or []) if isinstance(payload, dict) else []:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                present.append(item["name"])
+        token = (payload.get("next_page_token") or "") if isinstance(payload, dict) else ""
+        if not token:
+            break
+    missing = [n for n in needed if n not in present]
+    if missing:
+        raise ValueError(
+            f"OpenShell providers {missing} do not exist on the gateway. Import the provider profile "
+            "and create the provider first (operator bootstrap: `openshell profile import -f ...` then "
+            "`openshell provider create --name <n> --type <profile-id> --credential <ENV_NAME>`)")
+
+
 def _sandbox_exists(name: str) -> bool:
     # Apply-time idempotence for provision_create, decoupled from profile-installed state:
     # whether an OpenShell worker sandbox is already provisioned, from the broker's
@@ -1271,7 +1542,7 @@ def _sandbox_exists(name: str) -> bool:
     # so apply halts on an unknown broker state rather than creating over a live sandbox.
     import subprocess
     proc = subprocess.run(
-        _openshell_argv(["sandbox", "list"]), check=True, capture_output=True, text=True,
+        _openshell_argv(None, "sandbox", "list"), check=True, capture_output=True, text=True,
         encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S,
         env=_openshell_env(),
     )
@@ -1323,10 +1594,11 @@ _STATUS_POLLS = 3
 _STATUS_POLL_INTERVAL_S = 2.0
 
 
-def _run_capture(cmd: list[str], env: Optional[dict[str, str]] = None) -> str:
+def _run_capture(cmd: list[str], env: Optional[dict[str, str]] = None,
+                 timeout: float = _CAPTURE_TIMEOUT_S) -> str:
     import subprocess
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S, env=env)
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=timeout, env=env)
     return proc.stdout or ""
 
 
@@ -1362,7 +1634,8 @@ def _lane_proxy_commands(block: str, lane: Optional[dict[str, Any]]) -> str:
     return _PROXY_LINE_RE.sub(_sub, block)
 
 
-def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
+def _persist_ssh_config(sandbox: str, project: str, block: str,
+                        spec: Optional[dict[str, Any]] = None) -> None:
     """Persist one sandbox's ``openshell sandbox ssh-config`` output into the gateway user's
     managed include ``~/.ssh/config.d/openshell-<project>.conf`` (one marker-delimited block per
     alias, replaced in place on a rerun), and make ``~/.ssh/config`` include it exactly once as
@@ -1374,7 +1647,10 @@ def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
     inc_rel = f"config.d/openshell-{project}.conf"
     inc_path = ssh_dir / inc_rel
     inc_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    alias = f"openshell-{sandbox}"
+    alias = _ssh_alias(sandbox, spec)
+    if spec is not None and openshell_api(spec) == OPENSHELL_API_V01 and f"Host {alias}" not in block:
+        raise ValueError(f"{sandbox}: ssh-config output does not declare Host {alias}; the rendered "
+                         "terminal.ssh_host would not resolve")
     begin, end = f"# >>> {alias}", f"# <<< {alias}"
     new_block = f"{begin}\n{block.rstrip()}\n{end}\n"
     text = inc_path.read_text(encoding="utf-8-sig") if inc_path.exists() else ""
@@ -1434,7 +1710,7 @@ def _broker_policy_digest(name: str, bound: Path) -> str:
     an unreadable file, an unknown verb or unparsable output refuses: an unverified mirror is
     never a pass."""
     import subprocess
-    proc = subprocess.run(_openshell_argv(["policy", "digest", "--policy", str(bound)]), check=False,
+    proc = subprocess.run(_openshell_argv(None, "policy", "digest", "--policy", str(bound)), check=False,
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
                           stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S, env=_openshell_env())
     stdout, stderr = _strip_ansi(proc.stdout), _strip_ansi(proc.stderr)
@@ -1476,7 +1752,16 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
     broker binds a host mirror the installer may not be able to read, so each create carries the
     render's digest for the broker's compare-at-bind, and a drifted sandbox is replaced in one
     broker call that refuses before its delete, never deleted first."""
-    exists = _sandbox_exists(cmd[cmd.index("--name") + 1])
+    name = cmd[cmd.index("--name") + 1]
+    v01 = (step.data or {}).get("openshell_api") == OPENSHELL_API_V01
+    spec = ctx.get("spec") or {}
+    if v01:
+        if ctx.get("policy_root"):
+            raise ValueError(f"{name}: --policy-root binds a broker host mirror (OpenShell 0.0.72); a 0.1 sandbox "
+                             "is not created through it")
+        main = cmd[cmd.index("--") + 1:] if "--" in cmd else []
+        _legacy_seccomp().assert_command_not_a_tcp_server(main)
+    exists = _sandbox_exists_v01(name, spec) if v01 else _sandbox_exists(name)
     name, rendered, bound, want = _rendered_policy(cmd, step)
     import hashlib
     digest = hashlib.sha256(want).hexdigest()
@@ -1485,13 +1770,25 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
         recorded = record.read_text(encoding="utf-8-sig").strip() if record.is_file() else None
         if recorded == digest:
             return
-    if ctx.get("policy_root") or bound != rendered:
+    if v01:
+        if exists:
+            # 0.1 replace = delete (async ACCEPTED) + wait until gone + create.
+            _run(_openshell_argv(spec, "sandbox", "delete", name), env=_openshell_env())
+            _wait_sandbox_gone_v01(name, spec)
+        # A 0.1 create waits for Ready (image pull + pod admission), so allow far longer than a
+        # plain capture.
+        created = _run_capture(_openshell_argv(None, *cmd[1:]), env=_openshell_env(), timeout=_V01_CREATE_TIMEOUT_S)
+        phase = _sandbox_phase_v01(name, created, spec)
+        if phase != "Ready":
+            raise ValueError(f"{name}: sandbox create returned phase {phase!r}, expected 'Ready' "
+                             "(a Completed/Error main process cannot serve ssh or exec)")
+    elif ctx.get("policy_root") or bound != rendered:
         verb = "replace" if exists else "create"
-        _run(_openshell_argv(["sandbox", verb, *cmd[3:], "--policy-sha256", digest]), env=_openshell_env())
+        _run(_openshell_argv(None, "sandbox", verb, *cmd[3:], "--policy-sha256", digest), env=_openshell_env())
     else:
         if exists:
-            _run(_openshell_argv(["sandbox", "delete", name]), env=_openshell_env())
-        _run(_openshell_argv(cmd[1:]), env=_openshell_env())
+            _run(_openshell_argv(None, "sandbox", "delete", name), env=_openshell_env())
+        _run(_openshell_argv(None, *cmd[1:]), env=_openshell_env())
     record.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(record, digest + "\n")
 
@@ -1602,10 +1899,10 @@ def _real_git(skip: Path) -> Optional[str]:
     return None
 
 
-def _sealed_source() -> Optional[str]:
+def _sealed_source(fork_url: str) -> Optional[str]:
     """Where the caller's git sends the fork URL when it is a local repository (the lane image maps it to a
     sealed, root-owned tree); None for a network URL, the path every install took before."""
-    proc = _git("git", "ls-remote", "--get-url", _FORK_URL)
+    proc = _git("git", "ls-remote", "--get-url", fork_url)
     url = (proc.stdout or "").strip() if proc.returncode == 0 else ""
     path = url.removeprefix("file://")
     if not path or "://" in path or not Path(path).exists():
@@ -1628,13 +1925,13 @@ def _fork_mirror_paths(home: Path) -> tuple[Path, Path]:
     return base / "fork-mirror.git", base / "gitbin"
 
 
-def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_only: bool = False):
+def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, fork_url: str, plan_only: bool = False):
     """Resolve where ``hermes plugins install --ref <ref>`` will clone from. Returns None when the caller's
     git source already holds the ref (or is a network URL), else the installer-owned git dir to put first
     on PATH for the plugin steps — after building ``<home>/openshell/fork-mirror.git`` on the sealed tree's
     objects plus the ref fetched from ``fork_source``. ``plan_only`` returns the action line and writes or
     fetches nothing. A ref no source holds refuses, before any plugin install or sandbox step."""
-    sealed = _sealed_source()
+    sealed = _sealed_source(fork_url)
     mirror, gitbin = _fork_mirror_paths(home)
     if sealed is None:
         return None
@@ -1643,7 +1940,7 @@ def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_on
         raise ValueError("no git binary found on PATH (only wrappers); the sealed plugin source cannot be bridged")
     if _has_commit(real, sealed, ref):
         return None
-    refusal = (f"--ref {ref} is not in the sealed plugin source {sealed} ({_FORK_URL} resolves there)"
+    refusal = (f"--ref {ref} is not in the sealed plugin source {sealed} ({fork_url} resolves there)"
                + (f" and --fork-source {fork_source} does not hold it" if fork_source else
                   " and no --fork-source was given")
                + "; pass a --fork-source that holds it; no plugin was installed and no sandbox was changed")
@@ -1677,7 +1974,7 @@ def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_on
             raise ValueError(refusal)
     elif _git(real, "--git-dir", str(mirror), "update-ref", tag, ref, env=env).returncode != 0:
         raise ValueError(f"could not record {tag} in the fork mirror {mirror}")
-    rewrite = [f"url.{mirror}.insteadOf={url}" for url in (_FORK_URL, _FORK_URL[: -len(".git")])]
+    rewrite = [f"url.{mirror}.insteadOf={url}" for url in (fork_url, fork_url[: -len(".git")])]
     wrapper = gitbin / "git"
     gitbin.mkdir(mode=0o700, parents=True, exist_ok=True)
     _write_if_changed(wrapper, "#!/bin/sh\nexec " + " ".join(
@@ -1710,7 +2007,11 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         if tag == "provision_sshconfig":
             sandbox = cmd[-1]
             project = (ctx.get("spec") or {}).get("project") or "fleet"
-            _persist_ssh_config(sandbox, project, _run_capture(_openshell_argv(cmd[1:]), env=_openshell_env()))
+            _persist_ssh_config(sandbox, project, _run_capture(_openshell_argv(None, *cmd[1:]), env=_openshell_env()),
+                                ctx.get("spec"))
+            return
+        if tag == "provider_check":
+            _check_providers_v01(cmd, step, ctx)
             return
         if tag == "restart":
             _restart_gateway_detached(cmd, Path(ctx["home"]))
@@ -1719,7 +2020,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
             _run(cmd, env=_plugin_git_env(ctx["plugin_gitbin"]))
             return
         if cmd and cmd[0] == "openshell":
-            _run(_openshell_argv(cmd[1:]), env=_openshell_env())
+            _run(_openshell_argv(None, *cmd[1:]), env=_openshell_env())
             return
         _run(cmd)
         return
@@ -1840,12 +2141,13 @@ def _preflight_install(steps: list[Step], ctx: dict[str, Any], ref: str,
     lane = _ssh_lane(ctx["spec"])
     _preflight_ssh_lane(lane)
     if any(step.tag in _PLUGIN_GIT_TAGS for step in steps):
-        ctx["plugin_gitbin"] = _fork_preflight(Path(ctx["home"]), ref, fork_source)
+        ctx["plugin_gitbin"] = _fork_preflight(Path(ctx["home"]), ref, fork_source,
+                                               fork_url=_plugin_git_url(_plugin_source(ctx["spec"])))
     return lane
 
 
 def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None, policy_root=None,
-          fork_source: Optional[str] = None) -> None:
+          fork_source: Optional[str] = None, openshell_mode: Optional[str] = None) -> None:
     """Execute the full plan. ``room_creator(room_id, name, members)`` performs the
     onboarding ``groups.create`` against the live gateway and ``room_exists(room_id)``
     reports whether a room is already present; the caller (the CLI subaction) injects both
@@ -1853,6 +2155,7 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
     the plan so a fully-installed home plans no room step and no gateway restart."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
+    _refuse_remote_mode(spec, openshell_mode)
     state = collect_home_state(spec, spec_path)
     # Drift detection needs `coworker compose`, so only when a coworker is already present.
     if state.get("profiles"):
@@ -1879,7 +2182,8 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
         _ACTIVE_LANE.reset(token)
 
 
-def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> None:
+def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None,
+            openshell_mode: Optional[str] = None, _allow_remote: bool = False) -> None:
     """Bootstrap phase: move any legacy in-scan plugin snapshot out of the plugins dir (it
     would shadow the bootstrap install), then back up the ORIGINAL config (a ``plugins install --enable``
     rewrites config.yaml, so a later backup would capture a mutated file), THEN write the
@@ -1891,6 +2195,9 @@ def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> N
     plugin installs)."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
+    # Phase A is broker-free; remote.phase_a runs its own remote checks and then reuses it.
+    if not _allow_remote:
+        _refuse_remote_mode(spec, openshell_mode)
     state = collect_home_state(spec, spec_path)
     ctx = _apply_ctx(spec, spec_path)
     default_plugins_dir = Path(str(_require_home())) / "plugins"
@@ -1923,6 +2230,7 @@ def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> N
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="osh-f64-installer")
     sub = parser.add_subparsers(dest="mode", required=True)
+    remote = _remote_module()
     for mode in ("plan", "apply", "phase-a"):
         p = sub.add_parser(mode)
         p.add_argument("--spec", required=True)
@@ -1939,17 +2247,51 @@ def main(argv: Optional[list[str]] = None) -> int:
             help="Git URL or path that holds --ref when the plugin source git resolves to (a sealed fork) "
                  "does not; plugin installs then clone through an installer-owned mirror under HERMES_HOME",
         )
+        # Remote-gateway mode selection (default local = the unchanged path below).
+        remote.add_cli_args(p)
     ns = parser.parse_args(argv)
     if not SHA40.match(ns.ref):
         parser.error("--ref must be a full 40-character commit SHA")
+    spec = load_spec(ns.spec)
+    try:
+        rcfg = remote.resolve_config(spec, overrides=remote.overrides_from_args(ns))
+    except ValueError as exc:
+        sys.stderr.write(f"openshell mode refused: {exc}\n")
+        return 2
+    if rcfg["mode"] == remote.MODE_REMOTE:
+        if getattr(ns, "policy_root", None):
+            parser.error("--policy-root is a box-lane option and does not apply to --openshell-mode remote")
+        if getattr(ns, "fork_source", None):
+            parser.error("--fork-source is a box-lane option and does not apply to --openshell-mode remote")
+        try:
+            if ns.mode == "plan":
+                sys.stdout.write(remote.plan_text(ns.spec, ns.ref, rcfg, inst=sys.modules.get(__name__) or _self_ns()))
+            elif ns.mode == "apply":
+                remote.apply(ns.spec, ns.ref, rcfg, inst=sys.modules.get(__name__) or _self_ns())
+            else:
+                remote.phase_a(ns.spec, ns.ref, rcfg, inst=sys.modules.get(__name__) or _self_ns())
+        except remote.RemoteConfigError as exc:
+            sys.stderr.write(f"remote mode refused: {exc}\n")
+            return 2
+        return 0
+    # Local path. An explicit "local" from the CLI is forwarded so env/spec cannot flip it.
+    local = "local" if getattr(ns, "openshell_mode", None) == "local" else None
     if ns.mode == "plan":
         sys.stdout.write(plan_text(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None),
-                                   fork_source=ns.fork_source))
+                                   fork_source=ns.fork_source, openshell_mode=local))
     elif ns.mode == "apply":
-        apply(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None), fork_source=ns.fork_source)
+        apply(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None), fork_source=ns.fork_source,
+              openshell_mode=local)
     elif ns.mode == "phase-a":
-        phase_a(ns.spec, ns.ref, fork_source=ns.fork_source)
+        phase_a(ns.spec, ns.ref, fork_source=ns.fork_source, openshell_mode=local)
     return 0
+
+
+def _self_ns():
+    """This module's namespace as an object, for when it was loaded by path without a
+    ``sys.modules`` entry (the remote layer calls back into the planner through it)."""
+    import types
+    return types.SimpleNamespace(**globals())
 
 
 if __name__ == "__main__":
