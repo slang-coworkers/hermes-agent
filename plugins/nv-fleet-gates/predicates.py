@@ -268,3 +268,74 @@ def is_dangerous_command(command: str) -> bool:
 
     res = detect_dangerous_command(command)
     return bool(res[0]) if isinstance(res, tuple) else bool(res)
+
+
+# --- PR approve / merge refusal (owner rule: approvals and merges are human-only) ---
+# Defense-in-depth on the tool call's own text, not a credential control: text built at run time, a planted
+# alias or extension, or an MCP tool are beyond it. Bodies the gate cannot read are refused unread.
+_GH_PR_REVIEW_RE = re.compile(r"\bgh\s+pr\s+review\b")
+_GH_PR_MERGE_RE = re.compile(r"\bgh\s+pr\s+merge\b")
+_GH_ALIAS_WRITE_RE = re.compile(r"\bgh\s+alias\s+(?:set|import)\b")
+_APPROVE_RE = re.compile(r"\bAPPROVE\b")
+_REVIEWS_PATH_RE = re.compile(r"\bpulls/[^/\s]+/reviews\b")
+_MERGE_PATH_RE = re.compile(r"\bpulls/[^/\s]+/merge\b")
+_GQL_REVIEW_RE = re.compile(r"\b(?:add|submit)PullRequestReview\b")
+_GQL_MERGE_RE = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge)\b")
+_PUT_RE = re.compile(r"-X\s*PUT\b|--(?:method|request)[\s=]+PUT\b|\bmethod\s*=\s*PUT\b|\.put\(", re.IGNORECASE)
+_GH_API_GRAPHQL_RE = re.compile(r"\bgh\s+api\s+graphql\b")
+_FIELD_FILE_RE = re.compile(r"(?:(?<!\S)-F\s*|--field[\s=]+)[^\s=]+=@")
+_INPUT_RE = re.compile(r"--input\b")
+_CURL_FILE_BODY_RE = re.compile(r"(?<!\S)-d\s*@|--data[\w-]*[\s=]+@|--json[\s=]+@|(?<!\S)-T(?:\s|$)|--upload-file\b")
+# The execute_code argv-list spelling (["gh", "pr", "review", ...]) reads as a command once quotes, commas and
+# brackets are spaces.
+_DEQUOTE = str.maketrans({c: " " for c in "'\",[](){}"})
+
+
+def _review_approves(segment: str) -> bool:
+    m = _GH_PR_REVIEW_RE.search(segment)
+    if not m:
+        return False
+    try:
+        tokens = shlex.split(segment[m.end():])
+    except ValueError:
+        tokens = segment[m.end():].split()
+    for tok in tokens:
+        if tok == "--approve" or (tok.startswith("--approve=") and tok.split("=", 1)[1].lower() != "false"):
+            return True
+        if re.fullmatch(r"-[A-Za-z]+", tok) and "a" in tok[1:]:
+            return True
+    return False
+
+
+def _approval_or_merge(text: str) -> str | None:
+    segments = _segments(text)
+    if any(_review_approves(seg) for seg in segments):
+        return "gh pr review --approve"
+    if _GH_PR_MERGE_RE.search(text):
+        return "gh pr merge"
+    if _GH_ALIAS_WRITE_RE.search(text):
+        return "gh alias set|import"
+    if _REVIEWS_PATH_RE.search(text) and _APPROVE_RE.search(text):
+        return "REST review APPROVE"
+    if _GQL_REVIEW_RE.search(text) and _APPROVE_RE.search(text):
+        return "GraphQL review APPROVE"
+    if _GQL_MERGE_RE.search(text):
+        return "GraphQL merge"
+    if _MERGE_PATH_RE.search(text) and _PUT_RE.search(text):
+        return "REST PUT merge"
+    for seg in segments:
+        if _GH_API_GRAPHQL_RE.search(seg) and (_FIELD_FILE_RE.search(seg) or _INPUT_RE.search(seg)):
+            return "file-fed GraphQL (unreadable body)"
+        if re.search(r"\bcurl\b", seg) and "/graphql" in seg and _CURL_FILE_BODY_RE.search(seg):
+            return "file-fed GraphQL (unreadable body)"
+        if (_REVIEWS_PATH_RE.search(seg) or _MERGE_PATH_RE.search(seg)) and (
+                _FIELD_FILE_RE.search(seg) or _INPUT_RE.search(seg) or _CURL_FILE_BODY_RE.search(seg)):
+            return "file-fed review/merge body (unreadable body)"
+    return None
+
+
+def pr_approval_or_merge(command: str) -> str | None:
+    """The PR approve/merge class ``command`` invokes, or None. Matched as written and de-quoted."""
+    if not command:
+        return None
+    return _approval_or_merge(command) or _approval_or_merge(command.translate(_DEQUOTE))
