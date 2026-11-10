@@ -1013,7 +1013,7 @@ async def _slash_onboard_project(args: str = "", **_kwargs) -> str:
     return json.dumps(result)
 
 
-def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_root=None) -> None:
+def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_root=None, fork_source=None) -> None:
     """Run the openshell install with the standalone gateway context bound (as
     ``onboard_coworker`` does), so the room ``groups.state``/``groups.create`` calls the
     plan makes reach the LIVE gateway over the authenticated WS requester — a standalone
@@ -1038,7 +1038,7 @@ def _apply_openshell(installer, spec: str, ref: str, gateway_url: str, policy_ro
     token = _standalone_ctx.set({"url": gateway_url, "requester": requester})
     try:
         installer.apply(spec, ref, room_creator=_room_creator, room_exists=_room_present,
-                        parker=park_non_fleet_profiles, policy_root=policy_root)
+                        parker=park_non_fleet_profiles, policy_root=policy_root, fork_source=fork_source)
     finally:
         _close_standalone(token)
 
@@ -1074,7 +1074,8 @@ def _cli_coworker(args, **_kwargs) -> int:
             print(json.dumps({"ok": False, "error": str(exc)}))
             return 2
         if getattr(args, "dry_run", False):
-            print(installer.plan_text(args.spec, args.ref, policy_root=getattr(args, "policy_root", None)), end="")
+            print(installer.plan_text(args.spec, args.ref, policy_root=getattr(args, "policy_root", None),
+                                      fork_source=getattr(args, "fork_source", None)), end="")
         else:
             gateway_url = getattr(args, "gateway_url", None)
             if not gateway_url:
@@ -1082,7 +1083,8 @@ def _cli_coworker(args, **_kwargs) -> int:
                                   "(a loopback ?token/?ticket gateway URL) to probe and create the fleet rooms "
                                   "against the live gateway"}))
                 return 2
-            _apply_openshell(installer, args.spec, args.ref, gateway_url, policy_root=getattr(args, "policy_root", None))
+            _apply_openshell(installer, args.spec, args.ref, gateway_url, policy_root=getattr(args, "policy_root", None),
+                             fork_source=getattr(args, "fork_source", None))
         return 0
     if getattr(args, "coworker_command", None) == "install-trust":
         import importlib.util

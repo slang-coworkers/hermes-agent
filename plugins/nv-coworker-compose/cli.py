@@ -52,6 +52,11 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
              "each worker sandbox-create --policy is rebased to <root>/render/<role>/policy-<role>.yaml "
              "(default: the gateway-internal render path)",
     )
+    install_osh_p.add_argument(
+        "--fork-source", default=None,
+        help="Git URL or path that holds --ref when the plugin source git resolves to (a sealed fork) does "
+             "not; plugin installs then clone through an installer-owned mirror under HERMES_HOME",
+    )
 
     # For an openshell fleet that install-openshell does not install (no pinned offline lane):
     # carry the spec's egress.openshell_trust into the active gateway home, so the multiplexer
