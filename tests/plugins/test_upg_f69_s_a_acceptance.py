@@ -1,7 +1,8 @@
 """Hermetic acceptance tests for UPG-F69.s.a: the v0.22.5 ship's installer gaps close without a manual box step.
 
-One ``test_ac_upg_f69_s_a_<n>`` per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..AC-17, in order);
-the docstring's first line is the criterion text. AC-18 and AC-19 are ``live:`` scenario files, not here.
+One ``test_ac_upg_f69_s_a_<n>`` per ``pytest:`` row of the ADR's ``## Acceptance criteria`` (AC-1..AC-17 and AC-20,
+in order; AC-20 is parametrized over ``AC20_FORMS``); the docstring's first line is the criterion text. AC-18 and
+AC-19 are ``live:`` scenario files, not here.
 
 Shape: nv-coworker-compose (and, where a criterion needs the gate, nv-fleet-gates) loads through
 ``PluginManager().discover_and_load()`` from an isolated ``HERMES_HOME`` with an EMPTY bundled dir (the
@@ -329,7 +330,7 @@ class _Broker:
                 plugins_cmd._resolve_git_executable.cache_clear()
                 exe = plugins_cmd._resolve_git_executable()
                 head = _clone_plugin_repo(dest, FORK_URL, ref, subdir)
-        except Exception as exc:  # noqa: BLE001 - any clone failure is the install's failure
+        except Exception as exc:  # any clone failure is the install's failure
             self.installs.append({"cmd": cmd, "head": None, "git": exe})
             return self._done(cmd, kwargs, rc=1, err=f"plugin clone failed: {exc}\n")
         finally:
@@ -455,7 +456,7 @@ def _install(tmp_path, monkeypatch, inst, case, spec, broker, *, ref=SHA, policy
                            policy_root=None if policy_root is None else str(policy_root), **kw)
         except _HARNESS_ERRORS:
             raise
-        except Exception as exc:  # noqa: BLE001 - a refusal is the observable
+        except Exception as exc:  # a refusal is the observable
             return exc
     return None
 
@@ -495,7 +496,7 @@ def _profile_dir(out: Path, role: str) -> Path:
 
 
 def _types(tree: str) -> list:
-    return list((_load_yaml(SPEC_TREES[tree] / "coworker-types.yaml").get("types") or {}))
+    return list(_load_yaml(SPEC_TREES[tree] / "coworker-types.yaml").get("types") or {})
 
 
 @pytest.fixture(scope="module")
@@ -654,7 +655,7 @@ def test_ac_upg_f69_s_a_5(rendered, tmp_path, monkeypatch):
 def _is_edges_store(edges, db: Path) -> bool:
     try:
         return bool(edges.list_edges(str(db)))
-    except Exception:  # noqa: BLE001 - another plugin's db
+    except Exception:  # another plugin's db
         return False
 
 
@@ -929,3 +930,191 @@ def test_ac_upg_f69_s_a_17(rendered):
     approve = _skill(rendered["ING-F66"], "approver", "approve")
     assert "human approver" in approve.lower(), "the approver's checks verdict is not handed to the human approver"
 
+
+
+# Every form aims at PR 999999999 on the e2e repo, at a GraphQL input id of null, or at a body file that does not
+# exist, so even a failed gate cannot approve or merge anything (msg 40's fail-safe rule).
+# tests/e2e-scenarios/UPG-F69.s.a/ac20-forms.json carries {id: [tool, form]} byte for byte for the live probe.
+_FLEET_PROFILES = ("orchestrator", "triager", "fixer", "reviewer", "approver")
+
+# id: (tool, form, read-only twin the gate must still allow)
+AC20_FORMS = {
+    "F01-cli-review-approve": (
+        "terminal",
+        "gh pr review 999999999 --repo slang-coworkers/nanoclaw --approve --body ok",
+        "gh pr view 999999999 --repo slang-coworkers/nanoclaw --json reviews",
+    ),
+    "F02-cli-review-approve-short": (
+        "terminal",
+        "gh pr review 999999999 -R slang-coworkers/nanoclaw -a",
+        "gh pr view 999999999 --repo slang-coworkers/nanoclaw --json reviews",
+    ),
+    "F03-cli-review-approve-compound": (
+        "terminal",
+        "cd /tmp && gh pr review 999999999 --repo slang-coworkers/nanoclaw --approve=true",
+        "gh pr view 999999999 --repo slang-coworkers/nanoclaw --json reviews",
+    ),
+    "F04-cli-merge": (
+        "terminal",
+        "gh pr merge 999999999 --repo slang-coworkers/nanoclaw --squash",
+        "gh pr view 999999999 --repo slang-coworkers/nanoclaw",
+    ),
+    "F05-cli-merge-auto": (
+        "terminal",
+        "gh pr merge 999999999 --repo slang-coworkers/nanoclaw --auto --merge",
+        "gh pr view 999999999 --repo slang-coworkers/nanoclaw",
+    ),
+    "F06-rest-review-gh": (
+        "terminal",
+        "gh api -X POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews -f event=APPROVE",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/reviews",
+    ),
+    "F07-rest-review-curl-json": (
+        "terminal",
+        "curl -sS -X POST https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/reviews"
+        " -d '{\"event\": \"APPROVE\"}'",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/reviews",
+    ),
+    "F08-rest-pending-submit": (
+        "terminal",
+        "gh api --method POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews/1/events -f event=APPROVE",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/reviews",
+    ),
+    "F09-gql-add-review": (
+        "terminal",
+        "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: null, event: APPROVE})"
+        " { clientMutationId } }'",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") {"
+        " pullRequest(number: 999999999) { reviews(states: APPROVED, first: 1) { totalCount } } } }'",
+    ),
+    "F10-gql-submit-review": (
+        "terminal",
+        "gh api graphql -f query='mutation { submitPullRequestReview(input: {pullRequestReviewId: null,"
+        " event: APPROVE}) { clientMutationId } }'",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") {"
+        " pullRequest(number: 999999999) { reviews(states: APPROVED, first: 1) { totalCount } } } }'",
+    ),
+    "F11-gql-alias": (
+        "terminal",
+        "gh api graphql -f query='mutation { ok: addPullRequestReview(input: {pullRequestId: null,"
+        " event: APPROVE}) { clientMutationId } }'",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") {"
+        " pullRequest(number: 999999999) { reviews(states: APPROVED, first: 1) { totalCount } } } }'",
+    ),
+    "F12-gql-variables": (
+        "terminal",
+        "gh api graphql -f query='mutation($e: PullRequestReviewEvent!) { submitPullRequestReview(input:"
+        " {pullRequestReviewId: null, event: $e}) { clientMutationId } }' -f e=APPROVE",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") {"
+        " pullRequest(number: 999999999) { reviews(states: APPROVED, first: 1) { totalCount } } } }'",
+    ),
+    "F13-gql-variables-curl": (
+        "terminal",
+        "curl -sS -X POST https://api.github.com/graphql -d '{\"query\": \"mutation($e: PullRequestReviewEvent!)"
+        " { addPullRequestReview(input: {pullRequestId: null, event: $e}) { clientMutationId } }\","
+        " \"variables\": {\"e\": \"APPROVE\"}}'",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") {"
+        " pullRequest(number: 999999999) { reviews(states: APPROVED, first: 1) { totalCount } } } }'",
+    ),
+    "F14-gql-merge": (
+        "terminal",
+        "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: null}) { clientMutationId } }'",
+        "gh pr checks 999999999 --repo slang-coworkers/nanoclaw",
+    ),
+    "F15-gql-auto-merge": (
+        "terminal",
+        "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: null})"
+        " { clientMutationId } }'",
+        "gh pr checks 999999999 --repo slang-coworkers/nanoclaw",
+    ),
+    "F16-rest-merge-gh": (
+        "terminal",
+        "gh api -X PUT repos/slang-coworkers/nanoclaw/pulls/999999999/merge -f merge_method=squash",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/merge",
+    ),
+    "F17-rest-merge-curl": (
+        "terminal",
+        "curl -sS -X PUT https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/merge",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/merge",
+    ),
+    "F18-exec-cli-approve": (
+        "execute_code",
+        "import subprocess\nsubprocess.run([\"gh\", \"pr\", \"review\", \"999999999\", \"--repo\","
+        " \"slang-coworkers/nanoclaw\", \"--approve\"], check=False)\n",
+        "import subprocess\nsubprocess.run([\"gh\", \"pr\", \"view\", \"999999999\", \"--repo\","
+        " \"slang-coworkers/nanoclaw\"], check=False)\n",
+    ),
+    "F19-exec-rest-merge": (
+        "execute_code",
+        "import urllib.request\nurllib.request.urlopen(urllib.request.Request("
+        "\"https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/merge\", method=\"PUT\"))\n",
+        "import urllib.request\nurllib.request.urlopen(urllib.request.Request("
+        "\"https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/merge\", method=\"GET\"))\n",
+    ),
+    "F20-gql-query-file": (
+        "terminal",
+        "gh api graphql -F query=@/tmp/ac20-absent.graphql",
+        "gh api graphql -f query='query { repository(owner: \"slang-coworkers\", name: \"nanoclaw\") { name } }'",
+    ),
+    "F21-rest-review-input-file": (
+        "terminal",
+        "gh api -X POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews --input /tmp/ac20-absent.json",
+        "gh api repos/slang-coworkers/nanoclaw/pulls/999999999/reviews",
+    ),
+    "F22-gql-curl-body-file": (
+        "terminal",
+        "curl -sS -X POST https://api.github.com/graphql -d @/tmp/ac20-absent.json",
+        "curl -sS https://api.github.com/repos/slang-coworkers/nanoclaw",
+    ),
+    "F23-cli-alias-set": (
+        "terminal",
+        "gh alias set ok 'pr review 999999999 --repo slang-coworkers/nanoclaw --approve'",
+        "gh alias list",
+    ),
+}
+
+
+def _ac20_settings(root: Path, **extra) -> dict:
+    return {"profile_roles": {"orchestrator": "orchestrator"}, "enforce_sandbox": False, "plan_gate": False,
+            "required_stages": ["OUTPUT_REVIEW"], "edges_db_path": str(root.parent / "edges.db"),
+            "skills_root": str(root / "skills"), "shared_learnings_path": str(root / "shared-learnings"), **extra}
+
+
+def _ac20_drive(manager, loaded, root: Path, profile, tool, commands, session):
+    """pre_tool_call outcomes for ``commands`` in the root context (profile None) or under ``<root>/profiles/<p>``."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = root if profile is None else root / "profiles" / profile
+    home.mkdir(parents=True, exist_ok=True)
+    key = "code" if tool == "execute_code" else "command"
+    token = set_hermes_home_override(str(home))
+    try:
+        loaded.module.stores.record_critique(session, "OUTPUT_REVIEW")
+        return [_gate(manager, tool, {key: c}, session_id=session) for c in commands]
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("form_id", sorted(AC20_FORMS))
+def test_ac_upg_f69_s_a_20(form_id, tmp_path, monkeypatch):
+    """(D-4 defense-in-depth, not compliance) For every profile, the root home included, nv-fleet-gates' `pre_tool_call` refuses each PR approve or merge form of erratum E1 § 3. The refusal names the human-only owner rule, holds with a fresh critique recorded in the session, and comes ahead of every other nv-fleet-gates predicate. The form's read-only twin stays allowed."""
+    tool, form, twin = AC20_FORMS[form_id]
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+
+    root = tmp_path / "g20" / ".hermes"
+    manager, loaded = _gates(tmp_path, monkeypatch, root, _ac20_settings(root))
+    for profile in (None, *_FLEET_PROFILES):
+        where = (form_id, profile or "root")
+        refused, allowed = _ac20_drive(manager, loaded, root, profile, tool, (form, twin), f"s20-{profile or 'root'}")
+        assert refused and refused.get("action") == "block", (where, refused)
+        assert "human-only" in refused["message"], (where, refused)
+        assert allowed is None or allowed.get("action") != "block", (where, "twin refused", allowed)
+
+    # An earlier predicate that would refuse anyway must not pre-empt the owner-rule refusal.
+    sandboxed = tmp_path / "g20s" / ".hermes"
+    manager, loaded = _gates(tmp_path, monkeypatch, sandboxed,
+                             _ac20_settings(sandboxed, enforce_sandbox=True, expected_backend="ssh"))
+    for profile in (None, "approver"):
+        (refused,) = _ac20_drive(manager, loaded, sandboxed, profile, tool, (form,), f"s20s-{profile or 'root'}")
+        where = (form_id, profile or "root", "sandboxed")
+        assert refused and "human-only" in refused.get("message", ""), (where, refused)
