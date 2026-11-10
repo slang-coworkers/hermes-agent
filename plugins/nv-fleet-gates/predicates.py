@@ -270,7 +270,6 @@ def is_dangerous_command(command: str) -> bool:
     return bool(res[0]) if isinstance(res, tuple) else bool(res)
 
 
-# --- PR approve / merge refusal (owner rule: approvals and merges are human-only) ---
 # Defense-in-depth on the tool call's own text, not a credential control: text built at run time, a planted
 # alias or extension, or an MCP tool are beyond it. Bodies the gate cannot read are refused unread.
 _GH_PR_REVIEW_RE = re.compile(r"\bgh\s+pr\s+review\b")

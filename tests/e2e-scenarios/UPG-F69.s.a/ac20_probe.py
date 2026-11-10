@@ -84,6 +84,20 @@ def _gate_message(data: dict) -> str | None:
     return err if isinstance(err, str) and all(mark in err for mark in GATE_MARKS) else None
 
 
+def _dispatch(stores, scope, handle, pass_name: str, tool: str, text: str, *, plan: bool = False) -> dict:
+    """One call through the gateway tool path in a fresh session, inside ``scope``: the plugin's stores resolve their
+    DB from the active home, so the session's critique (and the preflight's plan) must be recorded where the gate
+    reads them."""
+    sid = f"ac20-{pass_name}-{uuid.uuid4().hex[:12]}"
+    key = "code" if tool == "execute_code" else "command"
+    with scope():
+        for stage in STAGES:
+            stores.record_critique(sid, stage)
+        if plan:
+            stores.record_plan(sid)
+        return _parse(handle(tool, {key: text}, task_id=sid, session_id=sid))
+
+
 def _preflight_ok(pf: dict, pass_name: str, fresh: Path, root_host: str) -> str | None:
     """None when the tool process ran where it must and sees no gh state but the pass's own; else why not."""
     want = APPROVER_HOST if pass_name == "approver" else root_host
@@ -138,24 +152,15 @@ def main(argv: list[str] | None = None) -> int:
     stores = loaded.module.stores
 
     def _scope(name):
-        return _profile_runtime_scope(approver_home) if name == "approver" else contextlib.nullcontext()
-
-    def _dispatch(name, tool, text, *, plan=False):
-        sid = f"ac20-{name}-{uuid.uuid4().hex[:12]}"
-        for stage in STAGES:
-            stores.record_critique(sid, stage)
-        if plan:
-            stores.record_plan(sid)
-        key = "code" if tool == "execute_code" else "command"
-        with _scope(name):
-            return _parse(model_tools.handle_function_call(tool, {key: text}, task_id=sid, session_id=sid))
+        return lambda: _profile_runtime_scope(approver_home) if name == "approver" else contextlib.nullcontext()
 
     rows, isolated, all_blocked = [], True, True
     for name in PASSES:
         os.environ["HOME"] = str(fresh[name])
         os.environ["GH_CONFIG_DIR"] = str(fresh[name] / "gh")
         for tool in ("terminal", "execute_code"):
-            data = _dispatch(name, tool, _PREFLIGHT[tool], plan=True)
+            data = _dispatch(stores, _scope(name), model_tools.handle_function_call, name, tool, _PREFLIGHT[tool],
+                             plan=True)
             line = next((ln[len("AC20PF "):] for ln in str(data.get("output") or "").splitlines()
                          if ln.startswith("AC20PF ")), None)
             if line is None:
@@ -172,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             break
         for fid, (tool, form) in sorted(forms.items()):
             t_start = _now()
-            data = _dispatch(name, tool, form)
+            data = _dispatch(stores, _scope(name), model_tools.handle_function_call, name, tool, form)
             message = _gate_message(data)
             rows.append({"pass": name, "id": fid, "tool": tool, "pid": os.getpid(), "t_start": t_start,
                          "t_end": _now(), "blocked": message is not None,
