@@ -20,6 +20,7 @@ Pure planner surface (no side effects):
 from __future__ import annotations
 
 import argparse
+import contextvars
 import copy
 import functools
 import logging
@@ -132,9 +133,15 @@ def _preflight_ssh_lane(lane: Optional[dict[str, Any]]) -> None:
                              "before installing; no sandbox was changed")
 
 
-def _openshell_argv(args: list[str], lane: Optional[dict[str, Any]]) -> list[str]:
+# The ssh lane of the install in progress, set by apply()/phase_a() once the bundle preflight admits it, so a step
+# run outside an install (a plan, a unit-level executor call) keeps the bare `openshell` argv.
+_ACTIVE_LANE: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar("osh_ssh_lane", default=None)
+
+
+def _openshell_argv(args: list[str]) -> list[str]:
     """One openshell invocation: bare without a lane, else the lane's shim run by its interpreter after
     sourcing its env file (the shape of the lane ProxyCommand)."""
+    lane = _ACTIVE_LANE.get()
     if lane is None:
         return ["openshell", *args]
     bundle = lane["bundle"]
@@ -1256,7 +1263,7 @@ def _gateway_restart_env() -> dict[str, str]:
     return env
 
 
-def _sandbox_exists(name: str, lane: Optional[dict[str, Any]] = None) -> bool:
+def _sandbox_exists(name: str) -> bool:
     # Apply-time idempotence for provision_create, decoupled from profile-installed state:
     # whether an OpenShell worker sandbox is already provisioned, from the broker's
     # `openshell sandbox list` (first whitespace column is NAME; the NAME/CREATED/PHASE header's
@@ -1264,7 +1271,7 @@ def _sandbox_exists(name: str, lane: Optional[dict[str, Any]] = None) -> bool:
     # so apply halts on an unknown broker state rather than creating over a live sandbox.
     import subprocess
     proc = subprocess.run(
-        _openshell_argv(["sandbox", "list"], lane), check=True, capture_output=True, text=True,
+        _openshell_argv(["sandbox", "list"]), check=True, capture_output=True, text=True,
         encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S,
         env=_openshell_env(),
     )
@@ -1342,7 +1349,7 @@ def _lane_proxy_commands(block: str, lane: Optional[dict[str, Any]]) -> str:
     if lane is None:
         return block
 
-    def _sub(m: "re.Match[str]") -> str:
+    def _sub(m: re.Match[str]) -> str:
         if m.group("prog").rsplit("/", 1)[-1] != "openshell":
             return m.group(0)
         args = m.group("args").strip()
@@ -1355,14 +1362,14 @@ def _lane_proxy_commands(block: str, lane: Optional[dict[str, Any]]) -> str:
     return _PROXY_LINE_RE.sub(_sub, block)
 
 
-def _persist_ssh_config(sandbox: str, project: str, block: str, lane: Optional[dict[str, Any]] = None) -> None:
+def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
     """Persist one sandbox's ``openshell sandbox ssh-config`` output into the gateway user's
     managed include ``~/.ssh/config.d/openshell-<project>.conf`` (one marker-delimited block per
     alias, replaced in place on a rerun), and make ``~/.ssh/config`` include it exactly once as
     its FIRST line — OpenSSH applies the first value it reads, so a later operator Host entry
     cannot shadow the alias. Every other line of the operator's config is kept. SGR codes are
     stripped and, under an ``ssh_lane``, each ProxyCommand runs through the lane."""
-    block = _lane_proxy_commands(_strip_ansi(block), lane)
+    block = _lane_proxy_commands(_strip_ansi(block), _ACTIVE_LANE.get())
     ssh_dir = Path(os.path.expanduser("~")) / ".ssh"
     inc_rel = f"config.d/openshell-{project}.conf"
     inc_path = ssh_dir / inc_rel
@@ -1422,12 +1429,12 @@ def _rendered_policy(cmd: list[str], step: Step) -> tuple[str, Path, Path, bytes
     return name, rendered, bound, want
 
 
-def _broker_policy_digest(name: str, bound: Path, lane: Optional[dict[str, Any]] = None) -> str:
+def _broker_policy_digest(name: str, bound: Path) -> str:
     """The broker's sha256 of the host file it will bind (``openshell policy digest``). A deny,
     an unreadable file, an unknown verb or unparsable output refuses: an unverified mirror is
     never a pass."""
     import subprocess
-    proc = subprocess.run(_openshell_argv(["policy", "digest", "--policy", str(bound)], lane), check=False,
+    proc = subprocess.run(_openshell_argv(["policy", "digest", "--policy", str(bound)]), check=False,
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
                           stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S, env=_openshell_env())
     stdout, stderr = _strip_ansi(proc.stdout), _strip_ansi(proc.stderr)
@@ -1445,7 +1452,7 @@ def _broker_policy_digest(name: str, bound: Path, lane: Optional[dict[str, Any]]
     return line.group(1).lower()
 
 
-def _preflight_rooted_policies(steps: list[Step], lane: Optional[dict[str, Any]] = None) -> None:
+def _preflight_rooted_policies(steps: list[Step]) -> None:
     """Verify every rooted worker policy before the first sandbox operation, so a stale, missing
     or unverifiable host mirror refuses the whole install with nothing deleted, created or
     recorded. Readable mirrors are compared before broker digests; then the broker digests each
@@ -1456,7 +1463,7 @@ def _preflight_rooted_policies(steps: list[Step], lane: Optional[dict[str, Any]]
         name, _rendered, bound, want = _rendered_policy(list(step.command), step)
         rooted.append((name, bound, hashlib.sha256(want).hexdigest()))
     for name, bound, digest in rooted:
-        got = _broker_policy_digest(name, bound, lane)
+        got = _broker_policy_digest(name, bound)
         if got != digest:
             raise ValueError(f"{name}: host policy {bound} is stale (broker sha256 {got} != rendered "
                              f"{digest}); refresh the host mirror before installing")
@@ -1469,8 +1476,7 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
     broker binds a host mirror the installer may not be able to read, so each create carries the
     render's digest for the broker's compare-at-bind, and a drifted sandbox is replaced in one
     broker call that refuses before its delete, never deleted first."""
-    lane = ctx.get("ssh_lane")
-    exists = _sandbox_exists(cmd[cmd.index("--name") + 1], lane)
+    exists = _sandbox_exists(cmd[cmd.index("--name") + 1])
     name, rendered, bound, want = _rendered_policy(cmd, step)
     import hashlib
     digest = hashlib.sha256(want).hexdigest()
@@ -1481,11 +1487,11 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
             return
     if ctx.get("policy_root") or bound != rendered:
         verb = "replace" if exists else "create"
-        _run(_openshell_argv(["sandbox", verb, *cmd[3:], "--policy-sha256", digest], lane), env=_openshell_env())
+        _run(_openshell_argv(["sandbox", verb, *cmd[3:], "--policy-sha256", digest]), env=_openshell_env())
     else:
         if exists:
-            _run(_openshell_argv(["sandbox", "delete", name], lane), env=_openshell_env())
-        _run(_openshell_argv(cmd[1:], lane), env=_openshell_env())
+            _run(_openshell_argv(["sandbox", "delete", name]), env=_openshell_env())
+        _run(_openshell_argv(cmd[1:]), env=_openshell_env())
     record.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(record, digest + "\n")
 
@@ -1601,7 +1607,7 @@ def _sealed_source() -> Optional[str]:
     sealed, root-owned tree); None for a network URL, the path every install took before."""
     proc = _git("git", "ls-remote", "--get-url", _FORK_URL)
     url = (proc.stdout or "").strip() if proc.returncode == 0 else ""
-    path = url[len("file://"):] if url.startswith("file://") else url
+    path = url.removeprefix("file://")
     if not path or "://" in path or not Path(path).exists():
         return None
     return path
@@ -1656,7 +1662,7 @@ def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_on
             raise ValueError(f"could not create the fork mirror {mirror}")
     _write_if_changed(mirror / "objects" / "info" / "alternates", f"{gitdir / 'objects'}\n")
     if (gitdir / "shallow").is_file():
-        _write_if_changed(mirror / "shallow", (gitdir / "shallow").read_text(encoding="utf-8"))
+        _write_if_changed(mirror / "shallow", (gitdir / "shallow").read_text(encoding="utf-8-sig"))
     if _git(real, "--git-dir", str(mirror), "config", "uploadpack.allowAnySHA1InWant", "true", env=env).returncode:
         raise ValueError(f"could not configure the fork mirror {mirror}")
     sealed_head = _git(real, "-c", f"safe.directory={sealed}", "-C", sealed, "rev-parse", "HEAD", env=env).stdout.strip()
@@ -1681,7 +1687,7 @@ def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_on
 
 
 def _write_if_changed(path: Path, text: str) -> None:
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
+    if path.is_file() and path.read_text(encoding="utf-8-sig") == text:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".osh-f64.tmp")
@@ -1703,12 +1709,10 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         if tag == "provision_create":
             _provision_create(cmd, step, ctx)
             return
-        lane = ctx.get("ssh_lane")
         if tag == "provision_sshconfig":
             sandbox = cmd[-1]
             project = (ctx.get("spec") or {}).get("project") or "fleet"
-            _persist_ssh_config(sandbox, project, _run_capture(_openshell_argv(cmd[1:], lane), env=_openshell_env()),
-                                lane)
+            _persist_ssh_config(sandbox, project, _run_capture(_openshell_argv(cmd[1:]), env=_openshell_env()))
             return
         if tag == "restart":
             _restart_gateway_detached(cmd, Path(ctx["home"]))
@@ -1717,7 +1721,7 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
             _run(cmd, env=_plugin_git_env(ctx.get("plugin_gitbin")))
             return
         if cmd and cmd[0] == "openshell":
-            _run(_openshell_argv(cmd[1:], lane), env=_openshell_env())
+            _run(_openshell_argv(cmd[1:]), env=_openshell_env())
             return
         _run(cmd)
         return
@@ -1826,17 +1830,20 @@ def _apply_ctx(spec: dict[str, Any], spec_path: Any, room_creator=None, parker=N
         "spec_path": spec_path,
         "room_creator": room_creator,
         "parker": parker,
-        "ssh_lane": _ssh_lane(spec),
         "plugin_gitbin": None,
     }
 
 
-def _preflight_install(steps: list[Step], ctx: dict[str, Any], ref: str, fork_source: Optional[str]) -> None:
+def _preflight_install(steps: list[Step], ctx: dict[str, Any], ref: str,
+                       fork_source: Optional[str]) -> Optional[dict[str, Any]]:
     """Refusals that must precede every executed step: an incomplete lane bundle, and a ``--ref`` no plugin
-    source holds (checked only when a plugin is (re)installed). Sets the plugin steps' git dir."""
-    _preflight_ssh_lane(ctx.get("ssh_lane"))
+    source holds (checked only when a plugin is (re)installed). Sets the plugin steps' git dir and returns the
+    admitted lane."""
+    lane = _ssh_lane(ctx["spec"])
+    _preflight_ssh_lane(lane)
     if any(step.tag in _PLUGIN_GIT_TAGS for step in steps):
         ctx["plugin_gitbin"] = _fork_preflight(Path(ctx["home"]), ref, fork_source)
+    return lane
 
 
 def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None, policy_root=None,
@@ -1863,12 +1870,15 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
     ctx = _apply_ctx(spec, spec_path, room_creator=room_creator, parker=parker)
     ctx["policy_root"] = bool(policy_root)
     steps = build_plan(state, spec_path, ref, policy_root=policy_root)
-    _preflight_install(steps, ctx, ref, fork_source)
-    creates = [step for step in steps if step.tag == "provision_create"]
-    for step in steps:
-        if policy_root and creates and step is creates[0]:
-            _preflight_rooted_policies(creates, ctx.get("ssh_lane"))
-        _execute_step(step, ctx)
+    token = _ACTIVE_LANE.set(_preflight_install(steps, ctx, ref, fork_source))
+    try:
+        creates = [step for step in steps if step.tag == "provision_create"]
+        for step in steps:
+            if policy_root and creates and step is creates[0]:
+                _preflight_rooted_policies(creates)
+            _execute_step(step, ctx)
+    finally:
+        _ACTIVE_LANE.reset(token)
 
 
 def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> None:
@@ -1904,9 +1914,12 @@ def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> N
         if (step.tag in ("legacy_snapshot_migrate", "backup", "scan_guard_write")
                 or is_bootstrap_plugin or is_bootstrap_snapshot):
             selected.append(step)
-    _preflight_install(selected, ctx, ref, fork_source)
-    for step in selected:
-        _execute_step(step, ctx)
+    token = _ACTIVE_LANE.set(_preflight_install(selected, ctx, ref, fork_source))
+    try:
+        for step in selected:
+            _execute_step(step, ctx)
+    finally:
+        _ACTIVE_LANE.reset(token)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
