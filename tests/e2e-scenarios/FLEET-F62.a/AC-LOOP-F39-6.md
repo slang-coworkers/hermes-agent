@@ -92,8 +92,9 @@ source "$TB/fleet-f62a.env"
    Then prove the config-only enable loaded it. The `plugins list` row must read `enabled`, and `not enabled`
    also contains that word, so it is excluded:
    ```bash
-   row=$(hermes plugins list | grep -F nv-coworker-compose)
-   test -n "$row" && ! grep -qF 'not enabled' <<< "$row" && grep -qwF enabled <<< "$row"
+   row=$(hermes plugins list | grep -F nv-coworker-compose || true)
+   if test -n "$row" && ! grep -qF 'not enabled' <<< "$row" && grep -qwF enabled <<< "$row"; then echo "plugin enabled OK"
+   else echo "FAIL(setup): nv-coworker-compose is not enabled: ${row:-no row}"; exit 1; fi
    hermes onboard --help | grep -F coworker               # the `coworker` verb now exists, exit 0
    ```
 2. **Boot the FULL messaging gateway** on the DEFAULT profile — `hermes gateway run --no-supervise`
