@@ -14,7 +14,7 @@ tools/process_registry.py	6c43147d73d273864dfb6f419db4625b5bb7e060f6475c54d6e589
 tests/agent/test_self_f57b_external_skill_mirror.py	5d2ff94cf44cc4b3df0171c9844eaf8eb5a87a67a9823a4dc80b966b22a38a59	ADR §D4 find_all_skills rename (UPG-F69 3) + architect msg 64 (st_mtime_ns restore)
 tests/hermes_cli/test_self_f57_acceptance.py	bcfcca2cda8c91abc6ba076aaf280df3a59ff263646e29f77bd8cb5857dd5174	ADR §D4 find_all_skills rename (UPG-F69 3)
 tests/plugins/test_mem_f43_shared_learnings_acceptance.py	c04f3b1c27c801df11ad20af7c44c693d2f6012a6ffbb018be781cf57489c818	ADR §D4 find_all_skills rename (UPG-F69 3)
-tests/plugins/test_upg_f67_acceptance.py	47444a89abc88c99ab0608ccce6f0aa773780848801a445aaa02d65b25c4b0e9	3a/msg-206 + F68 E4 C1: AC-UPG-F67-15 re-spec (UPG-F69 3)
+tests/plugins/test_upg_f67_acceptance.py	810d8d486889d592ae975b89a2ada25dff66ce9bc4f378f3c0106d5fd2115fc1	3a/msg-206 + F68 E4 C1: AC-UPG-F67-15 re-spec (UPG-F69 3); LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
 tests/tools/test_accretion_caps.py	f2f409589f6b547802003017069e11630ee9848bd6bc404c262b513e878315d6	user msg 306 (UPG-F69 E2)
 tests/tools/test_process_registry.py	003202797cd871e24a440e5b89ebc775425cc89b41a7d175a9f66324d73fed41	user msg 306 (UPG-F69 E2)
 tests/tools/test_process_registry_completion_races.py	fe9c324147c0106265d4e284ca8c6e3653a47161847cd3be50d38336da1b658d	user msg 306 (UPG-F69 E2)
@@ -61,3 +61,7 @@ tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-6.md	6fb787ff09f0ee2ee661c250ba5a9743
 tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-7.md	59c79cd997db5785f92baf5ac1c9c5948c78f6aeade8ea685751e59644774e60	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 tests/plugins/test_osh_f64_b_acceptance.py	deb2c38b8dedba945939796bc9fc1bd40abf344d5c4d7fcd577151e030281a0b	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 website/docs/user-guide/fleet-nanoclaw-base-port.md	8b9a7b23fd5c27aa7967e48265d00ebafc6b80866d181038967ee56297703234	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
+website/docs/user-guide/features/fleet-issue-supervision.md	bf0a9c9971c36ae75993a1f4113354824573790f5dd013b7a2d94b13bad957ac	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
+tests/e2e-scenarios/FLEET-F62.a/AC-LOOP-F39-6.md	532e905a653171c3ff30cc111d5d5314ed28ea5bc7e9b90efdae25b6452c6350	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
+tests/e2e-scenarios/FLEET-F62.a/oracle.py	bb6d5542f4dd23c4f2bdae35b2dc31dae77ad2d28df2b937cbe152f22b2947b7	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
+tests/hermes_cli/fixtures/loop-f39/skills/supervise-issues/SKILL.md	e520ac33bc3cef9edb177247702d4c07fee94fea4c06fd35c80a9f127a5f6f28	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
