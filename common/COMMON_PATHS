@@ -1,0 +1,48 @@
+# Paths kept byte-identical in the two repositories that carry the shared nv-* plugins.
+# scripts/common_drift.py compares them with the commit pinned in common/COMMON_PIN.
+# One entry per line: a file, a directory (every file under it) or an fnmatch glob over
+# repo-relative paths. A file belongs to the first entry that matches it.
+
+# The drift tooling itself
+common/COMMON_PATHS
+scripts/common_drift.py
+tests/plugins/test_common_drift.py
+
+# Whole plugins
+plugins/hello
+plugins/nv-approval-ledger
+plugins/nv-artifact
+plugins/nv-cost-cap
+plugins/nv-coworker-compose
+plugins/nv-delivery-redrive
+plugins/nv-workflow-modes
+plugins/podman-onecli
+
+# nv-fleet-gates: the generic core and modules only
+plugins/nv-fleet-gates/__init__.py
+plugins/nv-fleet-gates/aliases.py
+plugins/nv-fleet-gates/cli.py
+plugins/nv-fleet-gates/commands.py
+plugins/nv-fleet-gates/conversation_origin.py
+plugins/nv-fleet-gates/cron_delivery.py
+plugins/nv-fleet-gates/edges.py
+plugins/nv-fleet-gates/outbound.py
+plugins/nv-fleet-gates/placeholder_redact.py
+plugins/nv-fleet-gates/plugin.yaml
+plugins/nv-fleet-gates/predicates.py
+plugins/nv-fleet-gates/stores.py
+
+# Their tests
+tests/plugins/test_hello_acceptance.py
+tests/plugins/test_nv_approval_ledger*.py
+tests/plugins/test_nv_artifact*.py
+tests/plugins/test_nv_cost_cap*.py
+tests/plugins/test_nv_coworker_compose*.py
+tests/plugins/test_nv_delivery_redrive*.py
+tests/plugins/test_nv_workflow_modes*.py
+tests/plugins/test_podman_onecli*.py
+tests/plugins/test_nv_fleet_gates_acceptance.py
+tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py
+tests/plugins/test_nv_fleet_gates_lifecycle.py
+tests/plugins/test_nv_fleet_gates_terminal_scope.py
+tests/plugins/test_nv_fleet_gates_unit.py
