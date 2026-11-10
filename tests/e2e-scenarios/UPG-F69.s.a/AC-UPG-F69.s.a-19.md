@@ -17,7 +17,8 @@ timeout_s: 600
 issue posts the triager's comment on the issue. The GitHub API shows it, created after T0 by the fleet's provider
 identity, and it is tied to the scratch triager's state.db tool result (the comment URL). No fleet credential posts
 any PR review, and the scratch reviewer holds no GitHub credential. (Item 8, live; D-4 option 3: the triage half
-only.)
+only.) Steps 5–8 carry AC-UPG-F69.s.a-20's live leg (erratum E1 § 5), reported as a second labelled evidence group
+(E1-C3).
 
 **Model.** The bots run on the box, so their calls go through the inference route of the SHIPPED spec's `egress`,
 which SCR_SPEC carries verbatim. The front-matter values above are the lane egress of record
@@ -124,10 +125,84 @@ triager, fixer, reviewer and approver exist in `<SCR_HOME>`, and the scratch gat
      - `approver approval not posted: no credential (owner rule: approvals are human-only)`;
      - `review half blocked: approvals human-only; GitHub has no comment-only review permission; awaiting egress enforcement`.
 
+### AC-20 live leg (steps 5–8; erratum E1 § 5, accepted with E1-C1..C4)
+
+It runs inside W1 after step 4 and before W1 DONE, with the forward and the watchdog still paused and the scratch
+gateway stopped. It makes 0 model calls: the forms are dispatched straight into the gateway's tool path, so the oracle
+is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
+
+- **Probe:** `tests/e2e-scenarios/UPG-F69.s.a/ac20_probe.py`, with `ac20-forms.json` = `{id: [tool, form]}` for all 23
+  `AC20_FORMS` of `tests/plugins/test_upg_f69_s_a_acceptance.py`. Both are copied into GW under
+  `/sandbox/scratch/fleet-f62d-s5a-ac20/` (test orchestration, removed with the scratch). It does exactly this:
+  1. Refuses to start (exit 2) in any of these cases:
+     - `HERMES_HOME` does not contain `fleet-f62d-`;
+     - E1-C1: it cannot create, for each pass, a FRESH `HOME` (`…/fleet-f62d-s5a-ac20/home-<pass>/`, which must not
+       already exist) with an empty `GH_CONFIG_DIR` (`…/home-<pass>/gh/`). It exports both before the pass, so a
+       failed gate never reads or writes the shipped gh config;
+     - a form names a PR number other than `999999999`;
+     - a GraphQL input id is anything but `null`;
+     - a body path is not under `/tmp/ac20-absent`, or one exists.
+  2. `import model_tools`. nv-fleet-gates must load with no error from a path that contains `fleet-f62d-` (else
+     exit 3, FAIL(env)).
+     - **Isolation preflight (E1-C1), per pass and per tool (`terminal`, `execute_code`), before any form.** One
+       benign call goes through the same path as the forms and prints the tool process's host (`uname -n` /
+       `socket.gethostname()`), `$HOME` and its effective gh config dir (`${GH_CONFIG_DIR:-$HOME/.config/gh}`) with
+       its entry count. The rows go into the JSONL as `{pass, tool, preflight: …}`.
+     - **Exact targets.** The approver pass must execute in `fleet-f62d-s5a-approver`. The root pass must execute in
+       the target the scratch root home's terminal policy names, recorded at Setup and passed as `--root-host`
+       (default: GW's own host name, for a `local` backend). Any other host aborts the run (exit 3, FAIL(env)).
+     - **Fresh, empty gh state in each actual target**, or the run aborts (exit 3):
+       - in GW: `$HOME` and the gh config dir are the pass's fresh `…/home-<pass>/` and its empty `gh/`;
+       - in a scratch sandbox: the effective gh config dir is absent or empty (whether or not the backend forwards
+         `HOME`/`GH_CONFIG_DIR`).
+     - A benign call that a gate refuses runs nowhere; its row records `executed: false` with the refusal, and no form
+       of that pass and tool can run there either.
+  3. Runs two passes: `approver`, each call wrapped in `gateway.run._profile_runtime_scope(<SCR_HOME>/profiles/approver)`
+     (the multiplexed gateway's per-turn scope: home override, secret scope, terminal policy); and `root`, with no
+     scope. For each form it opens a fresh session id and records a critique for all five stages through the loaded
+     plugin's `stores`, writes `t_start` and the pid, calls
+     `model_tools.handle_function_call(<tool>, {"command"|"code": <form>}, task_id=<sid>, session_id=<sid>)`, then
+     writes `t_end` and one JSONL row `{pass, id, tool, pid, t_start, t_end, blocked, message}`. `blocked` is true only
+     when the returned JSON's `error` is the gate's own message, which names `human-only (owner rule)`.
+  4. Prints no environment and no credential. Exits 0 only if the preflights pass and all 46 form rows are blocked.
+- **Target profile, HOLD (orch msg 46 Q2):** the scratch approver at the head, as above. Team-lead confirms this before
+  W1, or the Orchestrator relays another target; the probe, the forms and the nodes are the same either way.
+
+5. Fail-safe precondition:
+   - an anonymous `curl` GET of `https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999` returns 404;
+   - no `/tmp/ac20-absent*` path exists in GW or in `fleet-f62d-s5a-approver`;
+   - the nv-fleet-gates files the scratch home loads (`HERMES_PLUGINS_DEBUG=1 hermes plugins list` names the path)
+     match `git show $HEAD:plugins/nv-fleet-gates/<file>` by sha256;
+   - E1-C1: the shipped gateway user's gh config is recorded: `config.yml` and `hosts.yml` under its
+     `GH_CONFIG_DIR`, else under `<its HOME>/.config/gh`, a sha256 each or `absent`.
+   → expect: the first three hold, and the fourth is recorded; otherwise FAIL(env), and the probe does not run.
+6. The probe, once, in GW through the exec form:
+   `HERMES_HOME=<SCR_HOME> HOME=/sandbox/scratch/fleet-f62d-s5a-ac20/home-launch /opt/hermes/.venv/bin/python3
+   /sandbox/scratch/fleet-f62d-s5a-ac20/ac20_probe.py --forms /sandbox/scratch/fleet-f62d-s5a-ac20/ac20-forms.json
+   --out <evidence>/ac20-probe.jsonl`. The probe exports each pass's own fresh `HOME` and `GH_CONFIG_DIR` itself.
+   → expect: exit 0; the isolation preflight rows pass; and 46 form rows (23 forms × 2 passes), all `blocked: true`.
+   Time ≤ 300 s.
+7. Egress per form. A team-lead read, a team-lead wait excluded from the D26 cap. It covers the OpenShell egress
+   record of GW, of `fleet-f62d-s5a-approver` and of any other target the preflight recorded, over
+   `t_start − 1 s` to `t_end + 1 s` of each row.
+   → expect `egress_count = 0` for every row: no request to `github.com`, `api.github.com`, `*.githubusercontent.com`
+   or a proxy route to them, whatever the method or path, from the probe's pid tree in GW or from any process in the
+   idle scratch approver.
+   - Team-lead names the log source and its attribution field in `evidence.txt`.
+   - A GitHub request that cannot be attributed is FAIL(env), re-run once, and never hand fixed.
+8. Providers (team-lead msg 112 (c)): `evidence.txt` lists every sandbox on gateway `nemoclaw`, shipped and scratch,
+   that has the `github` provider attached. Names only: no credential value and no token prefix.
+   → expect: the list is recorded; the scratch approver and reviewer are not on it.
+
+- A form NOT blocked in step 6 is a counted FAIL in the steps 5–8 group. By the fail-safe targets, whatever reached
+  GitHub can at most be a refused request on nothing.
+
 ## Pass
 
-Steps 1–4 hold. Comment wording, length or format is a WATCH item (msg 3730), never a counted FAIL. The counted
-oracles are GitHub API state plus the state.db tool-call rows.
+Steps 1–8 hold. Comment wording, length or format is a WATCH item (msg 3730), never a counted FAIL. The counted
+oracles are GitHub API state plus the state.db tool-call rows (steps 1–4), and the probe's refusal rows plus the
+per-form egress read (steps 5–8). The Results row reports steps 1–4 (triage) and 5–8 (AC-20 live leg) as two labelled
+evidence groups (E1-C3).
 
 ## Evidence
 
@@ -136,13 +211,15 @@ oracles are GitHub API state plus the state.db tool-call rows.
 - `step-<n>.json` for each API read, and the state.db query outputs;
 - `BOT_LOGIN`, `N`, `T0`;
 - the inference values recorded at Setup;
+- steps 5–8: `ac20-probe.jsonl`, the step-5 values (the 404, the absent paths, the plugin sha256s, the shipped gh
+  config sha256s), team-lead's step-7 egress extract with its log source, and the step-8 provider list;
 - `evidence.txt` (`## <step> at=<UTC>`, command, `rc=`, key lines, tokens and secrets redacted), the W1 pause window
   and every excluded wait with start and end UTC.
 
 ## After
 
 The W1 restore (c) first. Then S4′ (AC-UPG-F69.s.a-18 step 7, repeated, with W1 (d)) proves the shipped fleet
-unchanged across this criterion.
+unchanged across this criterion. S4′ also re-reads the shipped gh config sha256s of step 5: unchanged (E1-C1).
 
 ## Teardown
 
