@@ -1,0 +1,94 @@
+{
+  "F01-cli-review-approve": [
+    "terminal",
+    "gh pr review 999999999 --repo slang-coworkers/nanoclaw --approve --body ok"
+  ],
+  "F02-cli-review-approve-short": [
+    "terminal",
+    "gh pr review 999999999 -R slang-coworkers/nanoclaw -a"
+  ],
+  "F03-cli-review-approve-compound": [
+    "terminal",
+    "cd /tmp && gh pr review 999999999 --repo slang-coworkers/nanoclaw --approve=true"
+  ],
+  "F04-cli-merge": [
+    "terminal",
+    "gh pr merge 999999999 --repo slang-coworkers/nanoclaw --squash"
+  ],
+  "F05-cli-merge-auto": [
+    "terminal",
+    "gh pr merge 999999999 --repo slang-coworkers/nanoclaw --auto --merge"
+  ],
+  "F06-rest-review-gh": [
+    "terminal",
+    "gh api -X POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews -f event=APPROVE"
+  ],
+  "F07-rest-review-curl-json": [
+    "terminal",
+    "curl -sS -X POST https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/reviews -d '{\"event\": \"APPROVE\"}'"
+  ],
+  "F08-rest-pending-submit": [
+    "terminal",
+    "gh api --method POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews/1/events -f event=APPROVE"
+  ],
+  "F09-gql-add-review": [
+    "terminal",
+    "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: null, event: APPROVE}) { clientMutationId } }'"
+  ],
+  "F10-gql-submit-review": [
+    "terminal",
+    "gh api graphql -f query='mutation { submitPullRequestReview(input: {pullRequestReviewId: null, event: APPROVE}) { clientMutationId } }'"
+  ],
+  "F11-gql-alias": [
+    "terminal",
+    "gh api graphql -f query='mutation { ok: addPullRequestReview(input: {pullRequestId: null, event: APPROVE}) { clientMutationId } }'"
+  ],
+  "F12-gql-variables": [
+    "terminal",
+    "gh api graphql -f query='mutation($e: PullRequestReviewEvent!) { submitPullRequestReview(input: {pullRequestReviewId: null, event: $e}) { clientMutationId } }' -f e=APPROVE"
+  ],
+  "F13-gql-variables-curl": [
+    "terminal",
+    "curl -sS -X POST https://api.github.com/graphql -d '{\"query\": \"mutation($e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: null, event: $e}) { clientMutationId } }\", \"variables\": {\"e\": \"APPROVE\"}}'"
+  ],
+  "F14-gql-merge": [
+    "terminal",
+    "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: null}) { clientMutationId } }'"
+  ],
+  "F15-gql-auto-merge": [
+    "terminal",
+    "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: null}) { clientMutationId } }'"
+  ],
+  "F16-rest-merge-gh": [
+    "terminal",
+    "gh api -X PUT repos/slang-coworkers/nanoclaw/pulls/999999999/merge -f merge_method=squash"
+  ],
+  "F17-rest-merge-curl": [
+    "terminal",
+    "curl -sS -X PUT https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/merge"
+  ],
+  "F18-exec-cli-approve": [
+    "execute_code",
+    "import subprocess\nsubprocess.run([\"gh\", \"pr\", \"review\", \"999999999\", \"--repo\", \"slang-coworkers/nanoclaw\", \"--approve\"], check=False)\n"
+  ],
+  "F19-exec-rest-merge": [
+    "execute_code",
+    "import urllib.request\nurllib.request.urlopen(urllib.request.Request(\"https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999/merge\", method=\"PUT\"))\n"
+  ],
+  "F20-gql-query-file": [
+    "terminal",
+    "gh api graphql -F query=@/tmp/ac20-absent.graphql"
+  ],
+  "F21-rest-review-input-file": [
+    "terminal",
+    "gh api -X POST repos/slang-coworkers/nanoclaw/pulls/999999999/reviews --input /tmp/ac20-absent.json"
+  ],
+  "F22-gql-curl-body-file": [
+    "terminal",
+    "curl -sS -X POST https://api.github.com/graphql -d @/tmp/ac20-absent.json"
+  ],
+  "F23-cli-alias-set": [
+    "terminal",
+    "gh alias set ok 'pr review 999999999 --repo slang-coworkers/nanoclaw --approve'"
+  ]
+}
