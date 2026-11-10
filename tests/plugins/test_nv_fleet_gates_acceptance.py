@@ -209,11 +209,11 @@ def test_ac_loop_f37_1(tmp_path, monkeypatch):
 
 
 def test_ac_loop_f37_2(tmp_path, monkeypatch):
-    """terminal and execute_code gh pr create|review|comment are blocked without a critique; create/review pass after it, comment stays blocked."""
+    """terminal and execute_code gh pr create|review|comment are blocked without a critique; create and a non-approve review pass after it, comment stays blocked, and `gh pr review --approve` stays refused (owner rule, AC-UPG-F69.s.a-20)."""
     manager, _, _ = _load(tmp_path, monkeypatch)
     _loaded(manager)
     cmds = {"create": "gh pr create --title x --body y",
-            "review": "gh pr review 12 --approve",
+            "review": "gh pr review 12 --comment --body y",
             "comment": "gh pr comment 12 --body hi"}
 
     def mk(tool, cmd):
@@ -227,6 +227,7 @@ def test_ac_loop_f37_2(tmp_path, monkeypatch):
         assert _act(_gate(manager, tool, mk(tool, cmds["create"]), session_id="s2")) != "block"
         assert _act(_gate(manager, tool, mk(tool, cmds["review"]), session_id="s2")) != "block"
         assert _act(_gate(manager, tool, mk(tool, cmds["comment"]), session_id="s2")) == "block"
+        assert _act(_gate(manager, tool, mk(tool, "gh pr review 12 --approve"), session_id="s2")) == "block"
 
 
 def test_ac_loop_f37_3(tmp_path, monkeypatch):
