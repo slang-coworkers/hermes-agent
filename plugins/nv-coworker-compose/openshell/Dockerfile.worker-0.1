@@ -1,0 +1,56 @@
+# Worker workload image for OpenShell 0.1.2 (spec egress.openshell_api: "0.1").
+# Dockerfile.worker remains the 0.0.72 box image. A production deployment builds its own worker
+# image; this file is the plugin-side reference shape the 0.1 render assumes. Build context: this directory (plugins/nv-coworker-compose/openshell).
+#
+# What 0.1.2 on Kubernetes changes (refs/OpenShell@v0.1.2):
+#  * The driver overrides the command with the side-loaded static-musl openshell-sandbox
+#    (crates/openshell-driver-kubernetes/src/driver.rs:5799-5806), so ENTRYPOINT/CMD never run
+#    and the image needs no particular glibc and no iproute2 (networking lives in the separate
+#    supervisor pod).
+#  * One arbitrary UID from the namespace range runs everything (driver.rs:1452-1506). Nothing may
+#    depend on a fixed UID or a passwd entry, so /sandbox is group-0 writable.
+#  * /sandbox is the persistent workdir/HOME (the PVC mount, driver.rs:670). It is seeded ONCE from
+#    the image's /sandbox (workspace-init), so later image changes do not reach an existing PVC.
+#  * /run is shadowed by an emptyDir. Nothing is baked there.
+#  * OpenShell sets SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE/GIT_SSL_CAINFO to
+#    /etc/openshell-tls/ca-bundle.pem (crates/openshell-sandbox/src/child_env.rs:6-22).
+#  * No TCP servers: a cluster in legacy seccomp mode breaks accept()/getpeername(). No sshd (as
+#    before). The getpeername shim keeps sync Python TLS clients working (inferred, not yet probed).
+# The base: the uv project's python3.14-trixie image, pinned by digest (the same family as
+# Dockerfile.worker's FROM; a deployment that cannot reach its registry mirrors it). Required:
+#   --build-arg BASE_IMAGE=<registry>/<uv image>:<tag>-python3.14-trixie@sha256:<digest>
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Terminal tools only. Hermes runs in the hermes-gateway-agent pod, not here. No iproute2 (0.1
+# does no in-workload netns setup) and no gh (a cluster may block github.com).
+# Security updates for the base's own packages (the pinned base ages; CVE scans gate on fixable ones).
+RUN apt-get update \
+ && apt-get -y upgrade \
+ && apt-get install --no-install-recommends -y \
+      ca-certificates \
+      curl \
+      git \
+      ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+
+# 5f: opt-in getpeername shim for legacy seccomp mode, on the base interpreter's site path.
+# Reference image only. A production worker image may ship its own .pth shim instead; do NOT
+# copy this sitecustomize there as well (it detects that shim's marker and stays inert, but one
+# implementation per image is the rule).
+COPY legacy_seccomp_shim/sitecustomize.py /usr/local/lib/python3.14/site-packages/sitecustomize.py
+ENV OSH_LEGACY_GETPEERNAME_SHIM=1
+
+# Arbitrary-UID safe HOME on the persistent workdir: group 0 owns it and gets the owner's bits.
+RUN mkdir -p /sandbox/.hermes/skills /sandbox/workspace \
+ && chgrp -R 0 /sandbox \
+ && chmod -R g=u /sandbox
+ENV HOME=/sandbox \
+    XDG_CONFIG_HOME=/sandbox/.config \
+    XDG_CACHE_HOME=/sandbox/.cache
+
+WORKDIR /sandbox
+# A non-root numeric USER. The K8s driver replaces it with the namespace-range UID anyway.
+USER 65532
