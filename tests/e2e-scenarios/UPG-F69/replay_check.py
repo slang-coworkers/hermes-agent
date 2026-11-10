@@ -37,6 +37,13 @@ TABLES = {
     "fork_ci_contributors.tsv": ("path", "sha256", "authority"),
     "fork_ci_sizing.tsv": ("workflow", "job", "key", "value", "authority"),
 }
+# Absent means no rows; present, it is read and validated like TABLES.
+OPTIONAL_TABLES = {
+    "ruled_new_files.tsv": ("path", "sha256", "authority"),
+}
+# The only new paths outside the plugin surface that ruled_new_files.tsv may rule, each by the sha256 of its blob:
+# the shared-path drift tooling (DN-21, ruling msg 36). Any other new core or fork-ci path keeps rules 1-4 and 8.
+DN21_NEW_FILES = ("common/COMMON_PATHS", "scripts/common_drift.py", ".github/workflows/common-drift.yml")
 IN_SURFACE = ("plugins/", "website/docs/", "tests/", "apps/desktop/e2e/")
 FORK_CI = (".github/", "contributors/")
 NONPY_FORMATS = (".yaml", ".yml", ".json", ".toml", ".md", ".txt")
@@ -163,11 +170,12 @@ def load_data(data_dir: Path, rep: Report) -> tuple[dict | None, dict[str, list[
             rep.fail("DATA_MISSING", "bump.json", f"malformed: {exc}")
             bump = None
     tables: dict[str, list[dict]] = {}
-    for name, header in TABLES.items():
+    for name, header in {**TABLES, **OPTIONAL_TABLES}.items():
         tables[name] = []
         path = data_dir / name
         if not path.is_file():
-            rep.fail("DATA_MISSING", name, "absent")
+            if name not in OPTIONAL_TABLES:
+                rep.fail("DATA_MISSING", name, "absent")
             continue
         rows = [(n, ln) for n, ln in enumerate(path.read_text(encoding="utf-8-sig").split("\n"), 1)
                 if ln and not ln.startswith("#")]
@@ -197,7 +205,7 @@ def row_problem(name: str, row: dict) -> str | None:
             return f"surface {row['surface']!r}"
     elif name == "core_authority.tsv" and row["disposition"] not in ("replay", "absorbed", "ruled"):
         return f"disposition {row['disposition']!r}"
-    elif name in ("ruled_residuals.tsv", "overlap_rulings.tsv") and not SHA256.match(row["sha256"]):
+    elif name in ("ruled_residuals.tsv", "overlap_rulings.tsv", "ruled_new_files.tsv") and not SHA256.match(row["sha256"]):
         return "sha256 must be 64 hex"
     elif name == "fork_ci_contributors.tsv" and not (SHA256.match(row["sha256"]) or row["sha256"] == "deleted"):
         return "sha256 must be 64 hex or `deleted`"
@@ -457,14 +465,16 @@ class Checker:
                 if bump[k] != revs[k]:
                     self.rep.fail("DATA_STALE", "bump.json", f"--{k} resolves to {revs[k]}, bump.json says {bump[k]}")
                     self.ruled = False
-        self.t = tables if self.ruled else {name: [] for name in TABLES}
+        self.t = tables if self.ruled else {name: [] for name in {**TABLES, **OPTIONAL_TABLES}}
         self.fork = git.name_status(self.A, self.H)
         self.cand = git.name_status(self.B, self.C)
         self.changed = sorted(set(self.fork) | set(self.cand))
+        self.new_files: set[str] = set()
 
     def run(self) -> int:
         self.inventory()
-        core = [p for p in self.changed if surface_of(p) == "core"]
+        self.ruled_new_files()
+        core = [p for p in self.changed if surface_of(p) == "core" and p not in self.new_files]
         self.core(core)
         self.markers()
         self.fork_ci_labels()
@@ -511,6 +521,37 @@ class Checker:
             if path not in self.cand:
                 for row in got:
                     self.rep.fail("INVENTORY_EXTRA", row["_line"], f"{path} does not differ onto→candidate")
+
+    def ruled_new_files(self) -> None:
+        """A DN21_NEW_FILES path absent at from, onto and head whose ruled_new_files.tsv row carries the sha256 of
+        its candidate blob skips rules 1-4 and 8; it must still parse, and rules 5, 6 and the inventory still apply."""
+        self.authority_rows("ruled_new_files.tsv")
+        seen: set[str] = set()
+        for row in self.t["ruled_new_files.tsv"]:
+            path = row["path"]
+            if path in seen:
+                self.rep.fail("DATA_DUPLICATE", row["_line"], f"second row for {path}")
+                continue
+            seen.add(path)
+            if path not in DN21_NEW_FILES:
+                self.rep.fail("NEW_FILE_UNRULED", path, f"{row['_line']}: not one of the DN-21 drift paths")
+                continue
+            blob = self.git.blob(self.C, path)
+            if blob is None or any(self.git.blob(r, path) is not None for r in (self.A, self.B, self.H)):
+                self.rep.fail("DATA_STALE", row["_line"], f"{path} is not a new file at the candidate")
+                continue
+            if hashlib.sha256(blob).hexdigest() != row["sha256"]:
+                self.rep.fail("NEW_FILE_MISMATCH", path, f"candidate blob sha256 is {hashlib.sha256(blob).hexdigest()}")
+                continue
+            self.new_files.add(path)
+            text = blob.decode("utf-8", "surrogateescape")
+            if path.endswith(".py") and not PyScopes(text).parses:
+                self.rep.fail("SYNTAX", path, "does not parse at the candidate")
+            elif path.endswith((".yaml", ".yml")) and not path.startswith(".github/"):
+                try:
+                    yaml_load(text)
+                except Exception as exc:  # any loader error is a parse failure of the candidate file
+                    self.rep.fail("SYNTAX", path, f"hermes_yaml.safe_load: {type(exc).__name__}")
 
     def core(self, core: list[str]) -> None:
         """Rules 1-4 over every core path changed from→head or onto→candidate."""
@@ -634,7 +675,7 @@ class Checker:
         fmap = ForkCiMap(self.t["fork_ci_map.tsv"])
         for name in ("fork_ci_map.tsv", "fork_ci_lines.tsv", "fork_ci_contributors.tsv", "fork_ci_sizing.tsv"):
             self.authority_rows(name)
-        paths = sorted(p for p in self.cand if surface_of(p) == "fork-ci")
+        paths = sorted(p for p in self.cand if surface_of(p) == "fork-ci" and p not in self.new_files)
         contrib = {r["path"]: r for r in self.t["fork_ci_contributors.tsv"]}
         for row in self.t["fork_ci_contributors.tsv"]:
             if row["path"] not in self.cand:
