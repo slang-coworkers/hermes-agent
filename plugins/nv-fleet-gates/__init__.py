@@ -291,7 +291,7 @@ def _kanban_task() -> str:
         try:
             from gateway.session_context import get_session_env
             task = get_session_env("HERMES_KANBAN_TASK", "") or ""
-        except Exception:
+        except ImportError:
             task = ""
     return str(task)
 
@@ -642,7 +642,7 @@ def register(ctx) -> None:
             card = _owned_card(profile)
         except Exception as exc:  # the board cannot be read: no card (fail closed)
             logger.warning("nv-fleet-gates outbound policy: card lookup failed (%s); treating as no card",
-                           type(exc).__name__)
+                           type(exc).__name__, exc_info=True)
             card = ""
         # A room never holds a card. A session that cannot be placed counts as a room unless it owns a verified
         # card (a card-less unknown session is refused anyway; a dispatcher-bound worker is not a room).
@@ -914,24 +914,16 @@ def register(ctx) -> None:
         transform_tool_result callback returns (model_tools.py _apply_transform_tool_result_hook), so the two are
         ONE callback and neither can shadow the other. Never raises; returns None when nothing changed."""
         out = product_hooks.call("tool_result_rewrite", home=hook_home, default=None, **kwargs)
-        try:
-            text = out if isinstance(out, str) else kwargs.get("result")
-            redacted, n = placeholder_redact.redact_count(text)
-            return redacted if (n or isinstance(out, str)) else None
-        except Exception:
-            placeholder_redact._log_once()
-            return out if isinstance(out, str) else None
+        text = out if isinstance(out, str) else kwargs.get("result")
+        redacted, n = placeholder_redact.redact_count(text)
+        return redacted if (n or isinstance(out, str)) else None
 
     def _redact_terminal_output(output=None, **_kwargs):
         """transform_terminal_output for every profile: the OpenShell placeholder redaction (foreground terminal
         output and background-process output, tools/process_registry.py transform_process_output). Never raises;
         returns None when nothing changed, so another plugin's rewrite is not shadowed."""
-        try:
-            redacted, n = placeholder_redact.redact_count(output)
-            return redacted if n else None
-        except Exception:
-            placeholder_redact._log_once()
-            return None
+        redacted, n = placeholder_redact.redact_count(output)
+        return redacted if n else None
 
     def _capture_session(surface=None, command=None, session_key=None, session_id=None, **kwargs):
         # Stash this dispatch's session in a request-local ContextVar so the
