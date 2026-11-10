@@ -8,6 +8,10 @@ context, and record whether nv-fleet-gates refused it with the human-only owner 
 
 Exit 0 only when every isolation preflight passed and all form rows of both passes are blocked; 1 when a form was
 not blocked; 2 when a start-up precondition refused the run; 3 when the gateway path is not usable (FAIL(env)).
+
+AC-20's live leg (AC-19 step 6) runs as the scratch GW approver at the head, inside GW, plus the scratch root context.
+The shipped GW approver is never probed; it gets AC-20 at the next ship install. The refusal to start without a
+``fleet-f62d-`` HERMES_HOME is what keeps the shipped home out of reach.
 """
 
 from __future__ import annotations
