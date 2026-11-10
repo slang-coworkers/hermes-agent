@@ -5,11 +5,14 @@ context, and record whether nv-fleet-gates refused it with the human-only owner 
 
     HERMES_HOME=<scratch home> HERMES_MANAGED_DIR=<scratch managed dir> HOME=<scratch launch home> \
         python3 ac20_probe.py --forms ac20-forms.json --out ac20-probe.jsonl \
-        [--scratch /sandbox/scratch/fleet-f62d-s5a-ac20] [--root-host <host>]
+        [--scratch /sandbox/scratch/fleet-f62d-s5a-ac20] [--root-host <host>] \
+        [--root-backend <resolved> --root-expected-backend <expected>]
 
-Exit 0 only when every isolation preflight executed in its exact target and all form rows of both passes are
-blocked; 1 when a form was not blocked; 2 when a start-up precondition refused the run; 3 (FAIL(env)) when the gateway
-path is not usable or a preflight did not execute, or executed outside its exact target (erratum E2 Q1 (b)).
+Exit 0 only when all form rows of both passes are blocked, every approver preflight executed in its exact target, and
+every root preflight either executed on ``--root-host`` or found no target (erratum E3: both root preflights refused by
+SANDBOX naming the recorded ``--root-backend`` and ``--root-expected-backend``); 1 when a form was not blocked; 2 when a
+start-up precondition refused the run; 3 (FAIL(env)) when the gateway path is not usable or any other preflight did not
+execute, executed outside its exact target, or the two root preflights disagree (erratum E2 Q1 (b), E3).
 
 AC-20's live leg (AC-19 step 6) runs as the scratch GW approver at the head, inside GW, plus the scratch root context.
 The shipped GW approver is never probed; it gets AC-20 at the next ship install. The refusal to start without a
@@ -35,6 +38,7 @@ ABSENT_PREFIX = "/tmp/ac20-absent"  # no-tmp: ok — the erratum's fail-safe bod
 SCRATCH_DEFAULT = "/sandbox/scratch/fleet-f62d-s5a-ac20"
 APPROVER_HOST = "fleet-f62d-s5a-approver"
 PASSES = ("approver", "root")
+FORMS_EXPECTED = 23  # AC20_FORMS of the acceptance file; the live oracle is 46 rows = 23 forms x 2 passes
 STAGES = ("DIAGNOSIS_REVIEW", "PLAN_REVIEW", "CODE_REVIEW", "DECISION_REVIEW", "OUTPUT_REVIEW")
 GATE_MARKS = ("approval gate:", "human-only (owner rule)")
 _DEQUOTE = str.maketrans({c: " " for c in "'\",[](){}"})
@@ -118,6 +122,36 @@ def _preflight_ok(pf: dict, pass_name: str, fresh: Path, root_host: str) -> str 
     return None
 
 
+def _root_no_target(backend: str | None, expected: str | None) -> str | None:
+    """The SANDBOX refusal a no-target root must name, from the Setup-recorded backends (erratum E3); None without."""
+    if not (backend or expected):
+        return None
+    if not (backend and expected) or backend == expected:
+        _refuse(2, "--root-backend and --root-expected-backend go together and must differ (a no-target root)")
+    return f"resolved backend {backend!r} != expected {expected!r}"
+
+
+def _preflight_row(data: dict, pass_name: str, fresh: Path, root_host: str, root_no_target: str | None) -> dict:
+    """The preflight record of one pass and tool; it carries ``abort`` when the run must stop (exit 3)."""
+    line = next((ln[len("AC20PF "):] for ln in str(data.get("output") or "").splitlines()
+                 if ln.startswith("AC20PF ")), None)
+    if line is not None:
+        pf = {"executed": True, **_parse(line)}
+        if pass_name == "root" and root_no_target:
+            pf["abort"] = "root preflight executed although Setup recorded no root target"
+            return pf
+        why = _preflight_ok(pf, pass_name, fresh, root_host)
+        if why:
+            pf["abort"] = why
+        return pf
+    first = (str(data.get("error") or "").splitlines() or [""])[0][:300]
+    if pass_name == "root" and root_no_target and first.startswith("sandbox: refused") and root_no_target in first:
+        # A sandbox-enforcing root whose backend is not the expected one has nowhere to execute (erratum E3).
+        return {"executed": False, "no_target": "sandbox", "message": first}
+    # Ran nowhere, so the pass never reached its exact target: the precondition did not hold.
+    return {"executed": False, "error": first or "no preflight output", "abort": "preflight did not execute"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ac20_probe")
     parser.add_argument("--forms", required=True)
@@ -126,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root-host", default=socket.gethostname(),
                         help="where the root pass must execute: the target the scratch root home's terminal policy "
                              "names (default: this host, i.e. a local backend)")
+    parser.add_argument("--root-backend", help="the scratch root's resolved terminal backend, as Setup recorded it")
+    parser.add_argument("--root-expected-backend",
+                        help="the scratch root's nv-fleet-gates expected_backend, as Setup recorded it")
     ns = parser.parse_args(argv)
 
     home = os.environ.get("HERMES_HOME", "")
@@ -135,10 +172,13 @@ def main(argv: list[str] | None = None) -> int:
     managed = os.environ.get("HERMES_MANAGED_DIR", "").strip()
     if "fleet-f62d-" not in managed or not Path(managed).is_dir():
         _refuse(2, f"HERMES_MANAGED_DIR {managed!r} is not an existing fleet-f62d- scratch managed dir")
+    root_no_target = _root_no_target(ns.root_backend, ns.root_expected_backend)
     approver_home = Path(home) / "profiles" / "approver"
     if not approver_home.is_dir():
         _refuse(2, f"no approver profile at {approver_home}")
     forms = json.loads(Path(ns.forms).read_text(encoding="utf-8"))
+    if len(forms) != FORMS_EXPECTED:
+        _refuse(2, f"{ns.forms} holds {len(forms)} forms, not {FORMS_EXPECTED}")
     problems = [p for fid, (tool, form) in sorted(forms.items()) for p in _failsafe_problems(fid, tool, form)]
     if problems:
         _refuse(2, "; ".join(problems))
@@ -169,32 +209,26 @@ def main(argv: list[str] | None = None) -> int:
     for name in PASSES:
         os.environ["HOME"] = str(fresh[name])
         os.environ["GH_CONFIG_DIR"] = str(fresh[name] / "gh")
+        found = []
         for tool in ("terminal", "execute_code"):
             data = _dispatch(stores, _scope(name), model_tools.handle_function_call, name, tool, _PREFLIGHT[tool],
                              plan=True)
-            line = next((ln[len("AC20PF "):] for ln in str(data.get("output") or "").splitlines()
-                         if ln.startswith("AC20PF ")), None)
-            if line is None:
-                # Ran nowhere, so the pass never reached its exact target: the precondition did not hold.
-                pf = {"executed": False, "error": str(data.get("error") or "no preflight output")[:300],
-                      "abort": "preflight did not execute"}
-                isolated = False
-            else:
-                pf = {"executed": True, **_parse(line)}
-                why = _preflight_ok(pf, name, fresh[name], ns.root_host)
-                if why:
-                    pf["abort"] = why
-                    isolated = False
-            rows.append({"pass": name, "tool": tool, "preflight": pf})
-        if not isolated:
+            found.append(_preflight_row(data, name, fresh[name], ns.root_host, root_no_target))
+            rows.append({"pass": name, "tool": tool, "preflight": found[-1]})
+        if len({pf["executed"] for pf in found}) > 1:
+            for pf in found:
+                pf.setdefault("abort", "mixed preflight result: one tool executed, the other did not")
+        if any("abort" in pf for pf in found):
+            isolated = False
             break
         for fid, (tool, form) in sorted(forms.items()):
             t_start = _now()
             data = _dispatch(stores, _scope(name), model_tools.handle_function_call, name, tool, form)
             message = _gate_message(data)
+            other = (str(data.get("error") or "").splitlines() or ["no error"])[0][:300]
             rows.append({"pass": name, "id": fid, "tool": tool, "pid": os.getpid(), "t_start": t_start,
                          "t_end": _now(), "blocked": message is not None,
-                         "message": message if message is not None else "not blocked by the approval gate"})
+                         "message": message if message is not None else f"not blocked by the approval gate: {other}"})
             all_blocked = all_blocked and message is not None
     with open(ns.out, "w", encoding="utf-8") as fh:
         fh.writelines(json.dumps(row, sort_keys=True) + "\n" for row in rows)
