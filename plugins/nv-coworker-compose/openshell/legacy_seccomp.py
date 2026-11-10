@@ -153,6 +153,7 @@ def assert_no_tcp_listeners(config: dict[str, Any], profile: str) -> None:
             + "; ".join(findings))
 
 
+# health: allow CC -- command_tcp_server_reason is an ordered fail-closed check of each server-starting command form; not split until tests cover each branch, so the split cannot change a verdict
 def command_tcp_server_reason(argv: Sequence[str]) -> str:
     """Why ``argv`` (a sandbox main command) starts a TCP server, or "" when it does not."""
     words = [str(a) for a in argv]
