@@ -198,7 +198,7 @@ def derive_bundle(live: str, merge: Iterable[str], dest: Path) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("\n".join(texts) + "\n")
-        os.chmod(tmp, 0o644)
+        os.chmod(tmp, 0o644)  # NOSONAR a CA bundle of public certificates is world-readable by design
         os.replace(tmp, dest)
     finally:
         if tmp.exists():

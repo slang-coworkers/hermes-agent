@@ -85,6 +85,31 @@ _RETENTION_INVARIANTS: dict[str, Any] = {
     "checkpoints.auto_prune": False,
 }
 
+# Opt-in maximum-age retention (fleet spec `retention:`). Absent, the
+# invariants above stand unchanged (sessions.auto_prune False). Declared, every rendered profile gets the
+# session-history window EXPLICITLY (sessions.retention_days, read by the CLI/gateway auto-maintenance:
+# cli.py _run_state_db_auto_maintenance, gateway/run.py) and the kanban done-subscription GC capped at the
+# same window (kanban.done_sub_retention_days, gateway/kanban_watchers.py; 0 would disable it, so it is never
+# 0). Deletion is a separate switch, `enforce`, default false: until an operator turns it on after reading a
+# dry-run report, sessions.auto_prune stays False and nothing is deleted.
+_RETENTION_SPEC_KEYS = {"max_age_days", "enforce"}
+_RETENTION_MAX_DAYS = 365
+_RETENTION_PRUNE_INTERVAL_HOURS = 24
+_KANBAN_DONE_SUB_DEFAULT_DAYS = 30   # hermes_cli/config_defaults.py kanban.done_sub_retention_days
+
+# Opt-in internal-only data boundary (fleet spec `internal_only:`: a session sees only
+# internal or only external untrusted data). Absent, nothing changes. Declared, every rendered
+# profile and the DEFAULT get, by configuration:
+#  - agent.disabled_toolsets: the listed toolsets first, then any a type already disabled. Hermes subtracts this
+#    list on every platform after every other toolset rule (hermes_cli/tools_config.py _get_platform_tools), and the
+#    gateway, cron and delegation pass it to the agent as well;
+#  - auxiliary.allowed_providers: auxiliary model calls (titles, compression, image description) only on the listed
+#    providers, every fallback layer filtered (agent/auxiliary_client.py). Each listed provider must be the profile's
+#    model provider or one of its providers: entries, the model provider must be listed (every auxiliary call,
+#    compression included, rides it), and no auxiliary task may be pinned elsewhere (the client would refuse it).
+_INTERNAL_ONLY_SPEC_KEYS = {"disabled_toolsets", "auxiliary_providers"}
+_INTERNAL_ONLY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
 # Raised fleet baseline for per-agent curated memory. Stock is 2200/1375
 # (config_defaults.py memory.memory_char_limit / memory.user_char_limit) — too
 # small for the coworker types — so the render floors every profile up to these.
@@ -459,13 +484,143 @@ def _is_platform_key(key: Any) -> bool:
         return False
 
 
-def _enforce_retention(config: dict[str, Any]) -> None:
+def _resolve_retention_policy(data: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The fleet spec's optional ``retention:`` block, validated (fail closed) BEFORE any profile is written.
+
+    ``retention: {max_age_days: <1..365>, enforce: <bool, default false>}``. Absent -> None (no change to
+    any render). Anything else -> CompositionError."""
+    raw = data.get("retention")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CompositionError(f"retention must be a mapping, got {type(raw).__name__}")
+    unknown = sorted(set(raw) - _RETENTION_SPEC_KEYS)
+    if unknown:
+        raise CompositionError(f"retention: unknown key(s) {unknown}; allowed: {sorted(_RETENTION_SPEC_KEYS)}")
+    days = raw.get("max_age_days")
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= _RETENTION_MAX_DAYS:
+        raise CompositionError(f"retention.max_age_days must be an integer 1..{_RETENTION_MAX_DAYS}, got {days!r}")
+    enforce = raw.get("enforce", False)
+    if not isinstance(enforce, bool):
+        raise CompositionError(f"retention.enforce must be true or false, got {enforce!r}")
+    return {"max_age_days": days, "enforce": enforce}
+
+
+def _enforce_retention(config: dict[str, Any], policy: Optional[dict[str, Any]] = None) -> None:
     """Force the fleet-safe retention values onto ``config``, overriding a
     declared value and inserting an omitted one alike — the requirement's
     "explicitly and never by assumption". A setdefault-style fill would leave a
-    stale unsafe value untouched, so this always overwrites the leaf."""
+    stale unsafe value untouched, so this always overwrites the leaf.
+
+    With a ``retention:`` policy (``_resolve_retention_policy``) the session window is written explicitly and
+    ``sessions.auto_prune`` follows ``enforce`` (False = dry run: nothing deleted). The kanban done-subscription
+    GC keeps a declared shorter window but never exceeds the policy and is never disabled (<= 0)."""
     for dotted, value in _RETENTION_INVARIANTS.items():
         _set_dotted(config, dotted, value)
+    if policy is None:
+        return
+    days = policy["max_age_days"]
+    _set_dotted(config, "sessions.auto_prune", policy["enforce"])
+    _set_dotted(config, "sessions.retention_days", days)
+    _set_dotted(config, "sessions.min_interval_hours", _RETENTION_PRUNE_INTERVAL_HOURS)
+    declared = _get_dotted(config, "kanban.done_sub_retention_days")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared <= 0:
+        declared = _KANBAN_DONE_SUB_DEFAULT_DAYS
+    _set_dotted(config, "kanban.done_sub_retention_days", min(declared, days))
+
+
+def _internal_only_names(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise CompositionError(f"internal_only.{key} must be a non-empty list, got {value!r}")
+    names = []
+    for item in value:
+        if not isinstance(item, str) or not _INTERNAL_ONLY_NAME_RE.match(item):
+            raise CompositionError(f"internal_only.{key}: {item!r} is not a lower-case name")
+        if item in names:
+            raise CompositionError(f"internal_only.{key}: {item!r} is listed twice")
+        names.append(item)
+    return names
+
+
+def _resolve_internal_only_policy(data: dict[str, Any]) -> Optional[dict[str, list[str]]]:
+    """The fleet spec's optional ``internal_only:`` block, validated (fail closed) BEFORE any profile is written.
+
+    ``internal_only: {disabled_toolsets: [<toolset>, ...], auxiliary_providers: [<provider>, ...]}`` (either key
+    may be omitted, not both). Absent -> None (no change to any render). Anything else -> CompositionError."""
+    raw = data.get("internal_only")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise CompositionError(f"internal_only must be a non-empty mapping, got {raw!r}")
+    unknown = sorted(set(raw) - _INTERNAL_ONLY_SPEC_KEYS)
+    if unknown:
+        raise CompositionError(
+            f"internal_only: unknown key(s) {unknown}; allowed: {sorted(_INTERNAL_ONLY_SPEC_KEYS)}")
+    policy: dict[str, list[str]] = {}
+    if "disabled_toolsets" in raw:
+        from toolsets import TOOLSETS
+
+        names = _internal_only_names(raw["disabled_toolsets"], "disabled_toolsets")
+        for name in names:
+            ts = TOOLSETS.get(name)
+            # A platform bundle (hermes-*) or a posture toolset only subtracts its non-core delta
+            # (model_tools.py), so it would not mean "this capability is off".
+            if not isinstance(ts, dict) or name.startswith("hermes-") or ts.get("posture"):
+                raise CompositionError(
+                    f"internal_only.disabled_toolsets: {name!r} is not a capability toolset (toolsets.py)")
+        policy["disabled_toolsets"] = names
+    if "auxiliary_providers" in raw:
+        names = _internal_only_names(raw["auxiliary_providers"], "auxiliary_providers")
+        vague = [n for n in names if n in ("auto", "main", "custom")]
+        if vague:
+            raise CompositionError(
+                f"internal_only.auxiliary_providers: {vague} do not name one provider; list providers: entries")
+        policy["auxiliary_providers"] = names
+    return policy
+
+
+def _enforce_internal_only(config: dict[str, Any], policy: Optional[dict[str, list[str]]],
+                           profile_name: str) -> None:
+    """Write the ``internal_only:`` policy into one rendered profile (see _INTERNAL_ONLY_SPEC_KEYS). Runs after
+    the model-provider render, so the provider checks see the final ``model``/``providers`` blocks."""
+    if policy is None:
+        return
+    toolsets = policy.get("disabled_toolsets")
+    if toolsets:
+        from agent.skill_utils import parse_config_string_list
+
+        declared = [n.strip() for n in parse_config_string_list(_get_dotted(config, "agent.disabled_toolsets"))
+                    if n.strip()]
+        _set_dotted(config, "agent.disabled_toolsets", list(toolsets) + [n for n in declared if n not in toolsets])
+    providers = policy.get("auxiliary_providers")
+    if not providers:
+        return
+    main = str(_get_dotted(config, "model.provider") or "").strip().lower()
+    if main.startswith("custom:"):
+        main = main.split(":", 1)[1].strip()
+    named = config.get("providers")
+    named = {str(k).strip().lower() for k in named} if isinstance(named, dict) else set()
+    unknown = [p for p in providers if p != main and p not in named]
+    if unknown:
+        raise CompositionError(
+            f"coworker {profile_name!r}: internal_only.auxiliary_providers {unknown} is neither the model provider "
+            f"({main or 'unset'}) nor a providers: entry {sorted(named)}")
+    if main not in providers:
+        raise CompositionError(
+            f"coworker {profile_name!r}: the model provider {main or '(unset)'!r} must be in "
+            f"internal_only.auxiliary_providers {providers}: every auxiliary call, compression included, rides it")
+    aux = config.get("auxiliary")
+    for task, task_cfg in (aux.items() if isinstance(aux, dict) else ()):
+        if not isinstance(task_cfg, dict):
+            continue
+        pin = str(task_cfg.get("provider") or "").strip().lower()
+        if pin.startswith("custom:"):
+            pin = pin.split(":", 1)[1].strip()
+        if str(task_cfg.get("base_url") or "").strip() or pin not in ("", "auto", *providers):
+            raise CompositionError(
+                f"coworker {profile_name!r}: auxiliary.{task} is pinned off internal_only.auxiliary_providers "
+                f"(provider {pin or '-'}, base_url {'set' if task_cfg.get('base_url') else '-'})")
+    _set_dotted(config, "auxiliary.allowed_providers", list(providers))
 
 
 # The sandbox substrate is a DATA switch: the spec's `substrate` selects one descriptor
@@ -1079,14 +1234,19 @@ def _openshell_sandbox_name(fleet_name: str, profile_name: str) -> str:
     return f"{fleet_name}-{profile_name}"
 
 
-def _openshell_ssh_alias(fleet_name: str, profile_name: str) -> str:
+def _openshell_ssh_alias(fleet_name: str, profile_name: str, workspace: Optional[str] = None) -> str:
     """The ssh-config Host alias ``openshell sandbox ssh-config`` emits for a
     profile's sandbox: ``openshell-<fleet>-<profile>``. This is what the render
     writes as ``terminal.ssh_host`` AND as the veto's managed ``expected_ssh_host``
     anchor (they must agree — the veto compares ``TERMINAL_SSH_HOST`` to it); the bare
     sandbox name (``_openshell_sandbox_name``) is the provision plan's ``--name`` the
-    alias resolves to. AC-4 joins them by requiring ``ssh_host == openshell-<name>``."""
-    return f"openshell-{_openshell_sandbox_name(fleet_name, profile_name)}"
+    alias resolves to. AC-4 joins them by requiring ``ssh_host == openshell-<name>``.
+
+    OpenShell 0.1.x: ``ssh-config`` emits ``Host openshell-<name>.<workspace>``
+    (refs/OpenShell@v0.1.2 crates/openshell-cli/src/ssh.rs:1980-1982), so an
+    ``openshell_api: "0.1"`` fleet passes its workspace and the alias gains the suffix."""
+    alias = f"openshell-{_openshell_sandbox_name(fleet_name, profile_name)}"
+    return f"{alias}.{workspace}" if workspace else alias
 
 
 def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: list[str]) -> None:
@@ -1115,14 +1275,14 @@ def _prepare_openshell_ssh_keys(keys_dir: Path, profile_names: list[str]) -> Non
 
 
 def _enforce_openshell_ssh(config: dict[str, Any], profile_name: str, fleet_name: str,
-                           keys_dir: Path) -> None:
+                           keys_dir: Path, workspace: Optional[str] = None) -> None:
     """Write one coworker's builtin-ssh terminal block for its OWN OpenShell sandbox:
     a distinct ``ssh_host`` (the ssh-config alias ``openshell-<fleet>-<profile>``), a
     uniform ``ssh_user``/``ssh_port``, and an ``ssh_key`` PATH under ``keys_dir``
     (distinct leaf per profile). Config-only: the placeholder files themselves are
     created up front by ``_prepare_openshell_ssh_keys`` (all-or-nothing, before any
     write), so this never mutates the filesystem."""
-    _set_dotted(config, "terminal.ssh_host", _openshell_ssh_alias(fleet_name, profile_name))
+    _set_dotted(config, "terminal.ssh_host", _openshell_ssh_alias(fleet_name, profile_name, workspace))
     _set_dotted(config, "terminal.ssh_user", _OPENSHELL_SSH_USER)
     _set_dotted(config, "terminal.ssh_port", _OPENSHELL_SSH_PORT)
     _set_dotted(config, "terminal.ssh_key", str(keys_dir / profile_name))
@@ -1356,6 +1516,525 @@ def _validate_direct_inference_fields(block: dict[str, Any], req: Callable[[str]
     }
 
 
+# ---------------------------------------------------------------------------------------------
+# OpenShell 0.1.x render (``egress.openshell_api: "0.1"``). The 0.0.72 render above stays
+# byte-identical (no key / "0.0"); this mode targets the 0.1.2 Kubernetes driver.
+#  - Inference (5c): inference.local and the sk-OPENSHELL-PROXY-REWRITE trigger are gone in 0.1
+#    (refs/OpenShell@v0.1.2 docs/upgrade/0-1-0.mdx:95). Profiles call the provider's NATIVE
+#    URL. api_key is ``${env:<credential_env>}``, which Hermes expands at load
+#    (hermes_cli/config.py:2878). Inside an OpenShell sandbox that env holds the revision-scoped
+#    OpenShell placeholder (never the key), which the supervisor proxy swaps for the
+#    key on the profile endpoint only. A hard-coded canonical (unrevisioned) placeholder
+#    does NOT resolve for endpoint-bound credentials (crates/openshell-core/src/secrets.rs:433-443).
+#    In the hermes-gateway-agent pod (a plain Deployment, where every profile's Hermes process
+#    runs in the ssh topology) the env named by ``hermes_key_env`` (default: credential_env)
+#    holds the real key, injected by the deployment (for example as ANTHROPIC_AUTH_TOKEN, which a
+#    spec then names in ``hermes_key_env``).
+#  - Policy (5d): no raw tls:skip hops, no 172.17.0.1, no inference endpoint in user policy
+#    (the attached provider profile composes ``_provider_<name>``). Catalog providers bind as
+#    ``--provider`` attachments; their egress comes from the imported profile, not the user policy.
+#  - Legacy seccomp (5f): worker profiles must not open TCP listeners
+#    (openshell/legacy_seccomp.py).
+#  - Placeholder passthrough (5g): NOT rendered in the ssh topology. Hermes runs in the
+#    gateway-agent pod and reaches workers over the builtin ssh backend, which never applies
+#    terminal.env_passthrough (tools/environments/base.py:635). OpenShell injects provider
+#    placeholders straight into every exec/ssh session (crates/openshell-sandbox/src/
+#    boundary_exec.rs:158-185), so tool commands in the worker already see them. Passing a
+#    credential name through in the gateway-agent pod would instead export a REAL value to local
+#    children, so the render refuses provider and inference credential names in env_passthrough.
+# ---------------------------------------------------------------------------------------------
+_OPENSHELL_API_LEGACY = "0.0"
+_OPENSHELL_API_V01 = "0.1"
+_OSH_V01_EGRESS_KEYS = frozenset({
+    "openshell_api", "sandbox_image", "inference_provider", "workspace",
+    "filesystem_read_only", "filesystem_read_write", "anonymous_reads", "binaries",
+    # Accepted for spec compatibility (the remote-mode spec shape): inference_route must equal the
+    # provider-profile endpoint; pinned_offline_lane only disables firecrawl and the install scan
+    # (the OneCLI chain-dial never renders when inference_provider is set).
+    "inference_route", "pinned_offline_lane",
+    # Optional GET-only egress to a package mirror. Default: none.
+    "package_mirror",
+    # The sandbox main process (the trailing `-- CMD` of `sandbox create`). Default sleep infinity
+    # (the broker's default sandbox_command); a worker image may ship its own idle command.
+    "sandbox_command",
+})
+# 0.0.72 lane keys that have no 0.1 meaning. A 0.1 spec that carries one is refused, not ignored.
+_OSH_V01_REFUSED_EGRESS_KEYS = {
+    "proxy_addr": "the OneCLI 18255 hop does not exist on 0.1 (providers replace OneCLI)",
+    "broker_addr": "workers never reach the broker on 0.1 (the broker is a cluster Service the "
+                   "gateway-agent pod calls)",
+    "chain_addr": "the OneCLI chain-dial does not exist on 0.1",
+    "ca_bundle": "the OneCLI chain-dial does not exist on 0.1 (OpenShell sets SSL_CERT_FILE itself)",
+    "onecli_secret_ids": "OneCLI is replaced by OpenShell providers on 0.1",
+}
+_OSH_V01_INFERENCE_KEYS = frozenset({
+    "provider", "base_url", "api_mode", "model_id", "credential_env", "attribution_tag_prefix",
+    "openshell_provider", "profile",
+    # An absolute path to the provider profile file; absent, a bundled openshell/profiles/<profile>.yaml.
+    "profile_path",
+    # The env var the Hermes process reads for api_key (``${env:<hermes_key_env>}``). Default:
+    # credential_env (the provider profile's env var, which holds the placeholder inside a
+    # sandbox). In the hermes-gateway-agent pod it is whatever env the Deployment injects.
+    "hermes_key_env",
+    # The output cap every request to this provider carries, rendered as the provider's
+    # extra_body.max_tokens (custom-provider request overrides, merged into each request,
+    # continuations included). Hermes sends no output cap on this path by itself, so without it
+    # the endpoint's own default applies. Default: none (the endpoint decides).
+    "max_tokens",
+})
+# Bounds for egress.inference_provider.max_tokens: a positive output-token count no larger than
+# any context window this fleet uses.
+_OSH_V01_MAX_TOKENS_RANGE = (1, 1_000_000)
+_OSH_V01_DEFAULT_WORKSPACE = "default"
+# Hosts a 0.1 render never emits (box lane, removed managed route, Docker-driver host alias).
+_OSH_V01_FORBIDDEN_HOSTS = frozenset({
+    "inference.local", _DOCKER_BRIDGE_IP, _DOCKER_BRIDGE_HOST, "host.openshell.internal",
+})
+_OSH_V01_FORBIDDEN_PORTS = frozenset({18255, 18777})
+_OSH_V01_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_OSH_V01_WORKSPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_OSH_V01_SANDBOX_MAIN_COMMAND = ("sleep", "infinity")
+# Read-only floor added to every 0.1 worker policy: the hermes-worker image installs Hermes and its
+# venv under /opt/hermes (on PATH). Landlock denies anything outside the policy, so without it any
+# /opt/hermes tool fails; an image layer elsewhere (an nss_wrapper env, a shim) is listed by the spec in
+# egress.filesystem_read_only. best_effort skips a path the image does not have.
+_OSH_V01_WORKER_FS_READ_ONLY = ("/opt/hermes", "/proc", "/dev/urandom")
+# Landlock is allow-list only, and OpenShell adds its proxy baseline
+# (ro /proc, /dev/urandom; rw /dev/null) by itself ONLY when the policy has network_policies
+# (refs/OpenShell@v0.1.2:crates/openshell-supervisor/src/lib.rs:1404-1429, guarded at :1505; the
+# same paths as openshell-policy restrictive_default_policy, lib.rs:985-1000). A provider-only worker
+# policy has none, so the floor lists them itself: without rw /dev/null every `>/dev/null` in a tool
+# call fails; /proc and /dev/urandom are read by nearly every process. /dev/pts (rw) serves PTY
+# sessions (the gateway floor _OSH_F64B_GATEWAY_FS_READ_WRITE has it too).
+_OSH_V01_WORKER_FS_READ_WRITE = ("/dev/null", "/dev/pts")
+# Optional `egress.package_mirror` gives workers GET-only egress to the pip/uv/npm mirror a
+# worker image is configured for (/etc/pip.conf, /etc/uv/uv.toml,
+# /usr/local/etc/npmrc). It renders as its own network policy (not worker-egress) so its binaries
+# never widen the other rules. The interpreters are the REAL exes in the worker image (binary matching
+# uses the resolved exe; npm runs as node).
+# `enabled` (bool, default true) is the single on/off switch, so a spec can carry the
+# confirmed mirror block OFF (`enabled: false`): it is validated exactly as if on, but renders nothing.
+_OSH_V01_PACKAGE_MIRROR_POLICY = "package-mirror"
+_OSH_V01_PACKAGE_MIRROR_KEYS = frozenset({"enabled", "host", "port", "paths", "roles", "binaries"})
+_OSH_V01_PACKAGE_MIRROR_BINARIES = ("/usr/local/bin/python3*", "/usr/local/bin/uv", "/usr/local/bin/node")
+# A mirror path pins at least four literal segments (/<mirror>/api/<pypi|npm>/<repo>), so a rule
+# can name one mirror repo but never /<mirror>/api/** (the whole REST API) or every repo.
+_OSH_V01_MIRROR_LITERAL_SEGMENTS = 4
+_OSH_V01_MIRROR_PATH_RE = re.compile(r"^(/[A-Za-z0-9._~%+-]+){4,}(/[A-Za-z0-9._~%+*-]+)*/?$")
+_OPENSHELL_ASSET_DIR = Path(__file__).resolve().parent / "openshell"
+
+
+def _openshell_asset_module(name: str) -> Any:
+    """Load a co-located ``openshell/<name>.py`` asset module by path (the plugin dir name is
+    not importable as a package, the same pattern the install-openshell subaction uses)."""
+    import importlib.util
+    import sys as _sys
+    key = f"_nv_coworker_compose_openshell_{name}"
+    if key in _sys.modules:
+        return _sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, _OPENSHELL_ASSET_DIR / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _sys.modules[key] = mod
+    return mod
+
+
+def _load_openshell_provider_profile(profile_id: str, profile_path: Optional[str] = None) -> dict[str, Any]:
+    """The OpenShell 0.1 provider profile (the file the operator ``openshell profile import``s):
+    ``egress.inference_provider.profile_path`` when the spec names one (an absolute path), else a
+    bundled ``openshell/profiles/<id>.yaml``. The render checks the base URL and credential env name
+    against it, so the config and the imported profile cannot drift."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", profile_id or ""):
+        raise CompositionError(f"invalid OpenShell provider profile id {profile_id!r}")
+    if profile_path is not None:
+        path = Path(profile_path)
+        if not path.is_absolute():
+            raise CompositionError(
+                f"egress.inference_provider.profile_path must be an absolute path, got {profile_path!r}")
+    else:
+        path = _OPENSHELL_ASSET_DIR / "profiles" / f"{profile_id}.yaml"
+    if not path.is_file():
+        raise CompositionError(
+            f"no OpenShell provider profile {profile_id!r} (expected {path}); set "
+            f"egress.inference_provider.profile_path to the profile file")
+    data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+    if not isinstance(data, dict) or data.get("id") != profile_id:
+        raise CompositionError(f"provider profile {path} must declare id: {profile_id}")
+    return data
+
+
+def _assert_v01_host_allowed(entry: str, what: str) -> None:
+    """The base openshell host guard plus the 0.1 refusals: no lane hop, no inference.local."""
+    _assert_openshell_host_allowed(entry)
+    host, port = _openshell_hostport(entry)
+    canon = _canon_host(host)
+    if canon in _OSH_V01_FORBIDDEN_HOSTS or port in _OSH_V01_FORBIDDEN_PORTS:
+        raise CompositionError(
+            f"{what} {entry!r} is a 0.0.72 lane/managed-inference target with no OpenShell 0.1 "
+            f"equivalent (172.17.0.1 / 18255 / 18777 / inference.local / host.openshell.internal)")
+
+
+def _validate_pullable_image(image: str) -> str:
+    """OpenShell 0.1 ``--from`` must be a registry ref the cluster can pull
+    (crates/openshell-cli/src/run.rs:1279-1319); a ``localhost/`` tag or bare name is refused."""
+    first = image.split("/", 1)[0]
+    if ("/" not in image or first in ("localhost", "127.0.0.1")
+            or not ("." in first or ":" in first)):
+        raise CompositionError(
+            f"egress.sandbox_image {image!r} must be a pullable registry ref "
+            f"(e.g. registry.example.com/<repo>/hermes-worker:<tag>) under OpenShell 0.1")
+    return image
+
+
+def _validate_openshell_inference_provider_v01(block: Any) -> dict[str, Any]:
+    """Validate ``egress.inference_provider`` for an OpenShell 0.1 fleet (5c). Returns the same
+    normalized shape the render reads, with ``api_key_value`` = ``${env:<credential_env>}``
+    replacing the 0.0.72 rewrite placeholder."""
+    if not isinstance(block, dict):
+        raise CompositionError(
+            f"egress.inference_provider must be a mapping, got {type(block).__name__}")
+    if "rewrite_placeholder" in block:
+        raise CompositionError(
+            "egress.inference_provider.rewrite_placeholder is the 0.0.72 inference.local trigger; "
+            "OpenShell 0.1 uses a provider profile, so declare credential_env (the profile's env "
+            "var, e.g. PROVIDER_API_KEY) instead")
+    unknown = sorted(set(block) - _OSH_V01_INFERENCE_KEYS)
+    if unknown:
+        raise CompositionError(f"egress.inference_provider has unknown keys {unknown} (openshell_api 0.1)")
+
+    def _req(key: str, default: Optional[str] = None) -> str:
+        val = block.get(key, default)
+        if not isinstance(val, str) or not val.strip():
+            raise CompositionError(
+                f"egress.inference_provider.{key} must be a non-empty string, got {val!r}")
+        if any(c in val for c in "\n\r\x00"):
+            raise CompositionError(
+                f"egress.inference_provider.{key} must not contain control characters, got {val!r}")
+        return val.strip()
+
+    provider = _req("provider")
+    base_url = _req("base_url")
+    parts = urlsplit(base_url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must be an https URL with a host, got {base_url!r}")
+    if parts.username or parts.password:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must not embed credentials (userinfo), got {base_url!r}")
+    if parts.query or parts.fragment:
+        raise CompositionError(
+            f"egress.inference_provider.base_url must not carry a query or fragment, got {base_url!r}")
+    if parts.path.rstrip("/") != "/v1":
+        raise CompositionError(
+            f"egress.inference_provider.base_url must carry a /v1 path, got path {parts.path!r}")
+    host_port = f"{parts.hostname}:{parts.port or 443}"
+    _assert_v01_host_allowed(host_port, "egress.inference_provider.base_url")
+    api_mode = _req("api_mode")
+    if api_mode not in _OSH_F64B_INFERENCE_API_MODES:
+        raise CompositionError(
+            f"egress.inference_provider.api_mode {api_mode!r} is not permitted; use one of "
+            f"{', '.join(sorted(_OSH_F64B_INFERENCE_API_MODES))} (header-preserving, endpoint-backed)")
+    credential_env = _req("credential_env")
+    if not _OSH_V01_ENV_NAME_RE.fullmatch(credential_env):
+        raise CompositionError(
+            f"egress.inference_provider.credential_env {credential_env!r} must be an upper-case env "
+            f"var name")
+    hermes_key_env = _req("hermes_key_env", credential_env)
+    if not _OSH_V01_ENV_NAME_RE.fullmatch(hermes_key_env):
+        raise CompositionError(
+            f"egress.inference_provider.hermes_key_env {hermes_key_env!r} must be an upper-case env "
+            f"var name")
+    profile_id = _req("profile")
+    profile = _load_openshell_provider_profile(
+        profile_id, _req("profile_path") if "profile_path" in block else None)
+    endpoints = {(_canon_host(str(ep.get("host", ""))), int(ep.get("port") or 0))
+                 for ep in (profile.get("endpoints") or []) if isinstance(ep, dict)}
+    if (_canon_host(parts.hostname), parts.port or 443) not in endpoints:
+        raise CompositionError(
+            f"egress.inference_provider.base_url {base_url!r} is not an endpoint of provider profile "
+            f"{profile_id!r}; the proxy withholds the credential off-profile "
+            f"(403 credential_endpoint_mismatch)")
+    declared_env = {env for cred in (profile.get("credentials") or []) if isinstance(cred, dict)
+                    for env in (cred.get("env_vars") or [])}
+    if credential_env not in declared_env:
+        raise CompositionError(
+            f"egress.inference_provider.credential_env {credential_env!r} is not declared by provider "
+            f"profile {profile_id!r} (declared: {sorted(declared_env)})")
+    openshell_provider = _req("openshell_provider", profile_id)
+    _safe_name("provider", openshell_provider)
+    max_tokens = block.get("max_tokens")
+    if max_tokens is not None:
+        lo, hi = _OSH_V01_MAX_TOKENS_RANGE
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not lo <= max_tokens <= hi:
+            raise CompositionError(
+                f"egress.inference_provider.max_tokens must be an integer from {lo} to {hi}, "
+                f"got {max_tokens!r}")
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "api_mode": api_mode,
+        "model_id": _req("model_id"),
+        "max_tokens": max_tokens,
+        "rewrite_placeholder": None,
+        "credential_env": credential_env,
+        "hermes_key_env": hermes_key_env,
+        "api_key_value": "${env:" + hermes_key_env + "}",
+        "profile": profile_id,
+        "openshell_provider": openshell_provider,
+        "attribution_tag_prefix": _req("attribution_tag_prefix"),
+    }
+
+
+def _validate_v01_sandbox_command(value: Any) -> list[str]:
+    """``egress.sandbox_command``: the sandbox main process as an argv list. It must be
+    long-running (exit 0 leaves the sandbox Completed) and must not be a TCP server (5f)."""
+    if (not isinstance(value, list) or not value
+            or not all(isinstance(v, str) and v and not any(c in v for c in "\n\r\x00")
+                       for v in value)):
+        raise CompositionError(
+            f"egress.sandbox_command must be a non-empty list of argv strings, got {value!r}")
+    if value[0] in ("true", "/bin/true", "/usr/bin/true", ":"):
+        raise CompositionError(
+            "egress.sandbox_command must be long-running: the trailing command is the sandbox main "
+            "process and exit 0 leaves it Completed (docs/how-it-works/sandboxes/overview.mdx:23-33)")
+    guard = _openshell_asset_module("legacy_seccomp")
+    try:
+        guard.assert_command_not_a_tcp_server(list(value))
+    except guard.LegacySeccompError as exc:
+        raise CompositionError(str(exc)) from None
+    return list(value)
+
+
+def _validate_v01_package_mirror(value: Any, inference_route: str) -> dict[str, Any]:
+    """``egress.package_mirror``: GET-only egress to a pip/uv/npm package mirror.
+
+    Shape: ``{enabled?: true, host, port?: 443, paths: [..], roles?: [..], binaries?: [..]}``.
+    ``enabled: false`` keeps the block OFF but READY: every other key is validated exactly as
+    when on (so flipping the one switch cannot fail the render), and no role gets the rule. Every path must pin a
+    literal mirror prefix of at least four segments (``/<mirror>/api/pypi/<repo>/**``), so the
+    rule can never widen to the whole host, the whole REST API or every repo on it. The host goes through the same 0.1 guards as every
+    other user-authored egress target and may not be the inference provider endpoint (that host
+    belongs to the provider-composed layer). ``roles`` absent = every worker role."""
+    if not isinstance(value, dict):
+        raise CompositionError(f"egress.package_mirror must be a mapping, got {value!r}")
+    unknown = sorted(set(value) - _OSH_V01_PACKAGE_MIRROR_KEYS)
+    if unknown:
+        raise CompositionError(f"egress.package_mirror has unknown keys {unknown}")
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise CompositionError(f"egress.package_mirror.enabled must be true or false, got {enabled!r}")
+    host = value.get("host")
+    if not isinstance(host, str) or not host.strip() or any(c in host for c in "/:@ \t\r\n\x00"):
+        raise CompositionError(f"egress.package_mirror.host must be a bare DNS host, got {host!r}")
+    host = host.strip()
+    port = value.get("port", 443)
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise CompositionError(f"egress.package_mirror.port must be 1..65535, got {port!r}")
+    entry = f"{host}:{port}"
+    _assert_v01_host_allowed(entry, "egress.package_mirror")
+    if _openshell_hostport(entry) == _openshell_hostport(inference_route):
+        raise CompositionError(
+            "egress.package_mirror must not target the inference provider endpoint "
+            f"{inference_route!r} (that host is the provider-composed layer's)")
+    paths = value.get("paths")
+    if not isinstance(paths, list) or not paths:
+        raise CompositionError(
+            f"egress.package_mirror.paths must be a non-empty list of mirror path globs, got {paths!r}")
+    for path in paths:
+        if (not isinstance(path, str) or ".." in path.split("/")
+                or not _OSH_V01_MIRROR_PATH_RE.fullmatch(path)
+                or "*" in "/".join(path.split("/")[:_OSH_V01_MIRROR_LITERAL_SEGMENTS + 1])):
+            raise CompositionError(
+                f"egress.package_mirror.paths entry {path!r} must be an absolute path glob with a "
+                f"literal prefix of at least four segments (e.g. /<mirror>/api/pypi/<repo>/**); "
+                f"a host-wide rule is refused")
+    if len(set(paths)) != len(paths):
+        raise CompositionError("egress.package_mirror.paths has duplicates")
+    roles = value.get("roles")
+    if roles is not None and (not isinstance(roles, list) or not roles
+                              or not all(isinstance(r, str) and r for r in roles)):
+        raise CompositionError(f"egress.package_mirror.roles must be a non-empty list of roles, got {roles!r}")
+    binaries = (_validate_openshell_binaries(value["binaries"]) if "binaries" in value
+                else list(_OSH_V01_PACKAGE_MIRROR_BINARIES))
+    return {"enabled": enabled, "host": host, "port": port, "paths": list(paths),
+            "roles": list(roles) if roles is not None else None, "binaries": binaries}
+
+
+def _v01_package_mirror_for(mirror: Optional[dict[str, Any]], role: str) -> Optional[dict[str, Any]]:
+    """The validated ``egress.package_mirror`` if it is enabled and applies to ``role`` (absent
+    roles = all). ``enabled: false`` applies to no role (OFF but READY)."""
+    if (not mirror or not mirror["enabled"]
+            or (mirror["roles"] is not None and role not in mirror["roles"])):
+        return None
+    return mirror
+
+
+def _validate_openshell_egress_v01(egress: dict[str, Any]) -> dict[str, Any]:
+    """Validate an ``openshell_api: "0.1"`` egress block. Strict: a 0.0.72 lane key or any
+    unknown key is refused. The returned map has the same keys the legacy render reads, with the
+    lane fields empty, so the shared Phase-B code needs only the explicit 0.1 branches."""
+    refused = sorted(k for k in egress if k in _OSH_V01_REFUSED_EGRESS_KEYS)
+    if refused:
+        raise CompositionError(
+            "egress (openshell_api 0.1) must not declare "
+            + "; ".join(f"{k}: {_OSH_V01_REFUSED_EGRESS_KEYS[k]}" for k in refused))
+    unknown = sorted(set(egress) - _OSH_V01_EGRESS_KEYS)
+    if unknown:
+        raise CompositionError(f"egress has unknown keys {unknown} (openshell_api 0.1)")
+    image = egress.get("sandbox_image")
+    if not isinstance(image, str) or not image.strip() or any(c in image for c in "\n\r\x00 "):
+        raise CompositionError(f"egress.sandbox_image must be a non-empty image ref, got {image!r}")
+    image = _validate_pullable_image(image.strip())
+    if "inference_provider" not in egress:
+        raise CompositionError(
+            "egress.inference_provider is required under openshell_api 0.1 (inference.local is "
+            "removed; models go through an OpenShell provider profile)")
+    inference_provider = _validate_openshell_inference_provider_v01(egress["inference_provider"])
+    workspace = egress.get("workspace", _OSH_V01_DEFAULT_WORKSPACE)
+    if not isinstance(workspace, str) or not _OSH_V01_WORKSPACE_RE.fullmatch(workspace):
+        raise CompositionError(f"egress.workspace must be a DNS-label workspace name, got {workspace!r}")
+    read_only = (_validate_openshell_read_only(egress["filesystem_read_only"])
+                 if "filesystem_read_only" in egress else None)
+    read_write = (_validate_openshell_read_write(egress["filesystem_read_write"])
+                  if "filesystem_read_write" in egress else None)
+    anonymous_reads = (_validate_openshell_anonymous_reads(egress["anonymous_reads"])
+                       if "anonymous_reads" in egress else {})
+    for role, targets in anonymous_reads.items():
+        for entry in targets:
+            _assert_v01_host_allowed(entry, f"egress.anonymous_reads.{role}")
+    binaries = (_validate_openshell_binaries(egress["binaries"])
+                if "binaries" in egress else None)
+    bparts = urlsplit(inference_provider["base_url"])
+    route = f"{bparts.hostname}:{bparts.port or 443}"
+    if "inference_route" in egress:
+        declared = egress["inference_route"]
+        if not isinstance(declared, str) or _openshell_hostport(declared) != _openshell_hostport(route):
+            raise CompositionError(
+                f"egress.inference_route {declared!r} must equal the inference provider endpoint "
+                f"{route!r} under openshell_api 0.1 (inference.local is removed; the route is the "
+                f"provider profile endpoint)")
+    pinned_offline_lane = egress.get("pinned_offline_lane", False)
+    if not isinstance(pinned_offline_lane, bool):
+        raise CompositionError(
+            f"egress.pinned_offline_lane must be true or false, got {pinned_offline_lane!r}")
+    sandbox_command = _validate_v01_sandbox_command(
+        egress.get("sandbox_command", list(_OSH_V01_SANDBOX_MAIN_COMMAND)))
+    package_mirror = (_validate_v01_package_mirror(egress["package_mirror"], route)
+                      if "package_mirror" in egress else None)
+    return {
+        "openshell_api": _OPENSHELL_API_V01,
+        "package_mirror": package_mirror,
+        "sandbox_command": sandbox_command,
+        "workspace": workspace,
+        "allow": [],
+        "sandbox_image": image,
+        "filesystem_read_only": read_only,
+        "filesystem_read_write": read_write,
+        "anonymous_reads": anonymous_reads,
+        "binaries": binaries,
+        "raw_hops": [],
+        "chain_addr": None,
+        "ca_bundle": None,
+        "onecli_secret_ids": None,
+        "pinned_offline_lane": pinned_offline_lane,
+        "inference_provider": inference_provider,
+        # The provider-profile endpoint (never rendered into user policy on 0.1); kept so the
+        # shared provider-catalog guard still refuses a worker provider that re-adds it.
+        "inference_route": route,
+        "broker_addr": None,
+    }
+
+
+def _openshell_api(egress: Any) -> str:
+    """The spec's OpenShell CLI/API generation: ``"0.0"`` (default, the 0.0.72 box) or ``"0.1"``."""
+    if not isinstance(egress, dict):
+        return _OPENSHELL_API_LEGACY
+    api = egress.get("openshell_api", _OPENSHELL_API_LEGACY)
+    if api not in (_OPENSHELL_API_LEGACY, _OPENSHELL_API_V01):
+        raise CompositionError(
+            f"egress.openshell_api must be {_OPENSHELL_API_LEGACY!r} or {_OPENSHELL_API_V01!r}, got {api!r}")
+    return api
+
+
+def _enforce_openshell_v01_worker_guards(config: dict[str, Any], profile_name: str) -> None:
+    """5f: a worker profile of a 0.1 fleet must not open a TCP listener (legacy seccomp mode)."""
+    guard = _openshell_asset_module("legacy_seccomp")
+    try:
+        guard.assert_no_tcp_listeners(config, profile_name)
+    except guard.LegacySeccompError as exc:
+        raise CompositionError(str(exc)) from None
+
+
+def _assert_openshell_v01_no_credential_passthrough(
+        config: dict[str, Any], profile_name: str,
+        providers: list[tuple[str, dict[str, Any]]], inference_envs: list[str]) -> None:
+    """5g in the ssh topology: never pass a provider or inference credential NAME through.
+
+    Every 0.1 profile's Hermes runs in the hermes-gateway-agent pod and reaches its worker over
+    the builtin ssh backend, which does not apply ``terminal.env_passthrough``
+    (``_profile_scoped_passthrough = False``, tools/environments/base.py:635). OpenShell itself
+    injects the provider placeholders into every exec/ssh session
+    (crates/openshell-sandbox/src/boundary_exec.rs:158-185), so worker tool commands see them
+    without help. env_passthrough would only reach LOCAL children in the gateway-agent pod, where
+    a same-named variable holds a REAL value. So the render refuses those names rather than
+    rendering them (a placeholder passthrough is only meaningful when Hermes itself runs inside
+    an OpenShell sandbox; see upstream #4429)."""
+    current = _get_dotted(config, "terminal.env_passthrough")
+    if not isinstance(current, list):
+        return
+    for env in inference_envs:
+        if env in current:
+            raise CompositionError(
+                f"{profile_name}: terminal.env_passthrough lists the inference credential "
+                f"{env!r}; it must stay scrubbed from tool subprocesses")
+    for pname, pspec in providers:
+        for env in pspec.get("credential_env") or []:
+            if env in current:
+                raise CompositionError(
+                    f"{profile_name}: terminal.env_passthrough lists provider {pname!r} credential "
+                    f"{env!r}. Under openshell_api 0.1 OpenShell injects the placeholder into the "
+                    f"worker's ssh/exec sessions itself; passing it through would export the "
+                    f"gateway-agent pod's value to local tool children")
+
+
+def _v01_inference_envs(inference_provider: dict[str, Any]) -> list[str]:
+    envs = [inference_provider["credential_env"]]
+    if inference_provider.get("hermes_key_env") not in (None, *envs):
+        envs.append(inference_provider["hermes_key_env"])
+    return envs
+
+
+def build_provision_plan_v01(data: dict[str, Any], params: dict[str, Any]) -> list[str]:
+    """The 0.1 provisioning plan (5e): providers are explicit, the trailing command is the
+    long-running main process (``--detach -- <egress.sandbox_command>``, default ``sleep
+    infinity``; exit 0 would leave the sandbox
+    Completed, docs/how-it-works/sandboxes/overview.mdx:23-33), and teardown is delete (async;
+    the executor waits until gone)."""
+    fleet_name = _safe_name("project", data.get("project", "fleet"))
+    image = shlex.quote(params["sandbox_image"])
+    workspace = params["workspace"]
+    roster = sorted(_safe_name("type", t) for t in (data.get("types") or {}))
+    catalog = _validate_provider_catalog(data)
+    command = params.get("sandbox_command") or list(_OSH_V01_SANDBOX_MAIN_COMMAND)
+    main = " ".join(shlex.quote(c) for c in command)
+    _openshell_asset_module("legacy_seccomp").assert_command_not_a_tcp_server(list(command))
+    # Always explicit: without --workspace the CLI falls back to OPENSHELL_WORKSPACE from the
+    # caller's env, and the rendered ssh alias (openshell-<name>.<workspace>) would not match.
+    ws = f" --workspace {workspace}"
+    lines: list[str] = []
+    for role in roster:
+        provider_opts = "".join(f" --provider {name}"
+                                for name, _provider in _type_providers(data, role, catalog))
+        lines.append(
+            f"openshell{ws} sandbox create --name {_openshell_sandbox_name(fleet_name, role)} "
+            f"--from {image} --policy policy-{role}.yaml{provider_opts} --detach -o json -- {main}")
+    for role in roster:
+        lines.append(f"openshell{ws} sandbox ssh-config {_openshell_sandbox_name(fleet_name, role)}")
+    for role in roster:
+        lines.append(f"openshell{ws} sandbox delete {_openshell_sandbox_name(fleet_name, role)}")
+    return lines
+
+
 def _validate_openshell_egress(egress: Any) -> dict[str, Any]:
     """Validate the remote-ssh substrate's ``egress`` block into the openshell policy
     parameters. Fail-closed like ``_validate_egress_spec``: a missing/malformed field
@@ -1376,6 +2055,13 @@ def _validate_openshell_egress(egress: Any) -> dict[str, Any]:
     credential-free GET-only endpoint in that role's policy (``_openshell_policy_document``)."""
     if not isinstance(egress, dict):
         raise CompositionError(f"egress must be a mapping, got {type(egress).__name__}")
+    if _openshell_api(egress) == _OPENSHELL_API_V01:
+        return _validate_openshell_egress_v01(egress)
+    return _validate_openshell_egress_v0072(egress)
+
+
+def _validate_openshell_egress_v0072(egress: dict[str, Any]) -> dict[str, Any]:
+    """The OpenShell 0.0.72 half of ``_validate_openshell_egress``."""
 
     def _req_str(key: str) -> str:
         val = egress.get(key)
@@ -1673,7 +2359,7 @@ def _validate_openshell_secret_ids(value: Any) -> list[str]:
 _OPENSHELL_POLICY_NETWORK_NAME = "worker-egress"
 _OPENSHELL_POLICY_BINARY = "/usr/bin/curl"
 _OPENSHELL_POLICY_FS_READ_ONLY = ("/usr", "/bin", "/lib", "/etc")
-_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)  # no-tmp: ok — the OpenShell sandbox's own read-write lane, not Hermes scratch space
+_OPENSHELL_POLICY_FS_READ_WRITE = ("/tmp",)  # NOSONAR sandbox filesystem-policy constant, no file is created; no-tmp: ok — the OpenShell sandbox's own read-write lane, not Hermes scratch space
 # OSH-F64.b (AC-2 "reachable by the model-call process"): the GATEWAY (model-call) sandbox runs
 # Hermes itself to issue the inference request, so its filesystem_policy must grant the Hermes
 # runtime paths the worker minimal set omits — else the venv interpreter cannot exec and /dev/null
@@ -1851,7 +2537,93 @@ def _validate_provider_catalog(data: dict[str, Any]) -> dict[str, dict[str, Any]
                 raise CompositionError(
                     f"provider {pname!r} method {method!r} must be an uppercase HTTP verb")
         resolved[pname] = {"endpoints": endpoints, "binaries": binaries, "methods": methods}
+        # 5g (openshell_api 0.1): the OpenShell provider profile's credential env var
+        # NAMES (never values). Optional; absent leaves the entry byte-identical.
+        if "credential_env" in entry:
+            envs = _provider_str_list(entry, pname, "credential_env")
+            for env in envs:
+                if not _OSH_V01_ENV_NAME_RE.fullmatch(env):
+                    raise CompositionError(
+                        f"provider {pname!r} credential_env {env!r} must be an upper-case env var name")
+            resolved[pname]["credential_env"] = envs
+        # openshell_api 0.1: optional per-profile git credential include for git
+        # smart-HTTP through this provider. Absent leaves the entry byte-identical.
+        # Validated in compose() after the endpoint guards (_finalize_provider_gitconfigs), so a
+        # forbidden endpoint is reported as such first.
+        if "gitconfig" in entry:
+            resolved[pname]["gitconfig"] = entry["gitconfig"]
     return resolved
+
+
+# A provider's `gitconfig: <name>` renders skills/nv-gitconfig/gitconfig-<name>
+# into every 0.1 profile that opts into the provider. The worker image's /etc/gitconfig [include]s
+# /sandbox/.hermes/skills/nv-gitconfig/gitconfig-{github,gitlab}. The credential helper prints
+# `username=oauth2` and the provider's credential env var AS READ AT RUN TIME, which inside the
+# sandbox holds only an OpenShell placeholder, never the real token; the supervisor proxy
+# swaps the real token into the Basic authorization for the provider endpoint only. No value is
+# ever written. `github` is reserved for the FLEET-F62.c `gh auth git-credential` file.
+_PROVIDER_GITCONFIG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+_PROVIDER_GITCONFIG_USERNAME = "oauth2"
+
+
+def _finalize_provider_gitconfigs(catalog: dict[str, dict[str, Any]]) -> None:
+    """Replace each catalog entry's raw ``gitconfig`` name with its validated render inputs."""
+    for pname, spec in catalog.items():
+        if "gitconfig" in spec:
+            spec["gitconfig"] = _validate_provider_gitconfig(pname, spec)
+
+
+def _validate_provider_gitconfig(pname: str, spec: dict[str, Any]) -> dict[str, str]:
+    """``{"name", "host", "env"}`` for a provider's ``gitconfig`` key. Fail closed unless the
+    provider has exactly one https (:443) endpoint and exactly one credential env name."""
+    name = spec.get("gitconfig")
+    if not isinstance(name, str) or not _PROVIDER_GITCONFIG_NAME_RE.fullmatch(name) or name == "github":
+        raise CompositionError(
+            f"provider {pname!r}.gitconfig must be a short lower-case name other than 'github' "
+            f"(renders skills/nv-gitconfig/gitconfig-<name>), got {name!r}")
+    envs = spec.get("credential_env") or []
+    if len(envs) != 1:
+        raise CompositionError(
+            f"provider {pname!r}.gitconfig needs exactly one credential_env name (the placeholder "
+            f"the git credential helper prints), got {envs!r}")
+    if len(spec["endpoints"]) != 1:
+        raise CompositionError(
+            f"provider {pname!r}.gitconfig needs exactly one endpoint (the git smart-HTTP host), "
+            f"got {spec['endpoints']!r}")
+    host, port = _openshell_hostport(spec["endpoints"][0])
+    if port != 443 or not re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", host.casefold()):
+        raise CompositionError(
+            f"provider {pname!r}.gitconfig needs an https DNS endpoint host:443, got "
+            f"{spec['endpoints'][0]!r}")
+    return {"name": name, "host": host.casefold(), "env": envs[0]}
+
+
+def _provider_gitconfig_text(pname: str, gc: dict[str, str]) -> str:
+    """The rendered gitconfig-<name> body: a credential section for the provider's git host."""
+    host, env = gc["host"], gc["env"]
+    return (
+        f"# Per-profile git credential section for {host} (provider {pname}), rendered by\n"
+        "# nv-coworker-compose. The hermes-worker image's /etc/gitconfig [include]s\n"
+        "# it from /sandbox/.hermes/skills/nv-gitconfig/. No secret: the helper prints the OpenShell\n"
+        f"# placeholder held in ${env} at run time, and the sandbox proxy swaps the real token into the\n"
+        f"# Basic authorization header for {host} only.\n"
+        f'[credential "https://{host}"]\n'
+        "\thelper =\n"
+        f'\thelper = "!f() {{ test \\"$1\\" = get || exit 0; echo username={_PROVIDER_GITCONFIG_USERNAME}; '
+        f'echo \\"password=${{{env}:?{pname} provider not attached}}\\"; }}; f"\n'
+        "\tuseHttpPath = false\n"
+    )
+
+
+def _render_provider_gitconfigs(pdir: Path, providers: list[tuple[str, dict[str, Any]]]) -> None:
+    """Write skills/nv-gitconfig/gitconfig-<name> for each opted-in provider that declares one."""
+    for pname, pspec in providers or []:
+        gc = pspec.get("gitconfig")
+        if not gc:
+            continue
+        target = pdir / "skills" / "nv-gitconfig" / f"gitconfig-{gc['name']}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_provider_gitconfig_text(pname, gc), encoding="utf-8")
 
 
 def _type_providers(
@@ -1921,7 +2693,8 @@ def _refuse_gateway_type_collision(type_names: Iterable[str],
 
 
 def _enforce_openshell_inference_provider(config: dict[str, Any], profile_name: str,
-                                          inference_provider: dict[str, Any]) -> None:
+                                          inference_provider: dict[str, Any],
+                                          model_id: Optional[str] = None) -> None:
     """Render a served coworker's single-authority inference model-provider config
     (OSH-F64.b §D3), REPLACING the OSH-F64 §D7 OneCLI chain-dial for the openshell path.
     The provider carries the OpenShell endpoint ``base_url`` (with the ``/v1`` path so the
@@ -1930,8 +2703,13 @@ def _enforce_openshell_inference_provider(config: dict[str, Any], profile_name: 
     OpenShell L7 credential rewrite, which reads the real key OpenShell-side, never in the
     sandbox), and a per-request ``X-Hermes-Profile`` attribution header. A distinct
     per-profile ``attribution_tag`` is written at config top level as the hermetic artifact
-    (AC-OSH-F64.b-4) — a dedicated field, never the credential slot."""
+    (AC-OSH-F64.b-4) — a dedicated field, never the credential slot.
+
+    ``model_id`` is the role's own main model (``types.<role>.model.default``); ``None`` keeps the
+    fleet's ``inference_provider.model_id``. Only the model name varies: the provider, endpoint
+    and placeholder key stay single-authority."""
     provider = inference_provider["provider"]
+    model_id = model_id or inference_provider["model_id"]
     tag = f"{inference_provider['attribution_tag_prefix']}-{profile_name}"
     existing = config.get("providers")
     if existing is not None and not isinstance(existing, dict):
@@ -1948,14 +2726,17 @@ def _enforce_openshell_inference_provider(config: dict[str, Any], profile_name: 
         provider: {
             "base_url": inference_provider["base_url"],
             "api_mode": inference_provider["api_mode"],
-            "api_key": inference_provider["api_key"],
-            "default_model": inference_provider["model_id"],
+            "api_key": inference_provider.get("api_key_value") or inference_provider["api_key"],
+            "default_model": model_id,
             # X-Hermes-Profile is the per-profile attribution carrier: both profile children share
             # the one gateway sandbox, so a per-request header distinguishes them; it survives
             # because the validated api_mode keeps custom-provider extra_headers (run_agent.py:6437).
             "extra_headers": {_OSH_F64B_PROFILE_HEADER: tag},
         }
     }
+    # The validated output cap (0.1 spec), carried on every request as a body field.
+    if inference_provider.get("max_tokens"):
+        config["providers"][provider]["extra_body"] = {"max_tokens": inference_provider["max_tokens"]}
     for field in ("api_key", "api", "api_base", "base_url", "api_mode",
                   "key_env", "api_key_env", "default_headers", "extra_headers"):
         _pop_dotted(config, f"model.{field}")
@@ -2021,7 +2802,7 @@ def _enforce_openshell_inference_provider(config: dict[str, Any], profile_name: 
     if isinstance(enabled, list) and "podman-onecli" in enabled:
         _set_dotted(config, "plugins.enabled", [n for n in enabled if n != "podman-onecli"])
     _set_dotted(config, "model.provider", provider)
-    _set_dotted(config, "model.default", inference_provider["model_id"])
+    _set_dotted(config, "model.default", model_id)
     config["attribution_tag"] = tag
 
 
@@ -2035,6 +2816,7 @@ def _openshell_policy_document(
     extra_read_only: Optional[list[str]] = None,
     extra_read_write: Optional[list[str]] = None,
     anonymous_reads: Optional[list[str]] = None,
+    package_mirror: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build one profile's OpenShell policy document in the accepted five-section grammar
     from the validated egress targets (§D1.3), plus any opted-in provider
@@ -2055,6 +2837,11 @@ def _openshell_policy_document(
     ``anonymous_reads`` (host:port) are credential-free read-only egress targets: each renders
     as a ``protocol: rest`` endpoint with one GET rule and no binary change (the base
     ``/usr/bin/curl`` is the reader). Empty leaves the document as is.
+
+    ``package_mirror`` (0.1) adds a separate ``package-mirror`` network policy:
+    one GET-only ``protocol: rest`` / ``enforce`` endpoint on the mirror host whose rules are the
+    declared path globs, with its own binaries (the worker's python/uv/node). Absent leaves the
+    document as is.
 
     Absent both ``providers`` and the OSH-F64 extras the document is byte-identical to the
     base two-endpoint POST-only policy."""
@@ -2122,7 +2909,7 @@ def _openshell_policy_document(
             "enforcement": "enforce",
             "rules": [{"allow": {"method": "GET", "path": _OPENSHELL_POLICY_ALLOW_PATH}}],
         })
-    return {
+    document = {
         "version": 1,
         "filesystem_policy": {
             "include_workdir": True,
@@ -2140,6 +2927,24 @@ def _openshell_policy_document(
             }
         },
     }
+    # 0.1: a worker whose egress comes only from attached provider profiles has no user
+    # endpoint; omit the empty rule instead of shipping an inert one. The 0.0.72 render always
+    # has at least one allow target, so its output is unchanged.
+    if not endpoints:
+        del document["network_policies"]
+    if package_mirror:
+        document.setdefault("network_policies", {})[_OSH_V01_PACKAGE_MIRROR_POLICY] = {
+            "name": _OSH_V01_PACKAGE_MIRROR_POLICY,
+            "binaries": [{"path": b} for b in package_mirror["binaries"]],
+            "endpoints": [{
+                "host": package_mirror["host"],
+                "port": package_mirror["port"],
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "rules": [{"allow": {"method": "GET", "path": p}} for p in package_mirror["paths"]],
+            }],
+        }
+    return document
 
 
 def _enforce_openshell_policy(
@@ -2154,6 +2959,7 @@ def _enforce_openshell_policy(
     extra_read_only: Optional[list[str]] = None,
     extra_read_write: Optional[list[str]] = None,
     anonymous_reads: Optional[list[str]] = None,
+    package_mirror: Optional[dict[str, Any]] = None,
 ) -> None:
     """Write one coworker's per-profile ``openshell policy`` file
     (``policy-<profile>.yaml``) beside its ``config.yaml`` — the five-section
@@ -2173,7 +2979,7 @@ def _enforce_openshell_policy(
                 _openshell_policy_document(allow, providers, filesystem_read_only,
                                            binaries, raw_hops, rest_overrides,
                                            extra_read_only, extra_read_write,
-                                           anonymous_reads))
+                                           anonymous_reads, package_mirror))
     dist_path = pdir / "distribution.yaml"
     dist = yaml.safe_load(dist_path.read_text(encoding="utf-8-sig")) or {}
     owned = dist.get("distribution_owned")
@@ -2215,6 +3021,8 @@ def build_provision_plan(data: dict[str, Any], descriptor: _SubstrateDescriptor)
     and no container engine (podman/docker) is invoked."""
     if descriptor.kind != "remote_ssh":
         return []
+    if _openshell_api(data.get("egress")) == _OPENSHELL_API_V01:
+        return build_provision_plan_v01(data, _validate_openshell_egress(data.get("egress") or {}))
     fleet_name = _safe_name("project", data.get("project", "fleet"))
     # shlex-quote the spec-supplied image so a metachar cannot alter the plan (the
     # egress validator already refuses control chars). fleet/role names are
@@ -3534,6 +4342,63 @@ def _forbid_coworker_webhook_routes(config: dict[str, Any], tname: str) -> None:
         )
 
 
+# Per-role model choice (`types.<role>.model`). Model ids are plain identifiers (the same charset
+# a deployment's installer accepts for a model id), never a URL, header or credential.
+_TYPE_MODEL_KEYS = frozenset({"default", "auxiliary"})
+_TYPE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$")
+
+
+def _validate_type_model(tname: str, block: Any) -> Optional[dict[str, str]]:
+    """Validate a coworker type's optional ``model`` block::
+
+        model:
+          default: <id>     # this role's main model (model.default)
+          auxiliary: <id>   # replaces the model of every auxiliary task the role pins
+
+    Absent → ``None`` (the role keeps the fleet's model, today's behaviour). Only the model
+    NAME is per role: the provider, endpoint and credential stay the fleet's single route."""
+    if block is None:
+        return None
+    if not isinstance(block, dict) or not block:
+        raise CompositionError(
+            f"{tname}: 'model' must be a mapping with 'default' and/or 'auxiliary', got {block!r}")
+    unknown = sorted(set(block) - _TYPE_MODEL_KEYS)
+    if unknown:
+        raise CompositionError(
+            f"{tname}: 'model' has unknown keys {unknown} (allowed: default, auxiliary; the "
+            f"provider, base_url and key are fleet-wide)")
+    out: dict[str, str] = {}
+    for key, val in block.items():
+        if not isinstance(val, str) or not _TYPE_MODEL_ID_RE.fullmatch(val.strip()):
+            raise CompositionError(
+                f"{tname}: model.{key} must be a model id ([A-Za-z0-9._/:@-]), got {val!r}")
+        out[key] = val.strip()
+    return out
+
+
+def _apply_type_model(config: dict[str, Any], tname: str, model: Optional[dict[str, str]]) -> None:
+    """Write a role's ``model`` block into its config. ``default`` sets ``model.default``.
+    ``auxiliary`` sets ``auxiliary.<task>.model`` for every task the composed config already
+    pins a model for (a base spine may pin ``title_generation``); unpinned tasks keep
+    riding the main model. An ``auxiliary`` with nothing to replace is refused rather than
+    silently ignored."""
+    if not model:
+        return
+    if "default" in model:
+        _set_dotted(config, "model.default", model["default"])
+    if "auxiliary" in model:
+        aux = config.get("auxiliary")
+        pinned = [task for task, cfg in (aux.items() if isinstance(aux, dict) else ())
+                  if isinstance(cfg, dict) and isinstance(cfg.get("model"), str)
+                  and cfg["model"].strip()]
+        if not pinned:
+            raise CompositionError(
+                f"{tname}: model.auxiliary has no pinned auxiliary task to replace; pin one with "
+                f"config.auxiliary.<task>.model (e.g. title_generation)")
+        for task in pinned:
+            aux[task]["model"] = model["auxiliary"]
+
+
 def _resolve_type(tname: str, tinfo: dict[str, Any], spines: dict[str, Any]) -> dict[str, Any]:
     """Resolve one coworker type's extends chain into concrete artifacts."""
     identity: Any = None
@@ -3546,11 +4411,15 @@ def _resolve_type(tname: str, tinfo: dict[str, Any], spines: dict[str, Any]) -> 
     traits: dict[str, Any] = {}
     config: dict[str, Any] = {}
     mcp: Any = None
+    model: Any = None
 
     def _apply(layer: dict[str, Any]) -> None:
-        nonlocal identity, traits, config, mcp
+        nonlocal identity, traits, config, mcp, model
         if layer.get("identity") is not None:
             identity = layer["identity"]
+        # The per-role model block is leaf-wins like identity: the nearest layer names the model.
+        if layer.get("model") is not None:
+            model = layer["model"]
         # The mcp block is a whole-declaration leaf-wins layer (like identity),
         # not an append/merge domain: a coworker's own server set replaces a
         # spine's rather than silently unioning across the extends chain.
@@ -3587,6 +4456,10 @@ def _resolve_type(tname: str, tinfo: dict[str, Any], spines: dict[str, Any]) -> 
             raise CompositionError(f"{tname}: unsupported trait {tk!r}")
         _set_dotted(config, dotted, tv)
 
+    # Applied here (Phase A), so a bad block fails before any profile is written.
+    type_model = _validate_type_model(tname, model)
+    _apply_type_model(config, tname, type_model)
+
     return {
         "identity": identity,
         "invariants": _dedup(invariants),
@@ -3597,6 +4470,7 @@ def _resolve_type(tname: str, tinfo: dict[str, Any], spines: dict[str, Any]) -> 
         "cron_jobs": cron_jobs,
         "config": config,
         "mcp": mcp,
+        "model": type_model,
         "ui_meta": tinfo.get("ui_meta") or {},
     }
 
@@ -3608,7 +4482,8 @@ def _write_yaml(path: Path, data: Any) -> None:
     )
 
 
-def _write_soul(path: Path, name: str, identity: Any, context: list[Any], invariants: list[Any]) -> None:
+def _write_soul(path: Path, name: str, identity: Any, context: list[Any], invariants: list[Any],
+                messaging: Optional[str] = None) -> None:
     lines = [f"# {name}", "", str(identity or ""), ""]
     if context:
         lines.append("## Context")
@@ -3618,7 +4493,86 @@ def _write_soul(path: Path, name: str, identity: Any, context: list[Any], invari
         lines.append("## Invariants")
         lines.extend(f"- {i}" for i in invariants)
         lines.append("")
+    if messaging:
+        lines.extend([messaging, ""])
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+# Must NOT be tools/bot_mode_probe._PROTOCOL_HEADING ("## Messaging other agents"): Hermes >= 0.22.5 strips that
+# section from SOUL.md at load (agent/prompt_builder.load_soul_md -> strip_legacy_protocol, through the next H2 or the
+# end of the file), which dropped this whole section, "where your tools run" included. The core Bot Mode section is
+# injected only into a "Bot Chat" session and no longer looks at SOUL.md, so the old heading suppressed nothing.
+# In a "Bot Chat" session Hermes therefore still adds its own roster (every profile, "DM any of them"), next to this
+# section; turning it off is the agent setting `bot_mode_protocol` (agent/agent_init.py), a separate fleet-spec
+# change.
+_MESSAGING_HEADING = "## Your team and where your tools run"
+
+
+def _fleet_messaging_section(tname: str, data: dict[str, Any], orchestrator: str) -> Optional[str]:
+    """``messaging_section: wired`` (opt-in, fleet spec): a fleet-accurate messaging section for ``tname``'s SOUL.
+
+    Names only the WIRED teammates (spec ``wires``, undirected; nv-fleet-gates refuses message_agent to anyone
+    else), never the machine's root profile, routes every other hand-off through the orchestrator, keeps the
+    message_agent mechanics the core section would have taught, and says where this coworker's tools run: the
+    orchestrator is the serve/gateway launch profile, so its chats run tools in its own sandbox; every other
+    coworker's direct chats are tool-less by design (ISO-F10.a) and its tool work runs as kanban tasks the
+    orchestrator assigns. Absent/false: nothing is rendered (the core section applies)."""
+    mode = data.get("messaging_section")
+    if mode in (None, False, ""):
+        return None
+    if mode != "wired":
+        raise CompositionError(f"messaging_section must be 'wired' (or absent), got {mode!r}")
+    types = data.get("types") or {}
+    peers: set[str] = set()
+    for edge in data.get("wires") or []:
+        if not (isinstance(edge, (list, tuple)) and len(edge) == 2):
+            raise CompositionError(f"wires entry must be a [from, to] pair: {edge!r}")
+        a, b = (str(x) for x in edge)
+        if tname in (a, b) and a != b:
+            peers.add(b if a == tname else a)
+    project = str(data.get("project") or "fleet")
+    default = str(data.get("default_profile") or "default")
+    ingress_hint = data.get("messaging_section_ingress_hint")
+    if ingress_hint is not None and (not isinstance(ingress_hint, str) or not ingress_hint.strip()
+                                     or any(c in ingress_hint for c in '"\n\r\x00')):
+        raise CompositionError("messaging_section_ingress_hint must be a one-line string without double quotes, "
+                               f"got {ingress_hint!r}")
+    hint = f", or {ingress_hint.strip()}" if ingress_hint else ""
+
+    def _line(name: str) -> str:
+        ui = (types.get(name) or {}).get("ui_meta") or {}
+        role = " — ".join(str(x) for x in (ui.get("title"), ui.get("description")) if x)
+        return f"- `@{name}`" + (f" — {role}" if role else "")
+
+    # The team = the spec's coworker types. An installer that cuts the spec to the enabled roles before compose
+    # keeps this list to exactly the coworkers live today; it grows by itself as roles are enabled.
+    others = sorted(t for t in types if t not in (tname, default) and t not in peers)
+    lines = [_MESSAGING_HEADING,
+             f"You are `@{tname}`. Your team is exactly the coworkers below; nobody else is a teammate.",
+             "You can message these directly (`message_agent`; the fleet gate refuses anyone else):"]
+    lines.extend(_line(p) for p in sorted(peers))
+    if not peers:
+        lines.append("- (none)")
+    if others:
+        lines.append(f"These you reach ONLY through `@{orchestrator}` (ask it to hand the work over as a kanban task):")
+        lines.extend(_line(o) for o in others)
+    lines.append("`@hermes` is this machine's root management profile, not a coworker: never list it as a "
+                 "teammate and never message it.")
+    lines.append("`message_agent` is fire-and-forget and only for wired teammates: compose your own message (say what "
+                 "you need; never forward the user's words verbatim), send it and finish your turn; the reply arrives "
+                 "later as a completion notification that wakes you, and you relay it, naming who replied. Never "
+                 "ping-pong acknowledgements. Hand-offs of WORK go through the orchestrator's kanban board.")
+    if tname == orchestrator:
+        lines.append(f"Where your tools run: in your own OpenShell sandbox `{project}-{tname}`, also from Desktop "
+                     "and Slack chats (this gateway runs as you). You hand work to the others as kanban tasks.")
+    else:
+        lines.append("Where your tools run: NOT in direct chats. In a Desktop or Bot Chat conversation you have NO "
+                     "tools (the fleet gate refuses every tool call there by design, ISO-F10.a): no repos, builds, "
+                     "web, code or schedules. Say plainly: \"In this chat I can discuss and plan only. For real work "
+                     f"(reading code, commenting a plan on an issue), ask @{orchestrator} to hand it to me{hint}.\" "
+                     f"Your tool work runs only in kanban tasks `@{orchestrator}` assigns you, in your own "
+                     f"OpenShell sandbox `{project}-{tname}`.")
+    return "\n".join(lines)
 
 
 def _write_distribution(pdir: Path, name: str, description: str) -> None:
@@ -3944,10 +4898,11 @@ def _splice_overlays(body: str, workflow: str, tname: str, overlays: list[dict[s
 
 
 def _render_coworker(pdir: Path, tname: str, resolved: dict[str, Any],
-                     skills_root: Path, workflows_root: Path, overlays_root: Path) -> None:
+                     skills_root: Path, workflows_root: Path, overlays_root: Path,
+                     messaging: Optional[str] = None) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     _write_soul(pdir / "SOUL.md", tname, resolved["identity"],
-                resolved["context"], resolved["invariants"])
+                resolved["context"], resolved["invariants"], messaging)
     _write_yaml(pdir / "config.yaml", resolved["config"])
     _write_common(pdir)
     _render_cron_jobs(pdir / "cron", tname, resolved["cron_jobs"])
@@ -4188,13 +5143,20 @@ def _mcp_iter_strings(value: Any) -> Iterator[str]:
             yield from _mcp_iter_strings(sub)
 
 
-def _mcp_reject_env_refs(server: str, connection: dict[str, Any]) -> None:
+def _mcp_reject_env_refs(server: str, connection: dict[str, Any], allowed: frozenset = frozenset()) -> None:
+    """Refuse non-global env refs in an MCP connection value, except the names the fleet spec lists in
+    ``mcp_env_refs`` (exact names). That opt-in is only for SINGLE-PROFILE gateways (multiplex off: core's
+    get_secret then reads os.environ, never an unscoped multiplex read) without OneCLI, where the
+    credential reaches the gateway pod's own env from a Kubernetes Secret."""
     from agent.secret_scope import _is_global_env
 
     for text in _mcp_iter_strings(connection):
         for match in _MCP_ENV_REF_RE.finditer(text):
             ref = match.group(1).strip()
             if ref in _MCP_CONTEXT_REFS:
+                continue
+            name = ref[len("env:"):].strip() if ref.startswith("env:") else ref
+            if name in allowed:
                 continue
             if ref.startswith("env:"):
                 var = ref[len("env:"):].strip()
@@ -4288,10 +5250,11 @@ def _mcp_trust(value: Any) -> str:
     return "untrusted"
 
 
-def _mcp_server_stanza(server: str, decl: dict[str, Any]) -> tuple[dict[str, Any], str, list[str], bool, bool]:
+def _mcp_server_stanza(server: str, decl: dict[str, Any],
+                       allowed_env_refs: frozenset = frozenset()) -> tuple[dict[str, Any], str, list[str], bool, bool]:
     transport = _mcp_transport(server, decl)
     connection = {k: v for k, v in decl.items() if k not in _MCP_MANAGED_KEYS}
-    _mcp_reject_env_refs(server, connection)
+    _mcp_reject_env_refs(server, connection, allowed_env_refs)
     include = _mcp_validate_include(server, server, decl.get("include"))
     resources = decl.get("resources") is True
     prompts = decl.get("prompts") is True
@@ -4353,10 +5316,19 @@ def _mcp_write_scope(config: dict[str, Any], full_scope: dict[str, dict[str, str
     settings["mcp_scope"] = copy.deepcopy(full_scope)
 
 
+def _mcp_allowed_env_refs(data: dict[str, Any]) -> frozenset:
+    """The fleet spec's ``mcp_env_refs``: exact env-var names an MCP connection value may reference."""
+    refs = data.get("mcp_env_refs") or []
+    if not isinstance(refs, list) or not all(isinstance(r, str) and re.fullmatch(r"[A-Z][A-Z0-9_]*", r) for r in refs):
+        raise CompositionError("mcp_env_refs must be a list of exact upper-case env-var names")
+    return frozenset(refs)
+
+
 def _render_mcp_scope(
     resolved_by_type: dict[str, dict[str, Any]],
     default_config: dict[str, Any],
     default_profile: str,
+    allowed_env_refs: frozenset = frozenset(),
 ) -> None:
     """Emit per-role mcp_servers + the DEFAULT union + the profile-keyed mcp_scope."""
     # Strip any inherited/pre-existing mcp_servers so a no-MCP profile carries
@@ -4401,7 +5373,7 @@ def _render_mcp_scope(
                         f"to {sanitized!r}"
                     )
                 sanitized_servers[sanitized] = server
-                stanza, transport, include, resources, prompts = _mcp_server_stanza(server, decl)
+                stanza, transport, include, resources, prompts = _mcp_server_stanza(server, decl, allowed_env_refs)
                 servers_out[server] = stanza
                 for kind, tool in _mcp_scope_entries(include, resources, prompts):
                     key = _mcp_prefixed(server, tool)
@@ -4490,6 +5462,10 @@ def compose(spec: str, out: str) -> dict[str, str]:
         tname = _safe_name("type", tname)
         resolved_by_type[tname] = _resolve_type(tname, tinfo or {}, spines)
     default_config = _deep_merge(_merged_spine_config(spines), data.get("default_config") or {})
+    # Optional max-age retention (fleet spec `retention:`), validated before any profile is written.
+    retention_policy = _resolve_retention_policy(data)
+    # Optional internal-only data boundary (fleet spec `internal_only:`), validated before any profile is written.
+    internal_only_policy = _resolve_internal_only_policy(data)
 
     # ISO-F15 session-driver seam, enforced as an all-or-nothing pre-pass: force
     # terminal.backend to the substrate's backend (descriptor.backend — `docker` for
@@ -4529,11 +5505,25 @@ def compose(spec: str, out: str) -> dict[str, str]:
         openshell_params = _validate_openshell_egress(egress_block)
         _refuse_gateway_type_collision(resolved_by_type, openshell_params["inference_provider"],
                                        _safe_name("project", data.get("project", "fleet")))
+        # An `openshell_api: "0.1"` fleet targets the OpenShell 0.1.2 Kubernetes driver.
+        osh_v01 = openshell_params.get("openshell_api") == _OPENSHELL_API_V01
+        ssh_workspace = openshell_params.get("workspace") if osh_v01 else None
         unknown_anon = sorted(set(openshell_params["anonymous_reads"]) - set(resolved_by_type))
         if unknown_anon:
             raise CompositionError(
                 f"egress.anonymous_reads names {unknown_anon}, which are not declared coworker types")
+        mirror_roles = (openshell_params.get("package_mirror") or {}).get("roles") or []
+        unknown_mirror = sorted(set(mirror_roles) - set(resolved_by_type))
+        if unknown_mirror:
+            raise CompositionError(
+                f"egress.package_mirror.roles names {unknown_mirror}, which are not declared coworker types")
         provider_catalog = _validate_provider_catalog(data)
+        if not osh_v01:
+            with_gitconfig = sorted(n for n, p in provider_catalog.items() if "gitconfig" in p)
+            if with_gitconfig:
+                raise CompositionError(
+                    f"providers {with_gitconfig}: gitconfig needs openshell_api \"0.1\" (provider "
+                    f"profile placeholders); the 0.0.72 lane renders gitconfig-github only")
         # Resolve every type's provider opt-ins up front, so an unknown provider named by
         # any type fails closed HERE — before the Phase-B loop writes a distribution (the
         # same all-or-nothing discipline as the egress/ssh-key pre-passes).
@@ -4559,6 +5549,8 @@ def compose(spec: str, out: str) -> dict[str, str]:
             for tname, provs in providers_by_type.items():
                 for pname, pspec in provs:
                     for ep in pspec.get("endpoints") or []:
+                        if osh_v01:
+                            _assert_v01_host_allowed(ep, f"{tname}: provider {pname!r} endpoint")
                         ep_hp = _canon_hp(ep)
                         if ep_hp == onecli_hp:
                             raise CompositionError(
@@ -4569,6 +5561,8 @@ def compose(spec: str, out: str) -> dict[str, str]:
                             raise CompositionError(
                                 f"{tname}: provider {pname!r} endpoint {ep!r} is the inference "
                                 f"route — inference is a gateway-only endpoint, never a worker one")
+        if osh_v01:
+            _finalize_provider_gitconfigs(provider_catalog)
         egress_params = None
         fleet_name = _safe_name("project", data.get("project", "fleet"))
         keys_dir = _openshell_keys_dir()
@@ -4577,6 +5571,8 @@ def compose(spec: str, out: str) -> dict[str, str]:
             raise CompositionError(
                 f"{_trust.SPEC_KEY} is openshell-only (the live OpenShell bundle has no consumer "
                 f"on substrate {descriptor.substrate!r})")
+        osh_v01 = False
+        ssh_workspace = None
         egress_params = _validate_egress_spec(egress_block) if egress_block is not None else None
         openshell_params = None
         providers_by_type = {}
@@ -4632,7 +5628,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
     # Per-role MCP scope needs the whole fleet's declarations (per-role subsets,
     # the DEFAULT union, and the profile-keyed veto policy in every profile), so
     # it runs ONCE here — after Phase A resolve, before the per-profile writes.
-    _render_mcp_scope(resolved_by_type, default_config, default_profile)
+    _render_mcp_scope(resolved_by_type, default_config, default_profile, _mcp_allowed_env_refs(data))
 
     # OSH-F63: create every per-profile ssh_key placeholder up front (all-or-nothing,
     # fail-closed) BEFORE the Phase-B loop writes any distribution — a collision on a
@@ -4651,7 +5647,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
             # coworker's own process needs the orchestrator's name rendered there too.
             _set_dotted(resolved["config"], f"plugins.entries.{_INGRESS_PLUGIN}.settings.orchestrator_profile",
                         orchestrator_profile)
-        _enforce_retention(resolved["config"])
+        _enforce_retention(resolved["config"], retention_policy)
         # The shared-learnings clone and mount composition are container-substrate
         # writers of terminal.docker_volumes; the remote-ssh substrate has no local
         # container to bind into (container-mount fields are refused up front), so
@@ -4686,23 +5682,63 @@ def compose(spec: str, out: str) -> dict[str, str]:
         # is serialized; the per-profile openshell policy is a separate file written
         # AFTER (so _render_coworker does not need to know about it).
         if is_remote:
-            _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir)
+            _enforce_openshell_ssh(resolved["config"], tname, fleet_name, keys_dir, ssh_workspace)
             if osh_f64b_provider is not None:
-                _enforce_openshell_inference_provider(resolved["config"], tname, osh_f64b_provider)
+                _enforce_openshell_inference_provider(
+                    resolved["config"], tname, osh_f64b_provider,
+                    model_id=(resolved["model"] or {}).get("default"))
             elif openshell_params["pinned_offline_lane"]:
                 _enforce_openshell_chain_dial(resolved["config"], tname,
                                               openshell_params["chain_addr"],
                                               None if openshell_trust else openshell_params["ca_bundle"])
+            if osh_v01:
+                # 5f: no TCP listener in a 0.1 worker workload (legacy seccomp mode).
+                _enforce_openshell_v01_worker_guards(resolved["config"], tname)
+                # 5g (ssh topology): OpenShell injects provider placeholders into the worker's
+                # ssh/exec sessions itself; no credential name is ever passed through here.
+                # Every catalog provider's names, not just this role's: a role that did not opt in
+                # must not export another provider's real gateway-pod value either.
+                _assert_openshell_v01_no_credential_passthrough(
+                    resolved["config"], tname, sorted(provider_catalog.items()),
+                    _v01_inference_envs(osh_f64b_provider))
             if openshell_params["pinned_offline_lane"]:
                 _disable_firecrawl_providers(resolved["config"])
             if openshell_trust is not None:
                 _enforce_openshell_trust(resolved["config"], openshell_trust)
+        _enforce_internal_only(resolved["config"], internal_only_policy, tname)
         pdir = out_root / tname
-        _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root)
+        _render_coworker(pdir, tname, resolved, skills_root, workflows_root, overlays_root,
+                         _fleet_messaging_section(tname, data, orchestrator_profile))
         if is_remote:
-            if providers_by_type.get(tname):
+            # The GitHub credential-helper gitconfig is a FLEET-F62.c (github.com) artifact; on a 0.1
+            # fleet the per-provider gitconfig includes below take its place.
+            if providers_by_type.get(tname) and not osh_v01:
                 _render_openshell_gitconfig(pdir)
-            if osh_f64b_provider is not None:
+            if osh_v01:
+                # git smart-HTTP credential includes for opted-in providers
+                # (skills/nv-gitconfig/gitconfig-<name>, placeholder only).
+                _render_provider_gitconfigs(pdir, providers_by_type.get(tname))
+                # 0.1: the worker policy carries no lane hop, no inference endpoint and no
+                # catalog-provider endpoint. Inference and provider egress come from the attached
+                # provider profiles (`--provider`, composed as _provider_<name>). Only anonymous
+                # reads stay user-authored.
+                _enforce_openshell_policy(pdir, tname, [], None,
+                                          openshell_params["filesystem_read_only"],
+                                          openshell_params["binaries"], [],
+                                          extra_read_only=[
+                                              p for p in _OSH_V01_WORKER_FS_READ_ONLY
+                                              if p not in (openshell_params["filesystem_read_only"]
+                                                           or [])],
+                                          # spec lanes first, then the device floor.
+                                          extra_read_write=[
+                                              *(openshell_params["filesystem_read_write"] or []),
+                                              *(p for p in _OSH_V01_WORKER_FS_READ_WRITE
+                                                if p not in (openshell_params["filesystem_read_write"]
+                                                             or []))],
+                                          anonymous_reads=openshell_params["anonymous_reads"].get(tname),
+                                          package_mirror=_v01_package_mirror_for(
+                                              openshell_params.get("package_mirror"), tname))
+            elif osh_f64b_provider is not None:
                 # OSH-F64.b worker policy = D1 minus inference (workers issue no model call):
                 # the broker 18777 raw hop ONLY; the 18255 proxy hop is dropped from the allow-set.
                 # Opted-in FLEET-F62.c provider endpoints still apply to the worker.
@@ -4723,7 +5759,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
                                           anonymous_reads=openshell_params["anonymous_reads"].get(tname))
         rendered[tname] = str(pdir)
 
-    _enforce_retention(default_config)
+    _enforce_retention(default_config, retention_policy)
     _enforce_memory_policy(default_config)
     _enforce_curator(default_config)
     _validate_approval_lists(default_config, include_allowlist=False)
@@ -4751,10 +5787,15 @@ def compose(spec: str, out: str) -> dict[str, str]:
         # children, so under single-authority inference it ALSO reaches inference — render its
         # provider config so the placeholder + per-profile headers are present on the gateway too.
         _enforce_openshell_inference_provider(default_config, default_profile, osh_f64b_provider)
+    if osh_v01:
+        _assert_openshell_v01_no_credential_passthrough(
+            default_config, default_profile, sorted(provider_catalog.items()),
+            _v01_inference_envs(osh_f64b_provider))
     if is_remote and openshell_params["pinned_offline_lane"]:
         _disable_firecrawl_providers(default_config)
     if openshell_trust is not None:
         _enforce_openshell_trust(default_config, openshell_trust)
+    _enforce_internal_only(default_config, internal_only_policy, default_profile)
     ddir = out_root / default_profile
     _inject_redrive_plugin(default_config, orchestrator_profile)
     _render_default(ddir, default_profile, default_config)
@@ -4766,7 +5807,10 @@ def compose(spec: str, out: str) -> dict[str, str]:
     # profile) — the inference REST provider endpoint (exactly 4 method+paths, no on-endpoint
     # credential field) + the broker 18777 raw hop; the 18255 proxy hop is dropped. The legacy
     # §D7 render leaves the default profile unsandboxed (back-compat).
-    if is_remote and osh_f64b_provider is not None:
+    # 0.1: no gateway policy. The gateway (default profile, hermes serve) runs in a
+    # plain gateway Deployment, never in an OpenShell workload: legacy seccomp mode breaks
+    # TCP listeners there (5f).
+    if is_remote and osh_f64b_provider is not None and not osh_v01:
         # The gateway sandbox issues the model-call Python HTTP request, so its executable
         # allow-list MUST permit the venv interpreter (§D2) whether or not egress.binaries listed
         # it — else the policy-allowed REST endpoint is unreachable by the actual process.
@@ -4810,7 +5854,7 @@ def compose(spec: str, out: str) -> dict[str, str]:
     # terminal.ssh_host (the ssh-config alias) so the two values cannot drift — the
     # veto compares TERMINAL_SSH_HOST (== the rendered ssh_host) to this managed value.
     expected_ssh_host_map = (
-        {tname: _openshell_ssh_alias(fleet_name, tname) for tname in roster}
+        {tname: _openshell_ssh_alias(fleet_name, tname, ssh_workspace) for tname in roster}
         if is_remote else None
     )
     managed_fragment = _build_managed_fragment(
