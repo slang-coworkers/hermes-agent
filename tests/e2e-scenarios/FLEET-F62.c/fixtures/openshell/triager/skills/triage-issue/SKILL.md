@@ -30,6 +30,11 @@ requests — that is not triage's surface.
 8. Forward to the fixer — always hand off; the fixer decides whether and how to
    fix and may bounce back.
 9. Post the outcome on the issue — a short comment so a human landing on the
-   issue sees where it stands.
+   issue sees where it stands. Write it to a file in your worker, then run
+   through `terminal`:
+
+       gh issue comment <n> --repo <owner>/<repo> --body-file <file>
+
+   It prints the comment's URL; quote it in your report up.
 10. Forward the resolution upstream once the fix report lands; the chain is not
     closed until you do.

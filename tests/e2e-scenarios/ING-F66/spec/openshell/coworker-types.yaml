@@ -50,6 +50,16 @@ egress:
     rewrite_placeholder: "sk-OPENSHELL-PROXY-REWRITE"
     attribution_tag_prefix: ing-f66
 
+# The lane's ssh bundle (pushed into the gateway sandbox by the lane's host tooling; read only).
+# `openshell` is on no launcher PATH there: the installer runs its own openshell calls, and renders
+# every worker ProxyCommand, through this shim, sourcing env_file first.
+ssh_lane:
+  bundle: /tmp/osh-lane
+  env_file: lane.env
+  shim: bin/openshell
+  interpreter: /opt/hermes/.venv/bin/python3
+  members: [token, ca-bundle.pem]
+
 # Optional OpenShell egress providers (generic default-off widening). A worker opts in
 # via its own `providers: [<name>]`; the renderer then (1) emits an
 # `openshell sandbox provider attach <sandbox> <name>` provisioning line and (2) folds
