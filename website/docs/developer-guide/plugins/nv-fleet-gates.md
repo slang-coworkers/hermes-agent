@@ -150,6 +150,36 @@ in two places:
 `message_agent` is the one documented exclusion from the presence scan — it is
 injected, not registry-registered, so it is matched by constant in the gate.
 
+## Approve and merge refusal
+
+Approvals and merges of a pull request are human-only (owner rule). nv-fleet-gates refuses every `terminal` and
+`execute_code` call whose text approves or merges a pull request, for every profile and the root home alike. The
+refusal names `human-only (owner rule)`. No role is exempt, the orchestrator included, and no setting turns it off.
+It runs first in `pre_tool_call`, right after the restricted-set backstop and before every other predicate, so an
+earlier refusal never hides it.
+
+The classes it refuses (`predicates.pr_approval_or_merge`):
+
+- **gh CLI:** `gh pr review` with `--approve`, `--approve=<value>` (not `false`) or a short flag cluster that holds `a`;
+  any `gh pr merge`.
+- **REST:** a `pulls/<n>/reviews` path (including `reviews/<id>/events`) with `APPROVE` in the text; a
+  `pulls/<n>/merge` path with a PUT method (`-X PUT`, `--method PUT`, `--request PUT`, `method="PUT"`, `.put(`).
+  A GET of the merge path stays allowed.
+- **GraphQL:** `addPullRequestReview` or `submitPullRequestReview` with `APPROVE` in the text, which covers inline
+  values, aliases and variables; `mergePullRequest` and `enablePullRequestAutoMerge` with any arguments.
+- **Opaque bodies, refused unread (fail-closed):** `gh api graphql` with a file-fed field (`-F <k>=@…`,
+  `--field <k>=@…`) or `--input`; curl to `/graphql` with a file body (`-d @…`, `--data*@…`, `--json @…`, `-T`); a file
+  body sent to a reviews or merge path; and any `gh alias set` or `gh alias import`, since an alias hides the verb.
+  A file-fed comment on an `issues/<n>/comments` path is neither class and stays allowed.
+
+The text is matched as written and again with quotes, commas and brackets read as spaces, which is how the argv-list
+spelling of `execute_code` (`subprocess.run(["gh", "pr", "review", …])`) is read.
+
+This is defense-in-depth beside the owner rule, not a credential control. The hook sees only the tool call's own text,
+so it cannot see text built at run time (base64, `eval`, string assembly in `execute_code`), an alias or gh extension
+planted by a direct file write, or a GitHub MCP tool (the fleet ships none, and `mcp_scope` denies unlisted MCP
+tools). Only egress enforcement closes those.
+
 ## Wired-only agent messaging (A2A-F18)
 
 **Ported behaviour.** In NanoClaw the operator's destinations list is at once the
