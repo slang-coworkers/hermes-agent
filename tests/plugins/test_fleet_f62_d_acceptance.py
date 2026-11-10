@@ -443,6 +443,11 @@ def test_ac_fleet_f62_d_6(inst_env, monkeypatch):
     phase_spec = phase_spec_dir / SPEC.name
     phase_data = yaml.safe_load(phase_spec.read_text(encoding="utf-8"))
     phase_data.setdefault("egress", {})["pinned_offline_lane"] = True
+    lane = phase_data["ssh_lane"]
+    lane["bundle"] = str(home.parent / "osh-lane")  # staged here: phase_a refuses an unstaged lane bundle
+    for rel in (lane["env_file"], lane["shim"], *lane["members"]):
+        (Path(lane["bundle"]) / rel).parent.mkdir(parents=True, exist_ok=True)
+        (Path(lane["bundle"]) / rel).write_text("staged\n", encoding="utf-8")
     phase_spec.write_text(yaml.safe_dump(phase_data), encoding="utf-8")
     ran, real_execute = [], inst._execute_step
     inst._execute_step = lambda step, c: ran.append(getattr(step, "tag", None))
