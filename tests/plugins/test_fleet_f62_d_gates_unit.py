@@ -54,3 +54,18 @@ def test_unicode_or_control_redirect_target_is_a_write(command):
 ])
 def test_ascii_blank_still_ends_a_stream_merge(command):
     assert _predicates().is_mutation("terminal", {"command": command}) is False
+
+
+def test_segment_split_stays_linear_on_long_blank_runs():
+    """The split runs on the agent's own command text: blanks around the separators in the pattern made a
+    20,000-space command take about 2 s. Segments still lose only spaces and tabs, never a `\r`."""
+    import time
+
+    p = _predicates()
+    commands = [" " * 20000, "a" + " \t" * 10000 + "b", "ls" + " " * 20000 + "&& rm x", "x " * 10000 + "; y"]
+    started = time.perf_counter()
+    verdicts = [p.is_mutation("terminal", {"command": c}) for c in commands]
+    assert time.perf_counter() - started < 0.5
+    assert verdicts == [False, False, True, False]
+    assert p._segments("a  &&\tb ;  c\r ; | d || e\n  f") == ["a", "b", "c\r", "d", "e", "f"]
+    assert p._segments(" \t ; \r\n ") == []
