@@ -165,8 +165,9 @@ is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
      writes `t_end` and one JSONL row `{pass, id, tool, pid, t_start, t_end, blocked, message}`. `blocked` is true only
      when the returned JSON's `error` is the gate's own message, which names `human-only (owner rule)`.
   4. Prints no environment and no credential. Exits 0 only if the preflights pass and all 46 form rows are blocked.
-- **Target profile, HOLD (orch msg 46 Q2):** the scratch approver at the head, as above. Team-lead confirms this before
-  W1, or the Orchestrator relays another target; the probe, the forms and the nodes are the same either way.
+- **Target profile (Q2 ruled, team-lead option 1, orch msg 58):** AC-20's live leg (AC-19 step 6) runs as the scratch
+  GW approver at the head, inside GW, plus the scratch root context. The shipped GW approver is never probed; it gets
+  AC-20 at the next ship install.
 
 5. Fail-safe precondition:
    - an anonymous `curl` GET of `https://api.github.com/repos/slang-coworkers/nanoclaw/pulls/999999999` returns 404;
