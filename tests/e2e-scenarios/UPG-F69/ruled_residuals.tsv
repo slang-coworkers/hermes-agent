@@ -62,6 +62,6 @@ tests/e2e-scenarios/OSH-F64.b/AC-OSH-F64.b-7.md	59c79cd997db5785f92baf5ac1c9c594
 tests/plugins/test_osh_f64_b_acceptance.py	deb2c38b8dedba945939796bc9fc1bd40abf344d5c4d7fcd577151e030281a0b	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 website/docs/user-guide/fleet-nanoclaw-base-port.md	8b9a7b23fd5c27aa7967e48265d00ebafc6b80866d181038967ee56297703234	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 website/docs/user-guide/features/fleet-issue-supervision.md	bf0a9c9971c36ae75993a1f4113354824573790f5dd013b7a2d94b13bad957ac	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
-tests/e2e-scenarios/FLEET-F62.a/AC-LOOP-F39-6.md	175f7238b6ad976db9afa63a713080d8836b7afd673b252390f41865c9d3169e	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
+tests/e2e-scenarios/FLEET-F62.a/AC-LOOP-F39-6.md	ddef616ce56704ef1a5f97904b81c5e15d2e64cfa163f14f2b24701b0e79225b	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
 tests/e2e-scenarios/FLEET-F62.a/oracle.py	bb6d5542f4dd23c4f2bdae35b2dc31dae77ad2d28df2b937cbe152f22b2947b7	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
 tests/hermes_cli/fixtures/loop-f39/skills/supervise-issues/SKILL.md	e520ac33bc3cef9edb177247702d4c07fee94fea4c06fd35c80a9f127a5f6f28	LOOP-F39.a (orch msg 2, thread hermes-LOOP-F39.a): ADR §Design 1-6, the AC-LOOP-F39-6 re-spec
