@@ -29,14 +29,6 @@ tools/cronjob_tools.py ``_resolve_cron_context_deliver``): in a cron-run session
 Other routes to a job: ``execute_code`` cannot call ``cronjob`` (it is not in core's SANDBOX_ALLOWED_TOOLS), and
 ``hermes cron create`` typed into ``terminal`` runs in the profile's sandbox (enforce_sandbox + ssh backend),
 whose own Hermes home has no gateway, scheduler or Slack token.
-
-Open follow-ups, outside this guard:
-  * run-time output is not checked: a broadcast produced at fire time from a skill, a script or
-    ``context_from`` output passes; a ``transform_llm_output`` hook that neutralises broadcast mentions in
-    Slack-bound output would close it;
-  * core's Slack ``format_message`` escapes ``<!here>`` before it converts Markdown links, so ``[x](!here)``
-    is sent as ``<!here|x>`` (``has_mass_mention`` refuses the link form; the order bug is for upstream);
-  * whether a sandbox can reach the gateway pod's ``hermes serve`` cron API is to be probed live at deploy.
 """
 
 from __future__ import annotations
