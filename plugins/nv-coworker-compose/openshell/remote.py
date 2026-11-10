@@ -1264,13 +1264,13 @@ class RemoteInstaller:
         self.cfg = cfg
         self.inst = inst or load_installer()
 
-    def plan_text(self, spec_path: Any, ref: str, policy_root=None) -> str:
-        _refuse_policy_root(policy_root)
+    def plan_text(self, spec_path: Any, ref: str, policy_root=None, fork_source=None) -> str:
+        _refuse_box_lane_options(policy_root, fork_source)
         return plan_text(spec_path, ref, self.cfg, inst=self.inst)
 
     def apply(self, spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None,
-              policy_root=None) -> None:
-        _refuse_policy_root(policy_root)
+              policy_root=None, fork_source=None) -> None:
+        _refuse_box_lane_options(policy_root, fork_source)
         apply(spec_path, ref, self.cfg, room_creator=room_creator, room_exists=room_exists, parker=parker,
               inst=self.inst)
 
@@ -1282,19 +1282,23 @@ class LocalInstaller:
     def __init__(self, inst) -> None:
         self.inst = inst
 
-    def plan_text(self, spec_path: Any, ref: str, policy_root=None) -> str:
-        return self.inst.plan_text(spec_path, ref, policy_root=policy_root, openshell_mode=MODE_LOCAL)
+    def plan_text(self, spec_path: Any, ref: str, policy_root=None, fork_source=None) -> str:
+        return self.inst.plan_text(spec_path, ref, policy_root=policy_root, fork_source=fork_source,
+                                   openshell_mode=MODE_LOCAL)
 
     def apply(self, spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None,
-              policy_root=None) -> None:
+              policy_root=None, fork_source=None) -> None:
         self.inst.apply(spec_path, ref, room_creator=room_creator, room_exists=room_exists, parker=parker,
-                        policy_root=policy_root, openshell_mode=MODE_LOCAL)
+                        policy_root=policy_root, fork_source=fork_source, openshell_mode=MODE_LOCAL)
 
 
-def _refuse_policy_root(policy_root: Any) -> None:
+def _refuse_box_lane_options(policy_root: Any, fork_source: Any) -> None:
     if policy_root:
         raise RemoteConfigError("--policy-root is a box-lane option; remote mode binds policies by their "
                                 "broker-side path (openshell.policy_root) and --policy-sha256")
+    if fork_source:
+        raise RemoteConfigError("--fork-source is a box-lane option; remote mode installs plugins from the "
+                                "spec's plugin_source")
 
 
 def describe(cfg: dict[str, Any]) -> str:

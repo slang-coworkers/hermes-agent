@@ -57,6 +57,25 @@ def setup_coworker(parser: argparse.ArgumentParser) -> None:
         help="Git URL or path that holds --ref when the plugin source git resolves to (a sealed fork) does "
              "not; plugin installs then clone through an installer-owned mirror under HERMES_HOME",
     )
+    # Remote-gateway mode (default local: the path above, unchanged). Remote provisions worker
+    # sandboxes on an in-cluster OpenShell 0.1 gateway through the broker only.
+    install_osh_p.add_argument(
+        "--openshell-mode", choices=["local", "remote"], default=None,
+        help="local (default) or remote (in-cluster OpenShell 0.1 gateway via the broker); "
+             "overrides OPENSHELL_MODE and the spec's openshell.mode",
+    )
+    install_osh_p.add_argument(
+        "--broker-addr", default=None,
+        help="remote: broker address tcp://<svc>.<ns>.svc:<port> (overrides OSH_BROKER_ADDR / spec)",
+    )
+    install_osh_p.add_argument(
+        "--broker-token-file", default=None,
+        help="remote: broker token file (overrides OSH_BROKER_TOKEN_FILE / spec)",
+    )
+    install_osh_p.add_argument(
+        "--allow-plaintext-broker", action="store_true",
+        help="remote: allow a non-cluster plaintext broker address (dev/test only)",
+    )
 
     # For an openshell fleet that install-openshell does not install (no pinned offline lane):
     # carry the spec's egress.openshell_trust into the active gateway home, so the multiplexer

@@ -27,7 +27,7 @@ HUB = {"hub": {"base_url": "https://hub.example.internal/v1", "api_mode": "chat_
 def module(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
-    shutil.copytree(PLUGIN_SRC, home / "plugins" / PLUGIN_KEY)
+    shutil.copytree(PLUGIN_SRC, home / "plugins" / PLUGIN_KEY, ignore=shutil.ignore_patterns("__pycache__"))
     (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": [PLUGIN_KEY]}}), encoding="utf-8")
     (tmp_path / "bundled").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "os-home"))
