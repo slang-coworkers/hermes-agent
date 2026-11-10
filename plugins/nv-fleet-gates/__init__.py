@@ -35,7 +35,7 @@ from typing import Any, Dict, Optional
 
 from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 
-from . import edges, predicates, stores
+from . import edges, predicates, product_hooks, stores
 from .aliases import canonicalise
 
 logger = logging.getLogger(__name__)
@@ -324,6 +324,10 @@ def register(ctx) -> None:
 
     def _is_orch() -> bool:
         return _role() == "orchestrator"
+
+    # The product-hook registry key; captured once, never re-read from the environment at call time.
+    hook_home = str(get_hermes_home().resolve())
+    product_hooks._publish_profile(ctx, home=hook_home, profile=_current_profile(), is_orchestrator=_is_orch())
 
     # --- predicates ---------------------------------------------------------
     def _sandbox_block(canon, args):
