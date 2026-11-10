@@ -110,13 +110,16 @@ source "$TB/fleet-f62a.env"
      S="$ART/scenario-AC-LOOP-F39-6"; mkdir -p "$S"
      if test "$(env | grep -c '^HERMES_DESKTOP=')" = 0; then echo "bound(a) OK: HERMES_DESKTOP unset" >> "$S/setup.log"
      else echo "bound(a) FAIL(setup): HERMES_DESKTOP set" >> "$S/setup.log"; exit 1; fi
-     echo "dashboard token present=$([ -n "${HERMES_DASHBOARD_SESSION_TOKEN:-}" ] && echo yes || echo no)" >> "$S/setup.log"
+     if test -n "${HERMES_DASHBOARD_SESSION_TOKEN:-}"; then echo "dashboard token present=yes" >> "$S/setup.log"
+     else echo "dashboard token present=no FAIL(setup)" >> "$S/setup.log"; exit 1; fi
      HERMES_BUNDLED_PLUGINS="$WT/plugins" nohup hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open \
        > "$S/dashboard.log" 2>&1 < /dev/null &
      echo "DASH_PID=$!" >> "$TB/fleet-f62a.env" )
    ```
    Wait until `curl -fsS -o /dev/null "http://127.0.0.1:$DASH_PORT/"` succeeds. The token value is never logged.
    - **(b)** No browser, agent-browser, desktop app or TUI attaches to this dashboard until `oracle.py` has run.
+     After the oracle, append `bound(b) OK: first UI attach <UTC> after oracle <UTC>` to `setup.log`, from the
+     harness's own timestamps; a UI attach before the oracle ran is `bound(b) FAIL(setup)`.
    - **(c)** and **(e)** are checked before the fire, at the end of §Setup 5; **(d′)** after the oracle, in step 3.
 3. **Onboard-render the canonical spec** over the loopback WS (renders the cron + skill + Bot Chats):
    ```bash
@@ -256,15 +259,16 @@ source "$TB/fleet-f62a.env"
      dashboard's stdout:
      ```bash
      S="$ART/scenario-AC-LOOP-F39-6"
-     n=$(cat "$HERMES_HOME/logs/gui.log" "$S/dashboard.log" 2>/dev/null | grep -c 'Desktop cron scheduler started')
+     n=$(cat "$HERMES_HOME/logs/gui.log" "$S/dashboard.log" 2>/dev/null | grep -c 'Desktop cron scheduler started' || true)
      if test "$n" = 0; then echo "bound(c) OK: 0 desktop cron scheduler lines" >> "$S/setup.log"
      else echo "bound(c) FAIL(setup): $n desktop cron scheduler lines" >> "$S/setup.log"; exit 1; fi
      ```
    - **(e)** The orchestrator profile's authority is the multiplexed gateway, it is ready, and a Bot Chat owner is
      deliverable. Without this the cron delivery would park, not run. It must exit 0 and print exactly
-     `authority=ready control_home=root bot_chat_owner=present` (append that line to `setup.log`):
+     `authority=ready control_home=root bot_chat_owner=present`; the wrapper records it in `setup.log`:
      ```bash
-     "$WT/.venv/bin/python" - <<'PY'
+     S="$ART/scenario-AC-LOOP-F39-6"
+     if out=$("$WT/.venv/bin/python" - 2> "$S/bound-e.err" <<'PY'
      import os
      from pathlib import Path
      from hermes_cli.gateway_runtime import discover_gateway_endpoint
@@ -278,6 +282,9 @@ source "$TB/fleet-f62a.env"
      assert find_canonical_live_owner(orch) is not None, "no profile store, so no Bot Chat owner"
      print("authority=ready control_home=root bot_chat_owner=present")
      PY
+     ) && test "$out" = "authority=ready control_home=root bot_chat_owner=present"; then
+       echo "bound(e) OK: $out" >> "$S/setup.log"
+     else echo "bound(e) FAIL(setup): $(tail -n 1 "$S/bound-e.err")" >> "$S/setup.log"; exit 1; fi
      ```
 
 ## Steps
@@ -354,7 +361,7 @@ source "$TB/fleet-f62a.env"
    ```bash
    S="$ART/scenario-AC-LOOP-F39-6"
    n=$(cat "$HERMES_HOME/logs/agent.log" "$HERMES_HOME/profiles/orchestrator/logs/agent.log" 2>/dev/null \
-       | grep -cF "Job '$JOB_ID': Bot Chat (own) receipt=")
+       | grep -cF "Job '$JOB_ID': Bot Chat (own) receipt=" || true)
    e=$(python3 - "$HERMES_HOME" "$JOB_ID" "$TB/f62a-baselines.json" <<'PY'
    import json, sqlite3, sys
    home, job, bl = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3], encoding="utf-8"))
@@ -426,7 +433,7 @@ no re-drive). Verdict classes for the escalation (ADR §Acceptance criteria):
 
 **Semantic gate (headless — the state that decides PASS/FAIL):** the api_server platform serves the fire
 route but NOT the web SPA, so the semantic pass gate is on disk (`oracle.py` + state.db); the required UI
-screenshots below corroborate it and are captured from a separately-launched dashboard post-sweep.
+screenshots below corroborate it and are captured post-sweep from the single dashboard launched in §Setup 2b.
 - `oracle.py`'s stdout (the `PASS …` line) captured to `scenario-AC-LOOP-F39-6/oracle.txt` — the semantic gate.
 - The three oracle clauses as stdlib `python3 -c "import sqlite3 …"` (read-only `file:<path>?mode=ro`)
   dumps against the live stores, each labelled with what it proves: (a) the orchestrator `Bot Chat`
