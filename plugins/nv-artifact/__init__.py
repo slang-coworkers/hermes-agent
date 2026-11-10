@@ -3,7 +3,8 @@
 One fleet ``plugin_db`` (pinned to ``ledger_profile``) with three tables:
 
 * ``ownership(repo, pr, task_id, profile)`` — ``INSERT OR IGNORE`` first-claim-wins.
-  The first worker whose ``gh pr create`` produced a PR URL owns ``(repo, pr)``;
+  The first worker whose ``gh pr create`` produced a PR URL (or, on GitLab,
+  whose ``glab mr create`` or configured forge CLI produced an MR URL) owns ``(repo, pr)``;
   a foreign claim is refused naming the holder, the same holder refreshes its
   own ``task_id`` in place. Fed by the ``post_tool_call`` observer (terminal AND
   execute_code); the resolver ``resolve_pr_owner`` returns the owner.
@@ -28,10 +29,12 @@ only for an unclaimed / off-route / non-webhook delivery, and is fail-closed
 
 from __future__ import annotations
 
+import ast
 import functools
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -59,6 +62,238 @@ _CREATE_INTENT_RE = re.compile(r"\bgh\W+pr\W+create\b", re.IGNORECASE)
 _PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)", re.IGNORECASE
 )
+# GitLab: `glab mr create`, or a forge CLI named in the ``forge_tools`` setting (`<tool> mr create`,
+# `python3 -m <tool> mr create`), printing an MR web URL <host>/<group[/sub...]/project>/-/merge_requests/<iid>.
+# The key is (project path, iid), which is what the GitLab ingress puts in repository.full_name
+# and pull_request.number. Each intent only claims its own forge's URL shape.
+# Global options may sit between the tool and the noun (`<tool> --project <group>/<project> mr create`), so anything in
+# the same shell segment is allowed there.
+_GITLAB_CREATE_INTENT_RE = re.compile(r"\bglab\b[^;&|\n]*?\bmr\W+create\b", re.IGNORECASE)
+_GITLAB_MR_URL_RE = re.compile(
+    r"https?://[A-Za-z0-9.-]+(?::\d+)?/((?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)+[A-Za-z0-9_][A-Za-z0-9_.-]*)"
+    r"/-/merge_requests/(\d+)",
+    re.IGNORECASE,
+)
+# Each feed also carries its forge's reference sigil, which an anchor card's title uses: a GitHub PR is o/r#7, a
+# GitLab MR group/project!7 (group/project#7 is an issue there).
+_CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"), (_GITLAB_CREATE_INTENT_RE, _GITLAB_MR_URL_RE, "!"))
+
+
+# The CLI prints the created MR as JSON with sorted keys, so its "description" (which may link other MRs) comes
+# before its own "web_url": prefer the web_url value when there is one.
+_WEB_URL_RE = re.compile(r'"(?:web_url|html_url)"\s*:\s*"([^"]+)"')
+
+# A create command, token by token: the forge tool (``python3 -m <tool>`` names the module), then its noun, then
+# ``create``; its own source-branch flags. A value-taking option's value is never read as a flag (a title may begin
+# with ``--head=``), so the scan consumes the values of every value-taking option the create commands have.
+_CREATE_NOUN = {"gh": "pr", "glab": "mr"}
+_BRANCH_FLAGS = {"gh": ("--head", "-H"), "glab": ("--source-branch", "-s")}
+_VALUE_OPTIONS = frozenset({
+    "--title", "-t", "--body", "-b", "--body-file", "-F", "--description", "-d", "--base", "-B", "--target-branch",
+    "--assignee", "-a", "--label", "-l", "--labels", "--milestone", "-m", "--project", "-p", "--reviewer", "-r",
+    "--repo", "-R", "--template", "-T", "--source-branch", "-s", "--head", "-H",
+})
+_SHELL_OPERATOR_CHARS = ";&|\n"
+# The created object is looked for in the tail of the output only, within a bounded number of decode attempts.
+_CREATED_SCAN_CHARS = 262144
+_CREATED_SCAN_ATTEMPTS = 256
+# A chain's work branch, whose own cards carry its MR, so a create from it mints no anchor. Off unless the
+# ``chain_branch_re`` setting names the shape (full match); ``{projects}`` in it stands for the ``chain_projects``
+# alternation, longest first.
+_CHAIN_BRANCH_RE = None
+
+
+def _configure(forge_tools=(), chain_projects=(), chain_branch_re="") -> None:
+    """Apply the forge and chain settings to this scope's claim feeds (the defaults: ``glab`` only, no chain)."""
+    global _GITLAB_CREATE_INTENT_RE, _CLAIM_FEEDS, _CREATE_NOUN, _BRANCH_FLAGS, _CHAIN_BRANCH_RE
+    tools = ("glab", *(str(t) for t in forge_tools if str(t).strip() and str(t) != "glab"))
+    _GITLAB_CREATE_INTENT_RE = re.compile(
+        r"\b(?:" + "|".join(map(re.escape, sorted(tools, key=len, reverse=True))) + r")\b[^;&|\n]*?\bmr\W+create\b",
+        re.IGNORECASE)
+    _CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"), (_GITLAB_CREATE_INTENT_RE, _GITLAB_MR_URL_RE, "!"))
+    _CREATE_NOUN = {"gh": "pr", **{t: "mr" for t in tools}}
+    _BRANCH_FLAGS = {"gh": ("--head", "-H"), "glab": ("--source-branch", "-s"),
+                     **{t: ("--source-branch",) for t in tools if t != "glab"}}
+    pattern = str(chain_branch_re or "")
+    if "{projects}" in pattern:
+        names = sorted((str(p) for p in chain_projects if str(p)), key=len, reverse=True)
+        pattern = pattern.replace("{projects}", "|".join(map(re.escape, names)) if names else "(?!)")
+    _CHAIN_BRANCH_RE = re.compile(pattern) if pattern else None
+
+_ANCHOR_BODY = (
+    "Ownership anchor for {label}, which {profile} opened outside any kanban card. nv-artifact delivers later "
+    "events for {label} to the session that opened it through this card. Not a work item: nothing to run."
+)
+
+
+def _match_created_pr(invocation, result):
+    """``(repo, pr, sigil)`` when a forge create command's own output carries its PR/MR URL, else None."""
+    text = str(result or "")
+    for intent_re, url_re, sigil in _CLAIM_FEEDS:
+        if intent_re.search(str(invocation or "")):
+            candidates = [url_re.fullmatch(v) or url_re.match(v) for v in reversed(_WEB_URL_RE.findall(text))]
+            for m in [*candidates, *url_re.finditer(text)]:
+                pr = _iid(m.group(2)) if m else None
+                if pr is not None:
+                    return m.group(1), pr, sigil
+    return None
+
+
+def _iid(digits: str):
+    """A PR/MR number, or None for one no forge issues (an over-long digit run would not even convert)."""
+    return int(digits) if len(digits) <= 18 else None
+
+
+def _names_pr(obj, repo, pr) -> bool:
+    """Whether a forge JSON object is the PR/MR ``(repo, pr)`` itself (its own web_url/html_url)."""
+    url = obj.get("web_url") or obj.get("html_url")
+    for url_re in (_PR_URL_RE, _GITLAB_MR_URL_RE):
+        m = url_re.fullmatch(url) if isinstance(url, str) else None
+        if m and (m.group(1), _iid(m.group(2))) == (repo, pr):
+            return True
+    return False
+
+
+def _created_object(result, repo, pr):
+    """The JSON object in a create command's output that IS the created PR/MR, else None (other JSON, such as an
+    earlier listing in the same output, never answers for it). The CLI prints it last, so candidates are tried from
+    the end of a bounded tail: deep or broken JSON before it is never reached."""
+    text = str(result or "")[-_CREATED_SCAN_CHARS:]
+    decoder = json.JSONDecoder()
+    i = text.rfind("{")
+    for _ in range(_CREATED_SCAN_ATTEMPTS):
+        if i == -1:
+            break
+        try:
+            obj, _end = decoder.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            obj = None
+        if isinstance(obj, dict) and _names_pr(obj, repo, pr):
+            return obj
+        i = text.rfind("{", 0, i)
+    return None
+
+
+def _shell_commands(text: str) -> list:
+    """A shell line's simple commands as lists of words, split at ``; & |`` (so ``&&`` and ``||``) and newlines
+    outside quotes. Words are cooked as the shell would (quotes removed, backslash escapes applied), so a quoted
+    ``;`` is part of a word and ``--title="a; b"`` is one word. Raises ValueError on an unclosed quote."""
+    commands, words, word, in_word, quote = [], [], [], False, None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                word.append(c)
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            elif c == "\\" and i + 1 < n and text[i + 1] in '"\\$`\n':
+                i += 1
+                if text[i] != "\n":  # a backslash-newline is a line continuation, not a character
+                    word.append(text[i])
+            else:
+                word.append(c)
+        elif c in "'\"":
+            quote, in_word = c, True
+        elif c == "\\" and i + 1 < n:
+            i += 1
+            if text[i] != "\n":
+                word.append(text[i])
+                in_word = True
+        elif c in " \t\r" or c in _SHELL_OPERATOR_CHARS:
+            if in_word or word:
+                words.append("".join(word))
+            word, in_word = [], False
+            if c in _SHELL_OPERATOR_CHARS and words:
+                commands.append(words)
+                words = []
+        else:
+            word.append(c)
+            in_word = True
+        i += 1
+    if quote:
+        raise ValueError("unclosed quote")
+    if in_word or word:
+        words.append("".join(word))
+    if words:
+        commands.append(words)
+    return commands
+
+
+def _code_commands(code: str) -> list:
+    """The create commands a Python snippet spells literally: each list/tuple of string constants (an argv, whose
+    elements are data), and each other string constant that carries a create intent, lexed as a shell line on its
+    own (one that cannot be lexed is skipped, not fatal)."""
+    tree = ast.parse(code)
+    commands, argv_elements = [], set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts):
+            commands.append([e.value for e in node.elts])
+            argv_elements.update(id(e) for e in node.elts)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in argv_elements
+                and any(intent_re.search(node.value) for intent_re, _url_re, _sigil in _CLAIM_FEEDS)):
+            try:
+                commands.extend(_shell_commands(node.value))
+            except ValueError:
+                continue
+    return commands
+
+
+def _branch_of_create(words) -> str:
+    """The source branch a create command's own words name, else "" (also "" for a command that is not one). The
+    words are argv values (an execute_code list) or cooked shell words, used exactly as they are."""
+    for i, tool in enumerate(w.rsplit("/", 1)[-1] for w in words):
+        noun = _CREATE_NOUN.get(tool)
+        if not noun or noun not in words[i + 1:]:
+            continue
+        k = words.index(noun, i + 1)
+        if words[k + 1:k + 2] != ["create"]:
+            continue
+        rest = words[i + 1:]
+        j = 0
+        while j < len(rest) and rest[j] != "--":
+            name, eq, value = rest[j].partition("=")
+            if name in _BRANCH_FLAGS[tool]:
+                return value if eq else (rest[j + 1] if j + 1 < len(rest) else "")
+            j += 2 if name in _VALUE_OPTIONS and not eq else 1
+        return ""
+    return ""
+
+
+def _source_branch(tool_name, invocation, result, repo, pr) -> str:
+    """The created PR/MR's source branch: the created object's own ``source_branch`` in the output, else the create
+    command's own flag (a quoted ``;`` is not a boundary, an option's value is not a flag), else "" when unknown."""
+    try:
+        created = _created_object(result, repo, pr)
+        if created is not None and isinstance(created.get("source_branch"), str):
+            return created["source_branch"]
+        commands = (_shell_commands(str(invocation or "")) if tool_name == "terminal"
+                    else _code_commands(str(invocation or "")))
+    except (ValueError, SyntaxError, RecursionError):
+        return ""
+    for tokens in commands:
+        branch = _branch_of_create(tokens)
+        if branch:
+            return branch
+    return ""
+
+
+def _inherited_kanban_task() -> str:
+    """``HERMES_KANBAN_TASK`` from the process or the session env, whichever execution it belongs to."""
+    task = os.environ.get("HERMES_KANBAN_TASK", "")
+    if not task:
+        try:
+            from gateway.session_context import get_session_env
+            task = get_session_env("HERMES_KANBAN_TASK", "") or ""
+        except Exception:
+            task = ""
+    return str(task).strip()
+
 
 _BUSY_RETRIES = 5
 _BUSY_SLEEP_S = 0.05
@@ -313,10 +548,48 @@ def _resolve_pr_owner_tool(args, **kwargs) -> str:
 # Claim feed: post_tool_call observer (terminal AND execute_code)
 # ---------------------------------------------------------------------------
 
+def _owning_card(ctx, kb, conn, task_id, repo, pr, sigil, branch_of):
+    """The card a claim of ``(repo, pr)`` binds to, or None to claim nothing.
+
+    The hook's ``task_id`` when it is a card (a plain gateway/API turn passes its SESSION id, which is not). A
+    kanban worker's turn runs under a per-turn task id (``run_conversation`` gets none, so ``agent/turn_context.py``
+    mints a uuid4), so a worker's card is its dispatcher-owned ``HERMES_KANBAN_TASK``; a worker creates no cards,
+    so one this board cannot resolve claims nothing. Execution inside a worker's environment that does not own its
+    card (a delegated child, a cron job) claims nothing either. Any other turn gets an ownership anchor, created
+    ``blocked`` so no dispatcher ever runs it, and none for a configured chain's work branch (the chain's own cards
+    carry that MR) or for a (repo, pr) the ledger already owns.
+    """
+    from agent.delegation_context import owned_kanban_task
+
+    candidate = str(task_id or "")
+    if candidate and kb.get_task(conn, candidate) is not None:
+        return candidate
+    owned = owned_kanban_task()
+    if owned:
+        if kb.get_task(conn, owned) is not None:
+            return owned
+        logger.warning("nv-artifact: worker card %s is not on the claim board; %s%s%s not claimed",
+                       owned, repo, sigil, pr)
+        return None
+    if _inherited_kanban_task():
+        return None
+    if (_CHAIN_BRANCH_RE is not None and _CHAIN_BRANCH_RE.fullmatch(branch_of())) \
+            or resolve_pr_owner(repo, pr) is not None:
+        return None
+    label = f"{repo}{sigil}{pr}"
+    profile = _active_profile()
+    created = kb.create_task(
+        conn, title=label, body=_ANCHOR_BODY.format(label=label, profile=profile), assignee=profile,
+        created_by=PLUGIN_KEY, idempotency_key=_pr_key(repo, pr), board=_board(ctx), initial_status="blocked",
+    )
+    return created if isinstance(created, str) else getattr(created, "id", created)
+
+
 def _on_post_tool_call(tool_name=None, args=None, result=None, status=None,
                        task_id=None, session_id=None, **kwargs):
     """Claim (repo, pr) for the calling session when a successful terminal/
-    execute_code ``gh pr create`` produced a PR URL. Observer: returns None."""
+    execute_code ``gh pr create`` produced a PR URL (or a GitLab ``mr create`` an
+    MR URL; ``repo`` is then the project path, ``pr`` the MR iid). Observer: returns None."""
     try:
         ctx = _CTX
         if ctx is None or tool_name not in ("terminal", "execute_code"):
@@ -325,31 +598,21 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, status=None,
             return
         args = args or {}
         invocation = args.get("command") if tool_name == "terminal" else args.get("code")
-        if not _CREATE_INTENT_RE.search(str(invocation or "")):
+        created = _match_created_pr(invocation, result)
+        if created is None:
             return
-        m = _PR_URL_RE.search(str(result or ""))
-        if not m:
-            return
-        repo, pr = m.group(1), int(m.group(2))
+        repo, pr, sigil = created
 
-        # Ensure a real owning card and bind the calling session onto it. The
-        # hook's `task_id` is a kanban card ONLY in a kanban-worker turn; a plain
-        # gateway/API turn passes the SESSION id here, which is not a card — so
-        # reuse it only when it resolves to an existing task, else mint the
-        # artifact card. This keeps the ownership row's task_id a resolvable card
+        # Bind the calling session onto the owning card, which keeps the ownership row's task_id a resolvable card
         # (delivery enqueue + cost attribution both dereference it).
         import hermes_cli.kanban_db as kb
 
-        candidate = str(task_id or "") or None
         conn = _kb_connect(ctx)
         try:
-            card = candidate if (candidate and kb.get_task(conn, candidate) is not None) else None
+            card = _owning_card(ctx, kb, conn, task_id, repo, pr, sigil,
+                                lambda: _source_branch(tool_name, invocation, result, repo, pr))
             if card is None:
-                created = kb.create_task(
-                    conn, title=f"{repo}#{pr}", assignee=_active_profile(),
-                    idempotency_key=_pr_key(repo, pr), board=_board(ctx),
-                )
-                card = created if isinstance(created, str) else getattr(created, "id", created)
+                return
             if session_id:
                 with kb.write_txn(conn, allow_nested=True):
                     conn.execute("UPDATE tasks SET session_id = ? WHERE id = ?", (session_id, card))
@@ -871,6 +1134,13 @@ def register(ctx) -> None:
     orchestrator-only CLI verbs."""
     global _CTX
     _CTX = ctx
+    try:
+        _configure(ctx.get_config("forge_tools", []) or [], ctx.get_config("chain_projects", []) or [],
+                   ctx.get_config("chain_branch_re", "") or "")
+    except (TypeError, re.error):
+        logger.warning("nv-artifact: invalid forge_tools / chain_projects / chain_branch_re; using the defaults",
+                       exc_info=True)
+        _configure()
 
     ctx.register_tool(
         name="report_pr_created",
