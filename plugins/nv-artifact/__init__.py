@@ -98,14 +98,15 @@ _SHELL_OPERATOR_CHARS = ";&|\n"
 _CREATED_SCAN_CHARS = 262144
 _CREATED_SCAN_ATTEMPTS = 256
 # A chain's work branch, whose own cards carry its MR, so a create from it mints no anchor. Off unless the
-# ``chain_branch_re`` setting names the shape (full match); ``{projects}`` in it stands for the ``chain_projects``
-# alternation, longest first.
+# ``chain_branch_re`` setting holds the complete branch regex, applied with fullmatch.
 _CHAIN_BRANCH_RE = None
 
 
-def _configure(forge_tools=(), chain_projects=(), chain_branch_re="") -> None:
+def _configure(forge_tools=(), chain_branch_re="") -> None:
     """Apply the forge and chain settings to this scope's claim feeds (the defaults: ``glab`` only, no chain)."""
     global _GITLAB_CREATE_INTENT_RE, _CLAIM_FEEDS, _CREATE_NOUN, _BRANCH_FLAGS, _CHAIN_BRANCH_RE
+    if not isinstance(forge_tools, (list, tuple)) or not isinstance(chain_branch_re, str):
+        raise TypeError("forge_tools must be a list and chain_branch_re a string")
     tools = ("glab", *(str(t) for t in forge_tools if str(t).strip() and str(t) != "glab"))
     _GITLAB_CREATE_INTENT_RE = re.compile(
         r"\b(?:" + "|".join(map(re.escape, sorted(tools, key=len, reverse=True))) + r")\b[^;&|\n]*?\bmr\W+create\b",
@@ -114,11 +115,7 @@ def _configure(forge_tools=(), chain_projects=(), chain_branch_re="") -> None:
     _CREATE_NOUN = {"gh": "pr", **{t: "mr" for t in tools}}
     _BRANCH_FLAGS = {"gh": ("--head", "-H"), "glab": ("--source-branch", "-s"),
                      **{t: ("--source-branch",) for t in tools if t != "glab"}}
-    pattern = str(chain_branch_re or "")
-    if "{projects}" in pattern:
-        names = sorted((str(p) for p in chain_projects if str(p)), key=len, reverse=True)
-        pattern = pattern.replace("{projects}", "|".join(map(re.escape, names)) if names else "(?!)")
-    _CHAIN_BRANCH_RE = re.compile(pattern) if pattern else None
+    _CHAIN_BRANCH_RE = re.compile(chain_branch_re) if chain_branch_re else None
 
 _ANCHOR_BODY = (
     "Ownership anchor for {label}, which {profile} opened outside any kanban card. nv-artifact delivers later "
@@ -1135,10 +1132,9 @@ def register(ctx) -> None:
     global _CTX
     _CTX = ctx
     try:
-        _configure(ctx.get_config("forge_tools", []) or [], ctx.get_config("chain_projects", []) or [],
-                   ctx.get_config("chain_branch_re", "") or "")
+        _configure(ctx.get_config("forge_tools", []) or [], ctx.get_config("chain_branch_re", "") or "")
     except (TypeError, re.error):
-        logger.warning("nv-artifact: invalid forge_tools / chain_projects / chain_branch_re; using the defaults",
+        logger.warning("nv-artifact: invalid forge_tools / chain_branch_re; using the defaults",
                        exc_info=True)
         _configure()
 
