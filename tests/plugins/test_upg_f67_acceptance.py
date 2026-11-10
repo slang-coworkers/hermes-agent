@@ -529,35 +529,54 @@ def _oracle_world(root, delivery_id):
     (orch / "cron").mkdir(parents=True)
     worker.mkdir(parents=True)
 
-    def state_db(path, rows):
+    def state_db(path, rows, cron_rows=()):
         with sqlite3.connect(path) as c:
             c.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
             c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,"
                       " tool_calls TEXT, tool_name TEXT, tool_call_id TEXT)")
+            c.execute("CREATE TABLE session_admissions (request_id TEXT, principal_id TEXT, target_session_id TEXT)")
             c.execute("INSERT INTO sessions VALUES ('S', 'Bot Chat')")
+            c.execute("INSERT INTO sessions VALUES ('C', 'supervise-issues cron run')")
+            c.execute("INSERT INTO session_admissions VALUES ('cron:job-1:e1', 'cron-owner', 'C')")
+            c.executemany("INSERT INTO messages (session_id, role, content, tool_calls, tool_name, tool_call_id)"
+                          " VALUES ('C', ?, ?, ?, ?, ?)", cron_rows)
             c.executemany("INSERT INTO messages (session_id, role, content, tool_calls, tool_name, tool_call_id)"
                           " VALUES ('S', ?, ?, ?, ?, ?)", rows)
 
     call = [{"id": "call-1", "function": {"name": "message_agent", "arguments": json.dumps(
         {"target": "worker", "message": f"[supervise-issues nudge] F39A-{nonce} is silent"})}}]
     ack = {"status": "queued", "delivery_id": delivery_id}
+    block = [{"id": "k-1", "function": {"name": "kanban_block", "arguments": json.dumps(
+        {"task_id": f"f39b-{nonce}", "kind": "needs_input", "reason": f"F39-ESC:F39B-{nonce} needs a human"})}}]
+    blocked = {"ok": True, "task_id": f"f39b-{nonce}", "run_id": None, "status": "blocked", "block_kind": "needs_input"}
     state_db(orch / "state.db", [
         ("user", '[Cronjob "supervise-issues" output] brief', None, None, None),
         ("assistant", "", json.dumps(call), None, None),
         ("tool", json.dumps(ack), None, "message_agent", "call-1"),
         ("assistant", f"F39-ESC:F39B-{nonce} needs a human", None, None, None),
+    ], cron_rows=[
+        ("assistant", "", json.dumps(block), None, None),
+        ("tool", json.dumps(blocked), None, "kanban_block", "k-1"),
     ])
     state_db(worker / "state.db", [
         ("user", f"Message from 🤖 orchestrator (@orchestrator): [supervise-issues nudge] F39A-{nonce}",
          None, None, None)])
     with sqlite3.connect(orch / "cron" / "executions.db") as c:
-        c.execute("CREATE TABLE executions (id TEXT PRIMARY KEY, job_id TEXT, status TEXT, source TEXT)")
-        c.execute("INSERT INTO executions VALUES ('e1', 'job-1', 'completed', 'builtin')")
+        c.execute("CREATE TABLE executions (id TEXT PRIMARY KEY, job_id TEXT, status TEXT, source TEXT,"
+                  " claimed_at TEXT, finished_at TEXT)")
+        c.execute("INSERT INTO executions VALUES ('e1', 'job-1', 'completed', 'builtin',"
+                  " '2026-11-12T14:00:00+00:00', '2026-11-12T14:03:00+00:00')")
     kanban = root / "kanban.db"
     with sqlite3.connect(kanban) as c:
-        c.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, assignee TEXT)")
+        c.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, assignee TEXT, block_kind TEXT)")
         c.execute("CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id TEXT, author TEXT, body TEXT)")
-        c.executemany("INSERT INTO tasks VALUES (?, 'blocked', 'worker')", [(f"f39a-{nonce}",), (f"f39b-{nonce}",)])
+        c.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT,"
+                  " created_at INTEGER)")
+        c.executemany("INSERT INTO tasks VALUES (?, 'blocked', 'worker', ?)",
+                      [(f"f39a-{nonce}", None), (f"f39b-{nonce}", "needs_input")])
+        c.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'blocked', ?, ?)",
+                  (f"f39b-{nonce}", json.dumps({"kind": "needs_input", "classified_in_place": True}),
+                   1794492060))   # 2026-11-12T14:01:00Z, inside e1's window
         c.executemany("INSERT INTO task_comments (task_id, author, body) VALUES (?, 'orchestrator', ?)", [
             (f"f39b-{nonce}", "[supervise-issues nudge] first"), (f"f39b-{nonce}", "[supervise-issues nudge] second"),
             (f"f39a-{nonce}", f"[supervise-issues nudge] F39A-{nonce}")])

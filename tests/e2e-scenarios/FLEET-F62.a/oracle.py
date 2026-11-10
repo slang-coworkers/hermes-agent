@@ -6,8 +6,9 @@ force-due fire has settled. Read-only (stdlib sqlite3, read-only URIs — the ga
 never writes. Exits 0 and prints one `PASS <metrics>` line, else exits 1 and prints `FAIL <metrics>` plus a
 `FAIL reasons:` line naming every failed metric.
 
-Proves, each exactly once and bound to the ONE cron-delivered Bot Chat turn (the assistant rows between the
-cron inbound and the next user inbound in that same session), with the false-pass paths closed:
+Proves, each exactly once and bound to the ONE fire — the nudge to the cron-delivered Bot Chat turn (the assistant
+rows between the cron inbound and the next user inbound in that session), the escalation to the cron session admitted
+for the one new execution — with the false-pass paths closed:
  (1) the rendered cron fired through the scheduler — exactly one NEW execution for the job, status completed;
  (2) deliver:bot-chat delivered into the orchestrator's own 'Bot Chat' — exactly one cron inbound;
  (a) the cron-delivered turn issued exactly one message_agent nudge to `worker` carrying card A's token —
@@ -15,16 +16,21 @@ cron inbound and the next user inbound in that same session), with the false-pas
      one result whose parsed JSON is {"status":"sent",...};
  (b) that nudge landed as exactly one role='user' inbound in worker's exact 'Bot Chat' with the
      server-stamped `Message from 🤖 orchestrator (@orchestrator): ` envelope;
- (c) card B (its two prior unanswered supervisor nudges recorded in the baseline) drew exactly one
-     human-facing F39-ESC escalation in that same turn and ZERO third nudge — no message_agent call, no
-     worker inbound, and its on-card [supervise-issues nudge] task_comments set is unchanged from baseline
-     (exactly two), card B still assigned to `worker`, zero worker-authored comments;
+ (c) card B (its two prior unanswered supervisor nudges recorded in the baseline) drew exactly one recorded
+     owner-input escalation and ZERO third nudge — the orchestrator's kanban_block(kind=needs_input) on card B with
+     its ok result, in the cron session admitted for the one new execution; exactly one needs_input `blocked` event
+     on card B inside that execution's [claimed_at, finished_at]; card B still in needs_input; no needs_input event
+     on card A; no message_agent call, no worker inbound, and its on-card [supervise-issues nudge] task_comments set
+     is unchanged from baseline (exactly two), card B still assigned to `worker`, zero worker-authored comments.
+     No text is matched, so reply wording and marker position never decide it;
  plus card A gained exactly one on-card nudge comment and sent_nudges == required_nudges == 1.
 """
 import argparse
 import json
+import math
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -33,7 +39,12 @@ def _connect_ro(path: Path):
 
 
 def _rows(conn, sql, params=()):
-    return conn.execute(sql, params).fetchall() if conn is not None else []
+    if conn is None:
+        return []
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:   # a store without the table has no rows; the clause then fails, not the run
+        return []
 
 
 def _one(conn, sql, params=(), default=0):
@@ -66,6 +77,76 @@ def _iter_message_agent_calls(conn, base_id):
             target = str(args.get("target") or args.get("to") or "")
             message = str(args.get("message") or args.get("text") or "")
             yield row_id, sid, call.get("id"), target, message
+
+
+def _iter_tool_calls(conn, base_id, name):
+    """Yield (row_id, session_id, tool_call_id, args) for every `name` entry in every post-baseline assistant
+    tool_calls array of ANY session in this store."""
+    sql = "SELECT id, session_id, tool_calls FROM messages WHERE id>? AND role='assistant' AND tool_calls IS NOT NULL"
+    for row_id, sid, tc_json in _rows(conn, sql, (base_id,)):
+        try:
+            calls = json.loads(tc_json)
+        except (TypeError, ValueError):
+            continue
+        for call in calls if isinstance(calls, list) else []:
+            fn = (call or {}).get("function") or {}
+            if fn.get("name") != name:
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            yield row_id, sid, call.get("id"), args if isinstance(args, dict) else {}
+
+
+def _exec_window(execs, exec_id):
+    """(floor(claimed_at), ceil(finished_at)) of one execution as int epoch seconds, or None when either is absent.
+    Both are aware ISO strings; task_events.created_at is int seconds, hence the outward rounding."""
+    span = _rows(execs, "SELECT claimed_at, finished_at FROM executions WHERE id=?", (exec_id,))
+    try:
+        lo, hi = (datetime.fromisoformat(v).timestamp() for v in span[0])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return math.floor(lo), math.ceil(hi)
+
+
+def _block_acts(orch, base_id, sessions, task):
+    """kanban_block(task_id=task, kind='needs_input') calls made in one of `sessions` whose result — the same
+    session, a later row, correlated by tool_call_id — reports ok with the card landed in needs_input. A refused
+    call (error result) does not count and does not fail."""
+    acts = 0
+    for rid, sid, cid, args in _iter_tool_calls(orch, base_id, "kanban_block"):
+        if sid not in sessions or args.get("task_id") != task or args.get("kind") != "needs_input":
+            continue
+        res = _rows(orch, "SELECT content FROM messages WHERE id>? AND session_id=? AND role='tool' "
+                    "AND tool_name='kanban_block' AND tool_call_id=?", (rid, sid, cid))
+        try:
+            p = json.loads(res[0][0]) if len(res) == 1 else {}
+        except (TypeError, ValueError):
+            p = {}
+        acts += (isinstance(p, dict) and p.get("ok") is True and p.get("task_id") == task
+                 and p.get("block_kind") == "needs_input")
+    return acts
+
+
+def _owner_input_events(kanban, task, base_ids, window=None):
+    """Ids of the post-baseline `blocked` events on `task` whose payload kind is needs_input, limited to `window`
+    (inclusive int seconds) when one is given."""
+    out = []
+    for eid, payload, ts in _rows(kanban, "SELECT id, payload, created_at FROM task_events "
+                                  "WHERE task_id=? AND kind='blocked'", (task,)):
+        try:
+            kind = (json.loads(payload) or {}).get("kind")
+        except (AttributeError, TypeError, ValueError):
+            kind = None
+        if eid in base_ids or kind != "needs_input":
+            continue
+        if window is not None and not (isinstance(ts, (int, float)) and window[0] <= ts <= window[1]):
+            continue
+        out.append(eid)
+    return out
 
 
 def main():  # health: allow CC -- every metric is judged against the same read-only snapshot and baselines, and all failed metrics are reported together, so the checks stay in one pass
@@ -175,19 +256,27 @@ def main():  # health: allow CC -- every metric is judged against the same read-
     if m["card_b_inbounds"] != 0:
         fails.append(f"card_b_inbounds={m['card_b_inbounds']} != 0")
 
-    # (c) exactly one human-facing escalation for card B, inside the cron-delivered turn: the assistant
-    # message must BEGIN with `F39-ESC:<card-B-token>` (a quoted/negated mention elsewhere does not count).
-    # substr(...)=? is a CASE-SENSITIVE (BINARY) prefix match — LIKE is ASCII case-insensitive by default
-    # (a lowercase `f39-esc:` would false-pass the exact uppercase marker the SKILL.md mandates).
-    esc_prefix = f"F39-ESC:{tok_b}"
-    esc = [rid for (rid,) in _rows(orch,
-        "SELECT m.id FROM messages m WHERE m.id>? AND m.role='assistant' AND m.session_id=? "
-        "AND substr(m.content,1,length(?))=?",
-        (base_orch, turn_sid, esc_prefix, esc_prefix))] if turn_sid is not None else []
-    esc = [rid for rid in esc if turn_lo < rid < turn_hi]
-    m["escalations"] = len(esc)
-    if len(esc) != 1:
-        fails.append(f"escalations(cardB, in cron turn)={len(esc)} != 1")
+    # (c) card B escalated as ONE recorded owner-input act of this fire. The act binds to the cron session the
+    # scheduler principal admitted for the one new execution, not to the Bot Chat turn above: a cron inbound is tied
+    # to the execution by no key read here, and the skill keeps the Bot Chat turn off the board.
+    cron_sids, window = set(), None
+    if len(new_exec) == 1:
+        cron_sids = {sid for (sid,) in _rows(orch,
+            "SELECT target_session_id FROM session_admissions WHERE request_id=? AND principal_id='cron-owner'",
+            (f"cron:{a.job_id}:{new_exec[0][0]}",))}
+        window = _exec_window(execs, new_exec[0][0])
+    b_acts = _block_acts(orch, base_orch, cron_sids, card_b)
+    b_events = _owner_input_events(kanban, card_b, set(bl.get("card_b_event_ids") or []), window) if window else []
+    b_kind = (_rows(kanban, "SELECT block_kind FROM tasks WHERE id=?", (card_b,)) or [(None,)])[0][0]
+    m["escalations"] = int(b_acts >= 1 and len(b_events) == 1 and b_kind == "needs_input")
+    if m["escalations"] != 1:
+        fails.append(f"escalations(cardB owner-input act in cron turn)=0 != 1 "
+                     f"(acts={b_acts} events={len(b_events)} block_kind={b_kind})")
+    m["card_a_escalations"] = len(_owner_input_events(kanban, card_a, set(bl.get("card_a_event_ids") or [])))
+    if m["card_a_escalations"] != 0:
+        fails.append(f"card_a_escalations={m['card_a_escalations']} != 0")
+    if bl.get("card_b_block_kind") is not None:
+        fails.append(f"baseline card_b_block_kind={bl.get('card_b_block_kind')!r} != None")
 
     # card A gained exactly one NEW orchestrator-authored on-card nudge comment carrying token A
     # (post-baseline delta — card A must have had zero prior nudges, so a pre-existing comment can't pass).
@@ -237,7 +326,7 @@ def main():  # health: allow CC -- every metric is judged against the same read-
 
     order = ["cron", "cron_inbound", "message_agent_calls", "sent_results", "worker_bot_chat_inbounds",
              "escalations", "card_a_new_comments", "card_b_nudges", "card_b_calls", "card_b_inbounds",
-             "required_nudges", "sent_nudges"]
+             "required_nudges", "sent_nudges", "card_a_escalations"]
     summary = " ".join(f"{k}={m.get(k)}" for k in order)
     if fails:
         print("FAIL " + summary)
