@@ -1,9 +1,10 @@
 """Which commands a tool call's text runs: shell and Python text read into argv lists, with data kept apart.
 
 A write tripwire and the OUTBOUND policy both ask "does this call run a git push / a forge CLI write (a tool
-named in the ``forge_tools`` setting) / an HTTP client, and with which arguments". Searching the raw text for words answers wrongly both ways (``git log
---grep='git push'`` is not a push; a comment body that quotes a CLI example is not a second call), so this module
-reads the text the way a shell (or Python) would and returns the argv of every command in EXECUTABLE position:
+named in the ``forge_tools`` setting) / an HTTP client, and with which arguments". Searching the raw text for words
+answers wrongly both ways (``git log --grep='git push'`` is not a push; a comment body that quotes a CLI example is
+not a second call), so this module reads the text the way a shell (or Python) would and returns the argv of every
+command in EXECUTABLE position:
 
   * shell: quote-aware segments (``;``, ``&&``, ``||``, ``|``, ``&``, newlines), wrappers skipped (VAR=val, env,
     command, exec, sudo, timeout, nice, xargs, ...), ``bash -c '<code>'`` / ``python3 -c '<code>'`` / ``eval`` and
@@ -15,6 +16,7 @@ reads the text the way a shell (or Python) would and returns the argv of every c
     fail closed: it may be run later);
   * raw (text that does not parse): every piece between separators, split naively (fail closed).
 
+``_texts`` names the text of one tool call to read (a shell command, code, process stdin, a written file or patch).
 It reads text; it cannot follow what the text computes: a tripwire, not a boundary.
 Stdlib only.
 """
@@ -26,7 +28,7 @@ import functools
 import re
 import shlex
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import Any, Iterator, Optional
 
 SHELL_PARSE_MAX = 200_000  # longer text is read raw (no exemptions): the fail-closed direction
 _MAX_DEPTH = 4
@@ -77,6 +79,8 @@ def configure(forge_tools=()) -> None:
     FORGE_TOOLS = tools
     _FORGE_MODULES = frozenset(t.replace("-", "_") for t in tools)
     _COMMANDISH_RE = _commandish_re(tools)
+
+
 _SHELL_CALLS = frozenset({"system", "popen", "getoutput", "getstatusoutput", "create_subprocess_shell"})
 _EXEC_CALLS = frozenset({"run", "call", "check_call", "check_output", "Popen", "create_subprocess_exec"})
 
@@ -871,3 +875,169 @@ def prefix_assignments(head: str) -> list[str]:
             break
         i += 1
     return names
+
+
+# --------------------------------------------------------------------------- call texts
+# Tools whose text is checked. Canonical names (aliases.canonicalise): process -> process_manage.
+_SHELL_TOOLS = frozenset({"terminal"})
+_CODE_TOOLS = frozenset({"execute_code"})
+_PROCESS_TOOL = "process_manage"
+_PROCESS_STDIN_ACTIONS = frozenset({"write", "submit"})
+
+_SCRIPT_SUFFIXES = frozenset({".py", ".pyw", ".sh", ".bash", ".zsh", ".ksh", ".gitconfig"})
+_PYTHON_SUFFIXES = frozenset({".py", ".pyw"})
+
+# Slack writes outside fleet_slack_post (whose allow-list is the fleet's one Slack posting policy). Reads stay open.
+_SLACK_WRITE_RE = re.compile(
+    r"slack\.com/api/(?:chat\.(?!getPermalink\b)|files\.(?!info\b|list\b)"
+    r"|conversations\.(?:create|invite|join|kick|leave|archive|unarchive|rename|setPurpose|setTopic|mark|close|open|"
+    r"acceptSharedInvite|inviteShared)\b|reactions\.(?:add|remove)\b|pins\.(?:add|remove)\b|bookmarks\.(?:add|edit|remove)\b"
+    r"|reminders\.(?:add|delete|complete)\b|stars\.(?:add|remove)\b|usergroups\.(?!list\b)|users\.(?:profile\.set|"
+    r"setPresence|setPhoto|deletePhoto)\b|dnd\.(?:setSnooze|endSnooze|endDnd)\b|views\.|workflows\.|apps\.|admin\.|"
+    r"calls\.|dialog\.open\b)"
+    r"|hooks\.slack\.com/"
+    r"|\.(?:chat_(?:postMessage|update|delete|scheduleMessage|postEphemeral|meMessage|deleteScheduledMessage)"
+    r"|files_(?:upload\w*|delete|completeUploadExternal|getUploadURLExternal|remote_\w+)"
+    r"|conversations_(?:create|invite|join|kick|leave|archive|unarchive|rename|setPurpose|setTopic|mark|close|open)"
+    r"|reactions_(?:add|remove)|pins_(?:add|remove)|bookmarks_(?:add|edit|remove)|reminders_add|usergroups_\w+"
+    r"|users_profile_set)\s*\("
+    r"|\bapi_call\s*\(\s*[\"'](?:chat|files|conversations|reactions|pins|bookmarks|reminders|usergroups|views|admin)\."
+    r"|\bWebhookClient\s*\(",
+)
+
+
+def _str(value: Any) -> str:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _code_mode(code: str) -> str:
+    return "python" if is_python(code) else "shell"
+
+
+def _texts(canon: str, args: dict, workspace: Optional[str] = None) -> Iterator[tuple[str, str, str]]:
+    """(text, mode, scope) triples to scan for one call. mode: shell, python or raw. scope: ``full`` (every marker),
+    ``workspace`` (a file in the card's checkout: no API/Slack write markers) or ``config`` (a file that is not a
+    script: only the push-option and git-config markers)."""
+    if canon in _SHELL_TOOLS:
+        yield _str(args.get("command")), "shell", "full"
+    elif canon in _CODE_TOOLS:
+        code = _str(args.get("code"))
+        yield code, _code_mode(code), "full"
+    elif canon == _PROCESS_TOOL:
+        if _str(args.get("action")).strip().lower() in _PROCESS_STDIN_ACTIONS:
+            data = _str(args.get("data"))
+            yield data, _code_mode(data), "full"
+    elif canon == "write_file":
+        yield from _file_text(args.get("path") or args.get("file_path"), args.get("content"), workspace=workspace)
+    elif canon == "patch":
+        if _str(args.get("mode")).strip().lower() == "patch" or (args.get("patch") and not args.get("new_string")):
+            yield from _v4a_texts(_str(args.get("patch")), workspace)
+        else:
+            yield from _file_text(args.get("path") or args.get("file_path"), args.get("new_string"), fragment=True,
+                                  workspace=workspace)
+    elif canon == "skill_manage":
+        ops = args.get("operations")
+        for op in ([args] + (ops if isinstance(ops, list) else [])):
+            if not isinstance(op, dict):
+                continue
+            # SKILL.md (content) is Markdown, read by the model; only the files a skill ships can be run.
+            path = op.get("file_path")
+            if path is None:
+                continue
+            if op.get("file_content") is not None:
+                yield from _file_text(path, op.get("file_content"))
+            if op.get("new_string") is not None:
+                yield from _file_text(path, op.get("new_string"), fragment=True)
+            if op.get("content") is not None:  # SKILL.md text: read for git-config markers only
+                yield _str(op.get("content")), "raw", "config"
+
+
+def _scanned_path(path: Any, content: str) -> bool:
+    if not isinstance(path, str) or not path.strip():
+        return True  # unknown target: read it (fail closed)
+    name = PurePosixPath(path.replace("\\", "/")).name
+    suffix = PurePosixPath(name).suffix.lower()
+    return suffix in _SCRIPT_SUFFIXES or suffix == "" or content.lstrip("\ufeff").startswith("#!")
+
+
+def _file_mode(path: Any, content: str, fragment: bool) -> str:
+    suffix = PurePosixPath(_str(path).replace("\\", "/")).suffix.lower()
+    first = content.lstrip("\ufeff").split("\n", 1)[0]
+    if suffix in _PYTHON_SUFFIXES or (first.startswith("#!") and "python" in first):
+        return "python" if is_python(content) else "raw"
+    if fragment:
+        return "raw"  # a patch fragment is not a whole script: no exemptions
+    return "shell"
+
+
+def _in_workspace(path: Any, workspace: Optional[str]) -> bool:
+    if not (workspace and isinstance(path, str) and path.startswith("/")):
+        return False  # a relative path cannot be placed: not exempt
+    ws = PurePosixPath(workspace)
+    try:
+        PurePosixPath(path).relative_to(ws)
+    except ValueError:
+        return False
+    return ".." not in PurePosixPath(path).parts
+
+
+def _file_text(path: Any, content: Any, fragment: bool = False,
+               workspace: Optional[str] = None) -> Iterator[tuple[str, str, str]]:
+    text = _str(content)
+    if not text:
+        return
+    if not _scanned_path(path, text):
+        yield text, "raw", "config"  # any file can be a git config (or included by one)
+        return
+    yield text, _file_mode(path, text, fragment), "workspace" if _in_workspace(path, workspace) else "full"
+
+
+# The path starts at the first non-space after the colon (blank lines skipped) and runs to the end of its line;
+# _v4a_texts strips its trailing whitespace. Never a quantifier next to one over the same characters: linear.
+_V4A_HEADER_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File:\s*((?:\S.*)?)$|^\*\*\* Move to:\s*((?:\S.*)?)$",
+                            re.MULTILINE)
+
+
+def _v4a_texts(patch: str, workspace: Optional[str] = None) -> Iterator[tuple[str, str, str]]:
+    """The added lines of each file in a V4A patch; the whole patch when it has no file headers."""
+    if not patch:
+        return
+    headers = list(_V4A_HEADER_RE.finditer(patch))
+    if not headers:
+        yield patch, "raw", "full"
+        return
+    sections = []  # (paths, body)
+    for i, m in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(patch)
+        body = patch[m.end():end]
+        if m.group(2) is not None and sections:  # "*** Move to:" renames the section above
+            sections[-1][0].append(m.group(2).rstrip())
+            sections[-1][1].append(body)
+            continue
+        sections.append(([m.group(1) and m.group(1).rstrip()], [body]))
+    for paths, bodies in sections:
+        added = "\n".join(line[1:] for body in bodies for line in body.split("\n") if line.startswith("+"))
+        if not added:
+            continue
+        if not any(_scanned_path(p, added) for p in paths):
+            yield added, "raw", "config"
+        elif all(_in_workspace(p, workspace) for p in paths):
+            yield added, "raw", "workspace"
+        else:
+            yield added, "raw", "full"
+
+
+def _base(argv: list[str]) -> str:
+    return basename(argv[0]) if argv else ""
+
+
+def hermes_send(argv: list[str]) -> bool:
+    """``hermes [-p <profile>] send ...``: sends to a messaging platform with the gateway's own credentials."""
+    if _base(argv) != "hermes":
+        return False
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in ("-p", "--profile") else 1
+    return i + 1 < len(argv) and argv[i] == "send"  # bare `hermes send` sends nothing (usage)
