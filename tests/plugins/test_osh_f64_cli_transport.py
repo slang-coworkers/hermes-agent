@@ -82,7 +82,7 @@ def test_apply_openshell_routes_rooms_over_the_ws_requester(tmp_path, monkeypatc
             self.policy_root = "UNSET"
             self.parker = None
 
-        def apply(self, spec, ref, *, room_creator, room_exists, parker=None, policy_root=None):
+        def apply(self, spec, ref, *, room_creator, room_exists, parker=None, policy_root=None, fork_source=None):
             self.policy_root = policy_root
             self.parker = parker
             assert room_exists("fleet-review") is False
