@@ -5,8 +5,8 @@ A kanban worker's turn runs under a per-turn task id (``run_conversation`` gets 
 worker's card is the dispatcher-owned ``HERMES_KANBAN_TASK``; a claim from a worker binds there and creates no
 card. Outside a worker (a chat, cron or API turn) the claim mints an ownership anchor: parked, never dispatched,
 titled with the forge's own sigil (``!`` for a GitLab MR), and not minted at all for a configured chain's branch or
-for an MR the ledger already owns. The forge CLI and the chain shape come from the ``forge_tools``,
-``chain_projects`` and ``chain_branch_re`` settings, which are empty by default. FAKE data only.
+for an MR the ledger already owns. The forge CLI comes from the ``forge_tools`` setting and the chain's work branch
+from ``chain_branch_re`` (a complete regex, applied with fullmatch); both are empty by default. FAKE data only.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ FORGE = "example-forge"
 CHAIN_SETTINGS = {
     "forge_tools": [FORGE],
     "chain_projects": ["project"],
-    "chain_branch_re": r"chain-bot/chain-(?:{projects})-(?:issue-[1-9][0-9]{0,8}|slack-[0-9]{10}\.[0-9]{6})"
+    "chain_branch_re": r"chain-bot/chain-(?:project)-(?:issue-[1-9][0-9]{0,8}|slack-[0-9]{10}\.[0-9]{6})"
                        r"(?:-r[1-9][0-9]?)?",
 }
 CHAIN = "chain-bot/chain-project-issue-422"
@@ -136,6 +136,20 @@ def test_a_chain_branch_outside_a_worker_mints_and_claims_nothing(configured, br
     _claim(configured, command, result, task_id="", session_id="S-chat")
     assert _tasks() == []
     assert _ownership(configured.root) == []
+
+
+@pytest.mark.parametrize("branch", [f"{CHAIN}-x", f"{CHAIN}-r0", f"x{CHAIN}", "chain-bot/chain-other-issue-422",
+                                    "chain-bot/chain-project-issue-0422"])
+def test_a_near_miss_of_the_chain_branch_outside_a_worker_mints_an_anchor(configured, branch):
+    _claim(configured, _forge_create(branch), _mr_json(333, branch), task_id="", session_id="S-chat")
+    (anchor,) = _tasks()
+    assert anchor["title"] == f"{PROJECT}!333" and anchor["status"] == "blocked"
+
+
+def test_without_chain_branch_re_a_chain_branch_outside_a_worker_mints_an_anchor(artifact):
+    _claim(artifact, f"glab mr create -s {CHAIN} --title t", _mr_json(333, CHAIN), task_id="", session_id="S-chat")
+    (anchor,) = _tasks()
+    assert anchor["title"] == f"{PROJECT}!333" and anchor["status"] == "blocked"
 
 
 def test_an_mr_the_ledger_already_owns_mints_nothing_outside_a_worker(configured, monkeypatch):
