@@ -3,15 +3,18 @@
 ``ac20-forms.json`` through the gateway's own tool path, once in the approver's per-turn scope and once in the root
 context, and record whether nv-fleet-gates refused it with the human-only owner rule. No model call is made.
 
-    HERMES_HOME=<scratch home> HOME=<scratch launch home> python3 ac20_probe.py --forms ac20-forms.json \
-        --out ac20-probe.jsonl [--scratch /sandbox/scratch/fleet-f62d-s5a-ac20] [--root-host <host>]
+    HERMES_HOME=<scratch home> HERMES_MANAGED_DIR=<scratch managed dir> HOME=<scratch launch home> \
+        python3 ac20_probe.py --forms ac20-forms.json --out ac20-probe.jsonl \
+        [--scratch /sandbox/scratch/fleet-f62d-s5a-ac20] [--root-host <host>]
 
-Exit 0 only when every isolation preflight passed and all form rows of both passes are blocked; 1 when a form was
-not blocked; 2 when a start-up precondition refused the run; 3 when the gateway path is not usable (FAIL(env)).
+Exit 0 only when every isolation preflight executed in its exact target and all form rows of both passes are
+blocked; 1 when a form was not blocked; 2 when a start-up precondition refused the run; 3 (FAIL(env)) when the gateway
+path is not usable or a preflight did not execute, or executed outside its exact target (erratum E2 Q1 (b)).
 
 AC-20's live leg (AC-19 step 6) runs as the scratch GW approver at the head, inside GW, plus the scratch root context.
 The shipped GW approver is never probed; it gets AC-20 at the next ship install. The refusal to start without a
-``fleet-f62d-`` HERMES_HOME is what keeps the shipped home out of reach.
+``fleet-f62d-`` HERMES_HOME and HERMES_MANAGED_DIR is what keeps the shipped home and the shipped managed map
+(``expected_ssh_host``) out of reach.
 """
 
 from __future__ import annotations
@@ -128,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     home = os.environ.get("HERMES_HOME", "")
     if "fleet-f62d-" not in home:
         _refuse(2, f"HERMES_HOME {home!r} is not a fleet-f62d- scratch home")
+    # An unset or missing override lets managed_scope fall back to /etc/hermes or to no map at all.
+    managed = os.environ.get("HERMES_MANAGED_DIR", "").strip()
+    if "fleet-f62d-" not in managed or not Path(managed).is_dir():
+        _refuse(2, f"HERMES_MANAGED_DIR {managed!r} is not an existing fleet-f62d- scratch managed dir")
     approver_home = Path(home) / "profiles" / "approver"
     if not approver_home.is_dir():
         _refuse(2, f"no approver profile at {approver_home}")
@@ -168,8 +175,10 @@ def main(argv: list[str] | None = None) -> int:
             line = next((ln[len("AC20PF "):] for ln in str(data.get("output") or "").splitlines()
                          if ln.startswith("AC20PF ")), None)
             if line is None:
-                # The benign call never ran (a gate refused it), so no form can run in this target either.
-                pf = {"executed": False, "error": str(data.get("error") or "no preflight output")[:300]}
+                # Ran nowhere, so the pass never reached its exact target: the precondition did not hold.
+                pf = {"executed": False, "error": str(data.get("error") or "no preflight output")[:300],
+                      "abort": "preflight did not execute"}
+                isolated = False
             else:
                 pf = {"executed": True, **_parse(line)}
                 why = _preflight_ok(pf, name, fresh[name], ns.root_host)

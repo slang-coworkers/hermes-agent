@@ -82,6 +82,9 @@ triager, fixer, reviewer and approver exist in `<SCR_HOME>`, and the scratch gat
   - (d) S4′ checks that 127.0.0.1:28645 is listening again and targets brev-hermes-v0225:8644.
   - The pause window is a team-lead wait under A1/D26: it is excluded from the tester's time cap and listed in
     `evidence.txt`.
+- **Root target (AC-20 leg).** Record `ROOT_HOST` in `evidence.txt`: the `uname -n` of the target that
+  `<SCR_HOME>/config.yaml`'s `terminal` policy names. For a `local` backend that is GW's own `uname -n`; for any other
+  backend it is the name that target itself reports. Step 6 passes it as `--root-host`.
 - `T0=$(date -u +%FT%TZ)`, taken after the pause is confirmed.
 - Team-lead opens one issue on slang-coworkers/nanoclaw, giving `N`. The ask is a one-line, self-contained doc fix,
   so the chain stays short. The title is prefixed `[UPG-F69.s.a e2e]`.
@@ -136,6 +139,9 @@ is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
   `/sandbox/scratch/fleet-f62d-s5a-ac20/` (test orchestration, removed with the scratch). It does exactly this:
   1. Refuses to start (exit 2) in any of these cases:
      - `HERMES_HOME` does not contain `fleet-f62d-`;
+     - `HERMES_MANAGED_DIR` is unset, does not contain `fleet-f62d-`, or is not an existing directory (erratum E2
+       Q1 (c)). The probe never falls back to `/etc/hermes`, so the shipped managed map (`expected_ssh_host`) is never
+       in scope;
      - E1-C1: it cannot create, for each pass, a FRESH `HOME` (`…/fleet-f62d-s5a-ac20/home-<pass>/`, which must not
        already exist) with an empty `GH_CONFIG_DIR` (`…/home-<pass>/gh/`). It exports both before the pass, so a
        failed gate never reads or writes the shipped gh config;
@@ -150,13 +156,16 @@ is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
        its entry count. The rows go into the JSONL as `{pass, tool, preflight: …}`.
      - **Exact targets.** The approver pass must execute in `fleet-f62d-s5a-approver`. The root pass must execute in
        the target the scratch root home's terminal policy names, recorded at Setup and passed as `--root-host`
-       (default: GW's own host name, for a `local` backend). Any other host aborts the run (exit 3, FAIL(env)).
+       (default: GW's own host name, for a `local` backend). Any other host aborts the run (exit 3, FAIL(env)), and
+       so does a preflight that did not execute.
      - **Fresh, empty gh state in each actual target**, or the run aborts (exit 3):
        - in GW: `$HOME` and the gh config dir are the pass's fresh `…/home-<pass>/` and its empty `gh/`;
        - in a scratch sandbox: the effective gh config dir is absent or empty (whether or not the backend forwards
          `HOME`/`GH_CONFIG_DIR`).
-     - A benign call that a gate refuses runs nowhere; its row records `executed: false` with the refusal, and no form
-       of that pass and tool can run there either.
+     - **A preflight that does not execute aborts the run (erratum E2 Q1 (b)).** A benign call that a gate refuses,
+       or that prints no preflight line, ran nowhere, so the pass never reached its exact target and the precondition
+       did not hold. Its row records `executed: false` with the refusal, and the probe exits 3, FAIL(env), before any
+       form of that pass.
   3. Runs two passes: `approver`, each call wrapped in `gateway.run._profile_runtime_scope(<SCR_HOME>/profiles/approver)`
      (the multiplexed gateway's per-turn scope: home override, secret scope, terminal policy); and `root`, with no
      scope. For each form it opens a fresh session id and records a critique for all five stages through the loaded
@@ -164,7 +173,8 @@ is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
      `model_tools.handle_function_call(<tool>, {"command"|"code": <form>}, task_id=<sid>, session_id=<sid>)`, then
      writes `t_end` and one JSONL row `{pass, id, tool, pid, t_start, t_end, blocked, message}`. `blocked` is true only
      when the returned JSON's `error` is the gate's own message, which names `human-only (owner rule)`.
-  4. Prints no environment and no credential. Exits 0 only if the preflights pass and all 46 form rows are blocked.
+  4. Prints no environment and no credential. Exits 0 only if every preflight executed in its exact target and all
+     46 form rows are blocked.
 - **Target profile (Q2 ruled, team-lead option 1, orch msg 58):** AC-20's live leg (AC-19 step 6) runs as the scratch
   GW approver at the head, inside GW, plus the scratch root context. The shipped GW approver is never probed; it gets
   AC-20 at the next ship install.
@@ -178,10 +188,13 @@ is deterministic, and AC-19's ceiling of 30 calls / $10 is unchanged.
      `GH_CONFIG_DIR`, else under `<its HOME>/.config/gh`, a sha256 each or `absent`.
    → expect: the first three hold, and the fourth is recorded; otherwise FAIL(env), and the probe does not run.
 6. The probe, once, in GW through the exec form:
-   `HERMES_HOME=<SCR_HOME> HOME=/sandbox/scratch/fleet-f62d-s5a-ac20/home-launch /opt/hermes/.venv/bin/python3
-   /sandbox/scratch/fleet-f62d-s5a-ac20/ac20_probe.py --forms /sandbox/scratch/fleet-f62d-s5a-ac20/ac20-forms.json
-   --out <evidence>/ac20-probe.jsonl`. The probe exports each pass's own fresh `HOME` and `GH_CONFIG_DIR` itself.
-   → expect: exit 0; the isolation preflight rows pass; and 46 form rows (23 forms × 2 passes), all `blocked: true`.
+   `HERMES_HOME=<SCR_HOME> HERMES_MANAGED_DIR=<SCR_MD> HOME=/sandbox/scratch/fleet-f62d-s5a-ac20/home-launch
+   /opt/hermes/.venv/bin/python3 /sandbox/scratch/fleet-f62d-s5a-ac20/ac20_probe.py --forms
+   /sandbox/scratch/fleet-f62d-s5a-ac20/ac20-forms.json --out <evidence>/ac20-probe.jsonl --root-host <ROOT_HOST>`
+   (erratum E2 Q1 (a): `<SCR_MD>` is SENV's; `<ROOT_HOST>` is the Setup record). The probe exports each pass's own
+   fresh `HOME` and `GH_CONFIG_DIR` itself.
+   → expect: exit 0; the isolation preflight rows pass, each `executed: true` in its exact target (the approver pass
+   in `fleet-f62d-s5a-approver`); and 46 form rows (23 forms × 2 passes), all `blocked: true`.
    Time ≤ 300 s.
 7. Egress per form. A team-lead read, a team-lead wait excluded from the D26 cap. It covers the OpenShell egress
    record of GW, of `fleet-f62d-s5a-approver` and of any other target the preflight recorded, over

@@ -114,6 +114,14 @@ So every launch below runs under `SENV` (a fresh home, managed dir and user home
   - a scratch bare repo, and a `git fetch` of `$HEAD` from `https://github.com/slang-coworkers/hermes-agent.git`;
   - `git archive $HEAD plugins tests/e2e-scenarios/FLEET-F62.c/spec | tar -x`.
   - It must NOT create `<SCR_HOME>/openshell/`. Record that the dir is absent.
+- **Interpreter (P0, erratum E2 Q2).** Under `sh -lc` + `.gateway-env`, record in `evidence.txt` the box facts
+  `command -v python3`, `python3 -c 'import hermes_yaml'` and `/opt/hermes/.venv/bin/python3 -c 'import hermes_yaml'`
+  (exit code each). There is no `PATH` edit and no exported variable either way. `<PY>` and `<PYENV>` below are then:
+  - the bare `python3` imports `hermes_yaml`: `<PY>` = `python3`, `<PYENV>` = empty (the commands run as written);
+  - else `/opt/hermes/.venv/bin/python3` does: `<PY>` = `/opt/hermes/.venv/bin/python3`, named per command, and
+    `<PYENV>` = `HERMES_PYTHON=/opt/hermes/.venv/bin/python3 `, scoped to the one launch command, which
+    `install-into-sandbox.sh`'s `pick_python` honours first;
+  - neither does: HOLD, FAIL(env), and the box read goes to the Orchestrator.
 - **SCR_SPEC.**
   - `SCR_SPEC_DIR` = the staged head's `tests/e2e-scenarios/FLEET-F62.c/spec/openshell/` dir, copied to
     `/sandbox/scratch/fleet-f62d-s5a-spec/`.
@@ -124,7 +132,7 @@ So every launch below runs under `SENV` (a fresh home, managed dir and user home
     credential.
   - Its `ssh_lane` (bundle `/tmp/osh-lane`, read only) and its sibling `wire-manifest.txt` come from the head
     unchanged.
-  - Check: `test -f "$SCR_SPEC" && python3 <src>/plugins/nv-coworker-compose/openshell/installer.py plan --spec
+  - Check: `test -f "$SCR_SPEC" && <PY> <src>/plugins/nv-coworker-compose/openshell/installer.py plan --spec
     "$SCR_SPEC" --ref "$HEAD" --policy-root <ROOT> --fork-source https://github.com/slang-coworkers/hermes-agent.git`
     exits 0, prints five `fleet-f62d-s5a-*` creates and five `hermes wire add` lines, and names no `<SHIP_HH>`,
     `<SHIP_MD>` or `nanoclaw-base-*` (F62.f-9 S1.6). `plan` is read-only: it reports mirror work (a
@@ -140,13 +148,13 @@ So every launch below runs under `SENV` (a fresh home, managed dir and user home
 ## Steps
 
 1. Install 1, in the F62.f-9 order:
-   - Phase A at `$HEAD`: `<SENV>; python3 <src>/plugins/nv-coworker-compose/openshell/installer.py phase-a --spec
+   - Phase A at `$HEAD`: `<SENV>; <PY> <src>/plugins/nv-coworker-compose/openshell/installer.py phase-a --spec
      "$SCR_SPEC" --ref "$HEAD" --fork-source https://github.com/slang-coworkers/hermes-agent.git`, expecting
      `phasea_rc=0`;
    - L1/L2 for `PFX` (render, host mirrors under `ROOT`, digests equal);
-   - the launch, `<SENV>; nohup bash <src>/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh "$SCR_SPEC"
-     --ref "$HEAD" --gateway-url <SCR_URL> --policy-root <ROOT> --fork-source <same url> > /tmp/f69sa-install-1.log
-     2>&1; echo install_rc=$? >> /tmp/f69sa-install-1.log &`, polled as in F62.f-9 Step 1.
+   - the launch, `<SENV>; <PYENV>nohup bash <src>/plugins/nv-coworker-compose/openshell/install-into-sandbox.sh
+     "$SCR_SPEC" --ref "$HEAD" --gateway-url <SCR_URL> --policy-root <ROOT> --fork-source <same url>
+     > /tmp/f69sa-install-1.log 2>&1; echo install_rc=$? >> /tmp/f69sa-install-1.log &`, polled as in F62.f-9 Step 1.
    → expect: `install_rc=0`; five `fleet-f62d-s5a-*` Ready, each create carrying `--policy-sha256`.
 2. Item 6 → expect:
    - the three A7 values (for-each-ref digest, HEAD, porcelain sha256) equal S0;
