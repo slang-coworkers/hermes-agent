@@ -283,7 +283,7 @@ source "$TB/fleet-f62a.env"
      print("authority=ready control_home=root bot_chat_owner=present")
      PY
      ) && test "$out" = "authority=ready control_home=root bot_chat_owner=present"; then
-       echo "bound(e) OK: $out" >> "$S/setup.log"
+       printf '%s\n' "$out"; echo "bound(e) OK: $out" >> "$S/setup.log"
      else echo "bound(e) FAIL(setup): $(tail -n 1 "$S/bound-e.err")" >> "$S/setup.log"; exit 1; fi
      ```
 
