@@ -640,6 +640,10 @@ A	tests/e2e-scenarios/UPG-F68/fixtures/upg-f68-bot-b/distribution.yaml	in-surfac
 A	tests/e2e-scenarios/UPG-F68/path_inventory.tsv	in-surface	replay	F68	
 A	tests/e2e-scenarios/UPG-F68/replay_check.py	in-surface	replay	F68	
 A	tests/e2e-scenarios/UPG-F68/replay_ledger.tsv	in-surface	replay	F68	
+A	tests/e2e-scenarios/UPG-F69.s.a/AC-UPG-F69.s.a-18.md	in-surface	new	UPG-F69.s.a	Harsh option-1 ruling 2026-11-10 08:40Z (orch msg 2, thread hermes-UPG-F69.s.a): UPG-F69.s.a ADR, the v0.22.5 ship gaps
+A	tests/e2e-scenarios/UPG-F69.s.a/AC-UPG-F69.s.a-19.md	in-surface	new	UPG-F69.s.a	Harsh option-1 ruling 2026-11-10 08:40Z (orch msg 2, thread hermes-UPG-F69.s.a): UPG-F69.s.a ADR, the v0.22.5 ship gaps; owner ruling orch msg 16 + erratum E1 accepted orch msg 46 (thread hermes-UPG-F69.s.a): UPG-F69.s.a AC-20, the approval gate
+A	tests/e2e-scenarios/UPG-F69.s.a/ac20-forms.json	in-surface	new	UPG-F69.s.a	owner ruling orch msg 16 + erratum E1 accepted orch msg 46 (thread hermes-UPG-F69.s.a): UPG-F69.s.a AC-20, the approval gate
+A	tests/e2e-scenarios/UPG-F69.s.a/ac20_probe.py	in-surface	new	UPG-F69.s.a	owner ruling orch msg 16 + erratum E1 accepted orch msg 46 (thread hermes-UPG-F69.s.a): UPG-F69.s.a AC-20, the approval gate
 A	tests/e2e-scenarios/UPG-F69/bump.json	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/core_authority.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/fork_ci_contributors.tsv	in-surface	new	UPG-F69	
@@ -897,6 +901,8 @@ A	tests/plugins/test_upg_f69_a_acceptance.py	in-surface	new	UPG-F69.a	user msg 2
 A	tests/plugins/test_upg_f69_acceptance.py	in-surface	new	UPG-F69	
 A	tests/plugins/test_upg_f69_c_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_upg_f69_replay_check.py	in-surface	new	UPG-F69	
+A	tests/plugins/test_upg_f69_s_a_acceptance.py	in-surface	new	UPG-F69.s.a	Harsh option-1 ruling 2026-11-10 08:40Z (orch msg 2, thread hermes-UPG-F69.s.a): UPG-F69.s.a ADR, the v0.22.5 ship gaps; owner ruling orch msg 16 + erratum E1 accepted orch msg 46 (thread hermes-UPG-F69.s.a): UPG-F69.s.a AC-20, the approval gate
+A	tests/plugins/test_upg_f69_s_a_guardrails.py	in-surface	new	UPG-F69.s.a	Harsh option-1 ruling 2026-11-10 08:40Z (orch msg 2, thread hermes-UPG-F69.s.a): UPG-F69.s.a ADR, the v0.22.5 ship gaps
 A	tests/test_iso_f12_lifecycle_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1864 (orch msg 228): DN-CI-3 option 1, row 16 (UPG-F69 3)
 A	tests/test_sched_f34_timezone_acceptance.py	in-surface	replay	F68	
 M	tests/test_tests_tree_layout.py	in-surface	replay	F68	
