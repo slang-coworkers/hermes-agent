@@ -48,7 +48,9 @@ config:
       nv-fleet-gates:
         settings:
           enforce_sandbox: true
-          edges_db_path: /tmp/hermes-nanoclaw-base/edges.db
+          # Relative: resolved under the gateway's Hermes root, so the root and every profile home open
+          # one store, and a scratch install's wires never reach another home's store.
+          edges_db_path: fleet/edges.db
           admin_tools:
             - onboard_coworker
             - onboard_project
