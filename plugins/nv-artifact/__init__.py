@@ -105,8 +105,9 @@ _CHAIN_BRANCH_RE = None
 def _configure(forge_tools=(), chain_branch_re="") -> None:
     """Apply the forge and chain settings to this scope's claim feeds (the defaults: ``glab`` only, no chain)."""
     global _GITLAB_CREATE_INTENT_RE, _CLAIM_FEEDS, _CREATE_NOUN, _BRANCH_FLAGS, _CHAIN_BRANCH_RE
-    if not isinstance(forge_tools, (list, tuple)) or not isinstance(chain_branch_re, str):
-        raise TypeError("forge_tools must be a list and chain_branch_re a string")
+    if (not isinstance(forge_tools, (list, tuple)) or not all(isinstance(t, str) for t in forge_tools)
+            or not isinstance(chain_branch_re, str)):
+        raise TypeError("forge_tools must be a list of strings and chain_branch_re a string")
     tools = ("glab", *(str(t) for t in forge_tools if str(t).strip() and str(t) != "glab"))
     _GITLAB_CREATE_INTENT_RE = re.compile(
         r"\b(?:" + "|".join(map(re.escape, sorted(tools, key=len, reverse=True))) + r")\b[^;&|\n]*?\bmr\W+create\b",

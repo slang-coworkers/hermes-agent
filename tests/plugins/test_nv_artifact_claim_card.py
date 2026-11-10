@@ -307,3 +307,18 @@ def test_without_a_chain_setting_a_chain_shaped_branch_still_gets_its_anchor(art
     _claim(artifact, f"glab mr create --source-branch {CHAIN} --title t", URL_ONLY, task_id="", session_id="S-chat")
     (anchor,) = _tasks()
     assert anchor["title"] == f"{PROJECT}!333" and anchor["status"] == "blocked"
+
+
+@pytest.mark.parametrize("forge_tools", [[FORGE, 7], FORGE])
+def test_forge_tools_that_is_not_a_list_of_strings_falls_back_to_glab_only(artifact, forge_tools):
+    cfg_path = artifact.home / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["plugins"]["entries"][acceptance.PLUGIN_KEY]["settings"]["forge_tools"] = forge_tools
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    manager = PluginManager()
+    manager.discover_and_load()
+    loaded = manager._plugins[acceptance.PLUGIN_KEY]
+    assert loaded.enabled is True and loaded.error is None
+    reloaded = SimpleNamespace(manager=manager, loaded=loaded, root=artifact.root, home=artifact.home)
+    _claim(reloaded, _forge_create("fix/5"), _mr_json(5, "fix/5"), task_id="", session_id="S-chat")
+    assert _tasks() == [] and _ownership(artifact.root) == []
