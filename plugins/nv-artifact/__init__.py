@@ -290,7 +290,7 @@ def _inherited_kanban_task() -> str:
         try:
             from gateway.session_context import get_session_env
             task = get_session_env("HERMES_KANBAN_TASK", "") or ""
-        except Exception:
+        except ImportError:
             task = ""
     return str(task).strip()
 

@@ -81,6 +81,7 @@ def redact_count(text):
             return text, 0
         return _CANDIDATE.subn(REPLACEMENT, text)
     except Exception:
+        logger.debug("placeholder redaction failed", exc_info=True)
         _log_once()
         return text, 0
 

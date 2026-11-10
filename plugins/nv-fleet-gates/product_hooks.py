@@ -162,6 +162,7 @@ def call(point: str, *, home: str, default: Any, **kwargs: Any) -> Any:
     try:
         value = fn(**kwargs, home=home)
     except Exception:
+        logger.debug("nv-fleet-gates: product hook %s of %s raised", point, owner, exc_info=True)
         _log_once(home, point, owner, "raised", exc_info=True)
         return _on_error(point, owner, kwargs)
     if not _valid(point, value):

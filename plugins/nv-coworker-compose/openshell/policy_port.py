@@ -307,6 +307,7 @@ def _validate_matcher_block(rule: Any, key: str, where: str, errors: list[str]) 
                                           "operation_name", "fields", "params"))
 
 
+# health: allow CC -- _validate_endpoint is an ordered fail-closed check of every endpoint field the 0.1.2 schema accepts; not split until tests cover each branch, so the split cannot change a verdict
 def _validate_endpoint(ep: Any, where: str, errors: list[str]) -> None:
     if not isinstance(ep, dict):
         errors.append(f"{where} must be a mapping")
@@ -433,6 +434,7 @@ def _validate_endpoint(ep: Any, where: str, errors: list[str]) -> None:
         errors.append(f"{where}: rules/access/enforcement need an L7 protocol")
 
 
+# health: allow CC -- validate_policy is an ordered fail-closed walk of the whole policy document; not split until tests cover each branch, so the split cannot change a verdict
 def validate_policy(doc: Any, source: str = "<policy>") -> list[str]:
     """Return every 0.1.2 violation in ``doc`` (empty list == valid). Offline mirror of the
     schema walk + ``validate_policy`` + L7 semantics; the composed-policy ambiguity check and
@@ -560,6 +562,7 @@ def _ordered_endpoint(ep: dict[str, Any]) -> dict[str, Any]:
     return {k: ep[k] for k in ENDPOINT_FIELDS if k in ep}
 
 
+# health: allow CC -- port_policy is an ordered fail-closed port (strip, refuse, rebuild, re-validate); not split until tests cover each branch, so the split cannot change a verdict
 def port_policy(
     doc: dict[str, Any],
     *,
