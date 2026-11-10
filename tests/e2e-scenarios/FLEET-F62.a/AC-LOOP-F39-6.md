@@ -64,14 +64,14 @@ EOF
 source "$TB/fleet-f62a.env"
 ```
 
-0. **Stage + enable `nv-coworker-compose`** (the testbed points `HERMES_BUNDLED_PLUGINS` at an EMPTY dir, so
-   the `onboard coworker` verb is absent until the plugin is installed — mirror AC-LOOP-F35-5 §Setup 1):
+0. **Stage `nv-coworker-compose`** (the testbed points `HERMES_BUNDLED_PLUGINS` at an EMPTY dir, so the
+   `onboard coworker` verb is absent until the plugin is installed — mirror AC-LOOP-F35-5 §Setup 1). Enable it
+   by config only, through step 1's `plugins.enabled` merge: at v0.22.5 `hermes plugins enable` runs PM
+   admission (`hermes_cli/plugins_admission.py`, `pm.client.sync_venv`), which downloads a Python into the
+   machine store outside `$HERMES_HOME` and is refused offline.
    ```bash
    mkdir -p "$HERMES_HOME/plugins"
    cp -R "$WT/plugins/nv-coworker-compose" "$HERMES_HOME/plugins/"
-   hermes plugins enable nv-coworker-compose
-   hermes plugins list | grep -F nv-coworker-compose      # must show it enabled
-   hermes onboard --help | grep -F coworker               # the `coworker` verb now exists, exit 0
    ```
 1. **Default config + secret scope.** Merge `fixtures/default.config.yaml` (the multiplex block below, plus
    `plugins.enabled: [nv-coworker-compose]`) into
@@ -88,6 +88,13 @@ source "$TB/fleet-f62a.env"
      multiplex_profile_allowlist: [orchestrator, worker]   # orchestrator MUST be here so its cron ticks
    plugins:
      enabled: [nv-coworker-compose]
+   ```
+   Then prove the config-only enable loaded it. The `plugins list` row must read `enabled`, and `not enabled`
+   also contains that word, so it is excluded:
+   ```bash
+   row=$(hermes plugins list | grep -F nv-coworker-compose)
+   test -n "$row" && ! grep -qF 'not enabled' <<< "$row" && grep -qwF enabled <<< "$row"
+   hermes onboard --help | grep -F coworker               # the `coworker` verb now exists, exit 0
    ```
 2. **Boot the FULL messaging gateway** on the DEFAULT profile — `hermes gateway run --no-supervise`
    (`hermes_cli/subcommands/gateway.py:47`), with `API_SERVER_KEY` + `API_SERVER_HOST=127.0.0.1` +
