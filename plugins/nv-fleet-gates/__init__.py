@@ -4,11 +4,22 @@ Exactly ONE ``pre_tool_call`` callback runs an ordered, block-before-approve
 predicate chain and returns the FIRST match:
 
     canonicalise(tool_name)
+      -> APPROVAL         (PR approvals and merges are human-only, every profile)
+      -> early_veto       (product hook; none registered = no check)
       -> SANDBOX          (ISO-F10; inert unless enforce_sandbox)
       -> FLEET-ADMIN      (GOV-F26; orchestrator-only admin tools)
       -> WIRING unwired   (A2A-F18; wired-only peer messaging)
       -> MCP-SCOPE        (GOV-F27; mcp_* absent from the profile's rendered
                            allow-list denied, transport-aware, fail-closed)
+      -> CRON-DELIVERY    (off unless cron_delivery_guard: a cron create/update/run
+                           posts to Slack only where the slack_post allow-list
+                           lets it, never with a broadcast mention — cron_delivery.py)
+      -> policy_veto      (product hook; none registered = no check)
+      -> OUTBOUND         (off unless chain.outbound_policy: no card, no outbound
+                           write; the orchestrator, card-less, only replies in its
+                           own conversation or posts a top-level status to its
+                           allow-listed channel — outbound.py)
+      -> delivery_veto    (product hook; none registered = no check)
       -> GATES            (host-writer path / plan gate / critique gate + PR
                            invitation — LOOP-F37/F38, ISO-F10 merged)
       -> WIRING approve   (A2A-F19; gated edge -> escalate to the human gate)
@@ -17,11 +28,20 @@ Fail-closed is THIS plugin's own obligation: a raising ``pre_tool_call`` callbac
 is swallowed by core and the tool PROCEEDS (only a timeout fails closed), so the
 whole body is wrapped in ``try/except BaseException`` -> block.
 
+Product hooks (product_hooks.py): a plugin that declares ``requires_plugins:
+[nv-fleet-gates]`` registers callbacks at named points through the module
+published as ``nv_fleet_gates_product_hooks``, keyed by this profile's home. With
+none registered every point takes its stated default, which is this plugin's
+behaviour on its own.
+
 Companions: a session-correlated ``codex_critique`` tool (+ ``/codex-critique``
 slash alias) records the critique row the GATES consume; ``hermes wire`` writes
 the fleet-shared edges store; ``post_tool_call`` records plan creation and
-restales the critique on a file mutation; ``pre_gateway_dispatch`` captures the
-human PR-comment invitation token.
+restales the critique on a file mutation or a command that may change the tree;
+``pre_gateway_dispatch`` captures the human PR-comment invitation token and the
+item each webhook delivery is about (conversation_origin.py);
+``transform_tool_result`` and ``transform_terminal_output`` replace any OpenShell
+credential placeholder with ``[OpenShell placeholder]`` (placeholder_redact.py).
 """
 
 from __future__ import annotations
@@ -29,13 +49,15 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 
-from . import edges, predicates, product_hooks, stores
+from . import (commands, conversation_origin, cron_delivery, edges, outbound, placeholder_redact, predicates,
+               product_hooks, stores)
 from .aliases import canonicalise
 
 logger = logging.getLogger(__name__)
@@ -122,6 +144,121 @@ def _edges_lookup(from_profile: str, to_profile: str, db_path: str):
     return edges.lookup(db_path, from_profile, to_profile)
 
 
+def _lookup_cron_job(ref: str):
+    """The stored cron job an update/run names (by id or name), else None.
+
+    A bare module-global (like ``_edges_lookup``) so a test can rebind it. A
+    lookup error propagates to the gate's fail-closed handler.
+    """
+    from cron.jobs import resolve_job_ref
+
+    return resolve_job_ref(ref) if ref else None
+
+
+def _slack_home_chat() -> str:
+    """The Slack home channel the cron scheduler resolves ``all``/``slack``/no-origin to.
+
+    Hermes >= 0.22 keeps the resolver in ``cron.scheduler_delivery`` (env var, then the
+    config.yaml ``home_channel``); older trees had it in ``cron.scheduler``.
+    """
+    try:
+        from cron.scheduler_delivery import _get_home_target_chat_id
+    except ImportError:
+        try:
+            from cron.scheduler import _get_home_target_chat_id
+        except ImportError:
+            return os.getenv("SLACK_HOME_CHANNEL", "")
+    return str(_get_home_target_chat_id("slack") or "")
+
+
+def _cron_session_facts() -> dict[str, Any]:
+    """The live conversation of this tool call, as the cron tool itself reads it.
+
+    ``cron_creator`` is set only inside a cron run, where core stores the run's
+    own target for ``origin`` (tools/cronjob_tools.py _resolve_cron_context_deliver).
+    """
+    from gateway.session_context import get_session_env
+
+    facts: dict[str, Any] = {
+        "platform": get_session_env("HERMES_SESSION_PLATFORM", ""),
+        "chat_id": get_session_env("HERMES_SESSION_CHAT_ID", ""),
+        "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", ""),
+        "user_id": get_session_env("HERMES_SESSION_USER_ID", ""),
+        "cron_creator": None,
+    }
+    if str(get_session_env("HERMES_CRON_SESSION", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        facts["cron_creator"] = cron_delivery.cron_creator_target(
+            get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "").strip(),
+            get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "").strip(),
+            get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "").strip(),
+        )
+    return facts
+
+
+def _owned_card(profile: str) -> str:
+    """The card this execution owns, else "".
+
+    Identity comes only from the dispatcher's context: ``owned_kanban_task()`` (``HERMES_KANBAN_TASK`` for a
+    dispatcher-owned worker; a delegated child or an in-worker cron run owns none) together with
+    ``HERMES_KANBAN_RUN_ID`` and ``HERMES_KANBAN_CLAIM_LOCK``, which the dispatcher sets with it (the worker process
+    environment, not anything the sandbox can change). The board must agree on all of it: the card is assigned to
+    *profile*, ``running``, on that run and that claim lock. Anything missing or different is no card. (An expired
+    ``claim_expires`` alone is not checked: the dispatcher extends a live worker's expired claim rather than reclaim
+    it, and a real reclaim or reassignment changes the run id and claim lock, which are.)
+
+    This is checked when the tool call starts. A card completed, cancelled or reassigned while a long command runs is
+    not seen: a pre-tool gate cannot close that window (outbound.py, "Limits"; the follow-up is a run lease checked
+    at egress).
+
+    A bare module-global (like ``_edges_lookup``) so a test can rebind it. A board error propagates; the caller
+    treats it as "no card" (fail closed).
+    """
+    from agent.delegation_context import owned_kanban_task
+
+    task_id = owned_kanban_task()
+    run = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    lock = (os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if not (task_id and run and lock and profile):
+        return ""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+
+    conn = connect()
+    try:
+        task = kb.get_task(conn, task_id)
+    finally:
+        conn.close()
+    if (task is None or task.status != "running" or (task.assignee or "") != profile
+            or task.current_run_id is None or str(task.current_run_id) != run or (task.claim_lock or "") != lock):
+        return ""
+    return task_id
+
+
+def _room_session(session_id, platform: str, home: Optional[str] = None) -> str:
+    """``"room"`` / ``"unknown"`` / ``"no"``: whether this session is a hosted group room, from the
+    ``room_session_kind`` product hook of ``home`` (default: the active profile home). None registered: ``"no"``."""
+    home = str(Path(home).resolve()) if home is not None else str(get_hermes_home().resolve())
+    return product_hooks.call("room_session_kind", home=home, default="no", session_id=session_id, platform=platform)
+
+
+def _outbound_session() -> dict[str, Any]:
+    """The live conversation of this tool call, and the target a cron run delivers to."""
+    from gateway.session_context import get_session_env
+
+    session: dict[str, Any] = {
+        "platform": get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower(),
+        "chat_id": get_session_env("HERMES_SESSION_CHAT_ID", "").strip(),
+        "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", "").strip(),
+        "user_id": get_session_env("HERMES_SESSION_USER_ID", "").strip(),
+        "cron_target": None,
+    }
+    if str(get_session_env("HERMES_CRON_SESSION", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        session["cron_target"] = (get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "").strip(),
+                                  get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "").strip(),
+                                  get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "").strip())
+    return session
+
+
 def _block(message: str) -> dict[str, Any]:
     # Core DROPS a block directive that carries no message (a message-less block
     # is a fail-open), so every block outcome is minted here with a non-empty one.
@@ -130,6 +267,33 @@ def _block(message: str) -> dict[str, Any]:
 
 def _approve(rule_key: str, message: str) -> dict[str, Any]:
     return {"action": "approve", "rule_key": rule_key, "message": message}
+
+
+def _kanban_tenants(task_ids, board=None) -> dict[str, Optional[str]]:
+    """``{task id: tenant}`` read from the kanban board the call names (None: no tenant or no such card)."""
+    if not task_ids:
+        return {}
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    with kbc.connect_closing(board=board) as conn:
+        out: dict[str, Optional[str]] = {}
+        for tid in task_ids:
+            task = kb.get_task(conn, tid)
+            out[tid] = task.tenant if task is not None else None
+        return out
+
+
+def _kanban_task() -> str:
+    """The kanban task this execution runs (HERMES_KANBAN_TASK, from the process or the session env), else ""."""
+    task = os.environ.get("HERMES_KANBAN_TASK", "")
+    if not task:
+        try:
+            from gateway.session_context import get_session_env
+            task = get_session_env("HERMES_KANBAN_TASK", "") or ""
+        except Exception:
+            task = ""
+    return str(task)
 
 
 def _current_profile() -> str:
@@ -187,6 +351,23 @@ def _managed_expected_ssh_host():
     if not isinstance(hosts, dict):
         raise RuntimeError("managed nv-fleet-gates expected_ssh_host is not a mapping")
     return hosts
+
+
+def _str_list(value, key: str) -> list:
+    """A list-of-strings setting; anything else is ignored with a warning (never a raise in register())."""
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        return list(value)
+    if value not in (None, "", [], ()):
+        logger.warning("nv-fleet-gates: %s is not a list of strings; ignored", key)
+    return []
+
+
+def _str_setting(value, key: str) -> str:
+    if isinstance(value, str):
+        return value
+    if value is not None:
+        logger.warning("nv-fleet-gates: %s is not a string; ignored", key)
+    return ""
 
 
 def _status_ok(status) -> bool:
@@ -280,6 +461,24 @@ def register(ctx) -> None:
     # into every profile ({profile: {sanitized mcp__srv__tool: transport}}); the
     # predicate selects this profile's entry by _current_profile().
     mcp_scope = ctx.get_config("mcp_scope", {}) or {}
+    # The per-profile Slack post allow-list ({profile: {channels, users, own_threads_only, thread_reply_only}}),
+    # operator-rendered: the cron delivery guard and the OUTBOUND status post read it.
+    slack_post_settings = ctx.get_config("slack_post", {}) or {}
+    # Three checks that are OFF unless the fleet turns them on: OUTBOUND (outbound.py: no card, no outbound write),
+    # the cron delivery guard (cron_delivery.py), and a critique for a push to a matching remote. chain.
+    # card_creator_profiles names the PROFILES that may kanban_create from a hosted group room (default: none).
+    _chain_cfg = ctx.get_config("chain", {}) or {}
+    _chain_cfg = _chain_cfg if isinstance(_chain_cfg, dict) else {}
+    outbound_on = _chain_cfg.get("outbound_policy") not in (None, False)
+    _creators = _chain_cfg.get("card_creator_profiles") or []
+    card_creator_profiles = frozenset(
+        str(p) for p in (_creators if isinstance(_creators, (list, tuple)) else []) if isinstance(p, str) and p)
+    cron_guard_on = ctx.get_config("cron_delivery_guard", False) not in (None, False)
+    # The forge CLIs whose calls are forge writes, the review bot whose mention asks for a review, and the push
+    # remotes that need a critique: none by default. A malformed value is ignored (with a warning), never a raise.
+    commands.configure(_str_list(ctx.get_config("forge_tools", []), "forge_tools"))
+    conversation_origin.configure(_str_setting(ctx.get_config("review_bot", ""), "review_bot"))
+    outbound.configure(_str_list(ctx.get_config("critique_push_remotes", []), "critique_push_remotes"))
     # A malformed value must not raise here: register() failing disables the veto.
     try:
         critique_max_chars = int(ctx.get_config("critique_max_chars", 120000))
@@ -330,6 +529,8 @@ def register(ctx) -> None:
     product_hooks._publish_profile(ctx, home=hook_home, profile=_current_profile(), is_orchestrator=_is_orch())
 
     # --- predicates ---------------------------------------------------------
+    _BOARD_REPORT_TOOLS = frozenset({"kanban_show", "kanban_heartbeat", "kanban_comment", "kanban_block"})
+
     def _sandbox_block(canon, args):
         # message_agent's delivery runs host-local (bot_mode_dm.py `_host_local=True`) as a
         # control-plane child that never consumes the active profile's frozen terminal.* config,
@@ -351,7 +552,8 @@ def register(ctx) -> None:
         # Read TERMINAL_* through the scope in both branches: a kanban worker runs AS its profile
         # (active == launch) with TERMINAL_* stripped from its env, so its policy exists only in the
         # per-turn scope. With no scope bound terminal_env is the plain process-env read.
-        from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, terminal_env
+        from tools.terminal_scope import (TerminalPolicyRefusal, TerminalPolicyUnavailable, get_terminal_scope,
+                                          terminal_env)
 
         if hermes_home_key(active) != hermes_home_key(launch):
             scope = get_terminal_scope()
@@ -367,7 +569,11 @@ def register(ctx) -> None:
                     f"belongs to {Path(launch).name!r}, so this gateway turn cannot be sandboxed for "
                     f"{Path(active).name!r} (tool-bearing work runs on the kanban board)"
                 )
-        backend = terminal_env("TERMINAL_ENV", "local")
+        try:
+            backend = terminal_env("TERMINAL_ENV", "local")
+            resolved = terminal_env("TERMINAL_SSH_HOST", "")
+        except TerminalPolicyUnavailable:
+            return _block("sandbox: refused — this profile's terminal policy is unavailable")
         if backend != expected_backend:
             return _block(
                 f"sandbox: refused — resolved backend {backend!r} != expected {expected_backend!r}"
@@ -375,13 +581,18 @@ def register(ctx) -> None:
         # Check the managed host before readiness because ensure_task_env()
         # eagerly connects to and caches TERMINAL_SSH_HOST.
         if expected_backend == "ssh":
-            resolved = terminal_env("TERMINAL_SSH_HOST")
             expected = (_managed_expected_ssh_host() or {}).get(_current_profile())
             if not expected or resolved != expected:
                 return _block(
                     f"sandbox: refused — ssh target host {resolved!r} is not this "
                     f"profile's sandbox {expected!r}"
                 )
+        # A worker whose sandbox is down must still be able to say so. These board tools read its card or record a
+        # heartbeat, a comment or a block in the kanban DB from this process; none of them runs in the sandbox.
+        # Every later predicate (OUTBOUND's own-card rule included) still applies; kanban_complete and the other
+        # terminators still need a ready environment.
+        if canon in _BOARD_REPORT_TOOLS:
+            return None
         import tools.terminal_tool as tt
 
         if tt.ensure_task_env() is None:
@@ -403,6 +614,83 @@ def register(ctx) -> None:
         scope = mcp_scope.get(_current_profile()) if isinstance(mcp_scope, dict) else None
         reason = predicates.mcp_scope_reason(canon, scope, enforce_sandbox)
         return _block(reason) if reason else None
+
+    def _cron_delivery_block(canon, args):
+        # RT-11b: a cron job's output is posted by the gateway, so its deliver target and
+        # prompt follow the per-profile slack_post allow-list and broadcast refusal.
+        if not cron_guard_on or canon != cron_delivery.CRON_TOOL:
+            return None
+        stored = None
+        if cron_delivery.needs_stored_job(args):
+            stored = _lookup_cron_job(str(args.get("job_id") or "").strip())
+        profile = _current_profile()
+        own = frozenset()
+        entry = slack_post_settings.get(profile) if isinstance(slack_post_settings, dict) else None
+        if isinstance(entry, dict) and entry.get("own_threads_only"):
+            own = frozenset(product_hooks.call("own_post_threads", home=hook_home, default=frozenset(),
+                                               profile=profile, env=os.environ))
+        reason = cron_delivery.reason(
+            args, profile=profile, settings=slack_post_settings,
+            session=_cron_session_facts(), home=_slack_home_chat(), stored_job=stored, own_threads=own,
+        )
+        return _block(reason) if reason else None
+
+    def _outbound_facts(session_id) -> outbound.Facts:
+        profile = _current_profile()
+        session = _outbound_session()
+        try:
+            card = _owned_card(profile)
+        except Exception as exc:  # the board cannot be read: no card (fail closed)
+            logger.warning("nv-fleet-gates outbound policy: card lookup failed (%s); treating as no card",
+                           type(exc).__name__)
+            card = ""
+        # A room never holds a card. A session that cannot be placed counts as a room unless it owns a verified
+        # card (a card-less unknown session is refused anyway; a dispatcher-bound worker is not a room).
+        placed = _room_session(session_id, session["platform"], home=hook_home)
+        room = placed == "room" or (placed == "unknown" and not card)
+
+        def own_item(project, kind, iid) -> bool:
+            # The item this webhook session was asked about (conversation_origin.py); unreadable = not own.
+            try:
+                return conversation_origin.is_own_gitlab_item(project, kind, iid)
+            except Exception:
+                logger.warning("nv-fleet-gates outbound policy: origin lookup failed", exc_info=True)
+                return False
+
+        status_channels = cron_delivery.allowed_targets(slack_post_settings, profile)["channels"]
+
+        def own(write) -> bool:
+            # its own conversation (Slack thread / DM / cron target, or the item it was asked about), or a
+            # top-level status post to a channel on its own slack_post allow-list
+            return (outbound.own_slack(write, session) or outbound.own_gitlab(write, own_item)
+                    or outbound.status_post(write, status_channels))
+
+        return outbound.Facts(profile, _is_orch(), "" if room else card, room, own)
+
+    def _outbound_audit(canon, write_label, rule, facts) -> None:
+        logger.warning("AUDIT nv-fleet-gates outbound-policy: refused tool=%s profile=%s write=%s rule=%s "
+                       "card=%s room=%s", canon, facts.profile or "-", write_label, rule,
+                       "yes" if facts.card else "no", "yes" if facts.room else "no")
+
+    def _outbound_block(canon, args, session_id):
+        # No card, no outbound write (outbound.py). Every profile, the orchestrator included; reads and sandbox
+        # edits never reach it. Facts are gathered only for a call that writes outward (or kanban_create).
+        if not outbound_on:
+            return None
+        writes = outbound.classify(canon, args, home=hook_home)
+        if not writes and canon != outbound.KANBAN_CREATE:
+            return None
+        facts = _outbound_facts(session_id)
+        refusal = outbound.room_create_refusal(canon, facts, card_creator_profiles)
+        if refusal:
+            _outbound_audit(canon, "kanban:kanban_create", "room-card-create", facts)
+            return _block(refusal)
+        decision = outbound.decide(writes, facts)
+        if decision is None:
+            return None
+        write, rule, message = decision
+        _outbound_audit(canon, write.label(), rule, facts)
+        return _block(message)
 
     def _fleet_admin_block(canon, args):
         if _is_orch():
@@ -486,7 +774,14 @@ def register(ctx) -> None:
             canon == "message_agent"
             and predicates.is_stage_marked((args or {}).get("message"), stage_markers)
         ) or predicates.is_kanban_terminator(canon)
-        if marked or gh_egress:
+        writes = outbound.classify(canon, args, home=hook_home)
+        if any(outbound.critique_egress(w) and w.inline for w in writes):
+            return _block(
+                "critique gate: forge text must come from a file you wrote BEFORE the critique (--body-file / "
+                "--description-file <path>, not --body / --description / '-'): write it with write_file, run "
+                "/codex-critique on it, then post that file. Inline text is not what was critiqued."
+            )
+        if marked or gh_egress or any(outbound.critique_egress(w) for w in writes):
             if not stores.critique_fresh(session_id, required_stages):
                 return _block(
                     f"critique gate: run /codex-critique for stages {required_stages} before this "
@@ -542,7 +837,20 @@ def register(ctx) -> None:
             )
         return None
 
-    def _gate(tool_name=None, args=None, session_id=None, **kwargs):
+    def _veto(point, canon, args, session_id, task_id):
+        # A product hook's refusal, wrapped like every other block. A raising or out-of-contract veto comes back as
+        # a refusal (product_hooks.call), so it blocks too.
+        profile = _current_profile()
+        facts = {"tool_name": canon, "args": args, "session_id": session_id, "task_id": task_id, "profile": profile}
+        if point != "delivery_veto":
+            facts.update(is_orchestrator=_is_orch(), kanban_task=_kanban_task())
+        if point == "policy_veto":
+            facts.update(origin=conversation_origin.current, owned_card=lambda: _owned_card(profile),
+                         kanban_tenants=_kanban_tenants, writes=lambda: outbound.classify(canon, args, home=hook_home))
+        reason = product_hooks.call(point, home=hook_home, default=None, **facts)
+        return _block(reason) if reason else None
+
+    def _gate(tool_name=None, args=None, session_id=None, task_id=None, **kwargs):
         try:
             canon = canonicalise(tool_name or "")
             args = args if isinstance(args, dict) else {}
@@ -552,10 +860,23 @@ def register(ctx) -> None:
             blocked = _approval_block(canon, args)
             if blocked:
                 return blocked
-            for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block, _mcp_scope_block):
+            blocked = _veto("early_veto", canon, args, session_id, task_id)
+            if blocked:
+                return blocked
+            for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block, _mcp_scope_block,
+                              _cron_delivery_block):
                 blocked = predicate(canon, args)
                 if blocked:
                     return blocked
+            blocked = _veto("policy_veto", canon, args, session_id, task_id)
+            if blocked:
+                return blocked
+            blocked = _outbound_block(canon, args, session_id)
+            if blocked:
+                return blocked
+            blocked = _veto("delivery_veto", canon, args, session_id, task_id)
+            if blocked:
+                return blocked
             blocked = _gates_block(canon, args, session_id)
             if blocked:
                 return blocked
@@ -565,12 +886,19 @@ def register(ctx) -> None:
             return _block("nv-fleet-gates internal error — refusing the call (fail-closed)")
 
     # --- observers ----------------------------------------------------------
-    def _observe(tool_name=None, args=None, status=None, result=None, session_id=None, **kwargs):
+    def _observe(tool_name=None, args=None, status=None, result=None, session_id=None, task_id=None, **kwargs):
         try:
-            if not session_id or not _status_ok(status):
+            if not session_id:
                 return
             canon = canonicalise(tool_name or "")
             args = args if isinstance(args, dict) else {}
+            # Critique freshness, beyond the plan gate's file mutations: a command that changes the tree or runs a
+            # program (git rebase / merge / pull / cherry-pick / am / revert, make, a script) restales the critique,
+            # failed or not (a failed rebase can leave the tree changed).
+            if predicates.restales_critique(canon, args):
+                stores.record_mutation(session_id)
+            if not _status_ok(status):
+                return
             if predicates.is_mutation(canon, args):
                 stores.record_mutation(session_id)  # restales the critique (freshness)
                 path = predicates.target_path(canon, args)
@@ -579,6 +907,31 @@ def register(ctx) -> None:
         except Exception:
             logger.warning("nv-fleet-gates post_tool_call observer failed", exc_info=True)
         return
+
+    def _transform_tool_result(**kwargs):
+        """transform_tool_result for every profile: the ``tool_result_rewrite`` product hook, then the OpenShell
+        placeholder redaction on the final text (placeholder_redact.py). Hermes keeps only the FIRST string any
+        transform_tool_result callback returns (model_tools.py _apply_transform_tool_result_hook), so the two are
+        ONE callback and neither can shadow the other. Never raises; returns None when nothing changed."""
+        out = product_hooks.call("tool_result_rewrite", home=hook_home, default=None, **kwargs)
+        try:
+            text = out if isinstance(out, str) else kwargs.get("result")
+            redacted, n = placeholder_redact.redact_count(text)
+            return redacted if (n or isinstance(out, str)) else None
+        except Exception:
+            placeholder_redact._log_once()
+            return out if isinstance(out, str) else None
+
+    def _redact_terminal_output(output=None, **_kwargs):
+        """transform_terminal_output for every profile: the OpenShell placeholder redaction (foreground terminal
+        output and background-process output, tools/process_registry.py transform_process_output). Never raises;
+        returns None when nothing changed, so another plugin's rewrite is not shadowed."""
+        try:
+            redacted, n = placeholder_redact.redact_count(output)
+            return redacted if n else None
+        except Exception:
+            placeholder_redact._log_once()
+            return None
 
     def _capture_session(surface=None, command=None, session_key=None, session_id=None, **kwargs):
         # Stash this dispatch's session in a request-local ContextVar so the
@@ -597,6 +950,10 @@ def register(ctx) -> None:
                 stores.record_invitation(repo, pr)
         except Exception:
             logger.warning("nv-fleet-gates pre_gateway_dispatch observer failed", exc_info=True)
+        try:  # which item a webhook session is about, for its later turns (conversation_origin.py)
+            conversation_origin.record_event(event)
+        except Exception:
+            logger.warning("nv-fleet-gates conversation origin record failed", exc_info=True)
 
     # --- codex_critique tool + slash alias ----------------------------------
     def _critique_error(reason, error, stage, session_id):
@@ -756,6 +1113,8 @@ def register(ctx) -> None:
     ctx.register_hook("post_tool_call", _observe)
     ctx.register_hook("pre_command", _capture_session)
     ctx.register_hook("pre_gateway_dispatch", _capture_invitation)
+    ctx.register_hook("transform_tool_result", _transform_tool_result)   # product rewrite, then redaction
+    ctx.register_hook("transform_terminal_output", _redact_terminal_output)
     ctx.register_tool(
         name="codex_critique", toolset=_TOOLSET, schema=CODEX_CRITIQUE_SCHEMA,
         handler=_tool_codex_critique, check_fn=_check_codex_critique, is_async=True,

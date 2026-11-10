@@ -59,6 +59,9 @@ def _base_settings(hermes_home, edges_db, **overrides):
                         "record_decision", "record_human_verdict"],
         "skills_root": str(hermes_home / "skills"),
         "shared_learnings_path": str(hermes_home / "shared-learnings"),
+        # LOOP-F37 is the box lane's acceptance (GitHub, no kanban chain cards): the outbound write policy
+        # ("no card, no write", on by default) is off here and has its own tests (test_nv_fleet_gates_outbound).
+        "chain": {"outbound_policy": False},
     }
     settings.update(overrides)
     return settings
@@ -522,6 +525,40 @@ def test_ac_iso_f10_2(tmp_path, monkeypatch):
     assert _act(_gate(manager, "terminal", {"command": "rm -rf /"})) == "block"
     assert _act(_gate(manager, "terminal", {"command": "ls"})) != "block"
     assert calls["env"] >= 1
+
+
+def test_sandbox_down_leaves_the_board_report_tools_open(tmp_path, monkeypatch):
+    """With enforce_sandbox true and the task environment NOT ready (the role's sandbox is unreachable), a worker
+    can still read its card and record a heartbeat, a comment or a block: those board tools run in this process,
+    never in the sandbox, so a dead sandbox cannot turn a block into a crashed run. Sandbox-consuming calls and
+    kanban_complete are still refused."""
+    import tools.terminal_tool as tt
+
+    probes = {"n": 0}
+
+    def _env_down(*a, **k):
+        probes["n"] += 1                                 # the sandbox is unreachable: no environment (None)
+
+    monkeypatch.setattr(tt, "ensure_task_env", _env_down, raising=False)
+    manager, _, _ = _load(tmp_path, monkeypatch, enforce_sandbox=True, plan_gate=False)
+    _loaded(manager)
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    not_ready = "task environment is not ready"
+    for tool, args in (("terminal", {"command": "ls"}), ("read_file", {"path": "x"}),
+                       ("write_file", {"path": "x", "content": ""}), ("kanban_complete", {})):
+        d = _gate(manager, tool, args)
+        assert _act(d) == "block" and not_ready in (d.get("message") or ""), tool
+    before = probes["n"]
+    for tool, args in (("kanban_show", {}), ("kanban_heartbeat", {"note": "sandbox unreachable"}),
+                       ("kanban_comment", {"body": "sandbox unreachable"}),
+                       ("kanban_block", {"reason": "sandbox unreachable"})):
+        d = _gate(manager, tool, args)
+        assert _act(d) != "block", (tool, d)             # allowed by every gate, not only the sandbox one
+    assert probes["n"] == before, "the board report tools must not probe the sandbox"
+    # The exemption sits after the integrity checks: a mismatched backend still refuses them.
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    d = _gate(manager, "kanban_block", {"reason": "x"})
+    assert _act(d) == "block" and "sandbox: refused" in (d.get("message") or "")
 
 
 def test_codex_critique_sends_every_artifact_including_empty_ones(tmp_path, monkeypatch):

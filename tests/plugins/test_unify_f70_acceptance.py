@@ -522,6 +522,17 @@ def test_ac_unify_f70_8(tmp_path, bundled, monkeypatch):
         assert point.drive(manager)["action"] == "block"
         hooks.unregister_product_hooks(owner)
     assert point.drive(manager) == point.seen_default
+
+    # On the AC-20 base the approval gate runs before every product-hook point: an early_veto that blocks every
+    # call with its own text never stands in for the human-only refusal of an approve or a merge.
+    hooks.register_product_hook(owner, point.name, lambda **_kw: PROBE_REFUSAL)
+    assert point.drive(manager) == point.seen_valid
+    for command in ("gh pr review 7 --approve", "gh pr merge 7 --squash"):
+        directive = _gate(manager, "terminal", {"command": command})
+        message = str((directive or {}).get("message") or "")
+        assert (directive or {}).get("action") == "block" and "human-only" in message, command
+        assert PROBE_REFUSAL not in message, command
+    hooks.unregister_product_hooks(owner)
     _check_accessors(tmp_path, bundled, monkeypatch)
 
 
