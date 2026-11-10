@@ -12,6 +12,7 @@ M	.github/workflows/case-collision-check.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg
 M	.github/workflows/catalog-tests.yml	fork-ci	ruled	UPG-F69	5a/msg-206 + architect review E3
 M	.github/workflows/ci-review-comment.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/ci.yaml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
+A	.github/workflows/common-drift.yml	fork-ci	fork-ci	UNIFY-F70	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files
 M	.github/workflows/contributor-check.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-990,msg-3924,msg-206:5a,arch-msg-20
 M	.github/workflows/deploy-site.yml	fork-ci	fork-ci	UPG-F69	msg-596,msg-206:5a,arch-msg-20
 M	.github/workflows/desktop-bundle-smoke.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20
@@ -68,6 +69,7 @@ A	apps/desktop/e2e/fleet-f62-ac10.spec.ts	in-surface	replay	F68
 M	apps/desktop/e2e/fleet-profile-rail.spec.ts	in-surface	replay	F68	
 A	apps/desktop/e2e/loop-f35-ac1.spec.ts	in-surface	replay	F68	
 A	apps/desktop/e2e/rt-f03-ac9.spec.ts	in-surface	replay	F68	
+A	common/COMMON_PATHS	core	new	UNIFY-F70	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files
 A	contributors/emails/harsh1492@gmail.com	fork-ci	fork-ci	F68+UPG-F69	msg-990
 A	contributors/emails/hermes-builder@slang-coworkers.local	fork-ci	fork-ci	F68+UPG-F69	msg-990
 M	gateway/kanban_watchers.py	core	replay	F68	GOV-F25,GOV-F25.b (UPG-F68 carry)
@@ -123,11 +125,16 @@ A	plugins/nv-coworker-compose/_yaml_compat.py	in-surface	replay	F68
 A	plugins/nv-coworker-compose/cli.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/compose.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
 A	plugins/nv-coworker-compose/openshell/Dockerfile.worker	in-surface	replay	F68	
+A	plugins/nv-coworker-compose/openshell/Dockerfile.worker-0.1	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-coworker-compose/openshell/__init__.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/dockerfile_lint.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/install-into-sandbox.sh	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/installer.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port
+A	plugins/nv-coworker-compose/openshell/legacy_seccomp.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	plugins/nv-coworker-compose/openshell/legacy_seccomp_shim/sitecustomize.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	plugins/nv-coworker-compose/openshell/policy_port.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-coworker-compose/openshell/profile.d/nv-github-session.sh	in-surface	replay	F68	
+A	plugins/nv-coworker-compose/openshell/remote.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-coworker-compose/openshell/trust.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/openshell/trust_source.py	in-surface	replay	F68	
 A	plugins/nv-coworker-compose/plugin.yaml	in-surface	replay	F68	
@@ -145,9 +152,15 @@ A	plugins/nv-delivery-redrive/store.py	in-surface	replay	F68+UPG-F69	D-6 team-le
 A	plugins/nv-fleet-gates/__init__.py	in-surface	replay	F68+UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c ADR §D0, the #76/#81/#83 port; user msg 2982 (orch msg 16, thread hermes-UPG-F69.c): UPG-F69.c ADR §D10, the per-turn terminal scope
 A	plugins/nv-fleet-gates/aliases.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/cli.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/commands.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	plugins/nv-fleet-gates/conversation_origin.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	plugins/nv-fleet-gates/cron_delivery.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/edges.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/outbound.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	plugins/nv-fleet-gates/placeholder_redact.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/plugin.yaml	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/predicates.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/product_hooks.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/stores.py	in-surface	replay	F68	
 A	plugins/nv-ingress/__init__.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	plugins/nv-ingress/bridge.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
@@ -180,6 +193,7 @@ A	plugins/podman-onecli/hooks.py	in-surface	replay	F68
 A	plugins/podman-onecli/oneclient.py	in-surface	replay	F68	
 A	plugins/podman-onecli/plugin.yaml	in-surface	replay	F68	
 A	plugins/podman-onecli/secret_source.py	in-surface	replay	F68	
+A	scripts/common_drift.py	core	new	UNIFY-F70	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files
 A	tests/agent/test_a2a_f21_runaway_protection.py	in-surface	replay	F68	
 M	tests/agent/test_compression_review.py	in-surface	replay	F68	
 A	tests/agent/test_loop_f36_workflows_overlays_adopt.py	in-surface	replay	F68	
@@ -621,6 +635,8 @@ A	tests/e2e-scenarios/OSH-F64/fixtures/policy-tester.yaml	in-surface	replay	F68
 A	tests/e2e-scenarios/OSH-F64/fixtures/provision.dry-run.txt	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64/spec/coworker-types.yaml	in-surface	replay	F68	
 A	tests/e2e-scenarios/OSH-F64/spec/spines/base.yaml	in-surface	replay	F68	
+A	tests/e2e-scenarios/UNIFY-F70/AC-UNIFY-F70-5.md	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	tests/e2e-scenarios/UNIFY-F70/downstream-mr.sha256	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/e2e-scenarios/UPG-F67/desktop_repoints.tsv	in-surface	replay	F68	
 A	tests/e2e-scenarios/UPG-F67/e6_approved.patch	in-surface	replay	F68	
 A	tests/e2e-scenarios/UPG-F67/path_inventory.tsv	in-surface	replay	F68	
@@ -653,6 +669,7 @@ A	tests/e2e-scenarios/UPG-F69/fork_ci_sizing.tsv	in-surface	new	UPG-F69
 A	tests/e2e-scenarios/UPG-F69/overlap_rulings.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/path_inventory.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/UPG-F69/replay_check.py	in-surface	new	UPG-F69	
+A	tests/e2e-scenarios/UPG-F69/ruled_new_files.tsv	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D5, the checker's optional ruled_new_files table
 A	tests/e2e-scenarios/UPG-F69/ruled_residuals.tsv	in-surface	new	UPG-F69	
 A	tests/e2e-scenarios/loop-f35/AC-LOOP-F35-5.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/loop-f35/fixtures/loop-f35-bot-a/SOUL.md	in-surface	replay	F68	
@@ -808,6 +825,7 @@ A	tests/plugins/test_a2a_f19_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_ch_f51_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_ch_f52_github_routing_acceptance.py	in-surface	replay	F68+UPG-F69	user msg 1936 (orch msg 252): DN-CI-3 rows 7-10 (UPG-F69 3)
 A	tests/plugins/test_channel_adapter_registry_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_common_drift.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_fleet_f62_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_c_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_fleet_f62_d_acceptance.py	in-surface	replay	F68	
@@ -837,6 +855,7 @@ A	tests/plugins/test_mem_f43_shared_learnings_acceptance.py	in-surface	replay	F6
 A	tests/plugins/test_mem_f44_retention_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_approval_ledger_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_artifact_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_artifact_claim_card.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_cost_cap.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_cost_cap_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_cost_cap_escalation_acceptance.py	in-surface	replay	F68	
@@ -847,9 +866,12 @@ A	tests/plugins/test_nv_coworker_compose_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_nv_coworker_compose_egress_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_egress_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_engage_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_coworker_compose_internal_only.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_coworker_compose_mounts_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_mounts_unit.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_coworker_compose_openshell_v01_unit.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_coworker_compose_redrive_wiring.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_coworker_compose_retention.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_coworker_compose_session_driver_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_session_modes_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_coworker_compose_transport.py	in-surface	replay	F68	
@@ -857,8 +879,11 @@ A	tests/plugins/test_nv_coworker_compose_yaml_compat_unit.py	in-surface	replay	F
 A	tests/plugins/test_nv_delivery_redrive_bind.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 + E4′ d3c4f3ff + E4″ 31ef5b36 (architect msg 82 + E4″.4) (UPG-F69 D-6)
 A	tests/plugins/test_nv_delivery_redrive_safety.py	in-surface	replay	F68+UPG-F69	D-6 msg 888 + E4′ d3c4f3ff + E4″ 31ef5b36 (architect msg 82 + E4″.4) (UPG-F69 D-6)
 A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_fleet_gates_generic_modules.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_fleet_gates_product_hooks.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
+A	tests/plugins/test_nv_fleet_gates_terminal_scope.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_fleet_gates_unit.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_ingress_acceptance.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	tests/plugins/test_nv_ingress_admission_v2.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4); user msg 3162 (orch msg 40): erratum E1 D12, the real-admission node of AC-ING-F66-2
@@ -894,6 +919,7 @@ A	tests/plugins/test_self_f54_acceptance.py	in-surface	replay	F68
 A	tests/plugins/test_self_f54_doc_contract.py	in-surface	replay	F68	
 A	tests/plugins/test_self_f56_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_self_f56_doc_contract.py	in-surface	replay	F68	
+A	tests/plugins/test_unify_f70_acceptance.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_upg_f67_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206 + F68 E4 C1: AC-UPG-F67-15 re-spec (UPG-F69 3)
 A	tests/plugins/test_upg_f68_acceptance.py	in-surface	replay	F68+UPG-F69	3a/msg-206: AC-UPG-F68-8 re-point + F68 E4 C1 AC-UPG-F68-15 re-spec (UPG-F69 3); DN-E4-7/-8 opt 1 (msg 1288): AC-UPG-F68-18/-20 on the authority stub (UPG-F69 D-6); msg 72/78 + memo item3c §2/§3/§6 + E4′ §E4.6 + E7.1a/D-1..D-4 (msg 596, architect msg 94): AC-UPG-F68-19/-21 off the retired lease consumer (UPG-F69 3); orch msg 194 (architect msg 112): AC-UPG-F68-12 TAG_COMMIT re-pinned to v0.22.5 bf0203a7, criterion text unchanged (UPG-F69 3)
 A	tests/plugins/test_upg_f69_a_acceptance.py	in-surface	new	UPG-F69.a	user msg 2018 (orch msg 2, thread hermes-UPG-F69.a)
