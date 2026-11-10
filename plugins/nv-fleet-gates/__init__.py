@@ -271,7 +271,7 @@ def register(ctx) -> None:
     expected_backend = ctx.get_config("expected_backend", "docker")
     required_stages = list(ctx.get_config("required_stages", ["OUTPUT_REVIEW"]) or [])
     plan_gate_on = bool(ctx.get_config("plan_gate", True))
-    edges_db_path = ctx.get_config("edges_db_path")
+    edges_db_path = edges.resolve_db_path(ctx.get_config("edges_db_path"))
     stage_markers = list(ctx.get_config("stage_markers", []) or [])
     admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN
     skills_root = ctx.get_config("skills_root")

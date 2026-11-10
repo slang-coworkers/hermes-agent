@@ -4,7 +4,8 @@
 # --upload` / `openshell sandbox exec`). All install LOGIC lives in the co-located pure
 # planner `installer.py` (Hermes-native, hermetically testable); this script only routes.
 #
-#   install-into-sandbox.sh <coworker-types.yaml> --ref <40-char-sha> [--gateway-url <ws-url>] [--policy-root <host dir>] [--dry-run]
+#   install-into-sandbox.sh <coworker-types.yaml> --ref <40-char-sha> [--gateway-url <ws-url>] [--policy-root <host dir>]
+#                           [--fork-source <git url|path>] [--dry-run]
 #   (a real run requires --gateway-url; --dry-run does not)
 #
 # --dry-run prints the FULL ordered transcript (Phase A plugin bootstrap + Phase B compose
@@ -40,11 +41,13 @@ REF=""
 DRY_RUN=0
 GATEWAY_URL=""
 POLICY_ROOT=""
+FORK_SOURCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF="${2:-}"; shift 2 ;;
     --gateway-url) GATEWAY_URL="${2:-}"; shift 2 ;;
     --policy-root) POLICY_ROOT="${2:-}"; shift 2 ;;
+    --fork-source) FORK_SOURCE="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) if [ -z "$SPEC" ]; then SPEC="$1"; shift; else echo "unexpected arg: $1" >&2; exit 2; fi ;;
@@ -52,15 +55,17 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$SPEC" ] || [ -z "$REF" ]; then
-  echo "usage: install-into-sandbox.sh <coworker-types.yaml> --ref <40-char-sha> [--gateway-url <ws-url>] [--policy-root <host dir>] [--dry-run]" >&2
+  echo "usage: install-into-sandbox.sh <coworker-types.yaml> --ref <40-char-sha> [--gateway-url <ws-url>] [--policy-root <host dir>] [--fork-source <git url|path>] [--dry-run]" >&2
   exit 2
 fi
 
+FORK_ARGS=()
+[ -z "$FORK_SOURCE" ] || FORK_ARGS=(--fork-source "$FORK_SOURCE")
+ROOT_ARGS=()
+[ -z "$POLICY_ROOT" ] || ROOT_ARGS=(--policy-root "$POLICY_ROOT")
+
 if [ "$DRY_RUN" -eq 1 ]; then
-  if [ -n "$POLICY_ROOT" ]; then
-    exec "$PY" "$DIR/installer.py" plan --spec "$SPEC" --ref "$REF" --policy-root "$POLICY_ROOT"
-  fi
-  exec "$PY" "$DIR/installer.py" plan --spec "$SPEC" --ref "$REF"
+  exec "$PY" "$DIR/installer.py" plan --spec "$SPEC" --ref "$REF" ${ROOT_ARGS[@]+"${ROOT_ARGS[@]}"} ${FORK_ARGS[@]+"${FORK_ARGS[@]}"}
 fi
 
 # Both phases operate on the sandbox's OWN Hermes home (the installer's _require_home()
@@ -83,10 +88,8 @@ fi
 # plugin installs), so the guard is in place before any scanned install — the install-time scanner
 # returns a DANGEROUS verdict on the first-party fleet plugins that --force cannot override, so an
 # install attempted before the guard would exit 1. Idempotent — a re-run skips all three.
-"$PY" "$DIR/installer.py" phase-a --spec "$SPEC" --ref "$REF"
+"$PY" "$DIR/installer.py" phase-a --spec "$SPEC" --ref "$REF" ${FORK_ARGS[@]+"${FORK_ARGS[@]}"}
 # Phase B: compose + per-profile installs + backed-up in-place default edit + managed
 # fragment + wires + rooms + restart, planned + applied by the install-openshell subaction.
-if [ -n "$POLICY_ROOT" ]; then
-  exec hermes coworker install-openshell "$SPEC" --ref "$REF" --gateway-url "$GATEWAY_URL" --policy-root "$POLICY_ROOT"
-fi
-exec hermes coworker install-openshell "$SPEC" --ref "$REF" --gateway-url "$GATEWAY_URL"
+exec hermes coworker install-openshell "$SPEC" --ref "$REF" --gateway-url "$GATEWAY_URL" \
+  ${ROOT_ARGS[@]+"${ROOT_ARGS[@]}"} ${FORK_ARGS[@]+"${FORK_ARGS[@]}"}
