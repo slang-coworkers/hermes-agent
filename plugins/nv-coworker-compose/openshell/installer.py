@@ -1695,9 +1695,7 @@ def _write_if_changed(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _plugin_git_env(gitbin: Optional[Path]) -> Optional[dict[str, str]]:
-    if gitbin is None:
-        return None
+def _plugin_git_env(gitbin: Path) -> dict[str, str]:
     return {**os.environ, "PATH": f"{gitbin}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
@@ -1717,8 +1715,8 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         if tag == "restart":
             _restart_gateway_detached(cmd, Path(ctx["home"]))
             return
-        if tag in _PLUGIN_GIT_TAGS:
-            _run(cmd, env=_plugin_git_env(ctx.get("plugin_gitbin")))
+        if tag in _PLUGIN_GIT_TAGS and ctx.get("plugin_gitbin"):
+            _run(cmd, env=_plugin_git_env(ctx["plugin_gitbin"]))
             return
         if cmd and cmd[0] == "openshell":
             _run(_openshell_argv(cmd[1:]), env=_openshell_env())
