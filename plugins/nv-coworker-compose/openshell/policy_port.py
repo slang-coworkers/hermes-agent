@@ -108,7 +108,7 @@ DEFAULT_K8S_ALLOWED_HOSTS: tuple = ()
 INFERENCE_HOSTS = ("inference.local",)
 LANE_HOSTS = ("172.17.0.1", "host.openshell.internal", "host.docker.internal")
 LANE_PORTS = (18255, 18777)
-LANE_PATH_PREFIXES = ("/opt/osh-lane", "/tmp/osh-lane")  # NOSONAR sandbox-policy path constant, no file is created
+LANE_PATH_PREFIXES = ("/opt/osh-lane", "/tmp/osh-lane")  # NOSONAR sandbox-policy path constant, no file is created; no-tmp: ok — a lane path inside the OpenShell sandbox policy, not Hermes scratch space
 LANE_BINARIES = ("/usr/bin/socat", "/usr/bin/ssh")
 
 
