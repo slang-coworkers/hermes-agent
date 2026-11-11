@@ -51,6 +51,8 @@ miss on the pin read-back, or a refusal count above zero, is a FAIL.
 
 ## Evidence
 
+- What the install and the rollback created and removed (containers, images, scratch sandboxes), with `df -B1 /`
+  before and after.
 - The `hermes plugins list` output and the `.install-metadata.json` read-backs (step 1).
 - The `state.db` query outputs for steps 2 and 3, with the query text.
 - The box's provider block as read on the box (`base_url`, `api_mode`, `model_id`, `key_env`), kept in the private
