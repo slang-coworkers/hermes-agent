@@ -795,8 +795,8 @@ def git_call(argv: list[str]) -> Optional[tuple[str, list[str], list[str]]]:
 
 
 def forge_args(argv: list[str]) -> Optional[list[str]]:
-    """The arguments of a forge CLI invocation (``<tool>``, ``python3 -m <module>``, ``python3
-    <path>/<tool>``), else None."""
+    """The arguments of a forge CLI invocation (``{tool}``, ``python3 -m {module}``, ``python3
+    {path}/{tool}``), else None."""
     if not argv:
         return None
     base = basename(argv[0])

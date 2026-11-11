@@ -62,11 +62,11 @@ _CREATE_INTENT_RE = re.compile(r"\bgh\W+pr\W+create\b", re.IGNORECASE)
 _PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)", re.IGNORECASE
 )
-# GitLab: `glab mr create`, or a forge CLI named in the ``forge_tools`` setting (`<tool> mr create`,
-# `python3 -m <tool> mr create`), printing an MR web URL <host>/<group[/sub...]/project>/-/merge_requests/<iid>.
+# GitLab: `glab mr create`, or a forge CLI named in the ``forge_tools`` setting (`{tool} mr create`,
+# `python3 -m {tool} mr create`), printing an MR web URL <host>/<group[/sub...]/project>/-/merge_requests/<iid>.
 # The key is (project path, iid), which is what the GitLab ingress puts in repository.full_name
 # and pull_request.number. Each intent only claims its own forge's URL shape.
-# Global options may sit between the tool and the noun (`<tool> --project <group>/<project> mr create`), so anything in
+# Global options may sit between the tool and the noun (`{tool} --project {group}/{project} mr create`), so anything in
 # the same shell segment is allowed there.
 _GITLAB_CREATE_INTENT_RE = re.compile(r"\bglab\b[^;&|\n]*?\bmr\W+create\b", re.IGNORECASE)
 _GITLAB_MR_URL_RE = re.compile(
@@ -83,7 +83,7 @@ _CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"), (_GITLAB_CREATE_INTENT_RE,
 # before its own "web_url": prefer the web_url value when there is one.
 _WEB_URL_RE = re.compile(r'"(?:web_url|html_url)"\s*:\s*"([^"]+)"')
 
-# A create command, token by token: the forge tool (``python3 -m <tool>`` names the module), then its noun, then
+# A create command, token by token: the forge tool (``python3 -m {tool}`` names the module), then its noun, then
 # ``create``; its own source-branch flags. A value-taking option's value is never read as a flag (a title may begin
 # with ``--head=``), so the scan consumes the values of every value-taking option the create commands have.
 _CREATE_NOUN = {"gh": "pr", "glab": "mr"}
