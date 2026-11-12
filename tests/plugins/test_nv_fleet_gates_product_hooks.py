@@ -82,6 +82,8 @@ def test_the_callable_gets_keyword_arguments_plus_home(hooks, tmp_path):
         ("tool_result_rewrite", 7, None, None),
         ("room_session_kind", "maybe", "api_server", "unknown"),
         ("room_session_kind", "maybe", "cli", "no"),
+        ("room_session_kind", [], "api_server", "unknown"),
+        ("room_session_kind", [], "cli", "no"),
         ("forge_cli_parser", "not a parser", None, None),
     ],
 )

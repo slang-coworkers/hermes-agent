@@ -133,7 +133,7 @@ def _valid(point: str, value: Any) -> bool:
     if point in VETO_POINTS or point == "tool_result_rewrite":
         return value is None or isinstance(value, str)
     if point == "room_session_kind":
-        return value in ROOM_KINDS
+        return isinstance(value, str) and value in ROOM_KINDS
     if point == "own_post_threads":
         return isinstance(value, (set, frozenset)) and all(isinstance(v, str) for v in value)
     return value is None or isinstance(value, argparse.ArgumentParser)
