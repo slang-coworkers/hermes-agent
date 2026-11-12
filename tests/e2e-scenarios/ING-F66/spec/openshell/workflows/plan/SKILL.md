@@ -21,5 +21,13 @@ workflow when code or docs must change.
    versus hypotheses for an investigation; findings by severity for a review.
 5. Deliver — write the report with mode-appropriate sections and cite concrete
    files and lines.
-6. Handoff — post a short summary linking the report; invoke the implement
+6. Post a pull-request review — write your findings, with the checks-gate
+   verdict from the section below, to a file in your worker. Run
+   `codex_critique` with stage OUTPUT_REVIEW on that file right before the
+   post, then post it through `terminal` as a comment-mode review:
+
+       gh pr review <N> --repo <owner>/<repo> --comment --body-file <file>
+
+   Comment mode only: approvals are human-only.
+7. Handoff — post a short summary linking the report; invoke the implement
    workflow when the mode is plan and code changes follow.

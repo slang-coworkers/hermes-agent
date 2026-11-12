@@ -365,6 +365,15 @@ def test_ac_osh_f64_1(tmp_path, monkeypatch):
     assert result.report == ref_report.read_text(encoding="utf-8")
 
     spec = _osh_spec(root)
+    # The plan skips pairs already in the spec's target store: point it at this test's own store, not a host /tmp one.
+    spec_dir = tmp_path / "osh-f64-spec"
+    shutil.copytree(spec.parent, spec_dir)
+    spine_file = spec_dir / "spines" / "base.yaml"
+    spine_text = spine_file.read_text(encoding="utf-8")
+    assert "edges_db_path: /tmp/hermes-fleet/edges.db" in spine_text
+    spine_file.write_text(spine_text.replace("edges_db_path: /tmp/hermes-fleet/edges.db",
+                                             f"edges_db_path: {tmp_path / 'edges.db'}"), encoding="utf-8")
+    spec = spec_dir / spec.name
     # The canonical enabled set is the spine's config.plugins.enabled — the set compose renders
     # from (deep-merges each spine's `config`, compose.py:2335; reads plugins.enabled off the
     # merged config, :610). The FLEET-F62/OSH-F63 pattern declares it in the spine, not at the

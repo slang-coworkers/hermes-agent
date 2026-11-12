@@ -548,7 +548,10 @@ after a successful create or replace. The script:
   digest (`<home>/.osh-f64/sandbox-policy/<name>.sha256`) is missing or differs from the current
   render, discarding that sandbox's local state. A box installed by an older installer has no
   records, so its first rerun re-creates every worker sandbox.
-- It creates the fleet rooms and wires, then restarts the gateway via the shipped
+- It creates the fleet rooms and wires (the spec's `wires:`, else the `hermes wire add` lines of
+  the spec's sibling `wire-manifest.txt`, skipping each pair the spec's target edges store already
+  holds), puts each webhook route's relative `script:` into the bound profile's `scripts/`
+  (v0.22.5 resolves it there), then restarts the gateway via the shipped
   `hermes gateway restart`, launched **detached** with its output appended to
   `<home>/logs/osh-f64-restart.log`; the installer returns after a bounded
   `hermes gateway status` poll and reports on stderr whether a gateway answered.
@@ -573,6 +576,60 @@ the gateway sandbox and reads `skills.external_dirs`, so `/opt/hermes-fleet/shar
 must exist IN the gateway sandbox before boot (stage or mount it there). The remote-ssh
 substrate binds no container mount, so this is a gateway-sandbox prerequisite, not a
 worker-image one; the orchestrator wiki-fold stays an operator opt-in under openshell.
+
+### A re-install with no manual step: the lane bundle, a sealed fork and route scripts
+
+A spec can declare the gateway sandbox's ssh lane at the top level, outside `egress`, so a box
+`egress` swap keeps it:
+
+```yaml
+ssh_lane:
+  bundle: /tmp/osh-lane          # no-tmp: ok — the lane's own staging path inside the gateway sandbox
+  env_file: lane.env
+  shim: bin/openshell
+  interpreter: /opt/hermes/.venv/bin/python3
+  members: [token, ca-bundle.pem]
+```
+
+With `ssh_lane` declared:
+
+- Phase A and Phase B refuse, before any sandbox operation, when the env file, the shim or a
+  member is missing or empty in the bundle, and they name the path. The lane's host tooling
+  stages the bundle; the installer reads it and never copies it into the home.
+- Every openshell call the installer makes runs the shim with the interpreter after it sources
+  the env file. `openshell` does not need to be on `PATH`.
+- Every persisted `ProxyCommand openshell <args>` becomes the lane line
+  `ProxyCommand /bin/sh -c '. <bundle>/<env_file> && exec <interpreter> <bundle>/<shim> <args>'`.
+  A re-install therefore writes the same bytes as the lane's own re-apply.
+- Each value must be a plain path (`[A-Za-z0-9_./-]`). `bundle` and `interpreter` are absolute;
+  the other values are relative to the bundle.
+
+openshell 0.0.72 colours its output even when piped. The installer removes the SGR codes from
+every `sandbox list`, `policy digest` and `sandbox ssh-config` answer before it parses or
+persists the text, so a coloured listing still finds the live sandboxes.
+
+**Sealed fork (`--fork-source`).** On the lane image, the git URL of the plugin source maps to the
+read-only `/opt/hermes/fork`, which holds only the commit the image was built at.
+`install-into-sandbox.sh … --fork-source <git url|path>` (also on `installer.py phase-a|plan|apply`
+and `hermes coworker install-openshell`) installs another `--ref` without writing that tree:
+
+- The installer asks the caller's git where the plugin URL resolves.
+- When that is a local repository without `--ref`, it builds `$HERMES_HOME/openshell/fork-mirror.git`.
+  The mirror borrows the sealed objects (alternates), takes `--ref` from the fork source, and records
+  it as `refs/tags/nv-install/<ref>`.
+- Every plugin install then runs with `$HERMES_HOME/openshell/gitbin` first on `PATH`. Its `git`
+  calls the real git binary with `-c url.<mirror>.insteadOf=<plugin url>`. Command-line `-c` survives
+  Hermes' isolated git environment; injected git config does not.
+- A ref that neither the sealed tree nor the fork source holds refuses before any plugin install
+  or sandbox step, and names the ref and the sealed path. `--dry-run` reports the mirror work and
+  fetches nothing.
+
+**Route scripts.** For every webhook route in the default config whose `script:` is relative, the
+installer copies the script into the bound profile's `scripts/` (`$HERMES_HOME/scripts/` for
+default), where v0.22.5 resolves it. The copy runs after every profile install and before the
+restart. The source is the render's copy for that profile, else the render's default copy, else
+the gateway root `scripts/`. A missing source, an unknown profile or a `..` path refuses before the
+restart, and names the route.
 
 ### Rollback
 

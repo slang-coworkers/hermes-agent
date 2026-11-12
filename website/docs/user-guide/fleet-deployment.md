@@ -52,7 +52,7 @@ The render enforces the fleet invariants regardless of what the spec declares:
   [OpenShell fleet substrate](./fleet-openshell.md) runbook).
 - **The veto's settings**: `plugins.entries.nv-fleet-gates.settings` carries
   `enforce_sandbox: true`, `expected_backend` (render-derived from the substrate, so it
-  cannot drift from `terminal.backend`), an absolute `edges_db_path` outside every home,
+  cannot drift from `terminal.backend`), the fleet's `edges_db_path` (§5),
   and `admin_tools: [onboard_coworker, onboard_project, create_agent]` (unioned by the
   veto with its vendored `{cronjob_manage}`).
 - **The role map** lives in `managed/config.yaml` at
@@ -201,12 +201,21 @@ work still runs sandboxed as each profile's own subprocess.
 
 ## 5. The fleet edges store (`edges_db_path`)
 
-The render pins an absolute `edges_db_path` outside every profile home so the
-process-shared edges DB has one owner. For a persistent production deployment set it to
-an operator-owned durable path (e.g. `/var/lib/hermes/fleet/edges.db`) rather than an
-ephemeral `/tmp` location, which is cleared on reboot. The committed test fixtures use a <!-- no-tmp: ok — names /tmp to warn against it; the next line explains the test-only use -->
-`/tmp` path because the hermetic tests and the sandbox scenarios need it writable and
-outside `$HERMES_HOME`; that is a test/scenario choice, not a production recommendation.
+Every profile of the fleet must open ONE edges store, so the render writes one
+`edges_db_path` into every profile. The value is either absolute or relative:
+
+- **Relative** (the base-NanoClaw specs ship `fleet/edges.db`): nv-fleet-gates and the
+  openshell installer resolve it under the gateway's Hermes root
+  (`hermes_constants.get_default_hermes_root()`). That root is the same for the root home and
+  for every `<root>/profiles/<name>` home. The store then travels with the home, and a
+  scratch install under its own `HERMES_HOME` never writes another fleet's store.
+- **Absolute** values are used as given. Use an operator-owned durable path (e.g.
+  `/var/lib/hermes/fleet/edges.db`) rather than an ephemeral `/tmp` location, which is <!-- no-tmp: ok — names /tmp to warn against it -->
+  cleared on reboot. Two homes that name the same absolute path share one store.
+
+The openshell installer writes the fleet's wire ring into the store the spec targets, on every
+install. A re-install over a home whose installed config still names an older store therefore
+re-adds the ring to the new store.
 
 ## 6. Substrate pluggability
 

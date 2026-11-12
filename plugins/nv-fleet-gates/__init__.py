@@ -271,7 +271,7 @@ def register(ctx) -> None:
     expected_backend = ctx.get_config("expected_backend", "docker")
     required_stages = list(ctx.get_config("required_stages", ["OUTPUT_REVIEW"]) or [])
     plan_gate_on = bool(ctx.get_config("plan_gate", True))
-    edges_db_path = ctx.get_config("edges_db_path")
+    edges_db_path = edges.resolve_db_path(ctx.get_config("edges_db_path"))
     stage_markers = list(ctx.get_config("stage_markers", []) or [])
     admin_tools = set(ctx.get_config("admin_tools", []) or []) | _VENDORED_ADMIN
     skills_root = ctx.get_config("skills_root")
@@ -525,6 +525,19 @@ def register(ctx) -> None:
         _restricted_checked["ok"] = True
         return None
 
+    def _approval_block(canon, args):
+        # Owner rule, ahead of every other predicate and without a role exemption, so no earlier refusal or
+        # orchestrator allowance can stand in for it.
+        if canon not in ("terminal", "execute_code"):
+            return None
+        kind = predicates.pr_approval_or_merge(predicates.command_text(canon, args))
+        if kind:
+            return _block(
+                f"approval gate: PR approvals and merges are human-only (owner rule); {kind} refused for every "
+                "profile"
+            )
+        return None
+
     def _gate(tool_name=None, args=None, session_id=None, **kwargs):
         try:
             canon = canonicalise(tool_name or "")
@@ -532,6 +545,9 @@ def register(ctx) -> None:
             backstop = _restricted_block()
             if backstop:
                 return backstop
+            blocked = _approval_block(canon, args)
+            if blocked:
+                return blocked
             for predicate in (_sandbox_block, _fleet_admin_block, _wiring_block, _mcp_scope_block):
                 blocked = predicate(canon, args)
                 if blocked:

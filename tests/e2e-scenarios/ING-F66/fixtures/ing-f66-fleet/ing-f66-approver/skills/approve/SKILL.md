@@ -1,12 +1,13 @@
 ---
 name: approve
-description: Gate the final approval of a fleet pull request on the checks API at the pinned head.
+description: Check a fleet pull request's check runs at the pinned head and hand the verdict to the human approver.
 ---
 
 # Approve
 
-The approver grants the final approval only for a pull request whose check runs
-are green at the exact head the reviewers saw.
+Approvals are human-only. The approver checks that a pull request's check runs
+are green at the exact head the reviewers saw and hands that checks verdict to
+the human approver; it never approves a pull request itself.
 
 ## Steps
 
@@ -19,7 +20,8 @@ are green at the exact head the reviewers saw.
    `~/.hermes/skills/`; never use the skill directory that skill_view reports or
    the skill-directory template variable, which both name the gateway's copy.
 
-3. Exit 0: approve, quoting the gate's JSON line.
-4. Exit 3: refuse to approve and name every refused check run from the gate's
-   output. An unavailable read is a refusal too. Never approve on the legacy
-   commit-status endpoint.
+3. Checks green at the pinned head (exit 0): hand to the human approver,
+   quoting the gate's JSON line.
+4. Refused checks (exit 3): name every refused check run from the gate's
+   output in the verdict you hand to the human approver. An unavailable read is
+   a refusal too. Never take a verdict from the legacy commit-status endpoint.

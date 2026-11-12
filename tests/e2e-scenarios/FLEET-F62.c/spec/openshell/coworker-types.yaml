@@ -46,6 +46,16 @@ egress:
   openshell_trust:
     bundle: "/etc/openshell-tls/ca-bundle.pem"
 
+# The lane's ssh bundle (pushed into the gateway sandbox by the lane's host tooling; read only).
+# `openshell` is on no launcher PATH there: the installer runs its own openshell calls, and renders
+# every worker ProxyCommand, through this shim, sourcing env_file first.
+ssh_lane:
+  bundle: /tmp/osh-lane
+  env_file: lane.env
+  shim: bin/openshell
+  interpreter: /opt/hermes/.venv/bin/python3
+  members: [token, ca-bundle.pem]
+
 # Optional OpenShell egress providers (generic default-off widening). A worker opts in
 # via its own `providers: [<name>]`; the renderer then (1) binds the provider on that
 # worker's `openshell sandbox create` line (`--provider <name>`, at create), (2) folds

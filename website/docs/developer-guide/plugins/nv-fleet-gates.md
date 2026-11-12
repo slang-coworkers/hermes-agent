@@ -37,7 +37,7 @@ managed scope so a per-profile config cannot widen them.
 | setting | meaning |
 |---|---|
 | `profile_roles` | map of profile name → role; a profile is the orchestrator when its role is `orchestrator`. Read from the managed-scope merge, so a per-profile override cannot escalate a worker. |
-| `edges_db_path` | absolute path to the **fleet-shared** SQLite edges store (outside any profile home), written by `hermes wire` and read by every profile's predicate. |
+| `edges_db_path` | path to the **fleet-shared** SQLite edges store, written by `hermes wire` and read by every profile's predicate. An absolute path is used as given; a relative one resolves under the gateway's Hermes root (`get_default_hermes_root()`), the same file for the root and every `<root>/profiles/<name>` home. |
 | `enforce_sandbox` | when true, the SANDBOX predicate first hard-fails any turn whose active per-turn profile differs from the launch profile (cross-profile refusal, see below), then checks the resolved backend, brings up the container task env, and re-asserts the dangerous-command floor; and the MCP-SCOPE predicate additionally denies any non-`remote` (stdio/unknown-transport) `mcp_*` call. Off by default. |
 | `expected_backend` | the container backend a profile's tool calls must resolve to when `enforce_sandbox` is true. |
 | `mcp_scope` | the full profile-keyed MCP allow-list the compose plugin renders into **every** profile: `{profile: {mcp__<server>__<tool>: transport}}`. The MCP-SCOPE predicate selects the calling profile's entry by identity and denies any `mcp_*` tool absent from it (a profile absent from the map is denied all MCP — fail-closed); under `enforce_sandbox` a non-`remote` transport is also denied. The whole map is copied into each profile because `ctx.get_config` resolves against the active profile home. |
@@ -150,6 +150,36 @@ in two places:
 `message_agent` is the one documented exclusion from the presence scan — it is
 injected, not registry-registered, so it is matched by constant in the gate.
 
+## Approve and merge refusal
+
+Approvals and merges of a pull request are human-only (owner rule). nv-fleet-gates refuses every `terminal` and
+`execute_code` call whose text approves or merges a pull request, for every profile and the root home alike. The
+refusal names `human-only (owner rule)`. No role is exempt, the orchestrator included, and no setting turns it off.
+It runs first in `pre_tool_call`, right after the restricted-set backstop and before every other predicate, so an
+earlier refusal never hides it.
+
+The classes it refuses (`predicates.pr_approval_or_merge`):
+
+- **gh CLI:** `gh pr review` with `--approve`, `--approve=<value>` (not `false`) or a short flag cluster that holds `a`;
+  any `gh pr merge`.
+- **REST:** a `pulls/<n>/reviews` path (including `reviews/<id>/events`) with `APPROVE` in the text; a
+  `pulls/<n>/merge` path with a PUT method (`-X PUT`, `--method PUT`, `--request PUT`, `method="PUT"`, `.put(`).
+  A GET of the merge path stays allowed.
+- **GraphQL:** `addPullRequestReview` or `submitPullRequestReview` with `APPROVE` in the text, which covers inline
+  values, aliases and variables; `mergePullRequest` and `enablePullRequestAutoMerge` with any arguments.
+- **Opaque bodies, refused unread (fail-closed):** `gh api graphql` with a file-fed field (`-F <k>=@…`,
+  `--field <k>=@…`) or `--input`; curl to `/graphql` with a file body (`-d @…`, `--data*@…`, `--json @…`, `-T`); a file
+  body sent to a reviews or merge path; and any `gh alias set` or `gh alias import`, since an alias hides the verb.
+  A file-fed comment on an `issues/<n>/comments` path is neither class and stays allowed.
+
+The text is matched as written and again with quotes, commas and brackets read as spaces, which is how the argv-list
+spelling of `execute_code` (`subprocess.run(["gh", "pr", "review", …])`) is read.
+
+This is defense-in-depth beside the owner rule, not a credential control. The hook sees only the tool call's own text,
+so it cannot see text built at run time (base64, `eval`, string assembly in `execute_code`), an alias or gh extension
+planted by a direct file write, or a GitHub MCP tool (the fleet ships none, and `mcp_scope` denies unlisted MCP
+tools). Only egress enforcement closes those.
+
 ## Wired-only agent messaging (A2A-F18)
 
 **Ported behaviour.** In NanoClaw the operator's destinations list is at once the
@@ -181,8 +211,8 @@ per-pair layer, gating the stock `message_agent_tool` entry point through the si
   A wired **gated** edge escalates to Hermes' own **human approval** gate: `_wiring_approve`
   returns an `approve` directive carrying a stable `rule_key` of the form `wire:<from>:<to>`
   and the message `gated edge <from>-><to> requires human approval`. The edges live in a
-  fleet-shared SQLite store at the managed-scope `edges_db_path` setting (outside any profile
-  home), keyed `PRIMARY KEY (from_profile, to_profile)`. Because the covering surface is on
+  fleet-shared SQLite store at the `edges_db_path` setting (absolute, or relative to the
+  gateway's Hermes root), keyed `PRIMARY KEY (from_profile, to_profile)`. Because the covering surface is on
   the fork baseline `release/v2026.8.31-e2e-fixed` (merged by LOOP-F37 / PR #5, not present in
   the pinned release tree), its anchors are baseline-only:
   - baseline: `plugins/nv-fleet-gates/__init__.py:331` (_wiring_block, unwired → block)

@@ -20,6 +20,7 @@ Pure planner surface (no side effects):
 from __future__ import annotations
 
 import argparse
+import contextvars
 import copy
 import functools
 import logging
@@ -69,6 +70,87 @@ _ABSENT_SUFFIX = ".osh-f64.absent"
 # Names this install parked (one per line, at the home root): rollback unparks exactly these.
 _PARKED_RECORD = "gateway.osh-f64.parked"
 SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
+# The git URL `hermes plugins install <FORK_REPO>/plugins/<name>` clones (plugins_cmd.py owner/repo shorthand).
+_FORK_URL = f"https://github.com/{FORK_REPO}.git"
+# openshell 0.0.72 SGR-colours its tables and digests even when piped; every parsed or persisted read strips them.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# Lane values are spliced unquoted into `/bin/sh -c` argv and the persisted ProxyCommand, so only a plain path
+# alphabet is accepted: no whitespace, quote, `%` (an ssh token) or shell operator can reach either.
+_LANE_VALUE_RE = re.compile(r"[A-Za-z0-9_./-]+")
+_LANE_KEYS = ("bundle", "env_file", "shim", "interpreter", "members")
+_WIRE_MANIFEST = "wire-manifest.txt"
+
+
+def _strip_ansi(text: Optional[str]) -> str:
+    return _ANSI_RE.sub("", text or "")
+
+
+def _ssh_lane(spec: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The spec's top-level ``ssh_lane`` (None when absent), shape-checked: ``bundle`` and
+    ``interpreter`` absolute, ``env_file``/``shim``/``members`` relative to the bundle."""
+    lane = spec.get("ssh_lane")
+    if lane is None:
+        return None
+    if not isinstance(lane, dict):
+        raise ValueError(f"ssh_lane must be a mapping, got {lane!r}")
+    unknown = sorted(set(lane) - set(_LANE_KEYS))
+    if unknown:
+        raise ValueError(f"ssh_lane has unknown key(s) {unknown}; allowed: {list(_LANE_KEYS)}")
+    members = lane.get("members") or []
+    if not isinstance(members, list):
+        raise ValueError(f"ssh_lane.members must be a list of bundle-relative files, got {members!r}")
+    out: dict[str, Any] = {}
+    for key in ("bundle", "env_file", "shim", "interpreter"):
+        out[key] = lane.get(key)
+    out["members"] = list(members)
+    for key, value in [(k, out[k]) for k in ("bundle", "env_file", "shim", "interpreter")] + [
+            ("members", m) for m in members]:
+        if not isinstance(value, str) or not _LANE_VALUE_RE.fullmatch(value):
+            raise ValueError(f"ssh_lane.{key} must be a plain path ([A-Za-z0-9_./-]), got {value!r}")
+        absolute = key in ("bundle", "interpreter")
+        if value.startswith("/") != absolute:
+            raise ValueError(f"ssh_lane.{key} must be {'an absolute' if absolute else 'a bundle-relative'} path, "
+                             f"got {value!r}")
+        if ".." in value.split("/"):
+            raise ValueError(f"ssh_lane.{key} must not contain a '..' component, got {value!r}")
+    out["bundle"] = out["bundle"].rstrip("/") or "/"
+    return out
+
+
+def _lane_files(lane: dict[str, Any]) -> list[str]:
+    return [f"{lane['bundle']}/{rel}" for rel in (lane["env_file"], lane["shim"], *lane["members"])]
+
+
+def _preflight_ssh_lane(lane: Optional[dict[str, Any]]) -> None:
+    """Refuse an incomplete lane bundle before any sandbox operation: the installer reaches openshell, and every
+    worker ssh reaches its sandbox, only through these files (the lane's host tooling stages them)."""
+    if lane is None:
+        return
+    for path in _lane_files(lane):
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size == 0:
+            raise ValueError(f"ssh_lane: {path} is missing or empty; stage the lane bundle {lane['bundle']} "
+                             "before installing; no sandbox was changed")
+
+
+# The ssh lane of the install in progress, set by apply()/phase_a() once the bundle preflight admits it, so a step
+# run outside an install (a plan, a unit-level executor call) keeps the bare `openshell` argv.
+_ACTIVE_LANE: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar("osh_ssh_lane", default=None)
+
+
+def _openshell_argv(args: list[str]) -> list[str]:
+    """One openshell invocation: bare without a lane, else the lane's shim run by its interpreter after
+    sourcing its env file (the shape of the lane ProxyCommand)."""
+    lane = _ACTIVE_LANE.get()
+    if lane is None:
+        return ["openshell", *args]
+    bundle = lane["bundle"]
+    return ["/bin/sh", "-c", '. "$0" && exec "$@"', f"{bundle}/{lane['env_file']}", lane["interpreter"],
+            f"{bundle}/{lane['shim']}", *args]
+
+
+def _openshell_env() -> dict[str, str]:
+    return {**os.environ, "NO_COLOR": "1"}
 
 
 def _load_trust():
@@ -800,10 +882,10 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
             ))
             mutated = True
 
-    # Wires from the spec (skip any already present; edges are undirected). The spec's
-    # `wires` list is authoritative — the loop adds exactly those edges, no more.
+    # Wires from the spec, else its sibling wire manifest (skip any already present; edges are
+    # undirected). That list is authoritative — the loop adds exactly those edges, no more.
     installed_edges = {frozenset(p) for p in installed_wires} if isinstance(installed_wires, list) else None
-    for pair in (spec.get("wires") or []):
+    for pair in _spec_wires(spec, spec_path):
         a, b = pair[0], pair[1]
         if installed_wires == "all":
             continue
@@ -811,6 +893,13 @@ def build_plan(home_state: dict[str, Any], spec_path: Any, ref: str, policy_root
             continue
         steps.append(Step(["hermes", "wire", "add", a, b], "wire"))
         mutated = True
+
+    # v0.22.5 resolves a route's relative script under the BOUND profile's scripts/, so each one is put
+    # there after every profile (re)install, and an unresolvable one refuses before the restart.
+    routed = _relative_script_routes(apply_config_diff(default_config, diff))
+    if routed:
+        steps.append(Step(f"# place webhook route scripts in each bound profile's scripts/ "
+                          f"({', '.join(name for name, _script, _route in routed)})", "route_scripts"))
 
     # Restart via the shipped lifecycle command — only when something changed.
     if mutated:
@@ -848,12 +937,61 @@ def _installed_revision(meta: dict[str, Any], name: str) -> Optional[str]:
     return entry.get("revision") if isinstance(entry, dict) else None
 
 
-def _collect_wires(default_config: dict[str, Any]) -> Optional[list[list[str]]]:
-    """Existing wire edges from the nv-fleet-gates edges DB, so a re-run skips edges
-    already present. Filesystem-only sqlite read of the ``edges`` table
-    (from_profile, to_profile); None when the DB path is absent or unreadable."""
-    have, db = _get_dotted(default_config, f"plugins.entries.{_FLEET_GATES}.settings.edges_db_path")
-    if not have or not db or not Path(str(db)).exists():
+def _spec_wires(spec: dict[str, Any], spec_path: Any) -> list[list[str]]:
+    """The wire pairs to install: the spec's ``wires`` when the key is present, else its sibling
+    ``wire-manifest.txt``, whose every non-comment line must be ``hermes wire add <role> <role>``."""
+    if "wires" in spec:
+        return [[pair[0], pair[1]] for pair in (spec.get("wires") or [])]
+    manifest = Path(spec_path).parent / _WIRE_MANIFEST if spec_path is not None else None
+    if manifest is None or not manifest.is_file():
+        return []
+    roles = set(_coworker_roles(spec))
+    pairs: list[list[str]] = []
+    for lineno, raw in enumerate(manifest.read_text(encoding="utf-8-sig").split("\n"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            parts = []
+        if (len(parts) != 5 or parts[:3] != ["hermes", "wire", "add"] or parts[3] == parts[4]
+                or not {parts[3], parts[4]} <= roles):
+            raise ValueError(f"{manifest}:{lineno}: expected `hermes wire add <role> <role>` naming two spec "
+                             f"roles {sorted(roles)}, got {line!r}")
+        pairs.append(parts[3:5])
+    return pairs
+
+
+def _edges_store_path(value: Any) -> Optional[str]:
+    """``edges_db_path`` resolved the way nv-fleet-gates resolves it (``edges.resolve_db_path``): absolute
+    unchanged, relative under the gateway's Hermes root. Applied here because this file is loaded by path and
+    cannot import a sibling plugin."""
+    if not value:
+        return None
+    if Path(str(value)).is_absolute():
+        return str(value)
+    try:
+        from hermes_constants import get_default_hermes_root
+        root = get_default_hermes_root()
+    except ImportError:
+        logger.warning("_edges_store_path: hermes_constants unavailable; root derived from the home", exc_info=True)
+        home = _require_home()
+        root = home.parent.parent if home.parent.name == "profiles" else home
+    return str(root / str(value))
+
+
+def _collect_wires(spec: dict[str, Any], spec_path: Any, default_config: dict[str, Any]) -> Optional[list[list[str]]]:
+    """Existing wire edges in the store the install TARGETS (the spine's ``edges_db_path``, else the
+    installed one), so a re-run skips edges already present there — never the edges of a store an older
+    install named. Filesystem-only sqlite read of the ``edges`` table (from_profile, to_profile); None
+    when the DB is absent or unreadable."""
+    settings = (_spine_entries(spec, spec_path).get(_FLEET_GATES) or {}).get("settings") or {}
+    target = settings.get("edges_db_path") if isinstance(settings, dict) else None
+    if not target:
+        _, target = _get_dotted(default_config, f"plugins.entries.{_FLEET_GATES}.settings.edges_db_path")
+    db = _edges_store_path(target)
+    if not db or not Path(db).exists():
         return None
     import sqlite3
     try:
@@ -871,6 +1009,78 @@ def _profile_dir(home: Path, role: str) -> Path:
     """Where ``hermes profile install --name <role>`` lands, mirroring
     profiles.get_profile_dir without importing hermes (plan mode is stdlib-only)."""
     return home / "profiles" / role
+
+
+def _relative_script_routes(config: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    """``(route name, script, route)`` for each webhook route whose ``script`` is home-relative (not
+    absolute, ``~`` or variable-expanded, which name a path of the operator's own)."""
+    webhook = (config.get("platforms") or {}).get("webhook") if isinstance(config.get("platforms"), dict) else None
+    extra = webhook.get("extra") if isinstance(webhook, dict) else None
+    routes = extra.get("routes") if isinstance(extra, dict) else None
+    out = []
+    for name, route in (routes or {}).items() if isinstance(routes, dict) else ():
+        script = route.get("script") if isinstance(route, dict) else None
+        if not isinstance(script, str) or not script.strip():
+            continue
+        raw = script.strip()
+        if raw.startswith(("/", "~")) or "$" in raw or "%" in raw:
+            continue
+        out.append((str(name), raw, route))
+    return out
+
+
+def _route_script_copies(home: Path, out: Path, spec: dict[str, Any],
+                         config: dict[str, Any]) -> list[tuple[Path, Path]]:
+    """``(source, destination)`` per relative-script route, every route validated before any copy: the
+    destination is ``<bound profile home>/scripts/<script>`` (the 0.22.5 resolver's root), the source the
+    first of the render's ``<out>/<profile>/scripts``, the render's default ``scripts`` and the gateway
+    root ``scripts`` that holds the file."""
+    roles = _coworker_roles(spec)
+    default_out = spec.get("default_profile", "default")
+    copies = []
+    for name, script, route in _relative_script_routes(config):
+        profile = route.get("profile", "default")
+        if not isinstance(profile, str) or not profile.strip():
+            raise ValueError(f"webhook route {name!r} (script {script!r}) has profile {profile!r}, which binds no "
+                             "profile; fix the route, then re-run (no restart was made)")
+        profile = profile.strip()
+        if ".." in Path(script).parts:
+            raise ValueError(f"webhook route {name!r}: script {script!r} for profile {profile!r} has a '..' "
+                             "component; route scripts must live under scripts/")
+        if profile == "default":
+            target_home = home
+        elif profile in roles or (_PROFILE_ID_RE.match(profile) and (home / "profiles" / profile).is_dir()):
+            target_home = _profile_dir(home, profile)
+        else:
+            raise ValueError(f"webhook route {name!r} (script {script!r}) is bound to profile {profile!r}, which "
+                             "is neither default, a fleet role nor an installed profile; no restart was made")
+        rendered = default_out if profile == "default" else profile
+        roots = [out / rendered / "scripts", out / default_out / "scripts", home / "scripts"]
+        dest_root = target_home / "scripts"
+        dest = dest_root / script
+        src_root = next((root for root in roots if (root / script).is_file()), None)
+        if src_root is None:
+            raise ValueError(f"webhook route {name!r}: script {script!r} for profile {profile!r} exists in none "
+                             f"of {[str(r) for r in roots]}; no restart was made")
+        source = src_root / script
+        # A symlinked scripts/ entry could still point a copy at, or onto, a file outside its scripts root.
+        for path, root in ((source, src_root), (dest, dest_root)):
+            if not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"webhook route {name!r}: script {script!r} resolves outside {root}")
+        copies.append((source, dest))
+    return copies
+
+
+def _place_route_scripts(copies: list[tuple[Path, Path]]) -> None:
+    import shutil
+    for source, dest in copies:
+        if dest.is_file() and dest.read_bytes() == source.read_bytes():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".osh-f64.tmp")
+        shutil.copyfile(source, tmp)
+        os.chmod(tmp, source.stat().st_mode & 0o7777)
+        os.replace(tmp, dest)
 
 
 # Mirrors hermes_constants._PROFILE_IDENTITY_MARKERS / PROFILE_ID_RE (plan mode never imports hermes).
@@ -997,17 +1207,26 @@ def collect_home_state(spec: dict[str, Any], spec_path: Any) -> dict[str, Any]:
         "managed_installed": managed_installed,
         "legacy_snapshots": legacy_snapshots,
         "backup_present": backup_present,
-        "wires": _collect_wires(default_config),
+        "wires": _collect_wires(spec, spec_path, default_config),
         "rooms": None,  # existence checked at execution via groups.state (idempotent)
         "unparked_non_fleet": _unparked_non_fleet(home, roles),
     }
 
 
-def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None) -> str:
+def plan_text(spec_path: Any, ref: str, policy_root: Optional[str] = None, fork_source: Optional[str] = None) -> str:
+    """The dry-run transcript. Read-only: the lane shape is validated and the fork-mirror work a real run
+    would do is reported before the first plugin step, but nothing is fetched or written."""
     spec = load_spec(spec_path)
     _require_openshell(spec)
+    _ssh_lane(spec)
     state = collect_home_state(spec, spec_path)
-    return render_transcript(build_plan(state, spec_path, ref, policy_root=policy_root))
+    steps = build_plan(state, spec_path, ref, policy_root=policy_root)
+    first = next((i for i, step in enumerate(steps) if step.tag in _PLUGIN_GIT_TAGS), None)
+    if first is not None:
+        line = _fork_preflight(_require_home(), ref, fork_source, plan_only=True)
+        if line:
+            steps.insert(first, Step(line, "fork_mirror"))
+    return render_transcript(steps)
 
 
 # --------------------------------------------------------------------------------------
@@ -1052,10 +1271,11 @@ def _sandbox_exists(name: str) -> bool:
     # so apply halts on an unknown broker state rather than creating over a live sandbox.
     import subprocess
     proc = subprocess.run(
-        ["openshell", "sandbox", "list"], check=True, capture_output=True, text=True,
-        stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S,
+        _openshell_argv(["sandbox", "list"]), check=True, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S,
+        env=_openshell_env(),
     )
-    for line in proc.stdout.splitlines():
+    for line in _strip_ansi(proc.stdout).splitlines():
         parts = line.split()
         if parts and parts[0] == name:
             return True
@@ -1103,10 +1323,10 @@ _STATUS_POLLS = 3
 _STATUS_POLL_INTERVAL_S = 2.0
 
 
-def _run_capture(cmd: list[str]) -> str:
+def _run_capture(cmd: list[str], env: Optional[dict[str, str]] = None) -> str:
     import subprocess
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S, env=env)
     return proc.stdout or ""
 
 
@@ -1120,12 +1340,36 @@ def _atomic_write_text(path: Path, text: str) -> None:
     os.replace(tmp, target)
 
 
+_PROXY_LINE_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)ProxyCommand(?:[ \t]*=[ \t]*|[ \t]+)(?P<prog>\S+)(?P<args>[^\n]*)$")
+
+
+def _lane_proxy_commands(block: str, lane: Optional[dict[str, Any]]) -> str:
+    """Every ``ProxyCommand openshell <args>`` in ``block`` rewritten to run the lane's shim, exactly the line
+    the lane's own reapply writes, so a re-render never reverts an alias to an ``openshell`` no PATH holds."""
+    if lane is None:
+        return block
+
+    def _sub(m: re.Match[str]) -> str:
+        if m.group("prog").rsplit("/", 1)[-1] != "openshell":
+            return m.group(0)
+        args = m.group("args").strip()
+        if "'" in args:
+            raise ValueError(f"openshell rendered a ProxyCommand the lane line cannot quote: {m.group(0).strip()!r}")
+        bundle = lane["bundle"]
+        return (f"{m.group('indent')}ProxyCommand /bin/sh -c '. {bundle}/{lane['env_file']} && exec "
+                f"{lane['interpreter']} {bundle}/{lane['shim']} {args}'")
+
+    return _PROXY_LINE_RE.sub(_sub, block)
+
+
 def _persist_ssh_config(sandbox: str, project: str, block: str) -> None:
     """Persist one sandbox's ``openshell sandbox ssh-config`` output into the gateway user's
     managed include ``~/.ssh/config.d/openshell-<project>.conf`` (one marker-delimited block per
     alias, replaced in place on a rerun), and make ``~/.ssh/config`` include it exactly once as
     its FIRST line — OpenSSH applies the first value it reads, so a later operator Host entry
-    cannot shadow the alias. Every other line of the operator's config is kept."""
+    cannot shadow the alias. Every other line of the operator's config is kept. SGR codes are
+    stripped and, under an ``ssh_lane``, each ProxyCommand runs through the lane."""
+    block = _lane_proxy_commands(_strip_ansi(block), _ACTIVE_LANE.get())
     ssh_dir = Path(os.path.expanduser("~")) / ".ssh"
     inc_rel = f"config.d/openshell-{project}.conf"
     inc_path = ssh_dir / inc_rel
@@ -1190,17 +1434,18 @@ def _broker_policy_digest(name: str, bound: Path) -> str:
     an unreadable file, an unknown verb or unparsable output refuses: an unverified mirror is
     never a pass."""
     import subprocess
-    proc = subprocess.run(["openshell", "policy", "digest", "--policy", str(bound)], check=False,
+    proc = subprocess.run(_openshell_argv(["policy", "digest", "--policy", str(bound)]), check=False,
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S)
+                          stdin=subprocess.DEVNULL, timeout=_CAPTURE_TIMEOUT_S, env=_openshell_env())
+    stdout, stderr = _strip_ansi(proc.stdout), _strip_ansi(proc.stderr)
     # One sha256sum line for exactly the requested file; any other answer is not a verification.
-    line = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]" + re.escape(str(bound)) + r"\n?", proc.stdout or "")
+    line = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]" + re.escape(str(bound)) + r"\n?", stdout)
     if proc.returncode != 0 or line is None:
-        if proc.returncode == 2 and not proc.stdout and (proc.stderr or "").strip() == _DIGEST_VERB_ABSENT:
+        if proc.returncode == 2 and not stdout and stderr.strip() == _DIGEST_VERB_ABSENT:
             raise ValueError(f"{name}: the broker does not offer `openshell policy digest` for --policy {bound}; "
                              "enable or allow it for this sandbox prefix (a rooted install needs it); "
                              "no sandbox was changed")
-        reason = ((proc.stderr or "").strip().splitlines() or [f"unparsable output {proc.stdout!r}"])[-1]
+        reason = (stderr.strip().splitlines() or [f"unparsable output {stdout!r}"])[-1]
         raise ValueError(f"{name}: the broker could not verify --policy {bound} "
                          f"(exit {proc.returncode}: {reason}); a rooted install needs the host file's sha256 "
                          "from `openshell policy digest`; no sandbox was changed")
@@ -1242,11 +1487,11 @@ def _provision_create(cmd: list[str], step: Step, ctx: dict[str, Any]) -> None:
             return
     if ctx.get("policy_root") or bound != rendered:
         verb = "replace" if exists else "create"
-        _run(["openshell", "sandbox", verb, *cmd[3:], "--policy-sha256", digest])
+        _run(_openshell_argv(["sandbox", verb, *cmd[3:], "--policy-sha256", digest]), env=_openshell_env())
     else:
         if exists:
-            _run(["openshell", "sandbox", "delete", name])
-        _run(cmd)
+            _run(_openshell_argv(["sandbox", "delete", name]), env=_openshell_env())
+        _run(_openshell_argv(cmd[1:]), env=_openshell_env())
     record.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(record, digest + "\n")
 
@@ -1318,6 +1563,145 @@ def _migrate_legacy_snapshots(snapshots: list[str]) -> None:
         shutil.move(str(src), str(dest))
 
 
+_FETCH_TIMEOUT_S = 900
+_PLUGIN_GIT_TAGS = ("plugin_install", "plugin_force")
+
+
+def _isolated_git_env() -> dict[str, str]:
+    """The caller's env (proxy and CA kept) with no user/system git config, the way Hermes runs git."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("GIT_CONFIG_") or k == "GIT_CONFIG_PARAMETERS")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+               GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def _git(git: str, *args: str, env: Optional[dict[str, str]] = None, timeout: int = _CAPTURE_TIMEOUT_S):
+    import subprocess
+    try:
+        return subprocess.run([git, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              stdin=subprocess.DEVNULL, env=env, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess([git, *args], 1, "", str(exc))
+
+
+def _real_git(skip: Path) -> Optional[str]:
+    """The first ``git`` on PATH that is a binary, not a ``#!`` wrapper (the image's own wrapper maps the
+    fork URL to the sealed tree, so chaining onto it would shadow the installer's mapping)."""
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(entry or ".") / "git"
+        try:
+            if candidate.parent.resolve() == skip.resolve() or not (candidate.is_file() and os.access(candidate, os.X_OK)):
+                continue
+            with open(candidate, "rb") as fh:
+                if fh.read(2) == b"#!":
+                    continue
+        except OSError:
+            continue
+        return str(candidate)
+    return None
+
+
+def _sealed_source() -> Optional[str]:
+    """Where the caller's git sends the fork URL when it is a local repository (the lane image maps it to a
+    sealed, root-owned tree); None for a network URL, the path every install took before."""
+    proc = _git("git", "ls-remote", "--get-url", _FORK_URL)
+    url = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+    path = url.removeprefix("file://")
+    if not path or "://" in path or not Path(path).exists():
+        return None
+    return path
+
+
+def _has_commit(git: str, repo: str, ref: str, *, bare: bool = False) -> bool:
+    where = ["--git-dir", repo] if bare else ["-C", repo]
+    return _git(git, "-c", f"safe.directory={repo}", *where, "cat-file", "-e", f"{ref}^{{commit}}",
+                env=_isolated_git_env()).returncode == 0
+
+
+def _git_dir(repo: str) -> Path:
+    return Path(repo, ".git") if Path(repo, ".git").is_dir() else Path(repo)
+
+
+def _fork_mirror_paths(home: Path) -> tuple[Path, Path]:
+    base = home / "openshell"
+    return base / "fork-mirror.git", base / "gitbin"
+
+
+def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_only: bool = False):
+    """Resolve where ``hermes plugins install --ref <ref>`` will clone from. Returns None when the caller's
+    git source already holds the ref (or is a network URL), else the installer-owned git dir to put first
+    on PATH for the plugin steps — after building ``<home>/openshell/fork-mirror.git`` on the sealed tree's
+    objects plus the ref fetched from ``fork_source``. ``plan_only`` returns the action line and writes or
+    fetches nothing. A ref no source holds refuses, before any plugin install or sandbox step."""
+    sealed = _sealed_source()
+    mirror, gitbin = _fork_mirror_paths(home)
+    if sealed is None:
+        return None
+    real = _real_git(gitbin)
+    if real is None:
+        raise ValueError("no git binary found on PATH (only wrappers); the sealed plugin source cannot be bridged")
+    if _has_commit(real, sealed, ref):
+        return None
+    # Userinfo can carry a token (`https://user:token@host/…`, scp-like `token@host:repo`): the refusal and the
+    # plan line show the source without it.
+    shown = re.sub(r"(?<=://)[^/\s]*@|^[^/@\s]+@(?=[^/:\s]+:)", "", fork_source) if fork_source else fork_source
+    refusal = (f"--ref {ref} is not in the sealed plugin source {sealed} ({_FORK_URL} resolves there)"
+               + (f" and --fork-source {shown} does not hold it" if fork_source else
+                  " and no --fork-source was given")
+               + "; pass a --fork-source that holds it; no plugin was installed and no sandbox was changed")
+    if plan_only:
+        if not fork_source:
+            return f"# fork mirror: apply will refuse: {refusal}"
+        return (f"# fork mirror: {sealed} lacks {ref}; fetch it from {shown} into {mirror} and run every "
+                f"plugin install with {gitbin} first on PATH")
+    if not fork_source:
+        raise ValueError(refusal)
+    env = _isolated_git_env()
+    gitdir = _git_dir(sealed)
+    if not (mirror / "HEAD").is_file():
+        mirror.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if _git(real, "init", "--quiet", "--bare", str(mirror), env=env).returncode != 0:
+            raise ValueError(f"could not create the fork mirror {mirror}")
+    _write_if_changed(mirror / "objects" / "info" / "alternates", f"{gitdir / 'objects'}\n")
+    if (gitdir / "shallow").is_file():
+        _write_if_changed(mirror / "shallow", (gitdir / "shallow").read_text(encoding="utf-8-sig"))
+    if _git(real, "--git-dir", str(mirror), "config", "uploadpack.allowAnySHA1InWant", "true", env=env).returncode:
+        raise ValueError(f"could not configure the fork mirror {mirror}")
+    sealed_head = _git(real, "-c", f"safe.directory={sealed}", "-C", sealed, "rev-parse", "HEAD", env=env).stdout.strip()
+    if SHA40.match(sealed_head):
+        # The sealed HEAD as a local ref lets the fetch negotiate from it, so only the delta is transferred.
+        _git(real, "--git-dir", str(mirror), "update-ref", "refs/nv-install/sealed", sealed_head, env=env)
+    tag = f"refs/tags/nv-install/{ref}"
+    if not _has_commit(real, str(mirror), ref, bare=True):
+        fetched = _git(real, "--git-dir", str(mirror), "fetch", "--quiet", "--no-tags", fork_source,
+                       f"+{ref}:{tag}", env=env, timeout=_FETCH_TIMEOUT_S)
+        if fetched.returncode != 0 or not _has_commit(real, str(mirror), ref, bare=True):
+            raise ValueError(refusal)
+    elif _git(real, "--git-dir", str(mirror), "update-ref", tag, ref, env=env).returncode != 0:
+        raise ValueError(f"could not record {tag} in the fork mirror {mirror}")
+    rewrite = [f"url.{mirror}.insteadOf={url}" for url in (_FORK_URL, _FORK_URL[: -len(".git")])]
+    wrapper = gitbin / "git"
+    gitbin.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_if_changed(wrapper, "#!/bin/sh\nexec " + " ".join(
+        shlex.quote(tok) for tok in [real, "-c", rewrite[0], "-c", rewrite[1]]) + ' "$@"\n')
+    os.chmod(wrapper, 0o700)
+    return gitbin
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    if path.is_file() and path.read_text(encoding="utf-8-sig") == text:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".osh-f64.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _plugin_git_env(gitbin: Path) -> dict[str, str]:
+    return {**os.environ, "PATH": f"{gitbin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
 # health: allow CC -- one executor per plan step tag; each branch re-reads its file and writes it atomically, and the tag set is the planner's closed vocabulary
 def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
     tag = step.tag
@@ -1329,10 +1713,16 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         if tag == "provision_sshconfig":
             sandbox = cmd[-1]
             project = (ctx.get("spec") or {}).get("project") or "fleet"
-            _persist_ssh_config(sandbox, project, _run_capture(cmd))
+            _persist_ssh_config(sandbox, project, _run_capture(_openshell_argv(cmd[1:]), env=_openshell_env()))
             return
         if tag == "restart":
             _restart_gateway_detached(cmd, Path(ctx["home"]))
+            return
+        if tag in _PLUGIN_GIT_TAGS and ctx.get("plugin_gitbin"):
+            _run(cmd, env=_plugin_git_env(ctx["plugin_gitbin"]))
+            return
+        if cmd and cmd[0] == "openshell":
+            _run(_openshell_argv(cmd[1:]), env=_openshell_env())
             return
         _run(cmd)
         return
@@ -1417,6 +1807,10 @@ def _execute_step(step: Step, ctx: dict[str, Any]) -> None:
         new = [name for name in parked if name not in listed]
         if new:
             record.write_text("".join(f"{name}\n" for name in [*listed, *new]), encoding="utf-8")
+    elif tag == "route_scripts":
+        cfg_path = home / "config.yaml"
+        current = yaml.safe_load(cfg_path.read_text(encoding="utf-8-sig")) or {} if cfg_path.exists() else {}
+        _place_route_scripts(_route_script_copies(home, Path(ctx["out"]), ctx["spec"], current))
     elif tag == "rooms":
         creator = ctx.get("room_creator")
         payload = step.data or {}
@@ -1437,10 +1831,24 @@ def _apply_ctx(spec: dict[str, Any], spec_path: Any, room_creator=None, parker=N
         "spec_path": spec_path,
         "room_creator": room_creator,
         "parker": parker,
+        "plugin_gitbin": None,
     }
 
 
-def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None, policy_root=None) -> None:
+def _preflight_install(steps: list[Step], ctx: dict[str, Any], ref: str,
+                       fork_source: Optional[str]) -> Optional[dict[str, Any]]:
+    """Refusals that must precede every executed step: an incomplete lane bundle, and a ``--ref`` no plugin
+    source holds (checked only when a plugin is (re)installed). Sets the plugin steps' git dir and returns the
+    admitted lane."""
+    lane = _ssh_lane(ctx["spec"])
+    _preflight_ssh_lane(lane)
+    if any(step.tag in _PLUGIN_GIT_TAGS for step in steps):
+        ctx["plugin_gitbin"] = _fork_preflight(Path(ctx["home"]), ref, fork_source)
+    return lane
+
+
+def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, parker=None, policy_root=None,
+          fork_source: Optional[str] = None) -> None:
     """Execute the full plan. ``room_creator(room_id, name, members)`` performs the
     onboarding ``groups.create`` against the live gateway and ``room_exists(room_id)``
     reports whether a room is already present; the caller (the CLI subaction) injects both
@@ -1463,14 +1871,18 @@ def apply(spec_path: Any, ref: str, *, room_creator=None, room_exists=None, park
     ctx = _apply_ctx(spec, spec_path, room_creator=room_creator, parker=parker)
     ctx["policy_root"] = bool(policy_root)
     steps = build_plan(state, spec_path, ref, policy_root=policy_root)
-    creates = [step for step in steps if step.tag == "provision_create"]
-    for step in steps:
-        if policy_root and creates and step is creates[0]:
-            _preflight_rooted_policies(creates)
-        _execute_step(step, ctx)
+    token = _ACTIVE_LANE.set(_preflight_install(steps, ctx, ref, fork_source))
+    try:
+        creates = [step for step in steps if step.tag == "provision_create"]
+        for step in steps:
+            if policy_root and creates and step is creates[0]:
+                _preflight_rooted_policies(creates)
+            _execute_step(step, ctx)
+    finally:
+        _ACTIVE_LANE.reset(token)
 
 
-def phase_a(spec_path: Any, ref: str) -> None:
+def phase_a(spec_path: Any, ref: str, *, fork_source: Optional[str] = None) -> None:
     """Bootstrap phase: move any legacy in-scan plugin snapshot out of the plugins dir (it
     would shadow the bootstrap install), then back up the ORIGINAL config (a ``plugins install --enable``
     rewrites config.yaml, so a later backup would capture a mutated file), THEN write the
@@ -1485,6 +1897,7 @@ def phase_a(spec_path: Any, ref: str) -> None:
     state = collect_home_state(spec, spec_path)
     ctx = _apply_ctx(spec, spec_path)
     default_plugins_dir = Path(str(_require_home())) / "plugins"
+    selected = []
     for step in build_plan(state, spec_path, ref):
         is_bootstrap_plugin = (
             step.tag in ("plugin_install", "plugin_force", "plugin_enable")
@@ -1501,7 +1914,13 @@ def phase_a(spec_path: Any, ref: str) -> None:
         )
         if (step.tag in ("legacy_snapshot_migrate", "backup", "scan_guard_write")
                 or is_bootstrap_plugin or is_bootstrap_snapshot):
+            selected.append(step)
+    token = _ACTIVE_LANE.set(_preflight_install(selected, ctx, ref, fork_source))
+    try:
+        for step in selected:
             _execute_step(step, ctx)
+    finally:
+        _ACTIVE_LANE.reset(token)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1518,15 +1937,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                      "rebases each provision-create --policy to <root>/render/<role>/policy-<role>.yaml "
                      "(default: the gateway-internal render path)",
             )
+        p.add_argument(
+            "--fork-source", default=None,
+            help="Git URL or path that holds --ref when the plugin source git resolves to (a sealed fork) "
+                 "does not; plugin installs then clone through an installer-owned mirror under HERMES_HOME",
+        )
     ns = parser.parse_args(argv)
     if not SHA40.match(ns.ref):
         parser.error("--ref must be a full 40-character commit SHA")
     if ns.mode == "plan":
-        sys.stdout.write(plan_text(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None)))
+        sys.stdout.write(plan_text(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None),
+                                   fork_source=ns.fork_source))
     elif ns.mode == "apply":
-        apply(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None))
+        apply(ns.spec, ns.ref, policy_root=getattr(ns, "policy_root", None), fork_source=ns.fork_source)
     elif ns.mode == "phase-a":
-        phase_a(ns.spec, ns.ref)
+        phase_a(ns.spec, ns.ref, fork_source=ns.fork_source)
     return 0
 
 

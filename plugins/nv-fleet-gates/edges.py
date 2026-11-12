@@ -3,9 +3,10 @@
 The edges table is a fleet-wide fact every profile must read, but
 ``plugins.plugin_storage.plugin_db`` resolves through ``get_hermes_home()`` and
 is therefore PER-PROFILE — it cannot hold a fleet-wide table. So edges live in a
-dedicated SQLite DB at the managed-scope-pinned absolute ``settings.edges_db_path``
-(outside any profile home); ``hermes wire`` writes it and every profile's
-predicate opens it.
+dedicated SQLite DB at ``settings.edges_db_path``: an absolute path, or a path
+relative to the gateway's Hermes root (``resolve_db_path``), which is the same file
+for the root and every ``<root>/profiles/<name>`` home; ``hermes wire`` writes it and
+every profile's predicate opens it.
 
 Edges are bidirectional: one ``add``/``remove`` writes/clears both directions.
 The per-edge ``gated`` flag drives the A2A-F19 approve directive.
@@ -16,6 +17,15 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+
+def resolve_db_path(value: Optional[str]) -> Optional[str]:
+    """``edges_db_path`` as a usable path: absolute values unchanged, a relative one under
+    ``get_default_hermes_root()`` so a profile home and its gateway root open one store."""
+    if not value or Path(str(value)).is_absolute():
+        return value
+    from hermes_constants import get_default_hermes_root
+    return str(get_default_hermes_root() / str(value))
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
