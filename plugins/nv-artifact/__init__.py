@@ -62,13 +62,13 @@ _CREATE_INTENT_RE = re.compile(r"\bgh\W+pr\W+create\b", re.IGNORECASE)
 _PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)", re.IGNORECASE
 )
-# GitLab: `glab mr create`, or a forge CLI named in the ``forge_tools`` setting (`{tool} mr create`,
+# GitLab: a forge CLI named in the ``forge_tools`` setting (`glab mr create`, `{tool} mr create`,
 # `python3 -m {tool} mr create`), printing an MR web URL <host>/<group[/sub...]/project>/-/merge_requests/<iid>.
 # The key is (project path, iid), which is what the GitLab ingress puts in repository.full_name
 # and pull_request.number. Each intent only claims its own forge's URL shape.
 # Global options may sit between the tool and the noun (`{tool} --project {group}/{project} mr create`), so anything in
-# the same shell segment is allowed there.
-_GITLAB_CREATE_INTENT_RE = re.compile(r"\bglab\b[^;&|\n]*?\bmr\W+create\b", re.IGNORECASE)
+# the same shell segment is allowed there. With no tool listed (the default) there is no GitLab feed.
+_GITLAB_CREATE_INTENT_RE = None
 _GITLAB_MR_URL_RE = re.compile(
     r"https?://[A-Za-z0-9.-]+(?::\d+)?/((?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)+[A-Za-z0-9_][A-Za-z0-9_.-]*)"
     r"/-/merge_requests/(\d+)",
@@ -76,7 +76,7 @@ _GITLAB_MR_URL_RE = re.compile(
 )
 # Each feed also carries its forge's reference sigil, which an anchor card's title uses: a GitHub PR is o/r#7, a
 # GitLab MR group/project!7 (group/project#7 is an issue there).
-_CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"), (_GITLAB_CREATE_INTENT_RE, _GITLAB_MR_URL_RE, "!"))
+_CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"),)
 
 
 # The CLI prints the created MR as JSON with sorted keys, so its "description" (which may link other MRs) comes
@@ -86,8 +86,8 @@ _WEB_URL_RE = re.compile(r'"(?:web_url|html_url)"\s*:\s*"([^"]+)"')
 # A create command, token by token: the forge tool (``python3 -m {tool}`` names the module), then its noun, then
 # ``create``; its own source-branch flags. A value-taking option's value is never read as a flag (a title may begin
 # with ``--head=``), so the scan consumes the values of every value-taking option the create commands have.
-_CREATE_NOUN = {"gh": "pr", "glab": "mr"}
-_BRANCH_FLAGS = {"gh": ("--head", "-H"), "glab": ("--source-branch", "-s")}
+_CREATE_NOUN = {"gh": "pr"}
+_BRANCH_FLAGS = {"gh": ("--head", "-H")}
 _VALUE_OPTIONS = frozenset({
     "--title", "-t", "--body", "-b", "--body-file", "-F", "--description", "-d", "--base", "-B", "--target-branch",
     "--assignee", "-a", "--label", "-l", "--labels", "--milestone", "-m", "--project", "-p", "--reviewer", "-r",
@@ -103,19 +103,20 @@ _CHAIN_BRANCH_RE = None
 
 
 def _configure(forge_tools=(), chain_branch_re="") -> None:
-    """Apply the forge and chain settings to this scope's claim feeds (the defaults: ``glab`` only, no chain)."""
+    """Apply the forge and chain settings to this scope's claim feeds (the defaults: no forge tool, no chain)."""
     global _GITLAB_CREATE_INTENT_RE, _CLAIM_FEEDS, _CREATE_NOUN, _BRANCH_FLAGS, _CHAIN_BRANCH_RE
     if (not isinstance(forge_tools, (list, tuple)) or not all(isinstance(t, str) for t in forge_tools)
             or not isinstance(chain_branch_re, str)):
         raise TypeError("forge_tools must be a list of strings and chain_branch_re a string")
-    tools = ("glab", *(str(t) for t in forge_tools if str(t).strip() and str(t) != "glab"))
+    tools = tuple(dict.fromkeys(t for t in forge_tools if t.strip()))
     _GITLAB_CREATE_INTENT_RE = re.compile(
         r"\b(?:" + "|".join(map(re.escape, sorted(tools, key=len, reverse=True))) + r")\b[^;&|\n]*?\bmr\W+create\b",
-        re.IGNORECASE)
-    _CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"), (_GITLAB_CREATE_INTENT_RE, _GITLAB_MR_URL_RE, "!"))
+        re.IGNORECASE) if tools else None
+    _CLAIM_FEEDS = ((_CREATE_INTENT_RE, _PR_URL_RE, "#"),) + (
+        ((_GITLAB_CREATE_INTENT_RE, _GITLAB_MR_URL_RE, "!"),) if tools else ())
     _CREATE_NOUN = {"gh": "pr", **{t: "mr" for t in tools}}
-    _BRANCH_FLAGS = {"gh": ("--head", "-H"), "glab": ("--source-branch", "-s"),
-                     **{t: ("--source-branch",) for t in tools if t != "glab"}}
+    _BRANCH_FLAGS = {"gh": ("--head", "-H"),
+                     **{t: ("--source-branch", "-s") if t == "glab" else ("--source-branch",) for t in tools}}
     _CHAIN_BRANCH_RE = re.compile(chain_branch_re) if chain_branch_re else None
 
 _ANCHOR_BODY = (
