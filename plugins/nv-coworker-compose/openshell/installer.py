@@ -974,8 +974,8 @@ def _edges_store_path(value: Any) -> Optional[str]:
     try:
         from hermes_constants import get_default_hermes_root
         root = get_default_hermes_root()
-    except Exception:
-        logger.debug("_edges_store_path: hermes_constants unavailable", exc_info=True)
+    except ImportError:
+        logger.warning("_edges_store_path: hermes_constants unavailable; root derived from the home", exc_info=True)
         home = _require_home()
         root = home.parent.parent if home.parent.name == "profiles" else home
     return str(root / str(value))
@@ -1643,14 +1643,17 @@ def _fork_preflight(home: Path, ref: str, fork_source: Optional[str], *, plan_on
         raise ValueError("no git binary found on PATH (only wrappers); the sealed plugin source cannot be bridged")
     if _has_commit(real, sealed, ref):
         return None
+    # Userinfo can carry a token (`https://user:token@host/…`, scp-like `token@host:repo`): the refusal and the
+    # plan line show the source without it.
+    shown = re.sub(r"(?<=://)[^/\s]*@|^[^/@\s]+@(?=[^/:\s]+:)", "", fork_source) if fork_source else fork_source
     refusal = (f"--ref {ref} is not in the sealed plugin source {sealed} ({_FORK_URL} resolves there)"
-               + (f" and --fork-source {fork_source} does not hold it" if fork_source else
+               + (f" and --fork-source {shown} does not hold it" if fork_source else
                   " and no --fork-source was given")
                + "; pass a --fork-source that holds it; no plugin was installed and no sandbox was changed")
     if plan_only:
         if not fork_source:
             return f"# fork mirror: apply will refuse: {refusal}"
-        return (f"# fork mirror: {sealed} lacks {ref}; fetch it from {fork_source} into {mirror} and run every "
+        return (f"# fork mirror: {sealed} lacks {ref}; fetch it from {shown} into {mirror} and run every "
                 f"plugin install with {gitbin} first on PATH")
     if not fork_source:
         raise ValueError(refusal)

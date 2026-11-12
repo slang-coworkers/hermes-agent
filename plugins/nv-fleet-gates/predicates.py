@@ -288,16 +288,22 @@ _CURL_FILE_BODY_RE = re.compile(r"(?<!\S)-d\s*@|--data[\w-]*[\s=]+@|--json[\s=]+
 # The execute_code argv-list spelling (["gh", "pr", "review", ...]) reads as a command once quotes, commas and
 # brackets are spaces.
 _DEQUOTE = str.maketrans({c: " " for c in "'\",[](){}"})
+# bash drops a backslash-newline before it splits words, so `gh pr \<newline>merge` is one command.
+_CONTINUATION_RE = re.compile(r"\\\r?\n")
 
 
 def _review_approves(segment: str) -> bool:
     m = _GH_PR_REVIEW_RE.search(segment)
     if not m:
         return False
+    rest = segment[m.end():]
     try:
-        tokens = shlex.split(segment[m.end():])
+        # An operator glued to the flag (`--approve>/dev/null`, `-a</dev/null`, `--approve&`) ends its token.
+        lexer = shlex.shlex(rest, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
     except ValueError:
-        tokens = segment[m.end():].split()
+        tokens = re.split(r"[\s;&|<>]+", rest)
     for tok in tokens:
         if tok == "--approve" or (tok.startswith("--approve=") and tok.split("=", 1)[1].lower() != "false"):
             return True
@@ -334,7 +340,9 @@ def _approval_or_merge(text: str) -> str | None:
 
 
 def pr_approval_or_merge(command: str) -> str | None:
-    """The PR approve/merge class ``command`` invokes, or None. Matched as written and de-quoted."""
+    """The PR approve/merge class ``command`` invokes, or None. Continuations are joined first; then the text is
+    matched as written and de-quoted."""
     if not command:
         return None
+    command = _CONTINUATION_RE.sub("", command)
     return _approval_or_merge(command) or _approval_or_merge(command.translate(_DEQUOTE))

@@ -1,9 +1,11 @@
 """Guardrails of the UPG-F69.s.a installer steps that the acceptance rows do not pin: route-script binding and
-containment, the ``ssh_lane`` path alphabet and the strict wire-manifest parse; and the AC-20 live probe's session
-records landing in the store its pass's profile scope reads."""
+containment, the ``ssh_lane`` path alphabet, the strict wire-manifest parse and a ``--fork-source`` echoed without
+its userinfo; the AC-20 live probe's session records landing in the store its pass's profile scope reads; and the
+approve/merge detector reading line continuations and operators glued to a flag."""
 
 import importlib.util
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "plugins" / "nv-coworker-compose" / "openshell" / "installer.py"
 PROBE = REPO_ROOT / "tests" / "e2e-scenarios" / "UPG-F69.s.a" / "ac20_probe.py"
 STORES = REPO_ROOT / "plugins" / "nv-fleet-gates" / "stores.py"
+PREDICATES = REPO_ROOT / "plugins" / "nv-fleet-gates" / "predicates.py"
+FORMS = json.loads((PROBE.parent / "ac20-forms.json").read_text(encoding="utf-8"))
 SPEC = {"types": {"orchestrator": {}, "triager": {}}, "default_profile": "default"}
 LANE = {"bundle": "/srv/osh-lane", "env_file": "lane.env", "shim": "bin/openshell",
         "interpreter": "/opt/hermes/.venv/bin/python3", "members": ["token"]}
@@ -118,3 +122,56 @@ def test_ac20_probe_profile_scope(tmp_path, monkeypatch):
     assert seen["fresh"] and seen["plan"], seen
     assert not stores.critique_fresh(seen["sid"], probe.STAGES)
     assert not stores.has_plan(seen["sid"])
+
+
+@pytest.fixture(scope="module")
+def detect():
+    return _load(PREDICATES, "upg_f69sa_guardrails_predicates").pr_approval_or_merge
+
+
+@pytest.mark.parametrize("form_id", sorted(FORMS))
+def test_detector_joins_line_continuations(detect, form_id):
+    """Each AC-20 form, one or more per refused class, is refused as the same class when its words are split over
+    backslash-newline continuations."""
+    form = FORMS[form_id][1]
+    assert detect(form)
+    assert detect(form.replace(" ", " \\\n  ")) == detect(form)
+
+
+@pytest.mark.parametrize("command, refused", [
+    ("gh pr review 5 --repo o/r --approve>/dev/null", "gh pr review --approve"),
+    ("gh pr review 5 -a</dev/null", "gh pr review --approve"),
+    ("gh pr review 5 --approve&", "gh pr review --approve"),
+    ("gh pr review 5 --approve=true;echo done", "gh pr review --approve"),
+    ("gh pr review 5 --repo o/r \\\r\n  --approve", "gh pr review --approve"),
+    ("gh pr \\\nmerge 5 --squash", "gh pr merge"),
+    ("gh pr review 5 --comment -b ok>/dev/null", None),
+    ("gh pr review 5 --approve=false&", None),
+])
+def test_detector_reads_glued_operators(detect, command, refused):
+    """An operator glued to a flag ends its token, and a continuation inside ``gh pr`` still names the verb."""
+    assert detect(command) == refused
+
+
+@pytest.mark.parametrize("source, shown", [
+    ("https://bot:s3cr3t-token@example.invalid/o/fork.git", "https://example.invalid/o/fork.git"),
+    ("s3cr3t-token@example.invalid:o/fork.git", "example.invalid:o/fork.git"),
+])
+def test_fork_source_userinfo_never_echoed(installer, tmp_path, monkeypatch, source, shown):
+    """The plan line and the refusal name ``--fork-source`` without its userinfo."""
+    sealed = tmp_path / "sealed"
+    (sealed / "objects").mkdir(parents=True)
+    monkeypatch.setattr(installer, "_sealed_source", lambda: str(sealed))
+    monkeypatch.setattr(installer, "_fork_mirror_paths", lambda home: (tmp_path / "mirror.git", tmp_path / "gitbin"))
+    monkeypatch.setattr(installer, "_real_git", lambda skip: "git")
+    monkeypatch.setattr(installer, "_has_commit", lambda *args, **kwargs: False)
+    monkeypatch.setattr(installer, "_git_dir", lambda repo: sealed)
+    monkeypatch.setattr(installer, "_isolated_git_env", dict)
+    monkeypatch.setattr(installer, "_git", lambda git, *args, **kwargs: types.SimpleNamespace(
+        returncode=1 if "fetch" in args else 0, stdout=""))
+    plan = installer._fork_preflight(tmp_path, "a" * 40, source, plan_only=True)
+    with pytest.raises(ValueError) as refused:
+        installer._fork_preflight(tmp_path, "a" * 40, source)
+    for text in (plan, str(refused.value)):
+        assert shown in text
+        assert "s3cr3t-token" not in text and "bot:" not in text
