@@ -54,13 +54,15 @@ def command_text(canon: str, args: dict) -> str:
 
 
 # Split a shell command on statement/pipe separators so a mutation or a gh-pr
-# verb hiding after `&&`/`;`/`|` in a compound command is not missed. Only spaces and tabs are
-# trimmed: a `\r` before a separator is part of bash's word (`echo a >&2\r` writes `2\r`).
-_SEGMENT_RE = re.compile(r"[ \t]*(?:&&|\|\||[;\n|])[ \t]*")
+# verb hiding after `&&`/`;`/`|` in a compound command is not missed. The pattern matches the
+# separators only and each segment is trimmed afterwards, because `[ \t]*` around a separator
+# backtracks quadratically on a long run of spaces. Only spaces and tabs are trimmed: a `\r`
+# before a separator is part of bash's word (`echo a >&2\r` writes `2\r`).
+_SEGMENT_RE = re.compile(r"&&|\|\||[;\n|]")
 
 
 def _segments(command: str):
-    return [s for s in _SEGMENT_RE.split(command or "") if s.strip()]
+    return [s for s in (part.strip(" \t") for part in _SEGMENT_RE.split(command or "")) if s.strip()]
 
 
 # --- gh pr egress + PR-comment invitation (LOOP-F37-2 / -6) -----------------
@@ -194,6 +196,22 @@ def is_mutation(canon: str, args: dict) -> bool:
         if _is_valid_python(code):
             return True
         return _terminal_mutates(code)
+    return False
+
+
+def restales_critique(canon: str, args: dict) -> bool:
+    """A call that changes the working tree, or may by running code, without being a file mutation the plan gate
+    counts: git rebase / merge / pull / cherry-pick / am / revert / ..., make / cmake / ninja, a shell or Python
+    program, anything sent to a running process's stdin. It restales a critique (commands.restales)."""
+    from . import commands
+
+    if canon == "process_manage":
+        return str((args or {}).get("action") or "").strip().lower() in ("write", "submit")
+    if canon not in ("terminal", "execute_code"):
+        return False
+    for text, mode, _scope in commands._texts(canon, args if isinstance(args, dict) else {}):
+        if any(commands.restales(argv) for argv in commands.runs(text, mode)):
+            return True
     return False
 
 

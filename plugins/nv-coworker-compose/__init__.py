@@ -1068,7 +1068,30 @@ def _cli_coworker(args, **_kwargs) -> int:
             print(json.dumps({"ok": False, "error": "--ref must be a full 40-character commit SHA"}))
             return 2
         try:
-            installer._require_openshell(installer.load_spec(args.spec) or {})
+            spec_data = installer.load_spec(args.spec) or {}
+            installer._require_openshell(spec_data)
+            # Resolve local (default, unchanged) vs remote (in-cluster gateway via the broker).
+            # In remote mode the installer surface is the remote adapter, so the dry-run and the
+            # real run still come from one plan.
+            remote = installer._remote_module()
+            rcfg = remote.resolve_config(spec_data, overrides=remote.overrides_from_args(args))
+            if rcfg["mode"] == remote.MODE_REMOTE:
+                if getattr(args, "policy_root", None):
+                    raise ValueError("--policy-root is a box-lane option and does not apply to remote mode")
+                if getattr(args, "fork_source", None):
+                    raise ValueError("--fork-source is a box-lane option and does not apply to remote mode")
+                remote.check_spec(spec_data, rcfg, for_apply=not getattr(args, "dry_run", False))
+                if not getattr(args, "dry_run", False):
+                    # The remote preflight (token file, broker shim, no gateway credential) runs
+                    # BEFORE _apply_openshell's gateway preflight spends the single-use ticket;
+                    # the plan's remote_preflight step re-checks it.
+                    import sys as _sys
+                    for warning in remote.preflight(rcfg):
+                        print(f"[remote] warning: {warning}", file=_sys.stderr)
+                installer = remote.RemoteInstaller(rcfg, inst=installer)
+            elif getattr(args, "openshell_mode", None) == "local":
+                # An explicit --openshell-mode local wins over OPENSHELL_MODE / the spec.
+                installer = remote.LocalInstaller(installer)
         except ValueError as exc:
             # Refuse before the real run's gateway preflight, which spends a single-use ticket.
             print(json.dumps({"ok": False, "error": str(exc)}))
@@ -1101,6 +1124,7 @@ def _cli_coworker(args, **_kwargs) -> int:
         return 0
     print("usage: hermes coworker {compose <coworker-types.yaml> [--out DIR] [--provision-dry-run]"
           " | install-openshell <coworker-types.yaml> --ref <sha> [--gateway-url <ws-url>] [--policy-root <dir>] [--dry-run]"
+          " [--openshell-mode local|remote] [--broker-addr tcp://<svc>.<ns>.svc:<port>] [--broker-token-file <path>]"
           " | install-trust <coworker-types.yaml>}")
     return 2
 

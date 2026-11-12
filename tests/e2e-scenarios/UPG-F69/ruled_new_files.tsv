@@ -1,0 +1,5 @@
+# UNIFY-F70 (ADR §D5): the DN-21 drift paths, ruled by the sha256 of the candidate blob.
+path	sha256	authority
+common/COMMON_PATHS	fe468ffc89bcd67cfa2deeb29b7f44b5757d78c387575081627e95a14d6f2513	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files
+scripts/common_drift.py	8bb32da8422ab2eac5d6f222fa69d5feca72112397e41ec0feccd2120971fecc	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files
+.github/workflows/common-drift.yml	b7195635a4898f3994694a5efe3307de11fcff9fef558945d205552cf6f8c67f	DN-21 msg 36 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D3, the common-path drift files

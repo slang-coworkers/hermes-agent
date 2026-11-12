@@ -17,6 +17,7 @@ STORES = REPO_ROOT / "plugins" / "nv-fleet-gates" / "stores.py"
 PREDICATES = REPO_ROOT / "plugins" / "nv-fleet-gates" / "predicates.py"
 FORMS = json.loads((PROBE.parent / "ac20-forms.json").read_text(encoding="utf-8"))
 SPEC = {"types": {"orchestrator": {}, "triager": {}}, "default_profile": "default"}
+FORK_URL = "https://github.com/slang-coworkers/hermes-agent.git"
 LANE = {"bundle": "/srv/osh-lane", "env_file": "lane.env", "shim": "bin/openshell",
         "interpreter": "/opt/hermes/.venv/bin/python3", "members": ["token"]}
 
@@ -162,7 +163,7 @@ def test_fork_source_userinfo_never_echoed(installer, tmp_path, monkeypatch, sou
     """The plan line and the refusal name ``--fork-source`` without its userinfo."""
     sealed = tmp_path / "sealed"
     (sealed / "objects").mkdir(parents=True)
-    monkeypatch.setattr(installer, "_sealed_source", lambda: str(sealed))
+    monkeypatch.setattr(installer, "_sealed_source", lambda fork_url: str(sealed))
     monkeypatch.setattr(installer, "_fork_mirror_paths", lambda home: (tmp_path / "mirror.git", tmp_path / "gitbin"))
     monkeypatch.setattr(installer, "_real_git", lambda skip: "git")
     monkeypatch.setattr(installer, "_has_commit", lambda *args, **kwargs: False)
@@ -170,9 +171,9 @@ def test_fork_source_userinfo_never_echoed(installer, tmp_path, monkeypatch, sou
     monkeypatch.setattr(installer, "_isolated_git_env", dict)
     monkeypatch.setattr(installer, "_git", lambda git, *args, **kwargs: types.SimpleNamespace(
         returncode=1 if "fetch" in args else 0, stdout=""))
-    plan = installer._fork_preflight(tmp_path, "a" * 40, source, plan_only=True)
+    plan = installer._fork_preflight(tmp_path, "a" * 40, source, fork_url=FORK_URL, plan_only=True)
     with pytest.raises(ValueError) as refused:
-        installer._fork_preflight(tmp_path, "a" * 40, source)
+        installer._fork_preflight(tmp_path, "a" * 40, source, fork_url=FORK_URL)
     for text in (plan, str(refused.value)):
         assert shown in text
         assert "s3cr3t-token" not in text and "bot:" not in text

@@ -1,0 +1,26 @@
+name: Common Drift
+
+# Integrity self-check of common/COMMON_PATHS, the list of paths this fork shares byte for byte with its downstream
+# consumers. Comparing this repo with itself (--repo file://, --sha of the checked-out commit) reads no pin and
+# fetches nothing, so it fails exactly when an entry matches no file here (drift) or the list does not parse.
+# The cross-repository comparison runs in the downstream CI, whose pin names this public fork.
+#
+# Report only: continue-on-error, and ci.yaml's all-checks-pass does not depend on it. The drift checker's own unit
+# tests run in the hermetic suite (tests/plugins/test_common_drift.py).
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  common-drift:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Check the shared-path list against this tree
+        run: python3 scripts/common_drift.py --repo "file://$GITHUB_WORKSPACE" --sha "$GITHUB_SHA" --strict
