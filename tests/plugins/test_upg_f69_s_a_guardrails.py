@@ -143,6 +143,7 @@ def test_detector_joins_line_continuations(detect, form_id):
     ("gh pr review 5 -a</dev/null", "gh pr review --approve"),
     ("gh pr review 5 --approve&", "gh pr review --approve"),
     ("gh pr review 5 --approve=true;echo done", "gh pr review --approve"),
+    ("gh pr review 5 --body-file /tmp/review#1.md --approve", "gh pr review --approve"),
     ("gh pr review 5 --repo o/r \\\r\n  --approve", "gh pr review --approve"),
     ("gh pr \\\nmerge 5 --squash", "gh pr merge"),
     ("gh pr review 5 --comment -b ok>/dev/null", None),
