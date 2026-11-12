@@ -3,6 +3,7 @@ provider profile path and the messaging hint all come from the spec or the comma
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
 import shutil
@@ -28,8 +29,7 @@ def _openshell(name: str):
     return module
 
 
-@pytest.fixture
-def compose(tmp_path, monkeypatch):
+def _load_plugin(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     shutil.copytree(PLUGIN_SRC, home / "plugins" / PLUGIN_KEY, ignore=shutil.ignore_patterns("__pycache__"))
@@ -42,7 +42,17 @@ def compose(tmp_path, monkeypatch):
     manager.discover_and_load()
     loaded = manager._plugins[PLUGIN_KEY]
     assert loaded.enabled is True and loaded.error is None
-    return sys.modules[loaded.module.__name__ + ".compose"]
+    return loaded.module
+
+
+@pytest.fixture
+def plugin(tmp_path, monkeypatch):
+    return _load_plugin(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def compose(plugin):
+    return sys.modules[plugin.__name__ + ".compose"]
 
 
 POLICY = {
@@ -91,6 +101,24 @@ def test_local_mode_ignores_the_0072_inference_provider_block():
                                               "api_mode": "chat_completions", "model_id": "example-model"}}}
     cfg = remote.resolve_config(spec, env={})
     assert cfg["mode"] == remote.MODE_LOCAL and cfg["inference"] is None
+
+
+@pytest.mark.parametrize("scenario", ["OSH-F64.b", "OSH-F64.e"])
+def test_local_install_openshell_takes_a_0072_inference_spec_to_the_gateway_preflight(plugin, monkeypatch, scenario):
+    monkeypatch.delenv("OPENSHELL_MODE", raising=False)
+    probed = []
+
+    def _refusing_preflight(url):
+        probed.append(url)
+        return False, "test stop"
+
+    monkeypatch.setattr(plugin, "_gateway_preflight", _refusing_preflight)
+    spec = PLUGIN_SRC.parents[1] / "tests" / "e2e-scenarios" / scenario / "spec" / "coworker-types.yaml"
+    args = argparse.Namespace(coworker_command="install-openshell", spec=str(spec), ref="0" * 40, dry_run=False,
+                              gateway_url="ws://127.0.0.1:9/?ticket=t", policy_root=None)
+    with pytest.raises(RuntimeError, match="gateway preflight failed: test stop"):
+        plugin._cli_coworker(args)
+    assert probed == [args.gateway_url]
 
 
 def _provider_block(**extra) -> dict:
