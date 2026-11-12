@@ -26,24 +26,24 @@ escalate to the human only after two unanswered nudges — never a third.
    Bot Chat; that Bot Chat turn (which is Bot-Chat-gated-in, so `message_agent` is allowed) sends each
    per-assignee message with `message_agent`, landing the nudge in the assignee bot's canonical Bot Chat.
    **When your inbound begins `[Cronjob "supervise-issues" output`, you are that Bot Chat turn:** the sweep
-   is already done, so do not repeat steps 1–4 and ignore step 4's `message_agent` prohibition. Call
-   `message_agent` once per per-assignee action in the output, with its target and message verbatim, and
-   make those calls first. Only your final response may begin with `F39-ESC:<card-token>`: if the output
-   escalates a card, start the final response with that line (step 6) and put any summary after it.
-   **The escalation line is the first byte of that final response.** Write nothing before it: no
-   preamble, no note that the nudge is queued, no restating of these steps. The final response's very
-   first characters are `F39-ESC:` followed directly by the card's token; the nudge status and any other
-   summary come after the escalation line, never before it.
+   is already done, so do not repeat steps 1–4 or 6, do not touch the board, and ignore step 4's
+   `message_agent` prohibition. Call `message_agent` once per per-assignee action in the output, with its
+   target and message verbatim, and make those calls first. Then end with a short note for the human: the
+   cards nudged, and each `F39-ESC:<card-token>` escalation line from the output.
 6. **Escalate — a card already nudged twice.** If a blocked card's assignee is still unresponsive and the
-   card **already has two** `[supervise-issues nudge]` comments, do **not** send a third nudge. Instead
-   escalate to the human in your room: emit a message whose **very first characters are** `F39-ESC:` followed
-   immediately (no space) by the card's token — for example `F39-ESC:F39B-<nonce>` — and then the card id,
-   the stuck duration, and the blocker. The leading `F39-ESC:<card-token>` marker is mandatory and must be
-   the literal start of the message; a mention of the marker mid-sentence does not count.
+   card **already has two** `[supervise-issues nudge]` comments, do **not** send a third nudge. Instead,
+   escalate it to the human with one `kanban_block` call on that card, in this sweep:
+   `kanban_block(task_id="<card id>", kind="needs_input", reason="F39-ESC:<card-token> <card id> stuck <duration>; blocker: <blocker>")`.
+   The card is already blocked, so the call keeps it blocked and records that it now needs a human
+   (`needs_input`). That call is the escalation of record: make it exactly once per escalated card, and pass
+   `kind="needs_input"` exactly as shown (without a kind the call is refused). Then also put a line in your
+   final response that starts with `F39-ESC:` followed by the card's token, the card id, the stuck duration
+   and the blocker.
 7. **Reconcile — fail loud.** Count the nudges you actually sent this sweep; it must equal the number of
    cards that required a nudge (`sent_nudges == required_nudges`). If they differ, say so loudly and
    escalate.
 
 Never reap or force-transition a card here — worker liveness is the kanban dispatcher's job
 (`release_stale_claims`, `detect_crashed_workers`) and worktree reaping is `hermes worktree prune`.
-This skill only observes, comments, and pings.
+`kanban_block` on an already-blocked card is not a transition: the card stays blocked.
+This skill only observes, comments, escalates, and pings.

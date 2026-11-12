@@ -14,9 +14,10 @@ timeout_s: 600
 # AC-LOOP-F39-6 — the rendered supervise-issues 12h cron fires, nudges an assignee, escalates on repeat
 
 The rendered supervise-issues 12h `--deliver bot-chat` cron, made due and fired **through the gateway
-scheduler**, wakes the orchestrator's OWN canonical Bot Chat turn, which `message_agent`s the assignee of a
-silent card (the nudge lands in the assignee's Bot Chat) and — for a card already nudged twice with no
-assignee response — escalates to the human in the orchestrator's room instead of a third nudge. `model:
+scheduler**, runs one sweep that escalates a card already nudged twice with no assignee response to the human
+as one owner-input `kanban_block(kind="needs_input")` on the board instead of a third nudge, and wakes the
+orchestrator's OWN canonical Bot Chat turn, which `message_agent`s the assignee of a silent card (the nudge
+lands in the assignee's Bot Chat). `model:
 live` — a real model answers behind the OneCLI proxy. The on-disk provider is the named-provider
 `api_key`-literal form (`providers.coworkers-live` with an inline dummy `api_key` the egress proxy replaces
 at the wire), NOT a bare `key_env: ANTHROPIC_API_KEY` block: that shape 404/401s behind the proxy and does
@@ -27,14 +28,16 @@ precedent fixtures; the frontmatter `key_env` line is descriptive metadata only 
 
 The oracle is strict and exactly-one, mirroring AC-FLEET-F62-7. The cron-delivered envelope
 (`[Cronjob "supervise-issues" output …`) and the `message_agent` envelope
-(`Message from 🤖 orchestrator (@orchestrator): …`) are BOTH server-stamped (not spoofable by the model);
-each nudge/escalation carries this run's seeded card token (`F39A-$NONCE` / `F39B-$NONCE`), and the
-escalation message **begins with** the contiguous marker `F39-ESC:F39B-$NONCE` (the oracle matches it at the
-very start of the assistant content — a mid-sentence mention does not count). A single force-due fire drives BOTH behaviours in one
-sweep: card A (no prior nudges) → exactly one nudge; card B (two seeded unanswered supervisor nudges) →
-exactly one human escalation, no third nudge. The oracle is the executable `oracle.py` shipped alongside
-this file (it parses `tool_calls` arrays and correlates the sent result by `tool_call_id` — a bare row
-`COUNT(*)` is not sufficient).
+(`Message from 🤖 orchestrator (@orchestrator): …`) are BOTH server-stamped (not spoofable by the model),
+and each nudge carries this run's seeded card token (`F39A-$NONCE`). The escalation is a **recorded act**,
+not text: the orchestrator's `kanban_block(task_id=f39b-$NONCE, kind="needs_input")` with its `ok` result, in
+the cron session the scheduler principal admitted for this execution (`session_admissions.request_id =
+'cron:$JOB_ID:<execution id>'`, `principal_id = 'cron-owner'`), plus exactly one needs_input `blocked` event
+on card B inside that execution's `[claimed_at, finished_at]`. No reply text is matched, so the wording and
+where `F39-ESC:` sits never decide the verdict. A single force-due fire drives BOTH behaviours: card A (no
+prior nudges) → exactly one nudge; card B (two seeded unanswered supervisor nudges) → exactly one owner-input
+escalation, no third nudge. The oracle is the executable `oracle.py` shipped alongside this file (it parses
+`tool_calls` arrays and correlates each result by `tool_call_id` — a bare row `COUNT(*)` is not sufficient).
 
 ## Setup
 
@@ -61,14 +64,14 @@ EOF
 source "$TB/fleet-f62a.env"
 ```
 
-0. **Stage + enable `nv-coworker-compose`** (the testbed points `HERMES_BUNDLED_PLUGINS` at an EMPTY dir, so
-   the `onboard coworker` verb is absent until the plugin is installed — mirror AC-LOOP-F35-5 §Setup 1):
+0. **Stage `nv-coworker-compose`** (the testbed points `HERMES_BUNDLED_PLUGINS` at an EMPTY dir, so the
+   `onboard coworker` verb is absent until the plugin is installed — mirror AC-LOOP-F35-5 §Setup 1). Enable it
+   by config only, through step 1's `plugins.enabled` merge: at v0.22.5 `hermes plugins enable` runs PM
+   admission (`hermes_cli/plugins_admission.py`, `pm.client.sync_venv`), which downloads a Python into the
+   machine store outside `$HERMES_HOME` and is refused offline.
    ```bash
    mkdir -p "$HERMES_HOME/plugins"
    cp -R "$WT/plugins/nv-coworker-compose" "$HERMES_HOME/plugins/"
-   hermes plugins enable nv-coworker-compose
-   hermes plugins list | grep -F nv-coworker-compose      # must show it enabled
-   hermes onboard --help | grep -F coworker               # the `coworker` verb now exists, exit 0
    ```
 1. **Default config + secret scope.** Merge `fixtures/default.config.yaml` (the multiplex block below, plus
    `plugins.enabled: [nv-coworker-compose]`) into
@@ -86,6 +89,14 @@ source "$TB/fleet-f62a.env"
    plugins:
      enabled: [nv-coworker-compose]
    ```
+   Then prove the config-only enable loaded it. The `plugins list` row must read `enabled`, and `not enabled`
+   also contains that word, so it is excluded:
+   ```bash
+   row=$(hermes plugins list | grep -F nv-coworker-compose || true)
+   if test -n "$row" && ! grep -qF 'not enabled' <<< "$row" && grep -qwF enabled <<< "$row"; then echo "plugin enabled OK"
+   else echo "FAIL(setup): nv-coworker-compose is not enabled: ${row:-no row}"; exit 1; fi
+   hermes onboard --help | grep -F coworker               # the `coworker` verb now exists, exit 0
+   ```
 2. **Boot the FULL messaging gateway** on the DEFAULT profile — `hermes gateway run --no-supervise`
    (`hermes_cli/subcommands/gateway.py:47`), with `API_SERVER_KEY` + `API_SERVER_HOST=127.0.0.1` +
    `API_SERVER_PORT=$PORT` exported in the process env. This is the process that loads the aiohttp
@@ -95,14 +106,34 @@ source "$TB/fleet-f62a.env"
    (`hermes_cli/main.py:11995` `cmd_dashboard`), a SEPARATE process that does not load gateway platforms and
    returns HTTP 405 (`allow: GET`) on the `/p/.../api/jobs/{id}/run` route. Wait for `GET
    http://127.0.0.1:$PORT/health` → 200 (the api_server listener is up; the api_server registers `/health`,
-   `/health/detailed`, `/v1/health` — `gateway/platforms/api_server.py:2217-2219` — not `/api/health`). A dashboard SPA is launched
-   separately (on `$DASH_PORT`, against the same `$HERMES_HOME`) only AFTER a successful sweep, for the
-   required post-sweep UI screenshots in §Evidence.
+   `/health/detailed`, `/v1/health` — `gateway/platforms/api_server.py:2217-2219` — not `/api/health`). The
+   run's one dashboard is launched in §Setup 2b on `$DASH_PORT`, against the same `$HERMES_HOME`: it serves the
+   onboard WS in step 3 and, after the oracle, the §Evidence screenshots. The fire still goes to `$PORT`.
+2b. **One dashboard, launched before step 3 and kept up through the C5 screenshots** (ADR erratum E2.2). Launch it
+   from the same sourced `harness.live.env`, after `GET http://127.0.0.1:$PORT/health` → 200. It is the one
+   dashboard of the run, with no relaunch. Each bound below is a recorded line in
+   `$ART/scenario-AC-LOOP-F39-6/setup.log`; a miss on any of them is **FAIL(setup)**, with no re-run.
+   ```bash
+   ( source "$TB/harness.live.env" && source "$TB/fleet-f62a.env"
+     S="$ART/scenario-AC-LOOP-F39-6"; mkdir -p "$S"
+     if test "$(env | grep -c '^HERMES_DESKTOP=')" = 0; then echo "bound(a) OK: HERMES_DESKTOP unset" >> "$S/setup.log"
+     else echo "bound(a) FAIL(setup): HERMES_DESKTOP set" >> "$S/setup.log"; exit 1; fi
+     if test -n "${HERMES_DASHBOARD_SESSION_TOKEN:-}"; then echo "dashboard token present=yes" >> "$S/setup.log"
+     else echo "dashboard token present=no FAIL(setup)" >> "$S/setup.log"; exit 1; fi
+     HERMES_BUNDLED_PLUGINS="$WT/plugins" nohup hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open \
+       > "$S/dashboard.log" 2>&1 < /dev/null &
+     echo "DASH_PID=$!" >> "$TB/fleet-f62a.env" )
+   ```
+   Wait until `curl -fsS -o /dev/null "http://127.0.0.1:$DASH_PORT/"` succeeds. The token value is never logged.
+   - **(b)** No browser, agent-browser, desktop app or TUI attaches to this dashboard until `oracle.py` has run.
+     After the oracle, append `bound(b) OK: first UI attach <UTC> after oracle <UTC>` to `setup.log`, from the
+     harness's own timestamps; a UI attach before the oracle ran is `bound(b) FAIL(setup)`.
+   - **(c)** and **(e)** are checked before the fire, at the end of §Setup 5; **(d′)** after the oracle, in step 3.
 3. **Onboard-render the canonical spec** over the loopback WS (renders the cron + skill + Bot Chats):
    ```bash
    ( source "$TB/fleet-f62a.env" && source "$TB/harness.live.env" && cd "$WT"
      hermes onboard coworker tests/hermes_cli/fixtures/loop-f39/coworker-types.yaml \
-       --gateway-url "ws://127.0.0.1:$PORT/api/ws?token=$GATEWAY_TOKEN" \
+       --gateway-url "ws://127.0.0.1:$DASH_PORT/api/ws?token=${HERMES_DASHBOARD_SESSION_TOKEN:?dashboard token unset}" \
        > "$ART/scenario-AC-LOOP-F39-6/onboard.log" 2>&1 ; echo onboard_exit=$? )
    ```
    → expect `orchestrator/skills/supervise-issues/SKILL.md` present and `orchestrator/cron/jobs.json` with
@@ -135,8 +166,8 @@ source "$TB/fleet-f62a.env"
    the merged `orchestrator/config.yaml`, so the live provider takes effect for the fire.
    ```bash
    for p in orchestrator worker; do
-     python3 - "$SCN/fixtures/$p/config.yaml" "$HERMES_HOME/profiles/$p/config.yaml" <<'PY'
-   import sys, yaml
+     "$WT/.venv/bin/python" - "$SCN/fixtures/$p/config.yaml" "$HERMES_HOME/profiles/$p/config.yaml" <<'PY'
+   import sys, hermes_yaml as yaml
    src, dst = sys.argv[1], sys.argv[2]
    fix = yaml.safe_load(open(src, encoding="utf-8")) or {}
    cur = yaml.safe_load(open(dst, encoding="utf-8")) or {}
@@ -151,8 +182,8 @@ source "$TB/fleet-f62a.env"
    ```
    Then assert the merge landed AND the render survived — fail the scenario here rather than waste the fire:
    ```bash
-   python3 - <<'PY'
-   import os, json, yaml
+   "$WT/.venv/bin/python" - <<'PY'
+   import os, json, hermes_yaml as yaml
    H = os.environ["HERMES_HOME"]
    o = yaml.safe_load(open(f"{H}/profiles/orchestrator/config.yaml", encoding="utf-8"))
    assert o["model"]["provider"] == "coworkers-live", o.get("model")
@@ -203,6 +234,66 @@ source "$TB/fleet-f62a.env"
    c.commit(); c.close(); print("seeded", nonce)
    PY
    ```
+   Then assert card B can take the in-place owner-input classification: `kanban_block` on an already-blocked
+   card sets `block_kind` only when the card has none and no live run (`hermes_cli/kanban_db.py` `block_task`).
+   A miss is **FAIL(setup)**, raised here, before the fire:
+   ```bash
+   python3 - "$KANBAN_DB" "$NONCE" <<'PY'
+   import sqlite3, sys
+   c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+   row = c.execute("SELECT block_kind, current_run_id FROM tasks WHERE id=?", (f"f39b-{sys.argv[2]}",)).fetchone()
+   assert row == (None, None), f"FAIL(setup): card B block_kind/current_run_id = {row}, both must be NULL"
+   print("card B seed OK: block_kind NULL, current_run_id NULL")
+   PY
+   ```
+   **Kanban-tab probe ($0, before the fire).** The testbed points `HERMES_BUNDLED_PLUGINS` at an empty dir, so
+   a dashboard launched from it has no Kanban tab, and `step-3b.png` needs that tab. Prove the dashboard launched
+   with `HERMES_BUNDLED_PLUGINS="$WT/plugins"` discovers the bundled `kanban` dashboard plugin and would mount
+   its API (`hermes_cli/web_server_dashboard.py` `_discover_dashboard_plugins`, `_plugin_api_mount_skip_reason`).
+   A non-zero exit is **FAIL(setup)**, reported RED before the fire:
+   ```bash
+   HERMES_BUNDLED_PLUGINS="$WT/plugins" "$WT/.venv/bin/python" - <<'PY'
+   from hermes_cli.web_server_dashboard import _discover_dashboard_plugins, _plugin_api_mount_skip_reason
+   kanban = [p for p in _discover_dashboard_plugins() if p["name"] == "kanban"]
+   assert len(kanban) == 1, "FAIL(setup): no kanban dashboard plugin under $WT/plugins"
+   assert _plugin_api_mount_skip_reason(kanban[0], set(), set()) is None, "FAIL(setup): kanban API would not mount"
+   print("kanban tab + API OK")
+   PY
+   ```
+   The rendered tab itself is proven only by `step-3b.png`.
+
+   **Pre-fire bounds (c) and (e)** (ADR erratum E2.2), recorded in `setup.log`; a miss is **FAIL(setup)**:
+   - **(c)** 0 `Desktop cron scheduler started` lines before the fire, in `$HERMES_HOME/logs/gui.log` and in the
+     dashboard's stdout:
+     ```bash
+     S="$ART/scenario-AC-LOOP-F39-6"
+     n=$(cat "$HERMES_HOME/logs/gui.log" "$S/dashboard.log" 2>/dev/null | grep -c 'Desktop cron scheduler started' || true)
+     if test "$n" = 0; then echo "bound(c) OK: 0 desktop cron scheduler lines" >> "$S/setup.log"
+     else echo "bound(c) FAIL(setup): $n desktop cron scheduler lines" >> "$S/setup.log"; exit 1; fi
+     ```
+   - **(e)** The orchestrator profile's authority is the multiplexed gateway, it is ready, and a Bot Chat owner is
+     deliverable. Without this the cron delivery would park, not run. It must exit 0 and print exactly
+     `authority=ready control_home=root bot_chat_owner=present`; the wrapper records it in `setup.log`:
+     ```bash
+     S="$ART/scenario-AC-LOOP-F39-6"
+     if out=$("$WT/.venv/bin/python" - 2> "$S/bound-e.err" <<'PY'
+     import os
+     from pathlib import Path
+     from hermes_cli.gateway_runtime import discover_gateway_endpoint
+     from tools.bot_live_delivery import find_canonical_live_owner
+     root = Path(os.environ["HERMES_HOME"]).resolve()
+     orch = root / "profiles" / "orchestrator"
+     r = discover_gateway_endpoint(orch, timeout=5)
+     assert r.state == "ready" and r.endpoint is not None, r.state
+     assert r.endpoint.control_home, "no multiplexer control home"
+     assert Path(r.endpoint.control_home).resolve() == root, "not served by the root multiplexer"
+     assert find_canonical_live_owner(orch) is not None, "no profile store, so no Bot Chat owner"
+     print("authority=ready control_home=root bot_chat_owner=present")
+     PY
+     ) && test "$out" = "authority=ready control_home=root bot_chat_owner=present"; then
+       printf '%s\n' "$out"; echo "bound(e) OK: $out" >> "$S/setup.log"
+     else echo "bound(e) FAIL(setup): $(tail -n 1 "$S/bound-e.err")" >> "$S/setup.log"; exit 1; fi
+     ```
 
 ## Steps
 
@@ -222,6 +313,8 @@ source "$TB/fleet-f62a.env"
        return [r[0] for r in kb.execute(
            "SELECT id FROM task_comments WHERE task_id=? AND author='orchestrator' "
            "AND body LIKE '[supervise-issues nudge]%'", (cid,))] if kb else []
+   def event_ids(cid):
+       return [r[0] for r in kb.execute("SELECT id FROM task_events WHERE task_id=?", (cid,))] if kb else []
    def state(cid):
        row = (kb.execute("SELECT status, assignee FROM tasks WHERE id=?", (cid,)).fetchone()
               or ["", ""]) if kb else ["", ""]
@@ -229,17 +322,22 @@ source "$TB/fleet-f62a.env"
                         (cid,)).fetchone() or [0])[0] if kb else 0
        return {"status": row[0], "assignee": row[1], "worker_comments": wc}
    a, b = state(carda), state(cardb)
+   b_kind = (kb.execute("SELECT block_kind FROM tasks WHERE id=?", (cardb,)).fetchone() or [None])[0] if kb else None
    print(json.dumps({"base_orch": maxid(os.path.join(root,"profiles","orchestrator","state.db")),
                      "base_worker": maxid(os.path.join(root,"profiles","worker","state.db")),
                      "exec_base": exec_base,
                      "card_a_nudge_ids": nudge_ids(carda), "card_a_status": a["status"],
                      "card_a_assignee": a["assignee"], "card_a_worker_comments": a["worker_comments"],
                      "card_b_nudge_ids": nudge_ids(cardb), "card_b_status": b["status"],
-                     "card_b_assignee": b["assignee"], "card_b_worker_comments": b["worker_comments"]}))
+                     "card_b_assignee": b["assignee"], "card_b_worker_comments": b["worker_comments"],
+                     "card_b_block_kind": b_kind,
+                     "card_a_event_ids": event_ids(carda), "card_b_event_ids": event_ids(cardb)}))
    PY
    ```
    (The baseline must run AFTER the step-5 seed and BEFORE the fire, so `card_b_nudge_ids` captures exactly
-   the two seeded pre-fire nudges — the oracle proves this set is unchanged post-fire, i.e. no third nudge.)
+   the two seeded pre-fire nudges — the oracle proves this set is unchanged post-fire, i.e. no third nudge —
+   and `card_a_event_ids` / `card_b_event_ids` capture every pre-fire `task_events` row, so only an event the
+   fire appends can count as the escalation. `card_b_block_kind` must read `null`.)
    Also record the `session_model_usage` call counter for `orchestrator` + `worker` (the budget checkpoint).
 2. **Force the cron due ONCE through the scheduler** (do NOT call `hermes cron run`, `hermes chat`, or the
    skill directly — those bypass the scheduler / are a direct invocation):
@@ -249,8 +347,9 @@ source "$TB/fleet-f62a.env"
      -H "Authorization: Bearer $API_SERVER_KEY" -H "Content-Type: application/json" -d '{}'
    ```
    → expect HTTP 200 (`trigger_job` sets `next_run_at=now`). The orchestrator profile's scheduler tick
-   (≤60s) then fires the rendered job via `run_one_job` → `deliver: bot-chat` → the orchestrator's own
-   `Bot Chat` turn (which nudges card A and escalates card B in the one sweep).
+   (≤60s) then fires the rendered job via `run_one_job`: the sweep, in the cron session admitted for this
+   execution, escalates card B with `kanban_block(kind="needs_input")`, and `deliver: bot-chat` wakes the
+   orchestrator's own `Bot Chat` turn, which sends card A's `message_agent` nudge.
 3. **Bounded wait, then run the oracle** (≤ `timeout_s`; poll until `oracle.py` passes or the bound is hit).
    The tester's live tier (the `hermes-testbed` harness) sets and ENFORCES `LIVE_MODEL_CALLS_MAX=40` /
    `LIVE_BUDGET_USD=5` as a hard stop — it aborts the scenario when the summed `session_model_usage` call
@@ -262,15 +361,41 @@ source "$TB/fleet-f62a.env"
    python3 "$SCN/oracle.py" --home "$HERMES_HOME" --kanban-db "$KANBAN_DB" \
      --job-id "$JOB_ID" --nonce "$NONCE" --baselines "$TB/f62a-baselines.json"
    ```
+   Then bound **(d′)** (ADR erratum E2.2; a miss is **FAIL(setup)**). At v0.22.5 a `deliver: bot-chat` delivery is
+   admitted only to the target profile's authority, with no second-writer fallback, and it logs
+   `Job '<id>': Bot Chat (own) receipt=<key> status=<s>` (`cron/scheduler_delivery.py`). The root
+   `$HERMES_HOME/logs/agent.log` and the orchestrator profile's `agent.log` together hold exactly one such record,
+   and `executions.db` holds exactly one new `source='builtin'` row:
+   ```bash
+   S="$ART/scenario-AC-LOOP-F39-6"
+   n=$(cat "$HERMES_HOME/logs/agent.log" "$HERMES_HOME/profiles/orchestrator/logs/agent.log" 2>/dev/null \
+       | grep -cF "Job '$JOB_ID': Bot Chat (own) receipt=" || true)
+   e=$(python3 - "$HERMES_HOME" "$JOB_ID" "$TB/f62a-baselines.json" <<'PY'
+   import json, sqlite3, sys
+   home, job, bl = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3], encoding="utf-8"))
+   c = sqlite3.connect(f"file:{home}/profiles/orchestrator/cron/executions.db?mode=ro", uri=True)
+   base = set(bl.get("exec_base") or [])
+   print(sum(1 for (i,) in c.execute("SELECT id FROM executions WHERE job_id=? AND source='builtin'", (job,))
+             if i not in base))
+   PY
+   )
+   if test "$n" = 1 && test "$e" = 1; then echo "bound(d') OK: receipt records=1 new builtin executions=1" >> "$S/setup.log"
+   else echo "bound(d') FAIL(setup): receipt records=$n new builtin executions=$e" >> "$S/setup.log"; exit 1; fi
+   ```
 
 ## Pass
 
-The criterion holds **iff `oracle.py` exits 0** and prints exactly:
-```
-PASS cron=1 cron_inbound=1 message_agent_calls=1 sent_results=1 worker_bot_chat_inbounds=1 escalations=1 card_a_new_comments=1 card_b_nudges=2 card_b_calls=0 card_b_inbounds=0 required_nudges=1 sent_nudges=1
-```
-`oracle.py` is the authoritative gate; it enforces, all against the post-baseline current run and the
-`sessions.title='Bot Chat'` join:
+The criterion holds **iff BOTH** of these hold; a missing or non-conforming screenshot means no PASS, reported
+RED to the Orchestrator the same turn:
+- `oracle.py` exits 0 and prints exactly:
+  ```
+  PASS cron=1 cron_inbound=1 message_agent_calls=1 sent_results=1 worker_bot_chat_inbounds=1 escalations=1 card_a_new_comments=1 card_b_nudges=2 card_b_calls=0 card_b_inbounds=0 required_nudges=1 sent_nudges=1 card_a_escalations=0
+  ```
+- all four screenshots `step-1.png`, `step-2.png`, `step-3.png` and `step-3b.png` are captured as §Evidence
+  specifies.
+
+`oracle.py` is the authoritative state gate; it enforces, all against the post-baseline current run (the
+nudge half on the `sessions.title='Bot Chat'` join, the escalation on the admitted cron session):
 1. **cron fired through the scheduler** — exactly one NEW `completed` execution for `$JOB_ID` in
    `profiles/orchestrator/cron/executions.db` (`cron=1`).
 2. **deliver:bot-chat woke the orchestrator's own Bot Chat** — exactly one post-baseline `role='user'`
@@ -282,44 +407,73 @@ PASS cron=1 cron_inbound=1 message_agent_calls=1 sent_results=1 worker_bot_chat_
 4. **(b) the nudge landed in the assignee's Bot Chat** — exactly one post-baseline `role='user'` inbound in
    `worker`'s `Bot Chat` with `Message from 🤖 orchestrator (@orchestrator): …F39A-$NONCE…`
    (`worker_bot_chat_inbounds=1`).
-5. **(c) card B escalated to the human, no third nudge** — exactly one human-facing assistant message in the
-   orchestrator's Bot Chat whose content **begins with** `F39-ESC:F39B-$NONCE` (`escalations=1`); and for card B: zero
-   `message_agent` calls (`card_b_calls=0`), zero `worker` inbounds (`card_b_inbounds=0`), and its on-card
-   `[supervise-issues nudge]` `task_comments` count still exactly two (`card_b_nudges=2`).
+5. **(c) card B escalated to the human as one recorded owner-input act, no third nudge** (`escalations=1`):
+   - a post-baseline orchestrator `kanban_block` call with `task_id=f39b-$NONCE` and `kind="needs_input"`,
+     correlated by `tool_call_id` to a later `role='tool'` result in the same session whose JSON has
+     `ok: true`, `task_id=f39b-$NONCE` and `block_kind="needs_input"`;
+   - that session is the cron session admitted for the one new execution E
+     (`session_admissions.target_session_id` WHERE `request_id='cron:$JOB_ID:<E.id>'` AND
+     `principal_id='cron-owner'`), and no other: a call in the Bot Chat turn or an unrelated session does not
+     count;
+   - exactly one post-baseline `task_events` row on card B with kind `blocked` and payload kind `needs_input`,
+     whose `created_at` is in `[floor(E.claimed_at), ceil(E.finished_at)]`, and card B's `tasks.block_kind`
+     still `needs_input`;
+   - no post-baseline needs_input `blocked` event on card A (`card_a_escalations=0`), and the baseline
+     `card_b_block_kind` was `null`;
+   - for card B: zero `message_agent` calls (`card_b_calls=0`), zero `worker` inbounds (`card_b_inbounds=0`),
+     and its on-card `[supervise-issues nudge]` `task_comments` count still exactly two (`card_b_nudges=2`).
+
+   A refused extra `kanban_block` call is ignored. No reply text is gated: neither the wording of the reason or
+   the reply, nor where `F39-ESC:` sits in either.
 6. **on-card durable nudge + reconciliation** — card A gained exactly one `[supervise-issues nudge]`
    `task_comments` row (`card_a_new_comments=1`), and `sent_nudges == required_nudges == 1`.
 
 Any metric ≠ its target, a non-zero exit, or an inconclusive fire is a **FAIL** (no PASS-by-substitution,
-no re-drive).
+no re-drive). Verdict classes for the escalation (ADR §Acceptance criteria):
+- **counted FAIL:** no recorded act (`escalations=0` and no `kanban_block` call for card B in any orchestrator
+  session), a third nudge, or any act on card A;
+- **WATCH (timing):** the act is recorded on card B, but in a later turn instead of the sweep — the same
+  execution's cron-delivered Bot Chat turn or a later one, as shown by the call row's session and id. An
+  unrelated session or a stale delivery is not WATCH;
+- the nudge-half clauses and FAIL(env) / FAIL(setup) keep their meanings.
 
 ## Evidence
 
 **Semantic gate (headless — the state that decides PASS/FAIL):** the api_server platform serves the fire
 route but NOT the web SPA, so the semantic pass gate is on disk (`oracle.py` + state.db); the required UI
-screenshots below corroborate it and are captured from a separately-launched dashboard post-sweep.
+screenshots below corroborate it and are captured post-sweep from the single dashboard launched in §Setup 2b.
 - `oracle.py`'s stdout (the `PASS …` line) captured to `scenario-AC-LOOP-F39-6/oracle.txt` — the semantic gate.
 - The three oracle clauses as stdlib `python3 -c "import sqlite3 …"` (read-only `file:<path>?mode=ro`)
   dumps against the live stores, each labelled with what it proves: (a) the orchestrator `Bot Chat`
   assistant `tool_calls` row carrying the `message_agent` nudge to `worker` + `F39A-$NONCE` and its
   `status:"sent"` result; (b) the `worker` `Bot Chat` `role='user'` inbound `Message from 🤖 orchestrator
-  (@orchestrator): …F39A-$NONCE…`; (c) the orchestrator `Bot Chat` assistant row beginning
-  `F39-ESC:F39B-$NONCE` + card B's unchanged two-nudge `task_comments` set.
+  (@orchestrator): …F39A-$NONCE…`; (c) the cron-session `kanban_block` call row and its result, the card B
+  needs_input `task_events` row and `tasks.block_kind`, the `session_admissions` row for
+  `cron:$JOB_ID:<E.id>`, E's `claimed_at` / `finished_at` + card B's unchanged two-nudge `task_comments` set.
 - `execution.txt` (the one `source='builtin'` cron execution, `status=completed`), the `gateway.log`
   excerpt for the fired turn, `onboard.log`, the rendered `orchestrator/cron/jobs.json`
   (`deliver:bot-chat` + interval 720 + `JOB_ID`), `f62a-baselines.json`, and the `session_model_usage`
   call counter before/after (each < 40; cost recorded, may read `unknown_pricing`).
 
 **Required UI corroboration (post-sweep):** the screenshots require the web SPA, which is a SEPARATE server
-(`hermes dashboard`, `hermes_cli/main.py:11995`) — it does not serve the fire route, so it is launched only
-AFTER `oracle.py` passes, against the same `$HERMES_HOME` on its own port:
-`hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open` (resume the exact
-`sessions.title='Bot Chat'` session by id, mirroring AC-FLEET-F62-7's UI + state.db pairing). `oracle.py`
-remains the semantic state gate, but the AC row remains **FAIL** if any of the three required screenshots
-below cannot be captured (the live-scenario contract requires user-visible artifacts). On the 503-blocked
-run there were no nudge/escalation bubbles to capture, which is consistent with the FAIL.
+(`hermes dashboard`, `hermes_cli/main.py:11995`) that does not serve the fire route. They come from the one
+dashboard launched in §Setup 2b from the same sourced harness env (so `HERMES_KANBAN_HOME` resolves the same
+board), against the same `$HERMES_HOME` on its own port, with the bundled plugins pointed at the worktree so the
+Kanban tab exists:
+`HERMES_BUNDLED_PLUGINS="$WT/plugins" hermes dashboard --host 127.0.0.1 --port "$DASH_PORT" --no-open`.
+Nothing attaches to it until `oracle.py` has run (bound (b)), and it is not relaunched
+(resume the exact session by id, mirroring AC-FLEET-F62-7's UI + state.db pairing). `oracle.py` remains the
+semantic state gate, but the AC row remains **FAIL** if any of the four required screenshots below cannot be
+captured (the live-scenario contract requires user-visible artifacts). On the 503-blocked run there were no
+nudge/escalation bubbles to capture, which is consistent with the FAIL.
 - `scenario-AC-LOOP-F39-6/step-1.png` — the orchestrator's `Bot Chat` showing the card-A `message_agent`
   nudge to `worker` carrying `F39A-$NONCE` (observation a).
 - `scenario-AC-LOOP-F39-6/step-2.png` — `worker`'s `Bot Chat` showing the `Message from 🤖 orchestrator
   (@orchestrator): …F39A-$NONCE…` inbound (observation b).
-- `scenario-AC-LOOP-F39-6/step-3.png` — the orchestrator's `Bot Chat` showing the `F39-ESC:F39B-$NONCE`
-  human-facing escalation and NO third nudge to `worker` (observation c).
+- `scenario-AC-LOOP-F39-6/step-3.png` — the admitted cron session (`target_session_id` of
+  `cron:$JOB_ID:<E.id>`), opened by id, showing the card-B `kanban_block` call and NO third nudge to
+  `worker` (observation c).
+- `scenario-AC-LOOP-F39-6/step-3b.png` (**required, no "page absent" escape**) — card B's Kanban **drawer** on
+  the dashboard's `/kanban` tab: the title with `F39B-$NONCE` and, under Events (newest first), the NEW
+  `blocked` event whose payload line reads `"kind":"needs_input"`. The blocked column alone proves nothing,
+  because card B was blocked before the fire.

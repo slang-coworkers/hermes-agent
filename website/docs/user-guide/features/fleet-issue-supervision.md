@@ -70,7 +70,7 @@ ladder — all native config, no supervisor involvement:
 
 The supervisor never force-transitions a card: **worker liveness is the
 dispatcher's job, worktree reaping is `hermes worktree prune`**, and the nudger
-only observes, comments, and pings.
+only observes, comments, escalates, and pings.
 
 ## The supervise-issues nudger (a rendered 12h cron)
 
@@ -94,7 +94,14 @@ Each run (see the skill body for the exact steps):
    an assigned card the assignee hasn't acted on), skipping any a human touched.
 4. **Nudge** — post a durable `kanban_comment` on the card (the on-card artifact
    the assignee's worker consumes), and emit a per-assignee ping.
-5. **Escalate** to the human in the orchestrator's room on repeated non-response.
+5. **Escalate** to the human on repeated non-response.
+
+A card already nudged twice with no assignee response is not nudged a third time.
+The sweep escalates it with one `kanban_block` call, `kind: needs_input`, on the
+already-blocked card. The card stays blocked, with the same assignee and comments,
+and the board records that it needs a human. The gateway's kanban notifier treats a
+`needs_input` block as an owner decision for any chat subscribed to the card. The
+supervisor also repeats the `F39-ESC:<card-token>` line in its room reply.
 
 ### The nudge is two native seams, not one
 
