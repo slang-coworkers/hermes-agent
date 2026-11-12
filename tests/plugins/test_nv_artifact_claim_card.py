@@ -28,7 +28,7 @@ GL = "https://gitlab.example.test"
 PROJECT = "group/project"
 FORGE = "example-forge"
 CHAIN_SETTINGS = {
-    "forge_tools": [FORGE],
+    "forge_tools": [FORGE, "glab"],
     "chain_projects": ["project"],
     "chain_branch_re": r"chain-bot/chain-(?:project)-(?:issue-[1-9][0-9]{0,8}|slack-[0-9]{10}\.[0-9]{6})"
                        r"(?:-r[1-9][0-9]?)?",
@@ -40,9 +40,13 @@ CARD_KEY = "chain-project-issue-422:builder:r1"
 @pytest.fixture
 def configured(artifact):
     """``artifact`` reloaded with the forge and chain settings a downstream fleet renders."""
+    return _with_settings(artifact, **CHAIN_SETTINGS)
+
+
+def _with_settings(artifact, **settings):
     cfg_path = artifact.home / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    cfg["plugins"]["entries"][acceptance.PLUGIN_KEY]["settings"].update(CHAIN_SETTINGS)
+    cfg["plugins"]["entries"][acceptance.PLUGIN_KEY]["settings"].update(settings)
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     manager = PluginManager()
     manager.discover_and_load()
@@ -147,6 +151,7 @@ def test_a_near_miss_of_the_chain_branch_outside_a_worker_mints_an_anchor(config
 
 
 def test_without_chain_branch_re_a_chain_branch_outside_a_worker_mints_an_anchor(artifact):
+    artifact = _with_settings(artifact, forge_tools=["glab"])
     _claim(artifact, f"glab mr create -s {CHAIN} --title t", _mr_json(333, CHAIN), task_id="", session_id="S-chat")
     (anchor,) = _tasks()
     assert anchor["title"] == f"{PROJECT}!333" and anchor["status"] == "blocked"
@@ -294,7 +299,15 @@ def test_an_over_long_number_in_an_earlier_url_never_drops_a_workers_claim(confi
     assert _ownership(configured.root, repo=PROJECT, pr=333) == [(PROJECT, 333, card, OWNER_PROFILE)]
 
 
-def test_without_forge_tools_only_glab_claims_an_mr(artifact):
+def test_without_forge_tools_no_mr_create_claims(artifact):
+    _claim(artifact, _forge_create("fix/3"), _mr_json(3, "fix/3"), task_id="", session_id="S-chat")
+    _claim(artifact, "glab mr create --source-branch fix/4 --title t", _mr_json(4, "fix/4"),
+           task_id="", session_id="S-chat")
+    assert _tasks() == [] and _ownership(artifact.root) == []
+
+
+def test_only_the_listed_forge_tools_claim_an_mr(artifact):
+    artifact = _with_settings(artifact, forge_tools=["glab"])
     _claim(artifact, _forge_create("fix/3"), _mr_json(3, "fix/3"), task_id="", session_id="S-chat")
     assert _tasks() == [] and _ownership(artifact.root) == []
     _claim(artifact, "glab mr create --source-branch fix/4 --title t", _mr_json(4, "fix/4"),
@@ -304,13 +317,14 @@ def test_without_forge_tools_only_glab_claims_an_mr(artifact):
 
 
 def test_without_a_chain_setting_a_chain_shaped_branch_still_gets_its_anchor(artifact):
+    artifact = _with_settings(artifact, forge_tools=["glab"])
     _claim(artifact, f"glab mr create --source-branch {CHAIN} --title t", URL_ONLY, task_id="", session_id="S-chat")
     (anchor,) = _tasks()
     assert anchor["title"] == f"{PROJECT}!333" and anchor["status"] == "blocked"
 
 
 @pytest.mark.parametrize("forge_tools", [[FORGE, 7], FORGE])
-def test_forge_tools_that_is_not_a_list_of_strings_falls_back_to_glab_only(artifact, forge_tools):
+def test_forge_tools_that_is_not_a_list_of_strings_falls_back_to_no_forge_claims(artifact, forge_tools):
     cfg_path = artifact.home / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     cfg["plugins"]["entries"][acceptance.PLUGIN_KEY]["settings"]["forge_tools"] = forge_tools
@@ -321,4 +335,6 @@ def test_forge_tools_that_is_not_a_list_of_strings_falls_back_to_glab_only(artif
     assert loaded.enabled is True and loaded.error is None
     reloaded = SimpleNamespace(manager=manager, loaded=loaded, root=artifact.root, home=artifact.home)
     _claim(reloaded, _forge_create("fix/5"), _mr_json(5, "fix/5"), task_id="", session_id="S-chat")
+    _claim(reloaded, "glab mr create --source-branch fix/6 --title t", _mr_json(6, "fix/6"),
+           task_id="", session_id="S-chat")
     assert _tasks() == [] and _ownership(artifact.root) == []
