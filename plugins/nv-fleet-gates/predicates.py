@@ -319,6 +319,7 @@ def _review_approves(segment: str) -> bool:
         # An operator glued to the flag (`--approve>/dev/null`, `-a</dev/null`, `--approve&`) ends its token.
         lexer = shlex.shlex(rest, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
+        lexer.commenters = ""  # a `#` inside a path (`--body-file /tmp/review#1.md`) is not a comment
         tokens = list(lexer)
     except ValueError:
         tokens = re.split(r"[\s;&|<>]+", rest)
