@@ -62,10 +62,10 @@ def test_segment_split_stays_linear_on_long_blank_runs():
     import time
 
     p = _predicates()
-    commands = [" " * 20000, "a" + " \t" * 10000 + "b", "ls" + " " * 20000 + "&& rm x", "x " * 10000 + "; y"]
+    commands = [" " * 100000, "a" + " \t" * 50000 + "b", "ls" + " " * 100000 + "&& rm x", "x " * 50000 + "; y"]
     started = time.perf_counter()
     verdicts = [p.is_mutation("terminal", {"command": c}) for c in commands]
-    assert time.perf_counter() - started < 0.5
+    assert time.perf_counter() - started < 2.0
     assert verdicts == [False, False, True, False]
     assert p._segments("a  &&\tb ;  c\r ; | d || e\n  f") == ["a", "b", "c\r", "d", "e", "f"]
     assert p._segments(" \t ; \r\n ") == []
