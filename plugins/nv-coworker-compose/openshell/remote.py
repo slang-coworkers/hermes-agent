@@ -110,7 +110,7 @@ _SPEC_KEYS = {
     "mode", "broker", "policy_root", "policy_name", "ready_timeout_s", "image_registry_prefix",
     "inference", "allow_replace", "gpu",
 }
-# Keys an earlier draft of remote mode accepted. Refused with a pointer instead of "unknown key".
+# Give obsolete spec keys actionable errors instead of a generic unknown-key error.
 _MOVED_SPEC_KEYS = {
     "workspace": "use egress.workspace; it must equal the broker's workspace",
     "main_command": "the broker owns the sandbox main process (its sandbox_command setting)",
