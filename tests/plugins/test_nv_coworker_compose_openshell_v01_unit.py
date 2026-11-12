@@ -83,6 +83,16 @@ def test_remote_mode_needs_a_broker_address():
     assert remote.resolve_config({}, env={})["mode"] == remote.MODE_LOCAL
 
 
+def test_local_mode_ignores_the_0072_inference_provider_block():
+    remote = _openshell("remote")
+    spec = {"substrate": "openshell",
+            "egress": {"inference_provider": {"provider": "compatible-endpoint",
+                                              "base_url": "https://inference.local/v1",
+                                              "api_mode": "chat_completions", "model_id": "example-model"}}}
+    cfg = remote.resolve_config(spec, env={})
+    assert cfg["mode"] == remote.MODE_LOCAL and cfg["inference"] is None
+
+
 def _provider_block(**extra) -> dict:
     return {"provider": "custom", "base_url": "https://llm.example.com/v1", "api_mode": "chat_completions",
             "model_id": "example-model", "credential_env": "PROVIDER_API_KEY", "attribution_tag_prefix": "fleet",

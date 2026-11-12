@@ -369,7 +369,10 @@ def resolve_config(spec: dict[str, Any], env: Optional[dict[str, str]] = None,
     if registry_prefix is not None and (not isinstance(registry_prefix, str) or not registry_prefix.strip()):
         raise RemoteConfigError("openshell.image_registry_prefix must be a non-empty string when set")
 
-    inference = _resolve_inference(block.get("inference"), egress.get("inference_provider"))
+    # A 0.0.72 spec's egress.inference_provider is the OSH-F64.b endpoint block, not the 0.1 provider wiring.
+    provider_block = (egress.get("inference_provider")
+                      if mode == MODE_REMOTE or egress.get("openshell_api") == OPENSHELL_API_V01 else None)
+    inference = _resolve_inference(block.get("inference"), provider_block)
     gpu = _resolve_gpu(block.get("gpu"))
 
     cfg = {
