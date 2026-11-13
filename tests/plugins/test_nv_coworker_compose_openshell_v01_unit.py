@@ -103,8 +103,48 @@ def test_local_mode_ignores_the_0072_inference_provider_block():
     assert cfg["mode"] == remote.MODE_LOCAL and cfg["inference"] is None
 
 
-@pytest.mark.parametrize("scenario", ["OSH-F64.b", "OSH-F64.e"])
-def test_local_install_openshell_takes_a_0072_inference_spec_to_the_gateway_preflight(plugin, monkeypatch, scenario):
+_EGRESS = {"broker_addr": "127.0.0.1:18777", "pinned_offline_lane": True,
+           "sandbox_image": "localhost/hermes-openshell-sandbox:pinned"}
+# Concatenated so that no file carries OpenShell's env-placeholder prefix as one literal.
+_DIRECT_KEY = "openshell:" + "resolve:env:" + "PROVIDER_API_KEY"
+_INFERENCE_0072 = {
+    "OSH-F64.b": ({"inference_route": "inference.local:443", "inference_provider": {
+        "provider": "compatible-endpoint", "base_url": "https://inference.local/v1", "api_mode": "chat_completions",
+        "model_id": "example-model", "rewrite_placeholder": "sk-OPENSHELL-PROXY-REWRITE",
+        "attribution_tag_prefix": "fleet"}},
+        {"compatible-endpoint": {"base_url": "https://inference.local/v1", "api_mode": "chat_completions",
+                                 "api_key": "sk-OPENSHELL-PROXY-REWRITE", "default_model": "example-model"}}),
+    "OSH-F64.e": ({"inference_route": "llm.example.com:443", "inference_provider": {
+        "mode": "direct", "provider": "direct-endpoint", "base_url": "https://llm.example.com/v1",
+        "upstream_base_url": "https://llm.example.com/v1", "api_mode": "chat_completions", "model_id": "example-model",
+        "credential_provider": "example-inference", "credential_env": "PROVIDER_API_KEY",
+        "gateway_image": "example-gateway:1", "attribution_tag_prefix": "fleet"}},
+        {"direct-endpoint": {"base_url": "https://llm.example.com/v1", "api_mode": "chat_completions",
+                             "api_key": _DIRECT_KEY, "default_model": "example-model"}}),
+}
+
+
+def _write_spec(root: Path, egress: dict, providers: dict | None = None, **top) -> Path:
+    """A 0.0.72 fleet spec and its one spine under ``root``."""
+    config: dict = {"plugins": {"enabled": [PLUGIN_KEY, "nv-fleet-gates"]}}
+    if providers:
+        name = next(iter(providers))
+        config.update(model={"provider": name, "default": "example-model"}, providers=providers)
+    (root / "spines").mkdir(parents=True)
+    (root / "spines" / "base.yaml").write_text(yaml.safe_dump({"config": config}), encoding="utf-8")
+    spec = {"project": "fleet", "substrate": "openshell", "sandbox_scope": "profile", "default_profile": "default",
+            "orchestrator_profile": "orchestrator", "install_surfaces": [], "egress": {**_EGRESS, **egress},
+            "spines": {"base": {"source": "spines/base.yaml"}},
+            "types": {"orchestrator": {"extends": ["base"]}, "builder": {"extends": ["base"]}},
+            "wires": [["orchestrator", "builder"]], **top}
+    path = root / "coworker-types.yaml"
+    path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("scenario", sorted(_INFERENCE_0072))
+def test_local_install_openshell_takes_a_0072_inference_spec_to_the_gateway_preflight(plugin, monkeypatch, tmp_path,
+                                                                                      scenario):
     monkeypatch.delenv("OPENSHELL_MODE", raising=False)
     probed = []
 
@@ -113,7 +153,7 @@ def test_local_install_openshell_takes_a_0072_inference_spec_to_the_gateway_pref
         return False, "test stop"
 
     monkeypatch.setattr(plugin, "_gateway_preflight", _refusing_preflight)
-    spec = PLUGIN_SRC.parents[1] / "tests" / "e2e-scenarios" / scenario / "spec" / "coworker-types.yaml"
+    spec = _write_spec(tmp_path / "spec", *_INFERENCE_0072[scenario])
     args = argparse.Namespace(coworker_command="install-openshell", spec=str(spec), ref="0" * 40, dry_run=False,
                               gateway_url="ws://127.0.0.1:9/?ticket=t", policy_root=None)
     with pytest.raises(RuntimeError, match="gateway preflight failed: test stop"):
@@ -171,17 +211,10 @@ def test_the_messaging_section_names_no_ingress_unless_the_spec_does(compose):
 
 
 SHA = "a" * 40
-OSH_SPEC = PLUGIN_SRC.parents[1] / "tests" / "e2e-scenarios" / "OSH-F64" / "spec"
 
 
 def _spec_copy(tmp_path, **top):
-    root = tmp_path / "spec"
-    shutil.copytree(OSH_SPEC, root)
-    path = root / "coworker-types.yaml"
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    data.update(top)
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return path
+    return _write_spec(tmp_path / "spec", {"inference_route": "llm.example.com:443"}, **top)
 
 
 def _install_sources(inst, spec_path):
