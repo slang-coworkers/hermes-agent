@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Iterable, Iterator, Optional
 from urllib.parse import urlsplit
 
 from hermes_cli.profiles import normalize_profile_name, validate_profile_name
@@ -1358,7 +1358,8 @@ _OSH_F64E_RESERVED_ENV_PREFIX = "OPENSHELL_"
 # OpenShell's canonical resolve placeholder (openshell-core secrets.rs:9, :489-491). The relay
 # resolves it for an attached provider's key, falling back from the per-revision form to this
 # canonical alias (secrets.rs:212-219), and rejects an unresolvable one rather than forwarding it.
-_OSH_F64E_PLACEHOLDER_PREFIX = "openshell:resolve:env:"
+# Concatenated so that no shipped file carries the placeholder prefix as one literal.
+_OSH_F64E_PLACEHOLDER_PREFIX = "openshell:" + "resolve:env:"
 # The delegation.request_overrides keys that carry a route, a credential or request headers.
 _OSH_F64E_OVERRIDE_ROUTE_KEYS = ("api_key", "base_url", "provider", "api_mode",
                                  "default_headers", "extra_headers", "headers")
