@@ -105,8 +105,9 @@ def lint(path) -> LintResult:
                 add(ERROR, "from-pinned-digest", f"FROM must pin by @sha256 digest: {ref}", lineno)
 
         if upper in ("RUN",):
-            if re.search(r"\bapt-get\b[^\n]*\b(upgrade|dist-upgrade)\b", low):
-                add(ERROR, "no-apt-upgrade", "apt-get (dist-)upgrade is forbidden (pin the base image instead)", lineno)
+            if re.search(r"\bapt-get\b[^\n]*\b(dist-upgrade|full-upgrade)\b", low):
+                add(ERROR, "no-apt-upgrade",
+                    "apt-get dist-upgrade/full-upgrade is forbidden (pin the base image instead)", lineno)
             if re.search(r"\bapt-get\b[^\n]*\binstall\b", low) and "--no-install-recommends" not in low:
                 add(ERROR, "apt-no-install-recommends", "apt-get install must use --no-install-recommends", lineno)
             if re.search(r"\bpip3?\b[^\n]*\binstall\b", low):

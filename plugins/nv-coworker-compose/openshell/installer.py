@@ -30,7 +30,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -650,7 +650,9 @@ def _route_reconcile(existing: dict[str, Any], spec: dict[str, Any]) -> dict[str
     render's: compose's own validator and enforcer run on a copy of ``existing``, and only the
     difference is returned (``_DELETE`` for a key the enforcer removed)."""
     compose = _load_compose()
-    provider = compose._validate_openshell_inference_provider(spec["egress"]["inference_provider"])
+    validate = (compose._validate_openshell_inference_provider_v01 if openshell_api(spec) == OPENSHELL_API_V01
+                else compose._validate_openshell_inference_provider)
+    provider = validate(spec["egress"]["inference_provider"])
     enforced = copy.deepcopy(existing)
     compose._enforce_openshell_inference_provider(enforced, spec.get("default_profile", "default"), provider)
     out: dict[str, Any] = {}
