@@ -345,6 +345,22 @@ auxiliary:
 
 `base_url` takes precedence over `provider`. Hermes uses the configured `api_key` for authentication; without one it falls back to `OPENAI_API_KEY` only for OpenAI hosts (`*.openai.com`, `*.openai.azure.com`) or the exact `OPENAI_BASE_URL` it is paired with. It does **not** reuse `OPENROUTER_API_KEY` for custom endpoints.
 
+### Restricting Auxiliary Providers
+
+`auxiliary.allowed_providers` keeps every auxiliary call on the providers you list. It is off by default (`[]`):
+
+```yaml
+auxiliary:
+  allowed_providers: [my-gateway]   # a providers: entry, or a built-in name such as openrouter
+```
+
+With a list set, a provider that is not on it is never resolved, probed or called: not by the auto chain, not by a task's or the top-level fallback chain, not by the main-agent fallback, and not for vision. An explicit task pin to an unlisted provider fails with an error that names the setting instead of being replaced by another provider. Use it when side tasks must stay on one gateway, for example a self-hosted endpoint that holds the only key the deployment may use. `auxiliary.free_only` cannot do this; it only filters the OpenRouter lane.
+
+- Names match the provider identity: `custom:<name>` and `<name>` are the same, and aliases such as `codex` are normalized.
+- A task pin or fallback entry with its own `base_url` counts as `custom`, whatever its `provider` says, so list `custom` only if any custom endpoint is acceptable.
+- A `providers:` entry is allowed only at its own `base_url`. The main agent's runtime for that entry, which is recorded as `custom` plus the entry's URL, counts as the entry.
+- A value that is set but names nothing allows nothing.
+
 ---
 
 ## Auxiliary Capacity-Error Fallback
