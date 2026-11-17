@@ -5,8 +5,8 @@ name: Common Drift
 # fetches nothing, so it fails exactly when an entry matches no file here (drift) or the list does not parse.
 # The cross-repository comparison runs in the downstream CI, whose pin names this public fork.
 #
-# Report only: continue-on-error, and ci.yaml's all-checks-pass does not depend on it. The drift checker's own unit
-# tests run in the hermetic suite (tests/plugins/test_common_drift.py).
+# Blocking: a drift or an unparsable list fails this check (ci.yaml's all-checks-pass does not depend on it). The
+# drift checker's own unit tests run in the hermetic suite (tests/plugins/test_common_drift.py).
 
 on:
   pull_request:
@@ -18,7 +18,6 @@ permissions:
 jobs:
   common-drift:
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
