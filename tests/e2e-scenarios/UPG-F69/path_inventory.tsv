@@ -156,12 +156,14 @@ A	plugins/nv-fleet-gates/commands.py	in-surface	new	UNIFY-F70	request msg 26 (th
 A	plugins/nv-fleet-gates/conversation_origin.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/cron_delivery.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/edges.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/learnings.py	in-surface	new	LEARN-F71	owner approval: the shared-learnings build in the common nv-fleet-gates plugin, off by default
 A	plugins/nv-fleet-gates/outbound.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/placeholder_redact.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/plugin.yaml	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/predicates.py	in-surface	replay	F68	
 A	plugins/nv-fleet-gates/product_hooks.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	plugins/nv-fleet-gates/stores.py	in-surface	replay	F68	
+A	plugins/nv-fleet-gates/technical_filter.py	in-surface	new	LEARN-F71	owner approval: the shared-learnings build in the common nv-fleet-gates plugin, off by default
 A	plugins/nv-ingress/__init__.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	plugins/nv-ingress/bridge.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
 A	plugins/nv-ingress/deliver.py	in-surface	new	UPG-F69.c	user msg 2906 (orch msg 8, thread hermes-UPG-F69.c): UPG-F69.c, the #76/#81/#83 port (ADR §D4)
@@ -882,6 +884,7 @@ A	tests/plugins/test_nv_delivery_redrive_safety.py	in-surface	replay	F68+UPG-F69
 A	tests/plugins/test_nv_fleet_gates_acceptance.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_generic_modules.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py	in-surface	replay	F68	
+A	tests/plugins/test_nv_fleet_gates_learnings.py	in-surface	new	LEARN-F71	owner approval: the shared-learnings build in the common nv-fleet-gates plugin, off by default
 A	tests/plugins/test_nv_fleet_gates_lifecycle.py	in-surface	replay	F68	
 A	tests/plugins/test_nv_fleet_gates_product_hooks.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
 A	tests/plugins/test_nv_fleet_gates_terminal_scope.py	in-surface	new	UNIFY-F70	request msg 26 (thread hermes-UNIFY-F70): UNIFY-F70 ADR §D2, the common nv-* plugins reconcile
