@@ -724,14 +724,14 @@ def test_codex_critique_output_cap_on_the_wire(tmp_path, monkeypatch, chat_endpo
 
 
 @pytest.mark.parametrize("provider, body_cap, wire_caps", [
-    ("inference-hub", True, [{"max_tokens": 12000}]),
+    ("llm-gateway", True, [{"max_tokens": 12000}]),
     # Without the setting the critique's cap never reaches this route; whether the provider-wide cap does is the
     # host's business (today it does not for a named provider spelled without custom:).
-    ("inference-hub", False, [{}, {"max_tokens": 128000}]),
+    ("llm-gateway", False, [{}, {"max_tokens": 128000}]),
     # Spelled custom:<name>, the host layers the entry's extra_body under every auxiliary call to it: the provider-wide
     # cap arrives on its own, and the critique's cap replaces it.
-    ("custom:inference-hub", False, [{"max_tokens": 128000}]),
-    ("custom:inference-hub", True, [{"max_tokens": 12000}]),
+    ("custom:llm-gateway", False, [{"max_tokens": 128000}]),
+    ("custom:llm-gateway", True, [{"max_tokens": 12000}]),
 ])
 def test_codex_critique_cap_beats_the_gateway_providers_own_cap(tmp_path, monkeypatch, chat_endpoint, provider,
                                                                  body_cap, wire_caps):
@@ -742,7 +742,7 @@ def test_codex_critique_cap_beats_the_gateway_providers_own_cap(tmp_path, monkey
     _load(tmp_path, monkeypatch, critique_body_max_tokens=body_cap, critique_max_output_tokens=12000,
           config_extra={
               "model": {"provider": provider, "default": "vendor/reasoning-model"},
-              "providers": {"inference-hub": {
+              "providers": {"llm-gateway": {
                   "base_url": f"http://gateway.invalid:{port}/v1", "key_env": "GATEWAY_TEST_KEY",
                   "api_mode": "chat_completions", "extra_body": {"max_tokens": 128000}}},
           })
