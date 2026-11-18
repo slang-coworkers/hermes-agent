@@ -50,6 +50,10 @@ PROBE_THREAD = "1700000000.000100"
 PROBE_OWN_THREAD = f"{PROBE_CHANNEL}:{PROBE_THREAD}"
 # "--iid 7": the parser reads 7 as the option's int value; the no-parser path drops the option and keeps no iid.
 FORGE_ARGV = ("issue", "comment", "--iid", "7")
+# A learning the shared-learnings checks accept (a session with no platform has origin unknown: it names a source).
+PROBE_LEARNING = {"title": "probe build step needs a warm cache",
+                  "body": "The probe build step fails on a cold cache. Fix: warm the cache first.",
+                  "source_ref": "group/project!1"}
 
 POST_ALLOWLIST_KEY = "slack_post"
 
@@ -237,6 +241,20 @@ def drive_own_post_threads(manager) -> dict[str, Any]:
     return _directive_obs(_gate(manager, "cronjob_manage", args), "cron delivery:", "cron_refusal")
 
 
+def drive_session_taint(manager) -> dict[str, Any]:
+    """append_learning under the manager's own home (AC-7 drives home A after loading home B)."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.registry import registry
+
+    token = set_hermes_home_override(str(Path(manager.home_path).resolve()))
+    try:
+        out = json.loads(registry.dispatch("append_learning", dict(PROBE_LEARNING), scope=manager.scope_key,
+                                           session_id="sess-1"))
+    finally:
+        reset_hermes_home_override(token)
+    return {"refused": out.get("status") == "refused", "tainted": "CI-read taint" in str(out.get("reason") or "")}
+
+
 def drive_forge_cli_parser(manager) -> Optional[dict[str, Any]]:
     forge_op = _submodule(manager, "outbound").forge_op
     write = forge_op(list(FORGE_ARGV), **_with_home_if_accepted(manager, forge_op, {}))
@@ -310,6 +328,14 @@ POINTS: tuple[Point, ...] = (
           seen_default={"noun": "issue", "verb": "comment", "iid": None},
           seen_valid={"noun": "issue", "verb": "comment", "iid": 7},
           drive=drive_forge_cli_parser),
+    Point("session_taint", "learnings.py:register._taint (append_learning, before the store opens)",
+          ("session_id", "profile", "kanban_task", "home"),
+          default=None, valid=True,
+          seen_default={"refused": False, "tainted": False},
+          seen_valid={"refused": True, "tainted": True},
+          drive=drive_session_taint,
+          overrides={"learnings": {"enabled": True, "profile": "default", "writers": ["worker-a"],
+                                   "readers": ["worker-a"]}}),
 )
 
 # Optional second drive for room_session_kind through the public pre_tool_call hook (outbound policy on).
