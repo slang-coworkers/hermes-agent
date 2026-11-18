@@ -168,7 +168,7 @@ def load_roster(path: str) -> Roster:
         hit = _cache.get(path)
         if hit and hit[0] == key:
             return hit[1]
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:
         roster = parse_roster(fh.read())
     if not roster.size:
         raise ValueError("the roster lists nobody")

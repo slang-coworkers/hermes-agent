@@ -1105,9 +1105,9 @@ GET_SCHEMA = {
 def _session_env(name: str) -> str:
     try:
         from gateway.session_context import get_session_env
-        return str(get_session_env(name, "") or "")
-    except Exception:
+    except ImportError:
         return ""
+    return str(get_session_env(name, "") or "")
 
 
 def _truthy(value: Any) -> bool:
@@ -1135,7 +1135,7 @@ def session_origin(card: str, tenant_origins: dict[str, str]) -> str:
     if card:
         try:
             tenant = _card_tenant(card)
-        except Exception:
+        except (LookupError, OSError, ValueError, sqlite3.Error):
             logger.debug("nv-fleet-gates learnings: card %s not read", card, exc_info=True)
             return "unknown"
         for pattern, origin in tenant_origins.items():
@@ -1150,7 +1150,8 @@ def session_origin(card: str, tenant_origins: dict[str, str]) -> str:
 
         try:
             here = conversation_origin.current()
-        except Exception:
+        except (OSError, ValueError, sqlite3.Error):
+            logger.debug("nv-fleet-gates learnings: the conversation origin was not read", exc_info=True)
             return "unknown"
         return "gitlab" if here and here.get("gitlab") else "unknown"
     return "desktop" if platform in _DESKTOP_PLATFORMS else "unknown"
@@ -1307,6 +1308,35 @@ def register(ctx, *, current_profile: Callable[[], str], kanban_task: Callable[[
                                "note": "No active learning has this id (a stale one shows with include_stale)."})
         return json.dumps({"status": "ok", "id": learning_id, "learnings": frame([row])}, ensure_ascii=False)
 
+    def _list(conn, ns, _cfg_):
+        which = "all" if ns.all else "quarantined" if ns.quarantined else "active"
+        return {"learnings": listing(conn, which=which, limit=ns.limit)}, 0
+
+    def _show(conn, ns, _cfg_):
+        entry = show(conn, ns.id)
+        return (entry, 0) if entry else ({"ok": False, "error": f"no learning #{ns.id}"}, 1)
+
+    def _state(conn, ns, cfg):
+        return set_state(conn, ns.id, ns.learnings_command, actor="operator", reason=ns.reason,
+                         roster=_roster(cfg)), 0
+
+    def _purge(conn, ns, cfg):
+        if not ns.confirm:
+            return {"ok": False, "error": "a purge deletes the entry for good: add --confirm"}, 2
+        out = purge(conn, ns.id, actor="operator", reason=ns.reason, roster=_roster(cfg))
+        return out, 1 if out["cleanup_pending"] else 0
+
+    def _checked(report):
+        return report, 0 if report["ok"] else 1
+
+    _VERBS = {
+        "list": _list, "show": _show, "quarantine": _state, "release": _state, "purge": _purge,
+        "compact": lambda conn, ns, cfg: _checked(compact(conn)),
+        "verify": lambda conn, ns, cfg: _checked(verify(conn)),
+        "scan": lambda conn, ns, cfg: _checked(scan(conn, roster=_roster(cfg), apply=ns.apply)),
+        "stats": lambda conn, ns, cfg: (stats(conn, hours=ns.hours), 0),
+    }
+
     def _cli(ns, **_kwargs) -> int:
         verb = getattr(ns, "learnings_command", None)
         if verb is None:
@@ -1324,31 +1354,7 @@ def register(ctx, *, current_profile: Callable[[], str], kanban_task: Callable[[
         # The read-only verbs see the store as it is; the writing ones repair a lost trigger first (and log it).
         conn = open_store(cfg["profile"], repair=verb not in ("list", "show", "verify", "stats"))
         try:
-            if verb == "list":
-                which = "all" if ns.all else "quarantined" if ns.quarantined else "active"
-                out, rc = {"learnings": listing(conn, which=which, limit=ns.limit)}, 0
-            elif verb == "show":
-                entry = show(conn, ns.id)
-                out, rc = (entry, 0) if entry else ({"ok": False, "error": f"no learning #{ns.id}"}, 1)
-            elif verb in ("quarantine", "release"):
-                out, rc = set_state(conn, ns.id, verb, actor="operator", reason=ns.reason, roster=_roster(cfg)), 0
-            elif verb == "purge":
-                if not ns.confirm:
-                    out, rc = {"ok": False, "error": "a purge deletes the entry for good: add --confirm"}, 2
-                else:
-                    out = purge(conn, ns.id, actor="operator", reason=ns.reason, roster=_roster(cfg))
-                    rc = 1 if out["cleanup_pending"] else 0
-            elif verb == "compact":
-                out = compact(conn)
-                rc = 0 if out["ok"] else 1
-            elif verb == "verify":
-                out = verify(conn)
-                rc = 0 if out["ok"] else 1
-            elif verb == "scan":
-                out = scan(conn, roster=_roster(cfg), apply=ns.apply)
-                rc = 0 if out["ok"] else 1
-            else:
-                out, rc = stats(conn, hours=ns.hours), 0
+            out, rc = _VERBS[verb](conn, ns, cfg)
         except Refused as r:
             out, rc = {"ok": False, "error": r.message}, 1
         except (OSError, ValueError, UnicodeDecodeError) as exc:   # the roster
