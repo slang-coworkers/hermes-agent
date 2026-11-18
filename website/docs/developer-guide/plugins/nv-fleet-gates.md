@@ -116,6 +116,23 @@ file tools keep the full cross-profile + backend + dangerous-command checks.
     and, for the slash alias, `critique_no_session`.
   - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_max_chars`
     (default `120000`) bounds the characters one critique may send.
+  - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_timeout_s`
+    (default `180`, at most `3600`) is the seconds one backend call may run. The
+    critique call names no auxiliary task, so without it the host's 30 s default
+    would apply, too short for a reasoning reviewer on a large diff. A timed-out
+    call is `critique_backend_error`.
+  - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_max_output_tokens`
+    (default `16384`, from `256` to `131072`) is the output cap of one call,
+    reasoning included, passed as `max_tokens`. The host forwards it only on
+    routes known to need or honour it.
+  - **Setting:** `plugins.entries.nv-fleet-gates.settings.critique_body_max_tokens`
+    (default `false`) sends that cap in the request body (`extra_body.max_tokens`)
+    in place of the public `max_tokens` argument. Where the host layers a provider
+    entry's own `extra_body` under the call, the critique's value replaces an
+    inherited `extra_body.max_tokens` for this call. Turn it on for an
+    OpenAI-compatible gateway that applies a small default output limit when no cap
+    is sent and whose provider entry sets no `max_completion_tokens`; leave it off
+    for a route that rejects `max_tokens` (one that wants `max_completion_tokens`).
 - **`hermes wire add|remove|list`** — administers the fleet-shared wiring edges.
   `add`/`remove` are bidirectional; `add --gated` marks an edge so its traversal
   escalates to the human-approval gate with a stable `rule_key` of the form
