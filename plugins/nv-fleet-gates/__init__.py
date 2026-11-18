@@ -362,6 +362,26 @@ def _str_list(value, key: str) -> list:
     return []
 
 
+def _bounded_number(value, key: str, default, low, high, *, integer: bool):
+    """A numeric setting within [low, high]. A bool, a non-number, a fraction for an integer setting, a non-finite
+    or out-of-range value logs a warning and yields the default: register() must not fail on a bad setting."""
+    try:
+        if isinstance(value, bool):
+            raise TypeError(key)
+        if integer:
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError(key)
+            number = int(value.strip(), 10) if isinstance(value, str) else int(value)
+        else:
+            number = float(value)
+        if not low <= number <= high:
+            raise ValueError(key)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("nv-fleet-gates: invalid %s; using %s", key, default)
+        return default
+    return number
+
+
 def _str_setting(value, key: str) -> str:
     if isinstance(value, str):
         return value
@@ -485,6 +505,17 @@ def register(ctx) -> None:
     except (TypeError, ValueError):
         logger.warning("nv-fleet-gates: invalid critique_max_chars; using 120000")
         critique_max_chars = 120000
+    # The critique call names no auxiliary task, so without an explicit timeout the host's 30 s
+    # default applies: too short for a reasoning reviewer on a diff near critique_max_chars.
+    critique_timeout_s = _bounded_number(ctx.get_config("critique_timeout_s", 180.0), "critique_timeout_s",
+                                         180.0, 1, 3600, integer=False)
+    # Output cap for one critique, reasoning included: room for a reasoning reviewer plus its JSON verdict.
+    critique_max_output_tokens = _bounded_number(ctx.get_config("critique_max_output_tokens", 16384),
+                                                 "critique_max_output_tokens", 16384, 256, 131072, integer=True)
+    # The host forwards max_tokens only on routes known to need or honour it. An OpenAI-compatible gateway
+    # that applies a small default output limit when none is sent needs the cap in the request body instead;
+    # the cap then rides only there, so a request never names two token limits.
+    critique_body_max_tokens = ctx.get_config("critique_body_max_tokens", False) is True
     # When the managed layer pins the role map, roles come ONLY from it (a
     # profile absent from it defaults to worker) so a per-profile config cannot
     # add itself as orchestrator — ctx.get_config alone returns the deep-merged
@@ -954,6 +985,21 @@ def register(ctx) -> None:
             "stage": stage, "session_id": session_id,
         })
 
+    def _critique_llm():
+        """The critique's plugin-LLM lane; with critique_body_max_tokens the request body carries the cap."""
+        from agent.plugin_llm import PluginLlm
+
+        host = PluginLlm(plugin_id=PLUGIN_KEY)
+        if not critique_body_max_tokens:
+            return host
+
+        async def _with_body_cap(**kw):
+            body = dict(kw.get("extra_body") or {})
+            body["max_tokens"] = critique_max_output_tokens
+            return await host._invoke_async({**kw, "extra_body": body})
+
+        return PluginLlm(plugin_id=PLUGIN_KEY, async_caller=_with_body_cap)
+
     async def _critique_and_record(stage, task, artifacts, session_id):
         """Review inline artifacts; record the gate row only for a well-formed verdict."""
         task = task if isinstance(task, str) else ""
@@ -972,17 +1018,17 @@ def register(ctx) -> None:
                 f"{total} chars > {critique_max_chars}; send the diff, not whole files",
                 stage, session_id,
             )
-        from agent.plugin_llm import PluginLlm
-
         blocks = [{"type": "text", "text": f"Stage: {stage}\nTask: {task}"}]
         blocks += [{"type": "text", "text": f"### {a['name']}\n{a['content']}"} for a in artifacts]
-        llm = PluginLlm(plugin_id=PLUGIN_KEY)
+        llm = _critique_llm()
         for _attempt in range(2):
             try:
                 result = await llm.acomplete_structured(
                     instructions=_CRITIQUE_INSTRUCTIONS.format(stage=stage),
                     input=blocks,
                     json_mode=True,
+                    max_tokens=None if critique_body_max_tokens else critique_max_output_tokens,
+                    timeout=critique_timeout_s,
                 )
             except Exception as exc:
                 logger.warning("codex_critique backend failed", exc_info=True)

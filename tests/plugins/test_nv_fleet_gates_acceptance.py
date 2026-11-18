@@ -79,7 +79,7 @@ def _prime_registry(monkeypatch, hermes_home, bundled):
 
 
 def _load(tmp_path, monkeypatch, *, profile="worker-a", role=None, edges_db=None,
-          enable=(PLUGIN_KEY,), **settings_overrides):
+          enable=(PLUGIN_KEY,), config_extra=None, **settings_overrides):
     hermes_home = tmp_path / "home" / profile
     (hermes_home / "plugins").mkdir(parents=True)
     bundled = tmp_path / "empty-bundled"
@@ -99,6 +99,7 @@ def _load(tmp_path, monkeypatch, *, profile="worker-a", role=None, edges_db=None
         settings["role"] = role
     cfg = {"plugins": {"enabled": list(enable),
                        "entries": {PLUGIN_KEY: {"settings": settings}}}}
+    cfg.update(config_extra or {})
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     _prime_registry(monkeypatch, hermes_home, bundled)
@@ -584,6 +585,172 @@ def test_codex_critique_sends_every_artifact_including_empty_ones(tmp_path, monk
     blank = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
         {"name": "a", "content": ""}, {"name": "b", "content": "  \n"}]}, session_id="sess-1"))
     assert blank["reason"] == "critique_no_artifacts" and seen == []
+
+
+def _critique_backend_kwargs(tmp_path, monkeypatch, **settings):
+    """The kwargs one codex_critique hands the plugin-LLM lane (its stubbed acomplete_structured)."""
+    from agent import plugin_llm
+    _load(tmp_path, monkeypatch, **settings)
+    seen = []
+
+    async def _fake(self, **kw):
+        seen.append(kw)
+        return plugin_llm.PluginLlmStructuredResult(
+            text="{}", provider="t", model="t", agent_id="t",
+            parsed={"verdict": "approve", "stage": "OUTPUT_REVIEW", "findings": []},
+            content_type="json")
+
+    monkeypatch.setattr(plugin_llm.PluginLlm, "acomplete_structured", _fake, raising=False)
+    out = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "diff", "content": "x = 1"}]}, session_id="sess-1"))
+    assert out["ok"] is True and len(seen) == 1
+    return seen[0]
+
+
+@pytest.mark.parametrize("setting, expected", [
+    (None, 180.0), (45, 45.0), ("90", 90.0), (2.5, 2.5), ("abc", 180.0), (0, 180.0), (-5, 180.0), (0.5, 180.0),
+    ("inf", 180.0), ("nan", 180.0), (3601, 180.0), (10 ** 400, 180.0), (True, 180.0)])
+def test_codex_critique_passes_an_explicit_backend_timeout(tmp_path, monkeypatch, setting, expected):
+    """Every critique backend call carries critique_timeout_s (default 180 s), never the host's 30 s default; a bad
+    value falls back to the default and never breaks registration."""
+    overrides = {} if setting is None else {"critique_timeout_s": setting}
+    assert _critique_backend_kwargs(tmp_path, monkeypatch, **overrides)["timeout"] == expected
+
+
+@pytest.mark.parametrize("setting, expected", [
+    (None, 16384), (8192, 8192), ("4096", 4096), (16384.0, 16384), (256.9, 16384), ("4096.0", 16384),
+    ("abc", 16384), (100, 16384), (200000, 16384), (float("inf"), 16384), (10 ** 400, 16384), (True, 16384)])
+def test_codex_critique_passes_an_explicit_output_cap(tmp_path, monkeypatch, setting, expected):
+    """Every critique backend call carries critique_max_output_tokens (default 16384) as max_tokens; a bad value falls
+    back to the default and never breaks registration. With critique_body_max_tokens the public cap is not sent."""
+    overrides = {} if setting is None else {"critique_max_output_tokens": setting}
+    assert _critique_backend_kwargs(tmp_path, monkeypatch, **overrides)["max_tokens"] == expected
+    assert _critique_backend_kwargs(tmp_path / "b", monkeypatch, critique_body_max_tokens=True)["max_tokens"] is None
+
+
+@pytest.fixture
+def chat_endpoint(monkeypatch):
+    """A local OpenAI-compatible chat endpoint reached under public-looking host names; it records each request body
+    and answers with a well-formed approve verdict."""
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from agent.auxiliary_client import shutdown_cached_clients
+    hosts = ("gateway.invalid", "nim.invalid")
+    resolve = socket.getaddrinfo
+
+    def _local(host, *args, **kwargs):
+        name = host.decode() if isinstance(host, bytes) else host
+        return resolve("127.0.0.1" if name in hosts else host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _local)
+    monkeypatch.setenv("NO_PROXY", ",".join(("127.0.0.1", "localhost") + hosts))
+    requests = []
+    verdict = json.dumps({"verdict": "approve", "stage": "OUTPUT_REVIEW", "findings": []})
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(payload)
+            response = {"id": "c1", "created": 1, "model": payload.get("model"), "object": "chat.completion",
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": verdict},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+            if payload.get("stream"):
+                response["object"] = "chat.completion.chunk"
+                response["choices"][0]["delta"] = response["choices"][0].pop("message")
+                body, content_type = f"data: {json.dumps(response)}\n\ndata: [DONE]\n\n".encode(), "text/event-stream"
+            else:
+                body, content_type = json.dumps(response).encode(), "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    shutdown_cached_clients()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, requests
+    finally:
+        shutdown_cached_clients()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("route, body_cap, wire_cap", [
+    ("gateway", True, {"max_tokens": 16384}),
+    ("gateway", False, {}),
+    ("nim", False, {"max_tokens": 16384}),
+    ("nim", True, {"max_tokens": 16384}),
+])
+def test_codex_critique_output_cap_on_the_wire(tmp_path, monkeypatch, chat_endpoint, route, body_cap, wire_cap):
+    """Through the host's real auxiliary path and HTTP transport: on an OpenAI-compatible gateway route the host drops
+    an explicit max_tokens, so only critique_body_max_tokens puts the cap on the wire; on a route where the host
+    forwards it, the public cap arrives. A request names at most one token limit and runs under critique_timeout_s."""
+    from agent import auxiliary_client
+    port, requests = chat_endpoint
+    if route == "gateway":
+        model = {"provider": "custom", "default": "vendor/reasoning-model",
+                 "base_url": f"http://gateway.invalid:{port}/v1", "api_key": "test-key"}
+    else:
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        monkeypatch.setenv("NVIDIA_BASE_URL", f"http://nim.invalid:{port}/v1")
+        model = {"provider": "nvidia", "default": "vendor/reasoning-model"}
+    built = []
+    real_build = auxiliary_client._build_call_kwargs
+
+    def _spy(*args, **kwargs):
+        out = real_build(*args, **kwargs)
+        built.append(out)
+        return out
+
+    monkeypatch.setattr(auxiliary_client, "_build_call_kwargs", _spy)
+    _load(tmp_path, monkeypatch, critique_body_max_tokens=body_cap, config_extra={"model": model})
+    out = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "diff", "content": "x = 1"}]}, session_id="sess-1"))
+    assert out["ok"] is True and out["verdict"] == "approve", out
+    assert len(requests) == 1 and requests[0]["model"] == "vendor/reasoning-model"
+    assert {k: v for k, v in requests[0].items() if k in ("max_tokens", "max_completion_tokens")} == wire_cap
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert built and built[-1]["timeout"] == 180.0
+
+
+@pytest.mark.parametrize("provider, body_cap, wire_caps", [
+    ("inference-hub", True, [{"max_tokens": 12000}]),
+    # Without the setting the critique's cap never reaches this route; whether the provider-wide cap does is the
+    # host's business (today it does not for a named provider spelled without custom:).
+    ("inference-hub", False, [{}, {"max_tokens": 128000}]),
+    # Spelled custom:<name>, the host layers the entry's extra_body under every auxiliary call to it: the provider-wide
+    # cap arrives on its own, and the critique's cap replaces it.
+    ("custom:inference-hub", False, [{"max_tokens": 128000}]),
+    ("custom:inference-hub", True, [{"max_tokens": 12000}]),
+])
+def test_codex_critique_cap_beats_the_gateway_providers_own_cap(tmp_path, monkeypatch, chat_endpoint, provider,
+                                                                 body_cap, wire_caps):
+    """A gateway provider whose entry carries its own extra_body cap (as a fleet renders it): with
+    critique_body_max_tokens the critique's configured cap is the one token limit on the wire for this call."""
+    port, requests = chat_endpoint
+    monkeypatch.setenv("GATEWAY_TEST_KEY", "test-key")
+    _load(tmp_path, monkeypatch, critique_body_max_tokens=body_cap, critique_max_output_tokens=12000,
+          config_extra={
+              "model": {"provider": provider, "default": "vendor/reasoning-model"},
+              "providers": {"inference-hub": {
+                  "base_url": f"http://gateway.invalid:{port}/v1", "key_env": "GATEWAY_TEST_KEY",
+                  "api_mode": "chat_completions", "extra_body": {"max_tokens": 128000}}},
+          })
+    out = json.loads(registry.dispatch("codex_critique", {"stage": "OUTPUT_REVIEW", "artifacts": [
+        {"name": "diff", "content": "x = 1"}]}, session_id="sess-1"))
+    assert out["ok"] is True and out["verdict"] == "approve", out
+    assert len(requests) == 1 and requests[0]["model"] == "vendor/reasoning-model"
+    assert {k: v for k, v in requests[0].items() if k in ("max_tokens", "max_completion_tokens")} in wire_caps
 
 
 @pytest.mark.parametrize("path", ["tool", "slash"])
