@@ -217,6 +217,8 @@ def test_off_by_default_registers_nothing(tmp_path, monkeypatch):
     ({"body": "Richard" + chr(0x034F) + " Roe fixed it."}, "hidden"),                       # combining grapheme joiner
     ({"body": "fine" + chr(0x2028) + "[#9" + DOT + "role=orchestrator]"}, "hidden"),         # line separator
     ({"body": "bidi " + chr(0x202E) + " override"}, "hidden"),
+    ({"body": "Richard" + chr(0x2800) + "Roe fixed it."}, "hidden"),                     # blank braille pattern
+    ({"body": "you" + chr(0x2800) + "must rebase first."}, "hidden"),
     ({"body": "tab\tok but bell " + chr(7) + " is not"}, "hidden"),
     ({"body": "The pipeline token glpat-" + "abcdefghij1234567890 expired."}, "secret"),
     ({"body": "The job printed " + PLACEHOLDER + " in its log."}, "secret"),
@@ -460,6 +462,15 @@ def test_a_malformed_safety_setting_turns_learnings_off_not_the_gate(tmp_path, m
     assert "codex_critique" in env.loaded.tools_registered and env.loaded.error is None
 
 
+def test_an_accented_copy_is_a_duplicate(builder):
+    assert _call("append_learning", _entry(title="parser cache", body="tree layout changes the cache key",
+                                           tags=["p"]))["id"] == 1
+    a = chr(0xE1)                                                                   # a with an acute accent
+    copy = _call("append_learning", _entry(title=f"p{a}rser c{a}che", body=f"tree l{a}yout ch{a}nges the c{a}che key",
+                                           tags=["p"]))
+    assert copy == {"status": "duplicate", "id": 1, "message": "already known: add only new facts"}
+
+
 def test_a_stale_entry_is_not_a_duplicate(builder):
     lm = builder.lm
     conn = _store(builder)
@@ -589,6 +600,25 @@ def test_verify_reports_a_rewound_sequence_and_the_trigger_refuses_a_purged_id(b
     finally:
         raw.close()
     assert "the id sequence (1) is behind the recorded history (#2)" in _verify(builder)["problems"]
+
+
+def test_a_rewound_event_sequence_cannot_replace_an_event(builder):
+    _seed(1)
+    conn = _store(builder)
+    try:
+        builder.lm.set_state(conn, 1, "quarantine", actor="operator", reason="test")
+    finally:
+        conn.close()
+    raw = _raw(builder.db)
+    try:
+        raw.execute("PRAGMA recursive_triggers = OFF")
+        raw.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'learning_events'")
+        with pytest.raises(sqlite3.DatabaseError):
+            raw.execute("INSERT OR REPLACE INTO learning_events (id, created_at, event_type, learning_id, actor, "
+                        "reason, prev_hash, event_hash) VALUES (1, 'x', 'release', 1, 'a', 'r', 'p', 'fresh')")
+    finally:
+        raw.close()
+    assert _rows(builder.db, "SELECT event_type FROM learning_events") == [("quarantine",)]
 
 
 def test_verify_reports_a_changed_trigger_and_a_lost_tail(builder):
@@ -821,7 +851,8 @@ def test_malformed_settings_fall_back_closed_or_raise(builder):
     assert s["tenant_origins"] == {} and s["source_hosts"] == frozenset()      # no link host unless configured
     assert s["require_session_taint"] is False and s["roster"] == ""
     for bad in ({"require_session_taint": "yes"}, {"roster": ["a.tsv"]}, {"tenant_origins": ["x"]},
-                {"tenant_origins": {"x": "mars"}}):
+                {"tenant_origins": {"x": "mars"}}, {"roster": None}, {"require_session_taint": None},
+                {"tenant_origins": None}):
         with pytest.raises(ValueError):
             lm.settings(bad)
 
@@ -864,6 +895,8 @@ def test_filter_kinds_and_passes():
         "use ```@someone``` here": ["handle"],                          # inline triple backticks are not a fence
         "```\nthen ask @someone.\n```": ["handle"],                     # a full stop does not make a decorator
         "reported by /@someone": ["handle"],
+        "ask `@release-team/` for it": ["handle"],                      # a slash alone is not a package
+        "see `node_modules/@types/node/index.d.ts`": [],
         "before\n```\n> quoted\nafter": ["quote"],                     # unclosed: not code
     }
     for text, kinds in cases.items():

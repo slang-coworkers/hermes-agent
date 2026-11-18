@@ -52,9 +52,11 @@ REFUSAL = ("Refused: {noun} are technical only. Remove {what}. State the technic
 QUOTE_MAX = 120
 _MIN_USERNAME = 3
 
-# Unicode's Default_Ignorable_Code_Point ranges (DerivedCoreProperties): invisible wherever they are rendered.
+# Unicode's Default_Ignorable_Code_Point ranges (DerivedCoreProperties), plus the blank braille pattern (So, not
+# whitespace): invisible wherever they are rendered.
 _IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
-              (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+              (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x2800, 0x2800),
+              (0x3164, 0x3164),
               (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
               (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
 _IGNORABLE_RE = re.compile("[" + "".join(re.escape(chr(a)) + "-" + re.escape(chr(b)) for a, b in _IGNORABLE) + "]")
@@ -86,6 +88,8 @@ _FENCED = re.compile(r"(?ms)^[ \t]*(```|~~~)[^\n]*\n.*?^[ \t]*\1[ \t]*$")
 _INLINE = re.compile(r"`[^`\n]*`")
 _BARE_DECORATOR = re.compile(r"[ \t]*@[A-Za-z_][A-Za-z0-9_]*[ \t]*")
 _DOTTED_DECORATOR = re.compile(r"@[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+# A scoped package (npm: lower case, a scope and a name): "@types/node", never "@someone/" alone.
+_SCOPED_PACKAGE = re.compile(r"@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*")
 
 
 def _fold(text: str) -> str:
@@ -192,13 +196,14 @@ def _split_code(text: str) -> tuple[str, str]:
 
 def _code_handle(code: str) -> bool:
     """An @handle in code that is not code: not a line that is only a bare decorator, a dotted decorator, a call or a
-    package scope."""
+    complete scoped package name."""
     for m in _HANDLE.finditer(code):
         line_start = code.rfind("\n", 0, m.start()) + 1
         line_end = code.find("\n", m.end())
         if _BARE_DECORATOR.fullmatch(code[line_start:line_end if line_end >= 0 else len(code)]):
             continue
-        if _DOTTED_DECORATOR.fullmatch(m.group(0)) or code[m.end():m.end() + 1] in ("(", "/"):
+        if (_DOTTED_DECORATOR.fullmatch(m.group(0)) or code[m.end():m.end() + 1] == "("
+                or _SCOPED_PACKAGE.match(code, m.start())):
             continue
         return True
     return False

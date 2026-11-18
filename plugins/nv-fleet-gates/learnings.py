@@ -236,6 +236,7 @@ TRIGGERS = {
     "learning_events_next_id":
         "CREATE TRIGGER learning_events_next_id BEFORE INSERT ON learning_events "
         "WHEN NEW.id IS NOT (SELECT COALESCE(MAX(seq), 0) + 1 FROM sqlite_sequence WHERE name = 'learning_events') "
+        "OR EXISTS (SELECT 1 FROM learning_events WHERE id = NEW.id) "
         "BEGIN SELECT RAISE(ABORT, 'a learning event takes the next id'); END",
     "learning_events_no_hash_reuse":
         "CREATE TRIGGER learning_events_no_hash_reuse BEFORE INSERT ON learning_events "
@@ -270,8 +271,9 @@ def settings(raw: Any) -> dict[str, Any]:
     """The ``learnings`` block, normalised. A malformed value whose default would weaken a check (the roster, the
     taint requirement, the tenant origins) raises ValueError; any other falls back to its closed default."""
     raw = raw if isinstance(raw, dict) else {}
+    # Present means set: an empty YAML value (None) is malformed too, never "use the default".
     for key, kind in (("require_session_taint", bool), ("roster", str), ("tenant_origins", dict)):
-        if key in raw and raw[key] is not None and type(raw[key]) is not kind:
+        if key in raw and type(raw[key]) is not kind:
             raise ValueError(f"learnings.{key} must be a {kind.__name__}")
 
     def _names(value) -> frozenset:
@@ -665,13 +667,15 @@ def append(conn: sqlite3.Connection, entry: dict, *, role: str, session_id: str,
                 f"LEFT JOIN learning_usage u ON u.learning_id = l.id WHERE NOT {_QUARANTINED} "
                 f"AND l.created_at >= ? AND COALESCE(u.last_used_at, l.created_at) >= ? ORDER BY l.id",
                 (age_cutoff, unused_cutoff)).fetchall():
-            if esha == sha:
+            # As given and folded: an accented or look-alike copy is the same note, not a new one.
+            if esha == sha or content_sha256(fold(etitle), fold(ebody)) == folded_sha:
                 best = (2.0, eid)
                 break
             other = json.loads(other_json or "[]")
             if tags and other and not set(tags) & set(other):
                 continue
-            score = jaccard(tokens, _entry_tokens(esha, etitle, ebody))
+            score = max(jaccard(tokens, _entry_tokens(esha, etitle, ebody)),
+                        jaccard(folded_tokens, _entry_tokens("folded:" + esha, fold(etitle), fold(ebody))))
             if score >= NEAR_DUPLICATE and (best is None or score > best[0]):
                 best = (score, eid)
         if best is not None:
