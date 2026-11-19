@@ -87,6 +87,8 @@ def _idn_email(text: str) -> bool:
     """True when ``text`` holds an address whose domain is internationalized (a non-ASCII domain with a dot that
     IDNA accepts), whatever the script of its local part or domain."""
     for m in _AT_RUN.finditer(text):
+        if m.group(1).isascii():
+            continue                     # the ASCII matcher covers an all-ASCII domain as written
         labels = []      # the domain's labels up to the first empty one (an ellipsis or "..." ends the address)
         for label in unicodedata.normalize("NFKC", m.group(1)).split("."):
             label = label.strip()
@@ -94,14 +96,11 @@ def _idn_email(text: str) -> bool:
                 break
             labels.append(label)
         while len(labels) >= 2:          # the longest prefix of two or more labels that IDNA accepts
-            domain = ".".join(labels)
-            if not domain.isascii():     # the ASCII matcher covers ASCII domains
-                try:
-                    domain.encode("idna")
-                    return True
-                except UnicodeError:
-                    pass
-            labels.pop()
+            try:
+                ".".join(labels).encode("idna")
+                return True
+            except UnicodeError:
+                labels.pop()
     return False
 _SSH_REMOTE = re.compile(r"(?<![\w.+-])git@[A-Za-z0-9.-]+:[\w.-]+(?:/[\w.-]+)*")
 _SLACK_LINK = re.compile(r"(?i)\bhttps?://[\w.-]*slack\.com/(?:archives|app_redirect|messages|team)/\S*")
