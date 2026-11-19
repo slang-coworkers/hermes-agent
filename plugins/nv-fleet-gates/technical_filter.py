@@ -76,8 +76,25 @@ _SLACK_ID = re.compile(r"(?<![A-Za-z0-9_])[UWB](?=[A-Z0-9]{8,11}(?![A-Za-z0-9_])
                        r"[A-Z0-9]{8,11}(?![A-Za-z0-9_])")
 _MENTION = re.compile(r"<[@!][^>\s]+>")
 _HANDLE = re.compile(r"(?<![\w.+@])@\w[\w.-]*")
+# Domain labels of any script (an internationalized address is still an address; \w is Unicode-aware here). The
+# ASCII form below needs at least one dot; the Unicode form is checked with IDNA before it counts.
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
                     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+")
+_IDN_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W_](?:[\w-]*[^\W_])?")
+
+
+def _idn_email(text: str) -> bool:
+    """True when ``text`` holds an address whose domain is internationalized (a non-ASCII label that IDNA accepts)."""
+    for m in _IDN_EMAIL.finditer(text):
+        domain = m.group(0).rsplit("@", 1)[1]
+        if domain.isascii():
+            continue                       # the ASCII matcher covers it
+        try:
+            domain.encode("idna")
+        except UnicodeError:
+            continue
+        return True
+    return False
 _SSH_REMOTE = re.compile(r"(?<![\w.+-])git@[A-Za-z0-9.-]+:[\w.-]+(?:/[\w.-]+)*")
 _SLACK_LINK = re.compile(r"(?i)\bhttps?://[\w.-]*slack\.com/(?:archives|app_redirect|messages|team)/\S*")
 _QUOTE_LINE = re.compile(r"(?m)^[ \t]*(?:>(?!>>)|&gt;)")
@@ -148,15 +165,18 @@ class Roster:
 
 
 def parse_roster(text: str) -> Roster:
+    """People from ``username<TAB>full name`` rows. A data row without a tab, a username or a full name makes the
+    whole roster invalid (ValueError): a wrong delimiter must never pass as people with empty names."""
     people = []
-    for line in text.splitlines():
+    for n, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        username, _, full = line.partition("\t")
-        username = username.strip()
-        if username:
-            people.append((username, full.strip()))
+        username, tab, full = line.partition("\t")
+        username, full = username.strip(), full.strip()
+        if not tab or not username or not full:
+            raise ValueError(f"roster row {n} is not <username><TAB><full name>")
+        people.append((username, full))
     return Roster(people)
 
 
@@ -227,7 +247,7 @@ def kinds(texts: Iterable[str] | str, roster: Optional[Roster] = None) -> list[s
                 found.add("mention")
             if _HANDLE.search(prose) or _code_handle(code):
                 found.add("handle")
-            if _EMAIL.search(_SSH_REMOTE.sub(" ", view)):
+            if _EMAIL.search(_SSH_REMOTE.sub(" ", view)) or _idn_email(_SSH_REMOTE.sub(" ", view)):
                 found.add("email")
             if _SLACK_LINK.search(view):
                 found.add("slack_link")

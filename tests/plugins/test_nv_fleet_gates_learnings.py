@@ -939,3 +939,51 @@ def test_filter_module_is_stdlib_only_and_ascii():
             mods.add((node.module or "").split(".")[0])
     assert mods <= {"__future__", "os", "re", "threading", "typing", "unicodedata"}, mods
     assert (PLUGIN_SRC / "learnings.py").read_text(encoding="utf-8").isascii()
+
+
+def test_an_event_reason_never_keeps_a_credential(builder, capsys):
+    """The event history outlives a purge: a reason that looks like a credential is refused and stored nowhere."""
+    _seed(1)
+    token = "glpat-" + "AbCdEf0123456789xyzW"
+    capsys.readouterr()
+    assert _cli(builder, "purge", "1", "--reason", "leaked " + token, "--confirm") != 0
+    assert token not in capsys.readouterr().out
+    conn = sqlite3.connect(builder.db)
+    try:
+        assert not conn.execute("SELECT COUNT(*) FROM learning_events WHERE reason LIKE ?", (f"%{token}%",)).fetchone()[0]
+        assert conn.execute("SELECT COUNT(*) FROM learnings WHERE id = 1").fetchone()[0] == 1   # nothing purged
+    finally:
+        conn.close()
+
+
+def test_verify_reports_an_extra_trigger_and_a_suppressed_write_is_refused(builder):
+    _seed(1)
+    raw = _raw(builder.db)
+    try:
+        raw.execute("CREATE TRIGGER sneaky BEFORE INSERT ON learnings BEGIN SELECT RAISE(IGNORE); END")
+    finally:
+        raw.close()
+    report = _verify(builder)
+    assert report["ok"] is False and any("an unexpected trigger is installed" in p for p in report["problems"])
+    out = _call("append_learning", _entry(title="another fact", body="a different technical fact", tags=["y"]))
+    assert out["status"] == "refused" and "did not record the entry" in out["reason"], out
+
+
+def test_an_internationalized_email_address_is_personal_data():
+    tf = _filter()
+    assert "email" in tf.kinds("write to m\u00fcller@b\u00fccher.example for access", None)
+    assert "email" in tf.kinds("contact: \u0438\u0432\u0430\u043d@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444", None)
+    assert "email" not in tf.kinds("the m\u00fcller test passes", None)
+
+
+def test_a_malformed_roster_refuses_writes_and_fails_the_scan(tmp_path, monkeypatch):
+    bad = tmp_path / "bad-roster.tsv"
+    bad.write_text("# exported with spaces\njqdoe Jane Q Doe\nrroe Richard Roe\n", encoding="utf-8")
+    tf = _filter()
+    with pytest.raises(ValueError):
+        tf.parse_roster(bad.read_text(encoding="utf-8"))
+    env = _load(tmp_path, monkeypatch, roster=str(bad))
+    out = _call("append_learning", _entry())
+    assert out["status"] == "refused" and "roster could not be loaded" in out["reason"], out
+    assert not env.db.exists()
+    assert _cli(env, "scan") != 0                 # the nightly scan fails instead of passing without names

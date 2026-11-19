@@ -695,9 +695,11 @@ def append(conn: sqlite3.Connection, entry: dict, *, role: str, session_id: str,
                   "ci_tainted": ci_tainted, "title": title, "body": body, "tags_json": tags_json,
                   "source_ref": source_ref or None, "content_sha256": sha}
         prev = _learnings_head(conn)
-        conn.execute(f"INSERT INTO learnings ({', '.join(_ENTRY_FIELDS)}, prev_hash, entry_hash) "
-                     f"VALUES ({', '.join('?' * (len(_ENTRY_FIELDS) + 2))})",
-                     (*(fields[k] for k in _ENTRY_FIELDS), prev, chain_hash(prev, fields)))
+        cur = conn.execute(f"INSERT INTO learnings ({', '.join(_ENTRY_FIELDS)}, prev_hash, entry_hash) "
+                           f"VALUES ({', '.join('?' * (len(_ENTRY_FIELDS) + 2))})",
+                           (*(fields[k] for k in _ENTRY_FIELDS), prev, chain_hash(prev, fields)))
+        if cur.rowcount != 1 or not conn.execute("SELECT 1 FROM learnings WHERE id = ?", (fields["id"],)).fetchone():
+            raise Refused("store_error", "Refused: the store did not record the entry (check it with verify)")
         conn.execute("INSERT INTO learning_writes (learning_id, role, created_at) VALUES (?, ?, ?)",
                      (fields["id"], role, fields["created_at"]))
         return {"status": "ok", "id": fields["id"]}
@@ -824,6 +826,8 @@ def _event_reason(reason: Any, roster) -> str:
     found = technical_filter.kinds(reason, roster)
     if found:
         raise Refused("personal_data", technical_filter.refusal(found, "event reasons"))
+    if secret_shaped(reason):      # the event history outlives a purge: a pasted token must never land there
+        raise Refused("secret", "the reason looks like it holds a credential or a key; describe it without the value")
     return reason
 
 
@@ -880,7 +884,9 @@ def purge(conn: sqlite3.Connection, learning_id: int, *, actor: str, reason: str
             raise Refused("not_found", f"no learning #{learning_id}")
         event = _add_event(conn, event_type="purge", learning_id=learning_id, actor=actor, reason=reason, now=now,
                            purged=(row[0], row[1]))
-        conn.execute("DELETE FROM learnings WHERE id = ?", (learning_id,))
+        if conn.execute("DELETE FROM learnings WHERE id = ?", (learning_id,)).rowcount != 1 \
+                or conn.execute("SELECT 1 FROM learnings WHERE id = ?", (learning_id,)).fetchone():
+            raise Refused("store_error", f"the store did not delete learning #{learning_id} (check it with verify)")
         conn.execute("DELETE FROM learning_usage WHERE learning_id = ?", (learning_id,))
         return {"ok": True, "event": event, "type": "purge", "id": learning_id}
 
@@ -911,6 +917,8 @@ def _verify(conn: sqlite3.Connection) -> dict[str, Any]:
     for name, sql in TRIGGERS.items():
         if _squash(stored.get(name)) != _squash(sql):
             problems.append(f"trigger {name} is missing or changed")
+    for name in sorted(set(stored) - set(TRIGGERS)):      # an extra trigger could quietly drop or change writes
+        problems.append(f"an unexpected trigger is installed ({len(name)} characters)")
     purges = {lid: (eh, ph) for lid, eh, ph in conn.execute(
         "SELECT learning_id, purged_entry_hash, purged_prev_hash FROM learning_events WHERE event_type = 'purge'")}
     rows = {r[0]: r for r in conn.execute(
