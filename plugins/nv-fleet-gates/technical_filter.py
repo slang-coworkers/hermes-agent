@@ -76,19 +76,20 @@ _SLACK_ID = re.compile(r"(?<![A-Za-z0-9_])[UWB](?=[A-Z0-9]{8,11}(?![A-Za-z0-9_])
                        r"[A-Z0-9]{8,11}(?![A-Za-z0-9_])")
 _MENTION = re.compile(r"<[@!][^>\s]+>")
 _HANDLE = re.compile(r"(?<![\w.+@])@\w[\w.-]*")
-# Domain labels of any script (an internationalized address is still an address; \w is Unicode-aware here). The
-# ASCII form below needs at least one dot; the Unicode form is checked with IDNA before it counts.
+# Addresses with an internationalized domain: any non-space run around an "@" (letters of any script, combining
+# marks included), counted when the domain has a dot, is not ASCII (the ASCII matcher covers that) and IDNA accepts it.
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
                     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+")
-_IDN_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W_](?:[\w-]*[^\W_])?")
+_AT_RUN = re.compile(r"[^\s@<>()\[\]{},;:\"'`]+@([^\s@<>()\[\]{},;:\"'`]+)")
 
 
 def _idn_email(text: str) -> bool:
-    """True when ``text`` holds an address whose domain is internationalized (a non-ASCII label that IDNA accepts)."""
-    for m in _IDN_EMAIL.finditer(text):
-        domain = m.group(0).rsplit("@", 1)[1]
-        if domain.isascii():
-            continue                       # the ASCII matcher covers it
+    """True when ``text`` holds an address whose domain is internationalized (a non-ASCII domain with a dot that
+    IDNA accepts), whatever the script of its local part or domain."""
+    for m in _AT_RUN.finditer(text):
+        domain = m.group(1).rstrip(".")
+        if domain.isascii() or "." not in domain:
+            continue                       # the ASCII matcher covers ASCII domains
         try:
             domain.encode("idna")
         except UnicodeError:

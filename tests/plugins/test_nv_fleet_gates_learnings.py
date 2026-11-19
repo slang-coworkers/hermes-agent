@@ -974,6 +974,10 @@ def test_an_internationalized_email_address_is_personal_data():
     assert "email" in tf.kinds("write to m\u00fcller@b\u00fccher.example for access", None)
     assert "email" in tf.kinds("contact: \u0438\u0432\u0430\u043d@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444", None)
     assert "email" not in tf.kinds("the m\u00fcller test passes", None)
+    # combining marks in the domain (a Devanagari vowel sign) and in the local part
+    assert "email" in tf.kinds("alice@\u092d\u093e\u0930\u0924.in", None)
+    assert "email" in tf.kinds("\u0905\u0928\u0941@\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924 wrote", None)
+    assert "email" not in tf.kinds("decorators like @\u092d\u093e\u0930\u0924 stay code", None)
 
 
 def test_a_malformed_roster_refuses_writes_and_fails_the_scan(tmp_path, monkeypatch):
