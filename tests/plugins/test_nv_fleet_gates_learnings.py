@@ -978,6 +978,9 @@ def test_an_internationalized_email_address_is_personal_data():
     assert "email" in tf.kinds("alice@\u092d\u093e\u0930\u0924.in", None)
     assert "email" in tf.kinds("\u0905\u0928\u0941@\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924 wrote", None)
     assert "email" not in tf.kinds("decorators like @\u092d\u093e\u0930\u0924 stay code", None)
+    # an address that runs into an ellipsis or other punctuation is still found
+    for tail in ("...please reply", "\u2026please reply", "!", ".", ", thanks"):
+        assert "email" in tf.kinds("Contact alice@b\u00fccher.example" + tail, None), tail
 
 
 def test_a_malformed_roster_refuses_writes_and_fails_the_scan(tmp_path, monkeypatch):
