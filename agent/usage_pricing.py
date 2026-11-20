@@ -688,8 +688,11 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 # final streamed usage chunk (``usage.cost``, with ``stream_options.include_usage``): the proxy's own
 # billing figure, after any negotiated discount, for models no public rate card lists. Other relays
 # may use a ``cost`` field differently, so it is trusted only for the exact HTTPS hosts the operator
-# lists in config ``pricing.reported_cost_hosts`` (default: none), and only as LiteLLM sends it: one
-# response's JSON number (int or float, finite, >= 0).
+# lists in config ``pricing.reported_cost_hosts`` (default: none), only as LiteLLM sends it (one
+# response's JSON number: int or float, finite, >= 0; not 0 for a call that used tokens), only where the
+# caller vouches that ``base_url`` is the route that served the call (``trust_reported_cost``: the main
+# loop's own route; never an auxiliary or MoA call, whose fallback routing is not tracked), and only for a
+# call Hermes cannot price itself: a rate Hermes has always wins.
 REPORTED_COST_VERSION = "route-reported-usage-cost"
 
 
@@ -732,6 +735,9 @@ def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
             return None
     except OverflowError:  # an int too large for a float
         return None
+    if value == 0 and (usage.input_tokens or usage.output_tokens or usage.cache_read_tokens or usage.cache_write_tokens):
+        # A route may pass through a field it did not bill; a zero quote for tokens used is not trusted.
+        return None
     return Decimal(str(value))
 
 
@@ -743,20 +749,33 @@ def reported_usage_cost(usage: CanonicalUsage, base_url: Optional[str]) -> Optio
 
 def estimate_usage_cost(
     model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
-    base_url: Optional[str] = None, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None, trust_reported_cost: bool = False,
 ) -> CostResult:
+    """The call's cost. ``trust_reported_cost``: the caller vouches that ``base_url`` served this response,
+    so a listed route's own ``usage.cost`` may price a call Hermes has no rate for (see
+    ``REPORTED_COST_VERSION``)."""
     from providers import get_provider_profile
     profile = get_provider_profile(provider or '')
     reported = profile.get_usage_cost(model_name, usage) if profile else None
     if reported is not None:
         return reported
-    route_cost = reported_usage_cost(usage, base_url)
-    if route_cost is not None:
-        return CostResult(
-            amount_usd=route_cost, status="actual", source="provider_cost_api",
-            label=format_cost_label(route_cost), pricing_version=REPORTED_COST_VERSION,
-            notes=("cost reported by the route (usage.cost)",),
-        )
+    result = _estimate_from_rates(model_name, usage, provider=provider, base_url=base_url, api_key=api_key)
+    if result.status == "unknown" and trust_reported_cost:
+        route_cost = reported_usage_cost(usage, base_url)
+        if route_cost is not None:
+            return CostResult(
+                amount_usd=route_cost, status="actual", source="provider_cost_api",
+                label=format_cost_label(route_cost), pricing_version=REPORTED_COST_VERSION,
+                notes=("cost reported by the route (usage.cost)",),
+            )
+    return result
+
+
+def _estimate_from_rates(
+    model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None,
+) -> CostResult:
+    """Price ``usage`` from the rates Hermes knows for the route (snapshot, models API, models.dev)."""
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return CostResult(
@@ -819,10 +838,7 @@ def has_known_pricing(
     model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """True if pricing data exists for this model+route (direct lookup, no dummy usage), or the
-    route reports each request's cost itself (``pricing.reported_cost_hosts``)."""
-    if reports_usage_cost(base_url):
-        return True
+    """True if pricing data exists for this model+route (direct lookup, no dummy usage)."""
     return get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key) is not None
 
 

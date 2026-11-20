@@ -927,8 +927,9 @@ def test_anthropic_fast_response_without_a_fast_rate_is_unknown():
 
 
 class TestRouteReportedUsageCost:
-    """``usage.cost`` a route reports itself (LiteLLM's final streamed usage chunk) is the request's
-    cost only for the exact HTTPS hosts listed in ``pricing.reported_cost_hosts``."""
+    """``usage.cost`` a route reports itself (LiteLLM's final streamed usage chunk) prices a call only when the
+    caller vouches for the route (``trust_reported_cost``: the main loop's own route), the route is an exact HTTPS
+    host listed in ``pricing.reported_cost_hosts``, and Hermes has no rate of its own for the call."""
 
     @pytest.fixture
     def listed(self, monkeypatch):
@@ -944,25 +945,33 @@ class TestRouteReportedUsageCost:
     def _usage(cost):
         return CanonicalUsage(input_tokens=17, output_tokens=8, raw_usage={"cost": cost})
 
+    @staticmethod
+    def _price(usage, base_url="https://litellm.example.com/v1", *, trust=True, provider="custom",
+               model="vendor/open-model-x"):
+        return estimate_usage_cost(model, usage, provider=provider, base_url=base_url, trust_reported_cost=trust)
+
     def test_listed_https_host_uses_the_reported_cost(self, listed):
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(4.8077e-06), provider="custom",
-            base_url="https://litellm.example.com/v1",
-        )
+        result = self._price(self._usage(4.8077e-06))
         assert result.status == "actual"
         assert result.source == "provider_cost_api"
         assert result.amount_usd == Decimal("4.8077e-06")
         assert result.pricing_version == "route-reported-usage-cost"
         assert result.label == format_cost_label(Decimal("4.8077e-06"))
 
+    def test_nothing_is_trusted_unless_the_caller_vouches_for_the_route(self, listed):
+        assert self._price(self._usage(4.8077e-06), trust=False).status == "unknown"
+
+    def test_a_rate_hermes_has_always_wins(self, listed):
+        result = self._price(self._usage(0.000001), provider="anthropic", model="claude-sonnet-4-6")
+        assert result.status == "estimated"
+        assert result.pricing_version != "route-reported-usage-cost"
+
     @pytest.mark.parametrize("base_url", [
         "https://other.example.com/v1", "http://litellm.example.com/v1",
         "https://litellm.example.com.evil.test/v1", "https://sub.litellm.example.com/v1", "", None,
     ])
     def test_other_routes_ignore_the_field(self, listed, base_url):
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(4.8077e-06), provider="custom", base_url=base_url,
-        )
+        result = self._price(self._usage(4.8077e-06), base_url)
         assert result.status == "unknown"
         assert result.amount_usd is None
 
@@ -970,18 +979,17 @@ class TestRouteReportedUsageCost:
         True, -1, -0.5, float("nan"), float("inf"), "abc", "0.012", "1e400", 10**400, Decimal(1), None, [1], {"usd": 1},
     ])
     def test_malformed_cost_is_ignored(self, listed, cost):
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(cost), provider="custom",
-            base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "unknown"
+        assert self._price(self._usage(cost)).status == "unknown"
+
+    def test_a_zero_quote_for_tokens_used_is_not_trusted(self, listed):
+        assert self._price(self._usage(0)).status == "unknown"
+        assert self._price(self._usage(0.0)).status == "unknown"
+        empty = CanonicalUsage(raw_usage={"cost": 0})
+        assert (self._price(empty).status, self._price(empty).amount_usd) == ("actual", Decimal(0))
 
     def test_a_multi_request_usage_carries_no_single_reported_cost(self, listed):
         usage = CanonicalUsage(input_tokens=17, output_tokens=8, request_count=2, raw_usage={"cost": 1.0})
-        result = estimate_usage_cost(
-            "vendor/open-model-x", usage, provider="custom", base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "unknown"
+        assert self._price(usage).status == "unknown"
 
     def test_a_failed_config_read_trusts_no_host(self, monkeypatch):
         import hermes_cli.config as config_mod
@@ -990,44 +998,24 @@ class TestRouteReportedUsageCost:
         stale = FailedConfigRead({"pricing": {"reported_cost_hosts": ["litellm.example.com"]}}, error=OSError("EIO"))
         monkeypatch.setattr(config_mod, "load_config_readonly", lambda: stale)
         monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(1.0), provider="custom",
-            base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "unknown"
-
-    def test_zero_is_a_real_cost(self, listed):
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(0), provider="custom",
-            base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "actual"
-        assert result.amount_usd == Decimal(0)
+        assert self._price(self._usage(1.0)).status == "unknown"
 
     def test_nothing_is_trusted_without_the_setting(self, monkeypatch):
         import hermes_cli.config as config_mod
 
         monkeypatch.setattr(config_mod, "load_config_readonly", lambda: {"pricing": {"reported_cost_hosts": "x"}})
         monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
-        result = estimate_usage_cost(
-            "vendor/open-model-x", self._usage(1.0), provider="custom",
-            base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "unknown"
+        assert self._price(self._usage(1.0)).status == "unknown"
 
     def test_aggregated_usage_carries_no_reported_cost(self, listed):
         both = self._usage(1.0) + self._usage(2.0)
         assert both.raw_usage is None
-        result = estimate_usage_cost(
-            "vendor/open-model-x", both, provider="custom", base_url="https://litellm.example.com/v1",
-        )
-        assert result.status == "unknown"
+        assert self._price(both).status == "unknown"
 
-    def test_known_pricing_for_a_listed_route(self, listed):
+    def test_known_pricing_is_unchanged_for_a_listed_route(self, listed):
         from agent.usage_pricing import has_known_pricing
 
-        assert has_known_pricing("vendor/open-model-x", "custom", "https://litellm.example.com/v1")
-        assert not has_known_pricing("vendor/open-model-x", "custom", "https://other.example.com/v1")
+        assert not has_known_pricing("vendor/open-model-x", "custom", "https://litellm.example.com/v1")
 
     @staticmethod
     def _agent(tmp_path, monkeypatch, hosts):
@@ -1082,21 +1070,19 @@ class TestRouteReportedUsageCost:
         finally:
             agent.close()
 
-    def test_a_moa_slot_without_its_own_base_url_is_not_trusted(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("slot", [
+        {"model": "vendor/aggregator-y"},
+        {"model": "vendor/aggregator-y", "provider": "custom", "base_url": "https://litellm.example.com/v1"},
+    ])
+    def test_a_moa_turn_is_never_priced_from_usage_cost(self, tmp_path, monkeypatch, slot):
         agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
         real_client = agent.client
         try:
-            agent.client = SimpleNamespace(last_aggregator_slot={"model": "vendor/aggregator-y"})
+            agent.client = SimpleNamespace(last_aggregator_slot=slot)
             response = self._response(4.8077e-06)
             self._record(agent, response)
             assert agent.session_cost_status == "unknown"
             assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
-            agent.client = SimpleNamespace(last_aggregator_slot={
-                "model": "vendor/aggregator-y", "provider": "custom", "base_url": "https://litellm.example.com/v1"})
-            response2 = self._response(2.0e-06)
-            self._record(agent, response2)
-            assert agent.session_cost_status == "actual"
-            assert agent._usage_summary_for_api_request_hook(response2)["reported_cost"] == pytest.approx(2.0e-06)
         finally:
             agent.client = real_client
             agent.close()

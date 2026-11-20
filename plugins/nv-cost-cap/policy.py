@@ -194,7 +194,7 @@ def tier1_from(values: list[float], floor_usd=0.0) -> float:
     cap = p90(values)
     try:
         floor = float(floor_usd)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return cap
     if math.isfinite(cap) and math.isfinite(floor) and floor > cap:
         return floor

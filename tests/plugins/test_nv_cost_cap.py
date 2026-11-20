@@ -571,3 +571,21 @@ def test_tier1_floor_raises_a_small_p90(tmp_path, monkeypatch):
     assert loaded.module.tier1_cap(str(hermes_home)) == 10.0
     _seed(hermes_home, sessions=[("h3", None, 40.0, 1.7e9)], usage=[("h3", "m", "", 40.0)])
     assert loaded.module.tier1_cap(str(hermes_home)) == 40.0
+
+
+def test_an_oversized_tier1_floor_never_blocks_a_tier2_stop(tmp_path, monkeypatch):
+    """A floor too large for a float (a YAML integer) is ignored (the p90 stands) and the Tier-2 breach is
+    still recorded at the boundary: Tier-1 is evaluated only after the Tier-2 decision."""
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch,
+        settings={"profile_ceiling_usd": 1.0, "p90_window_sessions": 5, "tier1_floor_usd": 10**400,
+                  "estop_on_breach": False},
+    )
+    _seed(
+        hermes_home,
+        sessions=[("h1", None, 2.0, 1.7e9), ("s-big", None, 5.0, None)],
+        usage=[("h1", "m", "", 2.0), ("s-big", "m", "", 5.0)],
+    )
+    assert loaded.module.tier1_cap(str(hermes_home)) == 2.0
+    assert _has(_pgd(manager, "rk", "s-big"), "skip")
+    assert [e["kind"] for e in loaded.module.episodes("s-big")] == ["breach"]

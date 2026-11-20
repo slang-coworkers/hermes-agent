@@ -438,7 +438,6 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
         return False
 
     ceiling = resolve_ceiling()
-    cap = tier1_cap(_current_profile_home())
     budget_gen = state["budget_gen"] + 1
     delta = effective - state["window_start_total"]
     if unpriced_new and not unpriced_breach:
@@ -459,6 +458,12 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
             _engage_estop(session_id)
         return True
 
+    # Tier-1 only after the Tier-2 decision: a bad Tier-1 setting can never keep a breach from being recorded.
+    try:
+        cap = tier1_cap(_current_profile_home())
+    except Exception:
+        logger.warning("nv-cost-cap Tier-1 cap failed for %s", session_id, exc_info=True)
+        cap = math.inf
     if _finite(cap) and effective > cap:
         _record_escalation(session_id, budget_gen, today)
     store.set_state(

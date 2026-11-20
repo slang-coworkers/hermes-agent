@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
@@ -43,14 +43,6 @@ def _loop_mod():
     import agent.conversation_loop as _cl
 
     return _cl
-
-
-def _without_reported_cost(usage):
-    """``usage`` with any route-reported ``cost`` dropped from ``raw_usage`` (other raw fields kept)."""
-    raw = usage.raw_usage
-    if not isinstance(raw, dict) or "cost" not in raw:
-        return usage
-    return replace(usage, raw_usage={k: v for k, v in raw.items() if k != "cost"})
 
 
 def _fold_moa_usage(agent, canonical_usage):
@@ -238,13 +230,12 @@ def record_response_usage(
         _agg_cost_model = _agg_slot["model"]
         _agg_cost_provider = _agg_slot.get("provider") or agent.provider
         _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
-        if not _agg_slot.get("base_url"):
-            # A route-reported cost is trusted only for the route that served the call: a slot with no base
-            # URL of its own is priced at the outer agent's URL, so its usage.cost is not used.
-            aggregator_usage = _without_reported_cost(aggregator_usage)
+    # A route-reported usage.cost is trusted only for the main loop's own route (a fallback re-binds the agent's
+    # route before the call), never for a MoA turn: the aggregator's served route is not tracked.
     cost_result = estimate_usage_cost(
         _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
+        trust_reported_cost=not _agg_slot,
     )
     # The route-reported amount core just persisted, for this response only: the post_api_request hook
     # (fired later for the same response object) passes it on as usage.reported_cost.

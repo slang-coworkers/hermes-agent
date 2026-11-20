@@ -43,14 +43,21 @@ value, none, or a config read that failed keeps the fail-closed default.
 
 **A cost the route reports itself.** A LiteLLM proxy returns each request's USD cost in
 the final streamed usage chunk (`usage.cost`, with `stream_options.include_usage`). Core
-uses that number as the call's actual cost (`cost_status='actual'`,
-`provider_cost_api`) when the route that served the call has an HTTPS base URL on a host
-listed in config `pricing.reported_cost_hosts` (exact hostnames, default none) and the
-value is one response's JSON number (finite, >= 0). For a mixture-of-agents turn that
-route is the aggregator slot's own base URL. Core prices the response once and the
-`post_api_request` usage summary carries that amount as `reported_cost` (absent
-otherwise), which the fast path accrues as-is, so both accrual paths hold the same number.
-A route that is not listed is priced as before.
+uses that number as a main-loop call's actual cost (`cost_status='actual'`,
+`provider_cost_api`) only when all of these hold: Hermes has no rate of its own for the
+call (a rate always wins); the main loop's own route served it (a fallback re-binds the
+agent's route first; auxiliary and mixture-of-agents calls are never priced this way,
+since their served route is not tracked); that route's base URL is HTTPS on a host listed
+in config `pricing.reported_cost_hosts` (exact hostnames, default none); and the value is
+one response's JSON number, finite, >= 0, and not 0 for a call that used tokens (a route
+may pass through a field it did not bill). Listing a host is the operator's statement that
+its `usage.cost` is its bill. Core prices the response once and the `post_api_request`
+usage summary carries that amount as `reported_cost` (absent otherwise), which the fast
+path accrues as-is, so both accrual paths hold the same number.
+
+**Auxiliary calls** (titles, compression, vision) are recorded without a cost status, so
+the cap never sees an unknown price there, in either mode: an auxiliary call on a model
+Hermes cannot price counts as $0.
 
 ## Two tiers
 
