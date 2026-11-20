@@ -25,7 +25,8 @@ Rules:
 A callable is called with keyword arguments only, the point's fields plus ``home``, and must accept ``**kwargs``
 (fields may be added). One that raises or returns outside the point's contract is logged once per
 (home, point, owner), and the point's on-error behaviour applies: the three vetoes block, ``own_post_threads``
-raises so the gate blocks, the others fall back to their default path.
+raises so the gate blocks, ``session_taint`` answers tainted (a learnings write is refused), the others fall back to
+their default path.
 """
 
 from __future__ import annotations
@@ -45,7 +46,8 @@ logger = logging.getLogger(__name__)
 API_VERSION = 1
 PUBLISHED_NAME = "nv_fleet_gates_product_hooks"
 VETO_POINTS = frozenset({"early_veto", "policy_veto", "delivery_veto"})
-POINTS = VETO_POINTS | frozenset({"tool_result_rewrite", "room_session_kind", "own_post_threads", "forge_cli_parser"})
+POINTS = VETO_POINTS | frozenset({"tool_result_rewrite", "room_session_kind", "own_post_threads", "forge_cli_parser",
+                                   "session_taint"})
 ROOM_KINDS = frozenset({"room", "unknown", "no"})
 
 _lock = threading.RLock()
@@ -136,6 +138,8 @@ def _valid(point: str, value: Any) -> bool:
         return isinstance(value, str) and value in ROOM_KINDS
     if point == "own_post_threads":
         return isinstance(value, (set, frozenset)) and all(isinstance(v, str) for v in value)
+    if point == "session_taint":
+        return isinstance(value, bool)
     return value is None or isinstance(value, argparse.ArgumentParser)
 
 
@@ -146,6 +150,8 @@ def _on_error(point: str, owner: str, kwargs: dict[str, Any]) -> Any:
         return "unknown" if kwargs.get("platform") == "api_server" else "no"
     if point == "own_post_threads":
         raise ProductHookError(f"the own_post_threads product hook of {owner} failed")
+    if point == "session_taint":
+        return True
     return None
 
 

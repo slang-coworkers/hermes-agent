@@ -41,7 +41,10 @@ restales the critique on a file mutation or a command that may change the tree;
 ``pre_gateway_dispatch`` captures the human PR-comment invitation token and the
 item each webhook delivery is about (conversation_origin.py);
 ``transform_tool_result`` and ``transform_terminal_output`` replace any OpenShell
-credential placeholder with ``[OpenShell placeholder]`` (placeholder_redact.py).
+credential placeholder with ``[OpenShell placeholder]`` (placeholder_redact.py). With
+``learnings.enabled``: the ``append_learning`` / ``search_learnings`` / ``get_learning``
+tools and the operator's ``hermes learnings`` command over one append-only store of
+technical notes (learnings.py, technical_filter.py).
 """
 
 from __future__ import annotations
@@ -56,8 +59,8 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 
-from . import (commands, conversation_origin, cron_delivery, edges, outbound, placeholder_redact, predicates,
-               product_hooks, stores)
+from . import (commands, conversation_origin, cron_delivery, edges, learnings, outbound, placeholder_redact,
+               predicates, product_hooks, stores)
 from .aliases import canonicalise
 
 logger = logging.getLogger(__name__)
@@ -1168,3 +1171,8 @@ def register(ctx) -> None:
         setup_fn=setup_wire, handler_fn=_cli_wire,
         description="Add/remove/list bidirectional wiring edges in the fleet-shared edges store.",
     )
+    # Shared learnings (learnings.py), off unless learnings.enabled. Its failure must not take the veto with it.
+    try:
+        learnings.register(ctx, current_profile=_current_profile, kanban_task=_kanban_task, hook_home=hook_home)
+    except Exception:
+        logger.warning("nv-fleet-gates: shared learnings not registered", exc_info=True)

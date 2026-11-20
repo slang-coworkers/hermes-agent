@@ -85,6 +85,8 @@ def test_the_callable_gets_keyword_arguments_plus_home(hooks, tmp_path):
         ("room_session_kind", [], "api_server", "unknown"),
         ("room_session_kind", [], "cli", "no"),
         ("forge_cli_parser", "not a parser", None, None),
+        ("session_taint", "not a bool", None, True),
+        ("session_taint", 0, None, True),
     ],
 )
 def test_an_out_of_contract_return_takes_the_points_error_path(hooks, tmp_path, point, bad, platform, expected):
@@ -123,3 +125,17 @@ def test_an_unloaded_profile_reads_as_no_profile(hooks, tmp_path):
     assert hooks.current_profile(home=tmp_path / "home") == "orch" and hooks.is_orchestrator(home=_home(tmp_path))
     ctx.unload()
     assert hooks.current_profile(home=_home(tmp_path)) == "" and hooks.is_orchestrator(home=_home(tmp_path)) is False
+
+
+def test_session_taint_is_a_bool_and_fails_closed(hooks, tmp_path):
+    """No product: the caller's default. A product's bool as given; a raise answers tainted (a write is refused)."""
+    assert hooks.call("session_taint", home=_home(tmp_path), default=None, session_id="s") is None
+    ctx = _Ctx("owner")
+    hooks.register_product_hook(ctx, "session_taint", lambda **_: False)
+    assert hooks.call("session_taint", home=_home(tmp_path), default=None, session_id="s") is False
+
+    def boom(**_):
+        raise RuntimeError("probe")
+
+    hooks.register_product_hook(ctx, "session_taint", boom)
+    assert hooks.call("session_taint", home=_home(tmp_path), default=None, session_id="s") is True

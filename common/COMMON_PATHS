@@ -26,12 +26,14 @@ plugins/nv-fleet-gates/commands.py
 plugins/nv-fleet-gates/conversation_origin.py
 plugins/nv-fleet-gates/cron_delivery.py
 plugins/nv-fleet-gates/edges.py
+plugins/nv-fleet-gates/learnings.py
 plugins/nv-fleet-gates/outbound.py
 plugins/nv-fleet-gates/placeholder_redact.py
 plugins/nv-fleet-gates/plugin.yaml
 plugins/nv-fleet-gates/predicates.py
 plugins/nv-fleet-gates/product_hooks.py
 plugins/nv-fleet-gates/stores.py
+plugins/nv-fleet-gates/technical_filter.py
 
 # Their tests
 tests/plugins/test_hello_acceptance.py
@@ -44,6 +46,7 @@ tests/plugins/test_nv_workflow_modes*.py
 tests/plugins/test_podman_onecli*.py
 tests/plugins/test_nv_fleet_gates_acceptance.py
 tests/plugins/test_nv_fleet_gates_iso_f10a_acceptance.py
+tests/plugins/test_nv_fleet_gates_learnings.py
 tests/plugins/test_nv_fleet_gates_lifecycle.py
 tests/plugins/test_nv_fleet_gates_terminal_scope.py
 tests/plugins/test_nv_fleet_gates_unit.py
