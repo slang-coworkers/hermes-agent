@@ -46,6 +46,11 @@ class ApiRequestHooksMixin:
         summary.pop("raw_usage", None)
         summary["prompt_tokens"] = cu.prompt_tokens
         summary["total_tokens"] = cu.total_tokens
+        # The route's own per-request cost (LiteLLM ``usage.cost``), passed through as reported so a
+        # plugin can price the call the way core does (``estimate_usage_cost`` decides whether to trust it).
+        reported = cu.raw_usage.get("cost") if isinstance(cu.raw_usage, dict) else None
+        if isinstance(reported, (int, float)) and not isinstance(reported, bool):
+            summary["reported_cost"] = reported
         return summary
 
     @staticmethod

@@ -923,7 +923,7 @@ def session_resumes(session_id: str, *, belt_engaged: Optional[bool] = None) -> 
         state = get_state(session_id)
         if state["blocked"]:
             return False
-        if unpriced_count(session_id) > 0 or state["recon_unpriced"]:
+        if (unpriced_count(session_id) > 0 or state["recon_unpriced"]) and unknown_pricing_stops():
             return False
         ceiling = resolved_ceiling()
         baseline = state["day_start_total"] if state["immortal"] else state["window_start_total"]
@@ -1129,6 +1129,28 @@ def _dig(mapping, dotted_key):
             return None
         cur = cur.get(part)
     return cur
+
+
+def unknown_pricing_stops() -> bool:
+    """Whether an unpriced call stops a non-immortal session: ``settings.unknown_pricing``, CTX-FREE.
+
+    ``stop`` (the default, and the answer to a missing, unreadable or unknown value) is fail-CLOSED: an
+    unpriced call counts as a Tier-2 breach. ``report`` records an ``unknown_pricing`` episode for the
+    operator instead and keeps the session running; for a route where some calls carry no price (one
+    that reports its cost only on streamed calls, say). One resolver for enforcement and resolution,
+    like ``resolved_ceiling``, so the two never disagree.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        settings = ((load_config_readonly() or {}).get("plugins", {}).get("entries", {})
+                    .get(PLUGIN_KEY, {}).get("settings", {})) or {}
+    except Exception:
+        logger.warning("nv-cost-cap unknown_pricing setting read failed", exc_info=True)
+        return True
+    if not isinstance(settings, dict):
+        return True
+    return str(settings.get("unknown_pricing", "stop")).strip().lower() != "report"
 
 
 def resolved_ceiling() -> float:

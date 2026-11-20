@@ -32,6 +32,20 @@ core hook field exposing the resolved aggregator provider/model (a documented
 upstream ask), so until then the lineage reconcile is what folds in the real
 per-advisor MoA spend.
 
+`settings.unknown_pricing: report` relaxes this for a fleet whose route leaves some calls
+unpriced (a route that reports its cost only on streamed calls, say): an unknown-priced
+call then records one `unknown_pricing` episode per session and UTC day for the operator,
+counts as $0, and never stops the session or engages ESTOP; the Tier-2 ceiling still
+stops priced spend. Any other value, or none, keeps the fail-closed default.
+
+**A cost the route reports itself.** A LiteLLM proxy returns each request's USD cost in
+the final streamed usage chunk (`usage.cost`, with `stream_options.include_usage`). Core
+uses that number as the call's actual cost (`cost_status='actual'`,
+`provider_cost_api`) when the route's base URL is HTTPS on a host listed in config
+`pricing.reported_cost_hosts` (exact hostnames, default none), and the fast path passes
+it through as `reported_cost`, so both accrual paths agree. A route that is not listed is
+priced as before.
+
 ## Two tiers
 
 **Tier-2 and the immortal daily cap are evaluated on the window delta**, never the
@@ -113,6 +127,7 @@ All settings live under `plugins.entries.nv-cost-cap.settings`.
 | `estop_on_breach` | engage the profile ESTOP belt on a non-immortal breach so cron/kanban are gated too (default `true`; `false` = precise per-session refusals only). |
 | `orchestrator_profile` | the profile allowed to run `hermes cost-cap set` (falls back to `kanban.orchestrator_profile`). |
 | `default_ceiling_usd` | the plugin-default Tier-2 ceiling when no override, managed pin, or owner-pinned default is set. |
+| `unknown_pricing` | `stop` (default): an unknown-priced call is a Tier-2 breach for a non-immortal session. `report`: one `unknown_pricing` episode per session and day instead, and the session keeps running. |
 
 The fleet ceiling itself lives in managed scope and/or the owner-pinned fleet
 default — it is not a per-profile settings key.

@@ -683,6 +683,50 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
     return CostResult(amount_usd=None, status="unknown", source=source, label="n/a", notes=notes)
 
 
+# A request's cost as the route itself reports it. LiteLLM proxies put the request's USD cost in the
+# final streamed usage chunk (``usage.cost``, with ``stream_options.include_usage``): the proxy's own
+# billing figure, after any negotiated discount, for models no public rate card lists. Other relays
+# may use a ``cost`` field differently, so it is trusted only for the exact HTTPS hosts the operator
+# lists in config ``pricing.reported_cost_hosts`` (default: none).
+_REPORTED_COST_VERSION = "route-reported-usage-cost"
+
+
+def _reported_cost_hosts() -> frozenset[str]:
+    """Hostnames from config ``pricing.reported_cost_hosts``; empty on any read or shape problem."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        hosts = ((load_config_readonly() or {}).get("pricing") or {}).get("reported_cost_hosts")
+    except Exception:
+        logger.debug("pricing.reported_cost_hosts read failed", exc_info=True)
+        return frozenset()
+    if not isinstance(hosts, list):
+        return frozenset()
+    return frozenset(h.strip().lower().rstrip(".") for h in hosts if isinstance(h, str) and h.strip())
+
+
+def reports_usage_cost(base_url: Optional[str]) -> bool:
+    """True when ``base_url`` is an HTTPS URL on a host listed in ``pricing.reported_cost_hosts``."""
+    if not base_url:
+        return False
+    scheme, host, _port = base_url_origin(base_url)
+    return scheme == "https" and bool(host) and host in _reported_cost_hosts()
+
+
+def reported_usage_cost(usage: CanonicalUsage, base_url: Optional[str]) -> Optional[Decimal]:
+    """The USD cost a listed route reported in ``usage.cost`` (finite, >= 0), else None."""
+    raw = usage.raw_usage if isinstance(usage.raw_usage, dict) else None
+    if not raw or "cost" not in raw:
+        return None
+    value = raw.get("cost")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        return None
+    amount = _to_decimal(value)
+    if amount is None or not amount.is_finite() or amount < 0:
+        return None
+    return amount if reports_usage_cost(base_url) else None
+
+
 def estimate_usage_cost(
     model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
     base_url: Optional[str] = None, api_key: Optional[str] = None,
@@ -692,6 +736,13 @@ def estimate_usage_cost(
     reported = profile.get_usage_cost(model_name, usage) if profile else None
     if reported is not None:
         return reported
+    route_cost = reported_usage_cost(usage, base_url)
+    if route_cost is not None:
+        return CostResult(
+            amount_usd=route_cost, status="actual", source="provider_cost_api",
+            label=format_cost_label(route_cost), pricing_version=_REPORTED_COST_VERSION,
+            notes=("cost reported by the route (usage.cost)",),
+        )
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return CostResult(
@@ -754,7 +805,10 @@ def has_known_pricing(
     model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """True if pricing data exists for this model+route (direct lookup, no dummy usage)."""
+    """True if pricing data exists for this model+route (direct lookup, no dummy usage), or the
+    route reports each request's cost itself (``pricing.reported_cost_hosts``)."""
+    if reports_usage_cost(base_url):
+        return True
     return get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key) is not None
 
 

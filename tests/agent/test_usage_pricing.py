@@ -924,3 +924,96 @@ def test_anthropic_fast_response_without_a_fast_rate_is_unknown():
     result = estimate_usage_cost("claude-sonnet-4-6", _anthropic_usage("fast"), provider="anthropic")
     assert result.amount_usd is None
     assert result.status == "unknown"
+
+
+class TestRouteReportedUsageCost:
+    """``usage.cost`` a route reports itself (LiteLLM's final streamed usage chunk) is the request's
+    cost only for the exact HTTPS hosts listed in ``pricing.reported_cost_hosts``."""
+
+    @pytest.fixture
+    def listed(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod, "load_config_readonly",
+            lambda: {"pricing": {"reported_cost_hosts": [" LiteLLM.Example.com. ", 7, ""]}},
+        )
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+
+    @staticmethod
+    def _usage(cost):
+        return CanonicalUsage(input_tokens=17, output_tokens=8, raw_usage={"cost": cost})
+
+    def test_listed_https_host_uses_the_reported_cost(self, listed):
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(4.8077e-06), provider="custom",
+            base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "actual"
+        assert result.source == "provider_cost_api"
+        assert result.amount_usd == Decimal("4.8077e-06")
+        assert result.pricing_version == "route-reported-usage-cost"
+        assert result.label == format_cost_label(Decimal("4.8077e-06"))
+
+    @pytest.mark.parametrize("base_url", [
+        "https://other.example.com/v1", "http://litellm.example.com/v1",
+        "https://litellm.example.com.evil.test/v1", "https://sub.litellm.example.com/v1", "", None,
+    ])
+    def test_other_routes_ignore_the_field(self, listed, base_url):
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(4.8077e-06), provider="custom", base_url=base_url,
+        )
+        assert result.status == "unknown"
+        assert result.amount_usd is None
+
+    @pytest.mark.parametrize("cost", [True, -1, float("nan"), float("inf"), "abc", None, [1], {"usd": 1}])
+    def test_malformed_cost_is_ignored(self, listed, cost):
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(cost), provider="custom",
+            base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "unknown"
+
+    def test_zero_is_a_real_cost(self, listed):
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(0), provider="custom",
+            base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "actual"
+        assert result.amount_usd == Decimal(0)
+
+    def test_nothing_is_trusted_without_the_setting(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(config_mod, "load_config_readonly", lambda: {"pricing": {"reported_cost_hosts": "x"}})
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(1.0), provider="custom",
+            base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "unknown"
+
+    def test_aggregated_usage_carries_no_reported_cost(self, listed):
+        both = self._usage(1.0) + self._usage(2.0)
+        assert both.raw_usage is None
+        result = estimate_usage_cost(
+            "vendor/open-model-x", both, provider="custom", base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "unknown"
+
+    def test_known_pricing_for_a_listed_route(self, listed):
+        from agent.usage_pricing import has_known_pricing
+
+        assert has_known_pricing("vendor/open-model-x", "custom", "https://litellm.example.com/v1")
+        assert not has_known_pricing("vendor/open-model-x", "custom", "https://other.example.com/v1")
+
+    def test_hook_usage_summary_passes_the_reported_cost_through(self):
+        from agent.api_request_hooks import ApiRequestHooksMixin
+
+        agent = SimpleNamespace(provider="custom", api_mode="chat_completions")
+        response = SimpleNamespace(usage={"prompt_tokens": 17, "completion_tokens": 8, "cost": 4.8077e-06})
+        summary = ApiRequestHooksMixin._usage_summary_for_api_request_hook(agent, response)
+        assert summary["reported_cost"] == 4.8077e-06
+        assert "raw_usage" not in summary
+        flagged = SimpleNamespace(usage={"prompt_tokens": 17, "completion_tokens": 8, "cost": True})
+        assert "reported_cost" not in ApiRequestHooksMixin._usage_summary_for_api_request_hook(agent, flagged)

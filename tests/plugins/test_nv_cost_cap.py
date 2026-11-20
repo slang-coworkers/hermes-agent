@@ -20,6 +20,7 @@ import types
 from pathlib import Path
 
 import hermes_yaml as yaml
+import pytest
 
 from hermes_cli.plugins import PluginManager
 
@@ -433,3 +434,94 @@ def test_authoritative_unknown_boundary_failclosed_idempotent(tmp_path, monkeypa
     eps2 = loaded.module.episodes("s")
     assert len(eps2) == 1 and eps2[0]["budgetGen"] == gen
     estop.disengage()
+
+
+def test_unknown_pricing_report_keeps_the_session_running(tmp_path, monkeypatch):
+    """settings.unknown_pricing: report -- an unknown-priced call is reported once per session and day
+    (an unknown_pricing episode) and never stops the session or engages ESTOP; the ceiling still does."""
+    from agent import estop
+
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0, "unknown_pricing": "report"},
+    )
+    mod, store = loaded.module, loaded.module.store
+    usage = {"input_tokens": 10, "output_tokens": 5, "request_count": 1}
+    mod.record_api_request(
+        "s-rp", "definitely-not-a-real-model-zzz", usage, "req-1", provider="anthropic", base_url="",
+    )
+    assert store.unpriced_count("s-rp") == 1
+    assert mod._session_stopped("s-rp", today="2026-01-01") == (False, "under")
+    assert not _has(_pgd(manager, "rk", "s-rp"), "skip")
+    eps = mod.episodes("s-rp")
+    assert [e["kind"] for e in eps] == ["unknown_pricing"]
+    assert not estop.is_engaged()
+    assert not store.get_state("s-rp")["blocked"]
+    assert store.session_resumes("s-rp", belt_engaged=False)
+
+    # The same unknown signal at a later boundary: no second episode.
+    manager.invoke_hook(
+        "on_session_end", session_id="s-rp", completed=True, failed=False,
+        interrupted=False, model="x", platform="cli",
+    )
+    assert len(mod.episodes("s-rp")) == 1
+
+    # A reconcile-only unknown row is reported the same way, not stopped.
+    _seed_with_status(
+        hermes_home,
+        sessions=[("s-rc", None, 0.0, None, None)],
+        usage=[("s-rc", "opus", "aux", 0.0, "unknown")],
+    )
+    assert not _has(_pgd(manager, "rk2", "s-rc"), "skip")
+    assert [e["kind"] for e in mod.episodes("s-rc")] == ["unknown_pricing"]
+    assert not estop.is_engaged()
+
+    # Priced spend over the ceiling still stops the session.
+    store.bump_effective("s-rp", 5.0)
+    assert mod._session_stopped("s-rp", today="2026-01-01") == (True, "over_ceiling")
+    if estop.is_engaged():
+        estop.disengage()
+
+
+@pytest.mark.parametrize("value", ["Report-only", ["report"], "stop", None])
+def test_unknown_pricing_other_values_stay_fail_closed(tmp_path, monkeypatch, value):
+    """Any value other than ``report`` (a typo, a list, ``stop``, unset) keeps unknown pricing fail-CLOSED."""
+    settings = {"profile_ceiling_usd": 1.0}
+    if value is not None:
+        settings["unknown_pricing"] = value
+    _, _, loaded = _load(tmp_path, monkeypatch, settings=settings)
+    loaded.module.record_api_request(
+        "s-fc", "definitely-not-a-real-model-zzz", {"input_tokens": 1, "request_count": 1}, "req-1",
+        provider="anthropic", base_url="",
+    )
+    assert loaded.module.store.unknown_pricing_stops()
+    assert loaded.module._session_stopped("s-fc", today="2026-01-01") == (True, "unpriced")
+
+
+def test_route_reported_cost_prices_a_listed_route(tmp_path, monkeypatch):
+    """A route-reported ``reported_cost`` prices the call exactly when core trusts it: an HTTPS host
+    listed in ``pricing.reported_cost_hosts``. The same number on another route stays unpriced."""
+    hermes_home, _, loaded = _load(tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0})
+    cfg = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+    cfg["pricing"] = {"reported_cost_hosts": ["litellm.example.com"]}
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+    store = loaded.module.store
+    usage = {"input_tokens": 17, "output_tokens": 8, "request_count": 1, "reported_cost": 4.8077e-06}
+
+    total = loaded.module.record_api_request(
+        "s-ok", "vendor/open-model-x", usage, "req-1", provider="custom",
+        base_url="https://litellm.example.com/v1",
+    )
+    assert abs(total - 4.8077e-06) < 1e-15
+    assert store.unpriced_count("s-ok") == 0
+
+    loaded.module.record_api_request(
+        "s-other", "vendor/open-model-x", usage, "req-2", provider="custom",
+        base_url="https://other.example.com/v1",
+    )
+    assert store.unpriced_count("s-other") == 1
+    loaded.module.record_api_request(
+        "s-bool", "vendor/open-model-x", dict(usage, reported_cost=True), "req-3", provider="custom",
+        base_url="https://litellm.example.com/v1",
+    )
+    assert store.unpriced_count("s-bool") == 1

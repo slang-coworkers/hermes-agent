@@ -19,8 +19,11 @@ the ``llm_execution`` middleware returns a synthetic terminal response,
 (recovery slash-commands exempt), plus the profile ESTOP belt when
 ``settings.estop_on_breach`` (default true) so cron/kanban are gated too.
 Immortal sessions cap per UTC day and are never hard-stopped. Unknown pricing is
-fail-CLOSED. Runtime policy is set through the orchestrator-only ``hermes
-cost-cap`` CLI; no env var is a source of truth.
+fail-CLOSED by default; ``settings.unknown_pricing: report`` records an
+``unknown_pricing`` episode instead of stopping. A call the route prices itself
+(``usage.cost`` on a ``pricing.reported_cost_hosts`` host) is priced as core prices
+it. Runtime policy is set through the orchestrator-only ``hermes cost-cap`` CLI;
+no env var is a source of truth.
 """
 
 from __future__ import annotations
@@ -258,14 +261,17 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
 
     Builds ``CanonicalUsage`` from the SELECTED canonical token fields — never
     splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
-    properties, not constructor args. Unknown pricing is fail-CLOSED: the call
-    is recorded ``unpriced`` (never as free), which the middleware /
-    ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal session.
-    Returns the running priced fast-path total.
+    properties, not constructor args. A route-reported ``reported_cost`` rides along
+    as ``raw_usage`` so ``estimate_usage_cost`` trusts it exactly when core does.
+    Unknown pricing is fail-CLOSED by default: the call is recorded ``unpriced``
+    (never as free), which the middleware / ``pre_tool_call`` treat as a Tier-2
+    breach for a non-immortal session (``settings.unknown_pricing: report``: an
+    episode instead). Returns the running priced fast-path total.
     """
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
     usage = usage or {}
+    reported = usage.get("reported_cost")
     canonical = CanonicalUsage(
         input_tokens=int(usage.get("input_tokens", 0) or 0),
         output_tokens=int(usage.get("output_tokens", 0) or 0),
@@ -273,6 +279,8 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
         cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
         reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
         request_count=int(usage.get("request_count", 1) or 1),
+        raw_usage=({"cost": reported}
+                   if isinstance(reported, (int, float)) and not isinstance(reported, bool) else None),
     )
     amount = None
     try:
@@ -311,7 +319,7 @@ def _session_stopped(session_id, *, today, platform=None):
     state = store.get_state(session_id)
     if state["blocked"]:
         return True, "blocked"
-    if _unpriced_signal(session_id) > 0:
+    if _unpriced_signal(session_id) > 0 and store.unknown_pricing_stops():
         return True, "unpriced"
     ceiling = resolve_ceiling()
     delta = effective - state["window_start_total"]
@@ -417,10 +425,17 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
     cap = tier1_cap(_current_profile_home())
     budget_gen = state["budget_gen"] + 1
     delta = effective - state["window_start_total"]
-    crossed = unpriced_new or (_finite(ceiling) and delta >= ceiling)
+    unpriced_stops = unpriced_new and store.unknown_pricing_stops()
+    if unpriced_new and not unpriced_stops:
+        # settings.unknown_pricing: report -- tell the operator once per session and day, keep running.
+        store.record_episode(
+            session_id, "unknown_pricing", budget_gen, today,
+            dedup_key=f"{session_id}:unpriced:{today}",
+        )
+    crossed = unpriced_stops or (_finite(ceiling) and delta >= ceiling)
 
     if crossed:
-        _record_breach(session_id, budget_gen, today, unpriced=unpriced_new)
+        _record_breach(session_id, budget_gen, today, unpriced=unpriced_stops)
         store.set_state(
             session_id, blocked=1, budget_gen=budget_gen,
             last_evaluated_total=effective, last_unpriced_count=unpriced_now,
