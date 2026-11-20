@@ -447,7 +447,7 @@ def test_reported_cost_from_core_is_accrued_as_is(tmp_path, monkeypatch):
     assert abs(total - 4.8077e-06) < 1e-15
     assert store.unpriced_count("s-ok") == 0
     assert loaded.module._session_stopped("s-ok", today="2026-01-01") == (False, "under")
-    for n, bad in enumerate((True, "0.1", -1.0, float("nan"), float("inf"), 5), start=2):
+    for n, bad in enumerate((True, "0.1", -1.0, 0.0, float("nan"), float("inf"), 5), start=2):
         sid = f"s-bad-{n}"
         loaded.module.record_api_request(
             sid, "vendor/open-model-x", dict(usage, reported_cost=bad), f"req-{n}", provider="anthropic", base_url="",

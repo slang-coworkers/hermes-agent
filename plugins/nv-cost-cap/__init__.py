@@ -262,8 +262,9 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
     Builds ``CanonicalUsage`` from the SELECTED canonical token fields — never
     splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
     properties, not constructor args. ``reported_cost`` (core's own price for this
-    response, from a route that reports its cost: ``agent/api_request_hooks.py``) is
-    accrued as-is, so both accrual paths hold the same number. Unknown pricing is
+    response, from a route that reports its cost: ``agent/api_request_hooks.py``; a
+    finite float > 0, core's own contract) is accrued as-is, so both accrual paths hold
+    the same number. Unknown pricing is
     fail-CLOSED: the call is recorded ``unpriced`` (never as free), which the
     middleware / ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal
     session. Returns the running priced fast-path total.
@@ -273,7 +274,7 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
     usage = usage or {}
     amount = None
     reported = usage.get("reported_cost")
-    if type(reported) is float and math.isfinite(reported) and reported >= 0:
+    if type(reported) is float and math.isfinite(reported) and reported > 0:
         amount = reported
     else:
         canonical = CanonicalUsage(
