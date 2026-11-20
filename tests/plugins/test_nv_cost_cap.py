@@ -20,7 +20,6 @@ import types
 from pathlib import Path
 
 import hermes_yaml as yaml
-import pytest
 
 from hermes_cli.plugins import PluginManager
 
@@ -436,111 +435,9 @@ def test_authoritative_unknown_boundary_failclosed_idempotent(tmp_path, monkeypa
     estop.disengage()
 
 
-def test_unknown_pricing_report_keeps_the_session_running(tmp_path, monkeypatch):
-    """settings.unknown_pricing: report -- an unknown-priced call is reported once per session and day
-    (an unknown_pricing episode) and does not stop the session or engage ESTOP; the ceiling still does."""
-    from agent import estop
-
-    hermes_home, manager, loaded = _load(
-        tmp_path, monkeypatch, settings={"profile_ceiling_usd": 1.0, "unknown_pricing": "report"},
-    )
-    mod, store = loaded.module, loaded.module.store
-    usage = {"input_tokens": 10, "output_tokens": 5, "request_count": 1}
-    mod.record_api_request(
-        "s-rp", "definitely-not-a-real-model-zzz", usage, "req-1", provider="anthropic", base_url="",
-    )
-    assert store.unpriced_count("s-rp") == 1
-    assert mod._session_stopped("s-rp", today="2026-01-01") == (False, "under")
-    assert not _has(_pgd(manager, "rk", "s-rp"), "skip")
-    assert [e["kind"] for e in mod.episodes("s-rp")] == ["unknown_pricing"]
-    assert not estop.is_engaged()
-    assert not store.get_state("s-rp")["blocked"]
-    assert store.session_resumes("s-rp", belt_engaged=False)
-
-    # The same unknown signal at a later boundary: no second episode.
-    manager.invoke_hook(
-        "on_session_end", session_id="s-rp", completed=True, failed=False,
-        interrupted=False, model="x", platform="cli",
-    )
-    assert len(mod.episodes("s-rp")) == 1
-
-    # A reconcile-only unknown row (a non-streamed auxiliary call, say) is reported, never a stop.
-    _seed_with_status(
-        hermes_home,
-        sessions=[("s-rc", None, 0.0, None, None)],
-        usage=[("s-rc", "opus", "aux", 0.0, "unknown")],
-    )
-    assert not _has(_pgd(manager, "rk2", "s-rc"), "skip")
-    assert [e["kind"] for e in mod.episodes("s-rc")] == ["unknown_pricing"]
-    assert not estop.is_engaged()
-
-    # Priced spend over the ceiling still stops the session.
-    store.bump_effective("s-rp", 5.0)
-    assert mod._session_stopped("s-rp", today="2026-01-01") == (True, "over_ceiling")
-    if estop.is_engaged():
-        estop.disengage()
-
-
-def test_unknown_pricing_report_limit_bounds_a_blind_cap(tmp_path, monkeypatch):
-    """In report mode a session whose model calls stay unpriced stops at unknown_pricing_report_limit
-    calls (a breach, kind unknown_pricing, blocked); estop_on_breach: false keeps it to that session."""
-    from agent import estop
-
-    _, manager, loaded = _load(
-        tmp_path, monkeypatch,
-        settings={"profile_ceiling_usd": 100.0, "unknown_pricing": "report",
-                  "unknown_pricing_report_limit": 3, "estop_on_breach": False},
-    )
-    mod, store = loaded.module, loaded.module.store
-    usage = {"input_tokens": 10, "output_tokens": 5, "request_count": 1}
-    for n in (1, 2):
-        mod.record_api_request("s-lim", "definitely-not-a-real-model-zzz", usage, f"req-{n}",
-                               provider="anthropic", base_url="")
-        assert mod._session_stopped("s-lim", today="2026-01-01") == (False, "under")
-    assert not _has(_pgd(manager, "rk", "s-lim"), "skip")
-    mod.record_api_request("s-lim", "definitely-not-a-real-model-zzz", usage, "req-3",
-                           provider="anthropic", base_url="")
-    assert mod._session_stopped("s-lim", today="2026-01-01") == (True, "unpriced")
-    assert _has(_pgd(manager, "rk", "s-lim"), "skip")
-    assert store.get_state("s-lim")["blocked"]
-    assert [e["kind"] for e in mod.episodes("s-lim")] == ["unknown_pricing", "unknown_pricing"]
-    assert not store.session_resumes("s-lim", belt_engaged=False)
-    assert not estop.is_engaged()
-
-
-@pytest.mark.parametrize("value", ["Report-only", ["report"], "stop", None])
-def test_unknown_pricing_other_values_stay_fail_closed(tmp_path, monkeypatch, value):
-    """Any value other than ``report`` (a typo, a list, ``stop``, unset) keeps unknown pricing fail-CLOSED."""
-    settings = {"profile_ceiling_usd": 1.0}
-    if value is not None:
-        settings["unknown_pricing"] = value
-    _, _, loaded = _load(tmp_path, monkeypatch, settings=settings)
-    loaded.module.record_api_request(
-        "s-fc", "definitely-not-a-real-model-zzz", {"input_tokens": 1, "request_count": 1}, "req-1",
-        provider="anthropic", base_url="",
-    )
-    assert loaded.module.store.unknown_pricing_stops()
-    assert loaded.module._session_stopped("s-fc", today="2026-01-01") == (True, "unpriced")
-
-
-def test_unknown_pricing_failed_config_read_is_fail_closed(tmp_path, monkeypatch):
-    """A config read that failed (Hermes serves the last-known-good dict as FailedConfigRead) never
-    keeps ``report`` alive: the resolver answers ``stop``."""
-    import hermes_cli.config as config_mod
-    from hermes_cli.config_read_errors import FailedConfigRead
-
-    _, _, loaded = _load(tmp_path, monkeypatch, settings={"unknown_pricing": "report"})
-    assert not loaded.module.store.unknown_pricing_stops()
-    stale = FailedConfigRead(
-        {"plugins": {"entries": {PLUGIN_KEY: {"settings": {"unknown_pricing": "report"}}}}}, error=OSError("EIO"))
-    monkeypatch.setattr(config_mod, "load_config_readonly", lambda: stale)
-    assert loaded.module.store.unknown_pricing_stops()
-    assert loaded.module.store.unpriced_blocks(1, False)
-
-
 def test_reported_cost_from_core_is_accrued_as_is(tmp_path, monkeypatch):
     """``reported_cost`` (core's own price for the response: a float) is the call's amount; anything else
-    there is ignored and the call is priced as before (unpriced for an unknown model)."""
+    there is ignored and the call is priced as before (unpriced, fail-closed, for an unknown model)."""
     _, _, loaded = _load(tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0})
     store = loaded.module.store
     usage = {"input_tokens": 17, "output_tokens": 8, "request_count": 1, "reported_cost": 4.8077e-06}
@@ -549,12 +446,14 @@ def test_reported_cost_from_core_is_accrued_as_is(tmp_path, monkeypatch):
     )
     assert abs(total - 4.8077e-06) < 1e-15
     assert store.unpriced_count("s-ok") == 0
+    assert loaded.module._session_stopped("s-ok", today="2026-01-01") == (False, "under")
     for n, bad in enumerate((True, "0.1", -1.0, float("nan"), float("inf"), 5), start=2):
         sid = f"s-bad-{n}"
         loaded.module.record_api_request(
             sid, "vendor/open-model-x", dict(usage, reported_cost=bad), f"req-{n}", provider="anthropic", base_url="",
         )
         assert store.unpriced_count(sid) == 1, bad
+        assert loaded.module._session_stopped(sid, today="2026-01-01") == (True, "unpriced")
 
 
 def test_tier1_floor_raises_a_small_p90(tmp_path, monkeypatch):

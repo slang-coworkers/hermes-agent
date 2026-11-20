@@ -19,11 +19,9 @@ the ``llm_execution`` middleware returns a synthetic terminal response,
 (recovery slash-commands exempt), plus the profile ESTOP belt when
 ``settings.estop_on_breach`` (default true) so cron/kanban are gated too.
 Immortal sessions cap per UTC day and are never hard-stopped. Unknown pricing is
-fail-CLOSED by default; ``settings.unknown_pricing: report`` records an
-``unknown_pricing`` episode instead and stops only at
-``unknown_pricing_report_limit`` unpriced model calls. A call the route prices
-itself (``usage.cost`` on a ``pricing.reported_cost_hosts`` host) is accrued at
-core's own price for it (``reported_cost``). Runtime policy is set through the
+fail-CLOSED. A call the route prices itself (``usage.cost`` on a
+``pricing.reported_cost_hosts`` host, priced by core) is accrued at core's own
+price for it (``reported_cost``). Runtime policy is set through the
 orchestrator-only ``hermes cost-cap`` CLI; no env var is a source of truth.
 """
 
@@ -197,17 +195,6 @@ def _refresh_effective(session_id, *, strict=False) -> float:
     return store.bump_effective(session_id, reconciled)
 
 
-def _unpriced_blocks(session_id) -> bool:
-    """``store.unpriced_blocks`` over this session's fast-path unpriced count and reconcile marker.
-    Fails toward blocking when the state cannot be read."""
-    try:
-        state = store.get_state(session_id)
-        return store.unpriced_blocks(store.unpriced_count(session_id), state["recon_unpriced"])
-    except Exception:
-        logger.warning("nv-cost-cap unpriced check failed for %s", session_id, exc_info=True)
-        return True
-
-
 def _unpriced_signal(session_id) -> int:
     """Distinct unpriced signals across BOTH accrual paths.
 
@@ -276,11 +263,10 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
     splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
     properties, not constructor args. ``reported_cost`` (core's own price for this
     response, from a route that reports its cost: ``agent/api_request_hooks.py``) is
-    used as-is, so both accrual paths hold the same number. Unknown pricing is
-    fail-CLOSED by default: the call is recorded ``unpriced`` (never as free), which the
-    middleware / ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal session
-    (``settings.unknown_pricing: report``: see ``store.unpriced_blocks``). Returns the
-    running priced fast-path total.
+    accrued as-is, so both accrual paths hold the same number. Unknown pricing is
+    fail-CLOSED: the call is recorded ``unpriced`` (never as free), which the
+    middleware / ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal
+    session. Returns the running priced fast-path total.
     """
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
@@ -334,7 +320,7 @@ def _session_stopped(session_id, *, today, platform=None):
     state = store.get_state(session_id)
     if state["blocked"]:
         return True, "blocked"
-    if _unpriced_blocks(session_id):
+    if _unpriced_signal(session_id) > 0:
         return True, "unpriced"
     ceiling = resolve_ceiling()
     delta = effective - state["window_start_total"]
@@ -433,23 +419,16 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
     unpriced_now = _unpriced_signal(session_id)
     spend_increased = effective > state["last_evaluated_total"] + 1e-12
     unpriced_new = unpriced_now > state["last_unpriced_count"]
-    unpriced_breach = _unpriced_blocks(session_id)
-    if not (spend_increased or unpriced_new or unpriced_breach):
+    if not (spend_increased or unpriced_new):
         return False
 
     ceiling = resolve_ceiling()
     budget_gen = state["budget_gen"] + 1
     delta = effective - state["window_start_total"]
-    if unpriced_new and not unpriced_breach:
-        # settings.unknown_pricing: report -- tell the operator once per session and day, keep running.
-        store.record_episode(
-            session_id, "unknown_pricing", budget_gen, today,
-            dedup_key=f"{session_id}:unpriced:{today}",
-        )
-    crossed = unpriced_breach or (_finite(ceiling) and delta >= ceiling)
+    crossed = unpriced_new or (_finite(ceiling) and delta >= ceiling)
 
     if crossed:
-        _record_breach(session_id, budget_gen, today, unpriced=unpriced_breach)
+        _record_breach(session_id, budget_gen, today, unpriced=unpriced_new)
         store.set_state(
             session_id, blocked=1, budget_gen=budget_gen,
             last_evaluated_total=effective, last_unpriced_count=unpriced_now,

@@ -190,7 +190,7 @@ def completed_session_totals(profile_home: str, window: int) -> list[float]:
 
 def tier1_from(values: list[float], floor_usd=0.0) -> float:
     """Tier-1 cap: the p90 of ``values``, raised to ``floor_usd`` (a finite number > 0) when there is one.
-    No history stays ``inf`` (no Tier-1 yet), floor or not."""
+    No history stays ``inf`` (no Tier-1 yet), floor or not; an unusable floor is ignored."""
     cap = p90(values)
     try:
         floor = float(floor_usd)
