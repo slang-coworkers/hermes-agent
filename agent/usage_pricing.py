@@ -689,7 +689,7 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 # billing figure, after any negotiated discount, for models no public rate card lists. Other relays
 # may use a ``cost`` field differently, so it is trusted only for the exact HTTPS hosts the operator
 # lists in config ``pricing.reported_cost_hosts`` (default: none), only as LiteLLM sends it (one
-# response's JSON number: int or float, finite, >= 0; not 0 for a call that used tokens), only where the
+# response's JSON number: int or float, finite and strictly positive), only where the
 # caller vouches that ``base_url`` is the route that served the call (``trust_reported_cost``: the main
 # loop's own route; never an auxiliary or MoA call, whose fallback routing is not tracked), and only for a
 # call Hermes cannot price itself: a rate Hermes has always wins.
@@ -724,19 +724,18 @@ def reports_usage_cost(base_url: Optional[str]) -> bool:
 
 
 def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
-    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, >= 0)."""
+    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0)."""
     if usage.request_count != 1 or not isinstance(usage.raw_usage, dict):
         return None
     value = usage.raw_usage.get("cost")
     if type(value) not in (int, float):  # bool, str, Decimal, None and containers are refused
         return None
     try:
-        if not math.isfinite(float(value)) or value < 0:
+        # Strictly positive: a route may pass through a field it did not bill, and a zero quote cannot be told from
+        # one (a call left unknown stays fail-closed instead of becoming a $0 charge).
+        if not math.isfinite(float(value)) or value <= 0:
             return None
     except OverflowError:  # an int too large for a float
-        return None
-    if value == 0 and (usage.input_tokens or usage.output_tokens or usage.cache_read_tokens or usage.cache_write_tokens):
-        # A route may pass through a field it did not bill; a zero quote for tokens used is not trusted.
         return None
     return Decimal(str(value))
 

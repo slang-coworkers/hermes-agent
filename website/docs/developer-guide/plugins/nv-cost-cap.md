@@ -40,8 +40,8 @@ call (a rate always wins); the main loop's own route served it (a fallback re-bi
 agent's route first; auxiliary and mixture-of-agents calls are never priced this way,
 since their served route is not tracked); that route's base URL is HTTPS on a host listed
 in config `pricing.reported_cost_hosts` (exact hostnames, default none); and the value is
-one response's JSON number, finite, >= 0, and not 0 for a call that used tokens (a route
-may pass through a field it did not bill). Listing a host is the operator's statement that
+one response's JSON number, finite and strictly positive (a route may pass through a field
+it did not bill, and a zero quote cannot be told from one). Listing a host is the operator's statement that
 its `usage.cost` is its bill. Core prices the response once and the `post_api_request`
 usage summary carries that amount as `reported_cost` (absent otherwise), which the fast
 path accrues as-is, so both accrual paths hold the same number. A call with no usable

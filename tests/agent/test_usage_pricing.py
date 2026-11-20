@@ -981,11 +981,13 @@ class TestRouteReportedUsageCost:
     def test_malformed_cost_is_ignored(self, listed, cost):
         assert self._price(self._usage(cost)).status == "unknown"
 
-    def test_a_zero_quote_for_tokens_used_is_not_trusted(self, listed):
+    def test_a_zero_quote_is_never_trusted(self, listed):
         assert self._price(self._usage(0)).status == "unknown"
         assert self._price(self._usage(0.0)).status == "unknown"
-        empty = CanonicalUsage(raw_usage={"cost": 0})
-        assert (self._price(empty).status, self._price(empty).amount_usd) == ("actual", Decimal(0))
+        assert self._price(CanonicalUsage(raw_usage={"cost": 0})).status == "unknown"
+        # Token counts the canonical buckets miss (a raw total only) cannot make a zero quote a $0 charge.
+        raw_total = normalize_usage({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 25, "cost": 0})
+        assert self._price(raw_total).status == "unknown"
 
     def test_a_multi_request_usage_carries_no_single_reported_cost(self, listed):
         usage = CanonicalUsage(input_tokens=17, output_tokens=8, request_count=2, raw_usage={"cost": 1.0})
