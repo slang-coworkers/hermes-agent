@@ -21,7 +21,9 @@ spent twice.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextvars
+import errno
 import itertools
 import json
 import logging
@@ -532,9 +534,18 @@ def _ensure_canonical_bot_chat(profile: str) -> bool:
 # Fleet raw-request-capture toggle (OBS-F46). Read process-global via
 # env_var_enabled -> os.getenv at agent/conversation_loop.py, so it must reach a
 # process's os.environ; a coworker's ACTIVE .env is the file a spawned
-# `hermes -p <bot> chat` loads at startup, so install upserts it there.
+# `hermes -p <bot> chat` loads at startup, so the opt-in upserts it there.
+# Capture is OFF by default: a dump holds conversation content. Install enables it
+# only on the operator's explicit, per-run `hermes onboard coworker ...
+# --capture-requests` (the standalone CLI only). Without it, install writes nothing
+# and removes the exact line earlier versions of this installer wrote into every
+# profile, so re-onboarding turns that old default off. Capture an operator or
+# administrator configures elsewhere (service env, managed scope, a hand-set value)
+# is theirs, documented in the fleet raw-request-capture runbook.
 CAPTURE_KEY = "HERMES_DUMP_REQUESTS"
 CAPTURE_VALUE = "true"
+# The exact line earlier versions of this installer appended to every profile's .env.
+_LEGACY_CAPTURE_LINE = f"{CAPTURE_KEY}={CAPTURE_VALUE}"
 
 
 class CaptureEnvManagedError(Exception):
@@ -542,6 +553,12 @@ class CaptureEnvManagedError(Exception):
     action rather than a silent local override. Raised instead of writing the
     profile .env when a managed scope pins the key falsy, when a package-managed
     install owns the environment, or when managed policy cannot be read."""
+
+
+class CaptureWriteError(CaptureEnvManagedError):
+    """The opt-in's write failed AFTER the profile was installed: the profile is complete,
+    only the debug toggle is missing (capture stays OFF). Onboarding finishes normally for
+    that profile and reports this as a warning."""
 
 
 def _upsert_env_var(env_path: str | Path, key: str, value: str) -> None:
@@ -585,16 +602,11 @@ def _upsert_env_var(env_path: str | Path, key: str, value: str) -> None:
         raise
 
 
-def apply_capture_env(profile_home: str | Path) -> None:
-    """Idempotently enable ``HERMES_DUMP_REQUESTS`` in a profile's active ``.env``.
-
-    Respects machine-global managed policy: a managed value already truthy is a
-    no-op success; a managed value pinned falsy, or a package-managed install, is
-    surfaced as an explicit operator action instead of a silent local override.
-    Fails closed — if managed policy cannot be read, it raises rather than write a
-    value that might defy administrative policy. ``managed_scope.get_managed_dir()``
-    is ``None`` under pytest, so this guard is inert in the hermetic tests.
-    """
+def _capture_opt_in_policy(profile_home: str | Path) -> bool:
+    """The machine-policy checks of the opt-in (unchanged from the enabling installer): False
+    when a managed scope already provides a truthy value (nothing to write); True when the
+    profile may be written; raises CaptureEnvManagedError for an explicit operator action. It
+    also refuses an active ``.env`` the writer cannot read as UTF-8. Writes nothing."""
     env_path = Path(profile_home) / ".env"
     try:
         from hermes_cli import managed_scope
@@ -622,14 +634,30 @@ def apply_capture_env(profile_home: str | Path) -> None:
                 f"cannot read managed policy {managed_env_path}; refusing to modify {env_path}"
             ) from exc
 
-    managed_values = managed_scope.load_managed_env()
+    # Startup's own dotenv parser decides what the managed file sets (a quoted key included);
+    # only an unambiguous literal truthy value makes the local write unnecessary.
+    managed_values: dict[str, str] = {}
+    if managed_dir is not None and (managed_dir / ".env").exists():
+        from hermes_cli.env_loader import _parse_dotenv_file
+
+        try:
+            for name, value in _parse_dotenv_file(managed_dir / ".env"):
+                if name == CAPTURE_KEY:
+                    if value is None:
+                        managed_values.pop(name, None)
+                    else:
+                        managed_values[name] = value
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read managed policy {managed_dir / '.env'}; refusing to modify {env_path}"
+            ) from exc
 
     if CAPTURE_KEY in managed_values:
-        if is_truthy_value(managed_values[CAPTURE_KEY]):
-            return
+        if "$" not in managed_values[CAPTURE_KEY] and is_truthy_value(managed_values[CAPTURE_KEY]):
+            return False
         source = (managed_dir / ".env") if managed_dir else "the managed scope"
-        raise CaptureEnvManagedError(
-            f"{CAPTURE_KEY} is managed as {managed_values[CAPTURE_KEY]!r} by {source}; "
+        raise CaptureEnvManagedError(  # never echo the value: a managed reference may expand to a secret
+            f"{CAPTURE_KEY} is managed off (or not a truthy value) by {source}; "
             "set it to true there and re-run onboarding."
         )
     if managed_system is not None:
@@ -637,9 +665,203 @@ def apply_capture_env(profile_home: str | Path) -> None:
             f"Hermes is managed by {managed_system}; set {CAPTURE_KEY}=true in the "
             "package-managed environment (service-unit env or /etc/hermes/.env)."
         )
+    if os.path.lexists(env_path):
+        try:
+            if os.path.islink(env_path) or os.stat(env_path).st_nlink > 1:
+                raise CaptureEnvManagedError(
+                    f"{env_path} is a link to a file another scope owns; refusing to replace it "
+                    f"(set {CAPTURE_KEY}=true in that file by hand)"
+                )
+            env_path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read {env_path} as UTF-8; refusing to modify it"
+            ) from exc
+    return True
 
-    _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
 
+def _legacy_cleanup_bytes(env_path: Path) -> Optional[bytes]:
+    """The active ``.env``'s bytes with every TOP-LEVEL binding that is exactly the line earlier
+    installers wrote (``HERMES_DUMP_REQUESTS=true``, any line ending) removed, or None when
+    there is none. Decoded the way the loader decodes it (a UTF-16 BOM; else UTF-8, BOM kept;
+    else latin-1, which is lossless) and re-encoded the same way; bindings come from the dotenv
+    parser itself, so a lookalike line inside a quoted multi-line value is data and stays.
+    A UTF-32 file is not loaded by Hermes at all: nothing to remove."""
+    import io
+
+    from dotenv.parser import parse_stream
+
+    raw = env_path.read_bytes()
+    if raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return None
+    if raw.startswith(codecs.BOM_UTF16_LE):
+        bom, encoding = codecs.BOM_UTF16_LE, "utf-16-le"
+    elif raw.startswith(codecs.BOM_UTF16_BE):
+        bom, encoding = codecs.BOM_UTF16_BE, "utf-16-be"
+    else:
+        bom = codecs.BOM_UTF8 if raw.startswith(codecs.BOM_UTF8) else b""
+        try:
+            raw[len(bom):].decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            encoding = "latin-1"
+    text = raw[len(bom):].decode(encoding)
+    out: list[str] = []
+    removed = False
+    for binding in parse_stream(io.StringIO(text)):
+        original = binding.original.string
+        if binding.key == CAPTURE_KEY:
+            # The parser attaches the blank lines before an assignment to its binding: keep
+            # them; the assignment must be exactly the legacy line, on its own physical line
+            # (indentation on that line is significant).
+            lines = original.splitlines(keepends=True)
+            blank = 0
+            while blank < len(lines) and not lines[blank].strip():
+                blank += 1
+            if len(lines) == blank + 1 and lines[blank].rstrip("\r\n") == _LEGACY_CAPTURE_LINE:
+                out.append("".join(lines[:blank]))
+                removed = True
+                continue
+        out.append(original)
+    if not removed:
+        return None
+    return bom + "".join(out).encode(encoding)
+
+
+_ACL_XATTR = "system.posix_acl_access"
+
+
+def _atomic_rewrite_preserving(env_path: Path, data: bytes) -> None:
+    """Atomically replace the regular file *env_path* with *data*, keeping its mode, owner and
+    POSIX ACL exactly: the new file is staged in a private (0700) directory beside it (so an
+    inherited default ACL never exposes it, and an inherited ACL is cleared when the original
+    had none) and published with os.replace. Raises OSError when any of that cannot be kept or
+    the file cannot be replaced (e.g. a bind-mounted file)."""
+    st = os.stat(env_path)
+    acl: Optional[bytes] = None
+    if hasattr(os, "getxattr"):
+        try:
+            acl = os.getxattr(env_path, _ACL_XATTR)
+        except OSError as exc:
+            if exc.errno not in (errno.ENODATA, getattr(errno, "ENOTSUP", -1), getattr(errno, "EOPNOTSUPP", -1)):
+                raise
+    stage = tempfile.mkdtemp(dir=str(env_path.parent), prefix=".env_stage_")
+    try:
+        os.chmod(stage, 0o700)
+        tmp_name = os.path.join(stage, "env")
+        fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tst = os.stat(tmp_name)
+        if (tst.st_uid, tst.st_gid) != (st.st_uid, st.st_gid):
+            os.chown(tmp_name, st.st_uid, st.st_gid)
+        if hasattr(os, "setxattr"):
+            if acl is not None:
+                os.setxattr(tmp_name, _ACL_XATTR, acl)
+            else:
+                try:
+                    os.removexattr(tmp_name, _ACL_XATTR)  # an ACL inherited from the directory
+                except OSError as exc:
+                    if exc.errno not in (errno.ENODATA, getattr(errno, "ENOTSUP", -1), getattr(errno, "EOPNOTSUPP", -1)):
+                        raise
+        os.chmod(tmp_name, stat.S_IMODE(st.st_mode))
+        os.replace(tmp_name, env_path)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _remove_legacy_capture(profile_home: str | Path) -> None:
+    """Remove the capture earlier versions of this installer wrote (see
+    ``_legacy_cleanup_bytes``) from the profile's active ``.env``, keeping every other byte and
+    the file's mode, owner and ACL; write only when there is something to remove. Earlier
+    installers always replaced ``<profile>/.env`` with a regular file of its own, so a symlinked
+    or hard-linked ``.env`` (an alias of another scope's file, e.g. the managed or launch
+    ``.env``) cannot hold their line: it is left alone. Raises CaptureEnvManagedError
+    (capture would stay on) when the line is there but cannot be removed."""
+    env_path = Path(profile_home) / ".env"
+    if not os.path.lexists(env_path):
+        return
+    try:
+        if os.path.islink(env_path) or os.stat(env_path).st_nlink > 1:
+            logger.info("%s is a link to another file; earlier installers never wrote it: left alone", env_path)
+            return
+        data = _legacy_cleanup_bytes(env_path)
+        if data is not None:
+            _atomic_rewrite_preserving(env_path, data)
+    except OSError as exc:
+        raise CaptureEnvManagedError(
+            f"cannot rewrite {env_path}; remove the line {_LEGACY_CAPTURE_LINE} "
+            "there by hand (raw request capture stays off unless opted in)"
+        ) from exc
+
+
+def capture_preflight(profile_home: str | Path, *, enable: bool = False) -> None:
+    """Run BEFORE the distribution install mutates the profile (the install never writes the
+    active ``.env``): the default removes the line earlier versions of this installer wrote;
+    the opt-in checks its machine policy and the target file, so a refusal leaves the profile
+    untouched. The opt-in's write itself comes after the install (``apply_capture_env``): if
+    it fails there, the profile is installed with capture OFF and the error is reported."""
+    if enable:
+        _capture_opt_in_policy(profile_home)
+    else:
+        _remove_legacy_capture(profile_home)
+
+
+def _capture_on_bytes(env_path: Path) -> bytes:
+    """The opt-in's file content: every top-level binding of the key (a multi-line one whole)
+    removed as the dotenv parser sees it, the blank lines before it and every other binding
+    kept (a lookalike line inside a quoted value is data), and the single canonical
+    ``HERMES_DUMP_REQUESTS=true`` appended last."""
+    import io
+
+    from dotenv.parser import parse_stream
+
+    text = env_path.read_text(encoding="utf-8-sig") if env_path.exists() else ""
+    out: list[str] = []
+    for binding in parse_stream(io.StringIO(text)):
+        if binding.key == CAPTURE_KEY:
+            lines = binding.original.string.splitlines(keepends=True)
+            blank = 0
+            while blank < len(lines) and not lines[blank].strip():
+                blank += 1
+            out.append("".join(lines[:blank]))
+            continue
+        out.append(binding.original.string)
+    body = "".join(out)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    return (body + f"{CAPTURE_KEY}={CAPTURE_VALUE}\n").encode("utf-8")
+
+
+def apply_capture_env(profile_home: str | Path, *, enable: bool = False) -> None:
+    """Raw request capture (``HERMES_DUMP_REQUESTS``) for one installed profile's active ``.env``.
+
+    ``enable=False`` (the default) writes nothing new: capture stays OFF (Hermes' default) and
+    the exact ``HERMES_DUMP_REQUESTS=true`` line earlier versions of this installer wrote is
+    removed. ``enable=True`` (the operator's ``--capture-requests``) idempotently enables it and
+    respects machine-global managed policy: a managed value already truthy is a no-op success;
+    a managed value pinned falsy, or a package-managed install, is surfaced as an explicit
+    operator action instead of a silent local override; an unreadable managed policy fails
+    closed. ``managed_scope.get_managed_dir()`` is ``None`` under pytest, so these guards are
+    inert in the hermetic tests unless a test sets ``HERMES_MANAGED_DIR``.
+    """
+    if not enable:
+        _remove_legacy_capture(profile_home)
+        return
+    if not _capture_opt_in_policy(profile_home):
+        return
+    env_path = Path(profile_home) / ".env"
+    try:
+        if env_path.exists():
+            data = _capture_on_bytes(env_path)
+            if data != env_path.read_bytes():
+                _atomic_rewrite_preserving(env_path, data)
+        else:
+            _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
+    except OSError as exc:
+        raise CaptureWriteError(f"cannot write {env_path}; raw request capture stays off") from exc
 
 WIKI_JOB_NAME = "shared-learnings-wiki-fold"
 _WIKI_FOLD_PROMPT = (
@@ -691,12 +913,20 @@ def activate_shared_learnings(profile_homes: dict[str, str], orchestrator: str, 
         reset_hermes_home_override(token)
 
 
-def _install(rendered_dir: str, name: str) -> str:
+def _install(rendered_dir: str, name: str, *, capture: bool = False) -> str:
+    """Install one rendered profile. Raw request capture stays OFF unless *capture* (the
+    operator's explicit --capture-requests). The capture checks (and the default's removal of
+    the earlier installer's line) run before anything is installed, on exactly the home the
+    install targets; the opt-in's write follows the install and, if it fails, leaves capture
+    OFF and raises."""
     from hermes_cli.profile_distribution import install_distribution
+    from hermes_cli.profiles import _canon_valid
+
+    capture_preflight(get_profile_dir(_canon_valid(name)), enable=capture)
     plan = install_distribution(str(rendered_dir), name=name, force=True)
-    installed_home = plan.target_dir
-    apply_capture_env(installed_home)
-    return str(installed_home)
+    if capture:
+        apply_capture_env(plan.target_dir, enable=True)
+    return str(plan.target_dir)
 
 
 def _profile_cron_jobs(home: Path) -> dict[str, str]:
@@ -820,7 +1050,7 @@ def _configure_bot_meta(profile: str, ui_meta: dict[str, Any], revisions: dict[s
     return False
 
 
-def _run_onboard(spec: str) -> dict[str, Any]:
+def _run_onboard(spec: str, *, capture_requests: bool = False) -> dict[str, Any]:
     data = load_spec(spec)
     types = data.get("types") or {}
     failures: list[str] = []
@@ -831,11 +1061,16 @@ def _run_onboard(spec: str) -> dict[str, Any]:
         # is not installed here: install_distribution rejects the reserved name
         # "default"; the DEFAULT profile is the gateway root itself.
         new_cron: dict[str, dict[str, str]] = {}
+        install_failed: set[str] = set()
+        capture_warnings: list[str] = []
         for tname in types:
             try:
                 home = get_profile_dir(tname)
                 before = set(_profile_cron_jobs(home))
-                _install(rendered[tname], tname)
+                try:
+                    _install(rendered[tname], tname, capture=capture_requests)
+                except CaptureWriteError as exc:  # installed; only the debug toggle is missing
+                    capture_warnings.append(f"capture {tname}: {exc}")
                 shipped = _shipped_cron_jobs(rendered[tname])
                 # New and rendered are separate checks: another writer's job added during
                 # the install is new but not this render's, and must not be resumed.
@@ -846,9 +1081,12 @@ def _run_onboard(spec: str) -> dict[str, Any]:
             except Exception as exc:
                 logger.debug("_run_onboard failed", exc_info=True)
                 failures.append(f"install {tname}: {exc}")
+                install_failed.add(tname)
 
         revisions = _profile_revisions()
         for tname, tinfo in types.items():
+            if tname in install_failed:  # a refused install changed nothing: leave its metadata alone too
+                continue
             ui_meta = (tinfo or {}).get("ui_meta") or {}
             if not _configure_bot_meta(tname, ui_meta, revisions):
                 failures.append(f"ui_meta configure failed for {tname}")
@@ -912,12 +1150,22 @@ def _run_onboard(spec: str) -> dict[str, Any]:
             logger.debug("_run_onboard failed", exc_info=True)
             failures.append(f"resume onboarded cron jobs: {exc}")
     outcome = {"resumed_cron_jobs": [], "kept_paused_cron_jobs": [], **cron_outcome}
+    if capture_warnings:
+        outcome["capture_warnings"] = capture_warnings
     if failures:
-        return {"ok": False, "error": "; ".join(failures), "warnings": failures, **outcome}
+        return {"ok": False, "error": "; ".join(failures), "warnings": failures + capture_warnings, **outcome}
     return {"ok": True, **outcome}
 
 
 def onboard_coworker(spec: str, settings: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Render + install coworker distributions and write their Bot-Mode identity (see
+    ``_onboard_coworker``). Raw request capture is never enabled through this entry point:
+    only the ``hermes onboard coworker --capture-requests`` CLI flag opts in."""
+    return _onboard_coworker(spec, settings, capture_requests=False)
+
+
+def _onboard_coworker(spec: str, settings: Optional[dict[str, Any]] = None, *,
+                      capture_requests: bool = False) -> dict[str, Any]:
     """Render + install coworker distributions and write their Bot-Mode identity.
 
     Standalone path (``settings['gateway_url']`` present): a read-only liveness
@@ -939,7 +1187,9 @@ def onboard_coworker(spec: str, settings: Optional[dict[str, Any]] = None) -> di
         _pending_ws_requester.set(None)
         token = _standalone_ctx.set({"url": url, "requester": requester})
         try:
-            return _run_onboard(spec)
+            # Raw request capture: only the operator's explicit per-run CLI flag, never
+            # inherited state and never the in-process (gateway tool) path below.
+            return _run_onboard(spec, capture_requests=capture_requests is True)
         finally:
             _close_standalone(token)
     if settings.get("in_process") is True:
@@ -1138,7 +1388,8 @@ def _cli_onboard(args, **_kwargs) -> int:
         return 0 if result.get("ok") else 1
     if sub == "coworker":
         settings = {"gateway_url": getattr(args, "gateway_url", None)}
-        result = onboard_coworker(args.spec, settings=settings)
+        result = _onboard_coworker(args.spec, settings=settings,
+                                   capture_requests=getattr(args, "capture_requests", False) is True)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     print("usage: hermes onboard {project <path|url>|coworker <coworker-types.yaml>}")

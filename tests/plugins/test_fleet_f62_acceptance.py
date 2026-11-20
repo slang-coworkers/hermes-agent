@@ -271,7 +271,7 @@ def test_ac_fleet_f62_1(substrate, tmp_path, monkeypatch):
 def test_ac_fleet_f62_2(substrate, tmp_path, monkeypatch):
     """AC-FLEET-F62-2: every coworker renders the substrate's terminal.backend + a matching expected_backend,
     the nv-fleet-gates enforce_sandbox/edges_db_path settings and the admin_tools fleet-admin list, profile_roles
-    in the managed fragment, HERMES_DUMP_REQUESTS true, and no `local` backend on any profile incl. DEFAULT;
+    in the managed fragment, HERMES_DUMP_REQUESTS false (raw capture off by default), and no `local` backend on any profile incl. DEFAULT;
     the substrate's own hardening (image, policed mounts incl. the shared-learnings mount all outside
     HERMES_HOME, mount-CWD + explicit persistence, the egress block, credential enablement) via meta.json checks."""
     rendered = _build_rendered(substrate, tmp_path, monkeypatch)
@@ -297,7 +297,7 @@ def test_ac_fleet_f62_2(substrate, tmp_path, monkeypatch):
         edges = settings.get("edges_db_path")
         assert edges and Path(edges).is_absolute() and not _is_inside(edges, home)
         env_template = render_dir / name / ".env.template"
-        assert env_template.exists() and "HERMES_DUMP_REQUESTS=true" in env_template.read_text(encoding="utf-8")
+        assert env_template.exists() and "HERMES_DUMP_REQUESTS=false" in env_template.read_text(encoding="utf-8")
         # the veto's fleet-admin set must include the onboarding/create tools (unioned with the vendored
         # {cronjob_manage}); the render declares them so AC-3 can prove per-tool denial
         assert set(FLEET_ADMIN_TOOLS) <= set(settings.get("admin_tools") or []) | {"cronjob_manage"}, \

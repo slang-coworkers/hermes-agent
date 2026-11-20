@@ -1,8 +1,11 @@
 """Behavior-contract acceptance tests for OBS-F46 — raw request/response capture.
 
-OBS-F46 turns on Hermes's built-in raw request capture (``HERMES_DUMP_REQUESTS``,
-read process-global via ``env_var_enabled`` -> ``os.getenv``) across the fleet by
-extending the nv-coworker-compose plugin. Because the toggle is read from
+OBS-F46 governs Hermes's built-in raw request capture (``HERMES_DUMP_REQUESTS``,
+read process-global via ``env_var_enabled`` -> ``os.getenv``) across the fleet
+through the nv-coworker-compose plugin. Capture is OFF by default (a dump holds
+conversation content): the render documents ``false``, install writes nothing and
+removes the exact line earlier installers wrote; only the operator's explicit
+per-run ``hermes onboard coworker ... --capture-requests`` writes ``true``. Because the toggle is read from
 ``os.environ`` and a profile's ``.env`` reaches ``os.environ`` only for
 separately-spawned ``hermes -p <bot> chat`` processes (kanban workers, cron
 bot-chat) — the in-process multiplex path isolates a secondary profile's ``.env``
@@ -44,6 +47,10 @@ SPEC = FIXTURE_DIR / "coworker-types.yaml"
 
 CAPTURE_KEY = "HERMES_DUMP_REQUESTS"
 CAPTURE_VALUE = "true"
+CAPTURE_OFF = "false"
+# An environment variable is never an opt-in (it can be inherited); a stale export of
+# this name must change nothing.
+LEGACY_ENV = "NV_COWORKER_REQUEST_CAPTURE"
 
 # The fleet raw-request-capture runbook (the gateway-process-env mechanism cannot
 # be rendered into a profile, so it is documented here).
@@ -121,10 +128,11 @@ def _env_assignments(path, key):
 
 
 def test_ac_obs_f46_1(tmp_path, monkeypatch):
-    """AC-OBS-F46-1: The compose render writes exactly one HERMES_DUMP_REQUESTS=true
+    """AC-OBS-F46-1: The compose render writes exactly one HERMES_DUMP_REQUESTS=false
     line into the .env.template of every rendered profile — the DEFAULT (multiplexer)
-    profile and every coworker — so the distribution's documented env default carries
-    the capture toggle. Asserted on the RAW rendered .env.template, parsed as dotenv."""
+    profile and every coworker — so the distribution's documented env default is
+    capture OFF (a copied .env.EXAMPLE never turns it on). Asserted on the RAW rendered
+    .env.template, parsed as dotenv."""
     _, loaded = _load(tmp_path, monkeypatch)
     rendered = _render(loaded, SPEC, tmp_path / "out")
     default_name = _default_profile_name(rendered)
@@ -134,21 +142,27 @@ def test_ac_obs_f46_1(tmp_path, monkeypatch):
         template = Path(profile_dir) / ".env.template"
         assert template.is_file(), f"{name}: .env.template not rendered"
         values = _env_assignments(template, CAPTURE_KEY)
-        assert values == [CAPTURE_VALUE], (
-            f"{name}: .env.template must carry exactly one {CAPTURE_KEY}={CAPTURE_VALUE}, "
+        assert values == [CAPTURE_OFF], (
+            f"{name}: .env.template must carry exactly one {CAPTURE_KEY}={CAPTURE_OFF}, "
             f"got {values!r}"
         )
 
 
 def test_ac_obs_f46_2(tmp_path, monkeypatch):
-    """AC-OBS-F46-2: Installing a coworker profile idempotently sets exactly one
-    HERMES_DUMP_REQUESTS=true in that profile's ACTIVE .env (the file a spawned
-    `hermes -p <bot> chat` loads into os.environ) — inserting it when absent,
-    collapsing/overriding any prior conflicting assignments, preserving unrelated
-    entries and the file mode, stable across repeated application, and WITHOUT
-    mutating the calling process's os.environ."""
+    """AC-OBS-F46-2: Installing a coworker profile leaves raw request capture OFF unless the
+    operator opted in: by default install writes no capture value into the profile's ACTIVE
+    .env (the file a spawned `hermes -p <bot> chat` loads into os.environ) and removes the
+    exact HERMES_DUMP_REQUESTS=true line earlier installers wrote; with the explicit opt-in it
+    idempotently sets exactly one HERMES_DUMP_REQUESTS=true — inserting it when absent,
+    collapsing/overriding any prior conflicting assignments, preserving unrelated entries and
+    the file mode, stable across repeated application. Neither path mutates the calling
+    process's os.environ, and an inherited environment variable never opts in."""
     _, loaded = _load(tmp_path, monkeypatch)
-    apply_capture_env = loaded.module.apply_capture_env
+    module = loaded.module
+    monkeypatch.setenv(LEGACY_ENV, "1")  # inherited state must never opt in
+
+    def apply_capture_env(home):
+        module.apply_capture_env(home, enable=True)
 
     # A caller-process sentinel captured BEFORE any apply: enabling a profile's .env
     # must never mutate the calling process's os.environ (save_env_value would; the
@@ -198,15 +212,111 @@ def test_ac_obs_f46_2(tmp_path, monkeypatch):
     rendered = _render(loaded, SPEC, tmp_path / "out")
     default_name = _default_profile_name(rendered)
     coworker = next(n for n in rendered if n != default_name)
-    installed_home = loaded.module._install(str(rendered[coworker]), coworker)
-    assert _env_assignments(Path(installed_home) / ".env", CAPTURE_KEY) == [CAPTURE_VALUE], (
-        f"installed coworker {coworker}: active .env must carry {CAPTURE_KEY}={CAPTURE_VALUE}"
+    installed_home = Path(loaded.module._install(str(rendered[coworker]), coworker))
+    env = installed_home / ".env"
+    assert not env.exists() or _env_assignments(env, CAPTURE_KEY) == [], (
+        f"installed coworker {coworker}: the default install must not write {CAPTURE_KEY}"
     )
     assert os.environ.get(CAPTURE_KEY) == caller_env_before
 
+    installed_home = Path(loaded.module._install(str(rendered[coworker]), coworker, capture=True))
+    assert _env_assignments(installed_home / ".env", CAPTURE_KEY) == [CAPTURE_VALUE], (
+        f"installed coworker {coworker}: the explicit opt-in must set {CAPTURE_KEY}={CAPTURE_VALUE}"
+    )
+    assert os.environ.get(CAPTURE_KEY) == caller_env_before
+
+    # Re-installing without the opt-in turns it OFF again (the canonical line is the one
+    # earlier installers wrote, so it is removed); unrelated entries survive.
+    (installed_home / ".env").write_text(
+        (installed_home / ".env").read_text(encoding="utf-8") + "KEEP_AFTER=1\n", encoding="utf-8")
+    installed_home = Path(loaded.module._install(str(rendered[coworker]), coworker))
+    assert _env_assignments(installed_home / ".env", CAPTURE_KEY) == []
+    assert _env_assignments(installed_home / ".env", "KEEP_AFTER") == ["1"]
+    assert os.environ.get(CAPTURE_KEY) == caller_env_before
+
+
+def test_obs_f46_opt_in_is_the_per_run_cli_flag_only(tmp_path, monkeypatch):
+    """Only the parsed `hermes onboard coworker --capture-requests` flag reaches _run_onboard
+    with capture on: caller-supplied settings to onboard_coworker (the importable entry point,
+    the gateway tool) never do, whatever they say."""
+    import argparse
+    from importlib import import_module
+
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    seen = []
+    monkeypatch.setattr(module, "_run_onboard", lambda spec, **kw: seen.append(kw.get("capture_requests", False)) or {"ok": True})
+    monkeypatch.setattr(module, "_gateway_preflight", lambda url: (True, ""))
+    monkeypatch.setattr(module, "_close_standalone", lambda token: None)
+    monkeypatch.setenv(LEGACY_ENV, "1")
+    url = "ws://127.0.0.1:1/api/ws?token=x"
+
+    module.onboard_coworker(str(SPEC), settings={"in_process": True, "capture_requests": True})
+    module.onboard_coworker(str(SPEC), settings={"gateway_url": url, "capture_requests": True})
+    cli = import_module(module.__name__ + ".cli")
+    root = argparse.ArgumentParser()
+    cli.setup_onboard(root)
+    module._cli_onboard(root.parse_args(["coworker", str(SPEC), "--gateway-url", url]))
+    module._cli_onboard(root.parse_args(["coworker", str(SPEC), "--gateway-url", url, "--capture-requests"]))
+    assert seen == [False, False, False, True]
+
+
+def test_obs_f46_opt_in_refuses_aliased_env_files_before_install(tmp_path, monkeypatch):
+    """A symlinked or hard-linked .env belongs to another scope: the opt-in refuses to replace
+    it, before anything is installed, leaving the link and the shared file as they are."""
+    import os
+    import pytest
+    from hermes_cli.profiles import get_profile_dir
+
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    rendered = _render(loaded, SPEC, tmp_path / "out")
+    default_name = _default_profile_name(rendered)
+    coworker = next(n for n in rendered if n != default_name)
+    shared = tmp_path / "shared.env"
+    shared.write_text("TOKEN_REF=x\n", encoding="utf-8")
+    home = Path(get_profile_dir(coworker))
+    home.mkdir(parents=True)
+    for link in (lambda: (home / ".env").symlink_to(shared), lambda: os.link(shared, home / ".env")):
+        link()
+        with pytest.raises(module.CaptureEnvManagedError):
+            module._install(str(rendered[coworker]), coworker, capture=True)
+        assert shared.read_text(encoding="utf-8") == "TOKEN_REF=x\n"
+        assert not (home / "config.yaml").exists()
+        (home / ".env").unlink()
+
+
+def test_obs_f46_opt_in_policy_runs_before_install(tmp_path, monkeypatch):
+    """The opt-in's checks run BEFORE install_distribution: an active .env the writer cannot
+    read as UTF-8 refuses the opt-in with the profile untouched; the default leaves such a file
+    alone and installs."""
+    import codecs
+    import pytest
+    from hermes_cli.profiles import get_profile_dir
+
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    rendered = _render(loaded, SPEC, tmp_path / "out")
+    default_name = _default_profile_name(rendered)
+    coworker = next(n for n in rendered if n != default_name)
+    home = Path(get_profile_dir(coworker))
+    home.mkdir(parents=True, exist_ok=True)
+    body = codecs.BOM_UTF16_LE + f"{CAPTURE_KEY}=false\n".encode("utf-16-le")
+    (home / ".env").write_bytes(body)
+
+    with pytest.raises(module.CaptureEnvManagedError):
+        module._install(str(rendered[coworker]), coworker, capture=True)
+    assert (home / ".env").read_bytes() == body
+    assert not (home / "config.yaml").exists(), "install_distribution must not run after a refused preflight"
+
+    module._install(str(rendered[coworker]), coworker)
+    assert (home / ".env").read_bytes() == body
+    assert (home / "config.yaml").exists()
+
 
 def test_ac_obs_f46_3(tmp_path, monkeypatch):
-    """AC-OBS-F46-3: The fleet raw-request-capture runbook documents the gateway
+    """AC-OBS-F46-3: The fleet raw-request-capture runbook states capture is OFF by
+    default with the explicit onboarding opt-in, and documents the gateway
     PROCESS-env activation (launch/DEFAULT active .env, service-unit Environment=,
     launchd EnvironmentVariables, or managed /etc/hermes/.env), the secret-scope
     reason a secondary profile's .env cannot enable gateway-served capture, the
@@ -216,6 +326,8 @@ def test_ac_obs_f46_3(tmp_path, monkeypatch):
     assert RUNBOOK_PATH.is_file(), f"runbook page absent: {RUNBOOK_PATH}"
     norm = RUNBOOK_PATH.read_text(encoding="utf-8").replace("`", "").lower()
     required = [
+        "capture is off by default",     # the default the installer and the render keep
+        "--capture-requests",            # the explicit per-run onboarding opt-in
         "hermes_dump_requests=true",
         "launch/default",                # disambiguated from the "launchd" substring
         "active .env",
@@ -249,3 +361,85 @@ def test_ac_obs_f46_3(tmp_path, monkeypatch):
             os.environ.pop(CAPTURE_KEY, None)
         else:
             os.environ[CAPTURE_KEY] = prior
+
+
+def test_obs_f46_opt_in_write_failure_leaves_capture_off(tmp_path, monkeypatch):
+    """The opt-in's write follows the install: if it fails (e.g. a bind-mounted .env answers
+    EBUSY), onboarding reports the error and capture stays OFF."""
+    import errno
+    import pytest
+    from hermes_cli.profiles import get_profile_dir
+
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    rendered = _render(loaded, SPEC, tmp_path / "out")
+    default_name = _default_profile_name(rendered)
+    coworker = next(n for n in rendered if n != default_name)
+
+    def busy(*_a, **_k):
+        raise OSError(errno.EBUSY, "Device or resource busy")
+    monkeypatch.setattr(module, "_upsert_env_var", busy)
+    monkeypatch.setattr(module, "_atomic_rewrite_preserving", busy)
+    with pytest.raises(module.CaptureEnvManagedError):
+        module._install(str(rendered[coworker]), coworker, capture=True)
+    env = Path(get_profile_dir(coworker)) / ".env"
+    assert not env.exists() or _env_assignments(env, CAPTURE_KEY) == []
+
+
+def test_obs_f46_failed_install_skips_that_types_metadata(tmp_path, monkeypatch):
+    """A refused install changed nothing, so onboarding does not configure that type's
+    Bot-Mode metadata or bot chat either."""
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    rendered = _render(loaded, SPEC, tmp_path / "probe")
+    types = list((yaml.safe_load(SPEC.read_text(encoding="utf-8")) or {}).get("types") or {})
+    assert types
+    failing = types[0]
+
+    def fake_install(rendered_dir, name, **kw):
+        if name == failing:
+            raise module.CaptureEnvManagedError("refused")
+        return str(tmp_path / "homes" / name)
+    meta, chats = [], []
+    monkeypatch.setattr(module, "_install", fake_install)
+    monkeypatch.setattr(module, "_profile_cron_jobs", lambda home: {})
+    monkeypatch.setattr(module, "_shipped_cron_jobs", lambda d: {})
+    monkeypatch.setattr(module, "_profile_revisions", lambda: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda name, ui, rev: meta.append(name) or True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda name: chats.append(name) or True)
+    monkeypatch.setattr(module, "_dispatch_rpc", lambda method, params: {"exists": True})
+    monkeypatch.setattr(module, "_room_exists", lambda state: True)
+    result = module._run_onboard(str(SPEC))
+    assert result["ok"] is False
+    assert failing not in meta and failing not in chats
+    assert set(meta) == set(types) - {failing}
+
+
+def test_obs_f46_post_install_capture_failure_finishes_onboarding(tmp_path, monkeypatch):
+    """A failed opt-in write after a successful install is a warning: the profile is installed,
+    its metadata and bot chat are configured, and the result carries the capture warning."""
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    types = list((yaml.safe_load(SPEC.read_text(encoding="utf-8")) or {}).get("types") or {})
+    first = types[0]
+
+    def fake_install(rendered_dir, name, **kw):
+        if name == first:
+            raise module.CaptureWriteError("cannot write .env; raw request capture stays off")
+        return str(tmp_path / "homes" / name)
+    meta = []
+    monkeypatch.setattr(module, "_install", fake_install)
+    monkeypatch.setattr(module, "_profile_cron_jobs", lambda home: {})
+    monkeypatch.setattr(module, "_shipped_cron_jobs", lambda d: {})
+    monkeypatch.setattr(module, "_profile_revisions", lambda: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda name, ui, rev: meta.append(name) or True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda name: True)
+    monkeypatch.setattr(module, "_dispatch_rpc", lambda method, params: {"exists": True})
+    monkeypatch.setattr(module, "_room_exists", lambda state: True)
+    monkeypatch.setattr(module, "activate_shared_learnings", lambda **kw: None)
+    monkeypatch.setattr(module, "park_non_fleet_profiles", lambda names: None)
+    result = module._run_onboard(str(SPEC), capture_requests=True)
+    assert first in meta
+    assert any(first in w for w in result.get("capture_warnings", []))
+    assert not any(e.startswith(f"install {first}") for e in result.get("warnings", []) if not e.startswith("capture "))
+
