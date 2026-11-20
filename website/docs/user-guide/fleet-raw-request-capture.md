@@ -115,6 +115,10 @@ form), the gateway or service environment (surface 1), or the managed scope. To
 lock capture off machine-wide, set a literal `HERMES_DUMP_REQUESTS=false` in the
 managed environment (`/etc/hermes/.env`), which wins over a profile `.env` at load.
 
+A profile `.env` that is a symlink or a hard link belongs to the owner of the file
+it points to (for example a shared secrets file): the default cleanup leaves it
+alone, and the opt-in refuses to rewrite it — set the value in that file yourself.
+
 To turn capture on for these surfaces, opt in explicitly for one run:
 `hermes onboard coworker <coworker-types.yaml> --gateway-url <url> --capture-requests`.
 Install then upserts exactly one `HERMES_DUMP_REQUESTS=true` line into each

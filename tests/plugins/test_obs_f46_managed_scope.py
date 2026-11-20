@@ -318,3 +318,28 @@ def test_default_refuses_when_the_legacy_line_cannot_be_removed(tmp_path, monkey
         profile.chmod(0o755)
     assert (profile / ".env").read_text(encoding="utf-8") == body
 
+
+def test_opt_in_reads_the_managed_file_like_startup(tmp_path, monkeypatch):
+    """A managed `'KEY'=false` (quoted key, as startup parses it) is a falsy pin: the opt-in
+    refuses and writes nothing."""
+    module = _load(tmp_path, monkeypatch)
+    _managed_dir_with(tmp_path, monkeypatch, f"'{CAPTURE_KEY}'=false\n")
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    with pytest.raises(module.CaptureEnvManagedError):
+        module.capture_preflight(str(profile), enable=True)
+    with pytest.raises(module.CaptureEnvManagedError):
+        module.apply_capture_env(str(profile), enable=True)
+    assert not (profile / ".env").exists()
+
+
+def test_opt_in_keeps_quoted_multiline_values_and_drops_whole_capture_bindings(tmp_path, monkeypatch):
+    module = _load(tmp_path, monkeypatch)
+    profile = tmp_path / "prof"
+    profile.mkdir()
+    env = profile / ".env"
+    prompt = f'SYSTEM_PROMPT="line one\n{CAPTURE_KEY}=true\nline three"\n'
+    env.write_text(prompt + f'{CAPTURE_KEY}="false\ncontinued"\nB=2\n', encoding="utf-8")
+    module.apply_capture_env(str(profile), enable=True)
+    assert env.read_text(encoding="utf-8") == prompt + f"B=2\n{CAPTURE_KEY}=true\n"
+

@@ -555,6 +555,12 @@ class CaptureEnvManagedError(Exception):
     install owns the environment, or when managed policy cannot be read."""
 
 
+class CaptureWriteError(CaptureEnvManagedError):
+    """The opt-in's write failed AFTER the profile was installed: the profile is complete,
+    only the debug toggle is missing (capture stays OFF). Onboarding finishes normally for
+    that profile and reports this as a warning."""
+
+
 def _upsert_env_var(env_path: str | Path, key: str, value: str) -> None:
     """Atomically write exactly one ``key=value`` into a dotenv file.
 
@@ -628,10 +634,26 @@ def _capture_opt_in_policy(profile_home: str | Path) -> bool:
                 f"cannot read managed policy {managed_env_path}; refusing to modify {env_path}"
             ) from exc
 
-    managed_values = managed_scope.load_managed_env()
+    # Startup's own dotenv parser decides what the managed file sets (a quoted key included);
+    # only an unambiguous literal truthy value makes the local write unnecessary.
+    managed_values: dict[str, str] = {}
+    if managed_dir is not None and (managed_dir / ".env").exists():
+        from hermes_cli.env_loader import _parse_dotenv_file
+
+        try:
+            for name, value in _parse_dotenv_file(managed_dir / ".env"):
+                if name == CAPTURE_KEY:
+                    if value is None:
+                        managed_values.pop(name, None)
+                    else:
+                        managed_values[name] = value
+        except (OSError, UnicodeError) as exc:
+            raise CaptureEnvManagedError(
+                f"cannot read managed policy {managed_dir / '.env'}; refusing to modify {env_path}"
+            ) from exc
 
     if CAPTURE_KEY in managed_values:
-        if is_truthy_value(managed_values[CAPTURE_KEY]):
+        if "$" not in managed_values[CAPTURE_KEY] and is_truthy_value(managed_values[CAPTURE_KEY]):
             return False
         source = (managed_dir / ".env") if managed_dir else "the managed scope"
         raise CaptureEnvManagedError(  # never echo the value: a managed reference may expand to a secret
@@ -788,15 +810,29 @@ def capture_preflight(profile_home: str | Path, *, enable: bool = False) -> None
 
 
 def _capture_on_bytes(env_path: Path) -> bytes:
-    """The opt-in's file content: every assignment of the key collapsed to the single
-    canonical ``HERMES_DUMP_REQUESTS=true`` appended last, other lines kept (the release
-    writer's contract)."""
-    assign_re = re.compile(rf"^\s*(?:export\s+)?{re.escape(CAPTURE_KEY)}\s*=")
-    kept: list[str] = []
-    if env_path.exists():
-        kept = [line for line in env_path.read_text(encoding="utf-8-sig").splitlines() if not assign_re.match(line)]
-    kept.append(f"{CAPTURE_KEY}={CAPTURE_VALUE}")
-    return ("\n".join(kept) + "\n").encode("utf-8")
+    """The opt-in's file content: every top-level binding of the key (a multi-line one whole)
+    removed as the dotenv parser sees it, the blank lines before it and every other binding
+    kept (a lookalike line inside a quoted value is data), and the single canonical
+    ``HERMES_DUMP_REQUESTS=true`` appended last."""
+    import io
+
+    from dotenv.parser import parse_stream
+
+    text = env_path.read_text(encoding="utf-8-sig") if env_path.exists() else ""
+    out: list[str] = []
+    for binding in parse_stream(io.StringIO(text)):
+        if binding.key == CAPTURE_KEY:
+            lines = binding.original.string.splitlines(keepends=True)
+            blank = 0
+            while blank < len(lines) and not lines[blank].strip():
+                blank += 1
+            out.append("".join(lines[:blank]))
+            continue
+        out.append(binding.original.string)
+    body = "".join(out)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    return (body + f"{CAPTURE_KEY}={CAPTURE_VALUE}\n").encode("utf-8")
 
 
 def apply_capture_env(profile_home: str | Path, *, enable: bool = False) -> None:
@@ -825,7 +861,7 @@ def apply_capture_env(profile_home: str | Path, *, enable: bool = False) -> None
         else:
             _upsert_env_var(env_path, CAPTURE_KEY, CAPTURE_VALUE)
     except OSError as exc:
-        raise CaptureEnvManagedError(f"cannot write {env_path}; raw request capture stays off") from exc
+        raise CaptureWriteError(f"cannot write {env_path}; raw request capture stays off") from exc
 
 WIKI_JOB_NAME = "shared-learnings-wiki-fold"
 _WIKI_FOLD_PROMPT = (
@@ -1026,11 +1062,15 @@ def _run_onboard(spec: str, *, capture_requests: bool = False) -> dict[str, Any]
         # "default"; the DEFAULT profile is the gateway root itself.
         new_cron: dict[str, dict[str, str]] = {}
         install_failed: set[str] = set()
+        capture_warnings: list[str] = []
         for tname in types:
             try:
                 home = get_profile_dir(tname)
                 before = set(_profile_cron_jobs(home))
-                _install(rendered[tname], tname, capture=capture_requests)
+                try:
+                    _install(rendered[tname], tname, capture=capture_requests)
+                except CaptureWriteError as exc:  # installed; only the debug toggle is missing
+                    capture_warnings.append(f"capture {tname}: {exc}")
                 shipped = _shipped_cron_jobs(rendered[tname])
                 # New and rendered are separate checks: another writer's job added during
                 # the install is new but not this render's, and must not be resumed.
@@ -1110,8 +1150,10 @@ def _run_onboard(spec: str, *, capture_requests: bool = False) -> dict[str, Any]
             logger.debug("_run_onboard failed", exc_info=True)
             failures.append(f"resume onboarded cron jobs: {exc}")
     outcome = {"resumed_cron_jobs": [], "kept_paused_cron_jobs": [], **cron_outcome}
+    if capture_warnings:
+        outcome["capture_warnings"] = capture_warnings
     if failures:
-        return {"ok": False, "error": "; ".join(failures), "warnings": failures, **outcome}
+        return {"ok": False, "error": "; ".join(failures), "warnings": failures + capture_warnings, **outcome}
     return {"ok": True, **outcome}
 
 

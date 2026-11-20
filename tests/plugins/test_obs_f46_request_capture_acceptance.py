@@ -414,3 +414,32 @@ def test_obs_f46_failed_install_skips_that_types_metadata(tmp_path, monkeypatch)
     assert failing not in meta and failing not in chats
     assert set(meta) == set(types) - {failing}
 
+
+def test_obs_f46_post_install_capture_failure_finishes_onboarding(tmp_path, monkeypatch):
+    """A failed opt-in write after a successful install is a warning: the profile is installed,
+    its metadata and bot chat are configured, and the result carries the capture warning."""
+    _, loaded = _load(tmp_path, monkeypatch)
+    module = loaded.module
+    types = list((yaml.safe_load(SPEC.read_text(encoding="utf-8")) or {}).get("types") or {})
+    first = types[0]
+
+    def fake_install(rendered_dir, name, **kw):
+        if name == first:
+            raise module.CaptureWriteError("cannot write .env; raw request capture stays off")
+        return str(tmp_path / "homes" / name)
+    meta = []
+    monkeypatch.setattr(module, "_install", fake_install)
+    monkeypatch.setattr(module, "_profile_cron_jobs", lambda home: {})
+    monkeypatch.setattr(module, "_shipped_cron_jobs", lambda d: {})
+    monkeypatch.setattr(module, "_profile_revisions", lambda: {})
+    monkeypatch.setattr(module, "_configure_bot_meta", lambda name, ui, rev: meta.append(name) or True)
+    monkeypatch.setattr(module, "_ensure_canonical_bot_chat", lambda name: True)
+    monkeypatch.setattr(module, "_dispatch_rpc", lambda method, params: {"exists": True})
+    monkeypatch.setattr(module, "_room_exists", lambda state: True)
+    monkeypatch.setattr(module, "activate_shared_learnings", lambda **kw: None)
+    monkeypatch.setattr(module, "park_non_fleet_profiles", lambda names: None)
+    result = module._run_onboard(str(SPEC), capture_requests=True)
+    assert first in meta
+    assert any(first in w for w in result.get("capture_warnings", []))
+    assert not any(e.startswith(f"install {first}") for e in result.get("warnings", []) if not e.startswith("capture "))
+
