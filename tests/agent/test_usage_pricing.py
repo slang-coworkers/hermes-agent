@@ -966,10 +966,32 @@ class TestRouteReportedUsageCost:
         assert result.status == "unknown"
         assert result.amount_usd is None
 
-    @pytest.mark.parametrize("cost", [True, -1, float("nan"), float("inf"), "abc", None, [1], {"usd": 1}])
+    @pytest.mark.parametrize("cost", [
+        True, -1, -0.5, float("nan"), float("inf"), "abc", "0.012", "1e400", 10**400, Decimal(1), None, [1], {"usd": 1},
+    ])
     def test_malformed_cost_is_ignored(self, listed, cost):
         result = estimate_usage_cost(
             "vendor/open-model-x", self._usage(cost), provider="custom",
+            base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "unknown"
+
+    def test_a_multi_request_usage_carries_no_single_reported_cost(self, listed):
+        usage = CanonicalUsage(input_tokens=17, output_tokens=8, request_count=2, raw_usage={"cost": 1.0})
+        result = estimate_usage_cost(
+            "vendor/open-model-x", usage, provider="custom", base_url="https://litellm.example.com/v1",
+        )
+        assert result.status == "unknown"
+
+    def test_a_failed_config_read_trusts_no_host(self, monkeypatch):
+        import hermes_cli.config as config_mod
+        from hermes_cli.config_read_errors import FailedConfigRead
+
+        stale = FailedConfigRead({"pricing": {"reported_cost_hosts": ["litellm.example.com"]}}, error=OSError("EIO"))
+        monkeypatch.setattr(config_mod, "load_config_readonly", lambda: stale)
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        result = estimate_usage_cost(
+            "vendor/open-model-x", self._usage(1.0), provider="custom",
             base_url="https://litellm.example.com/v1",
         )
         assert result.status == "unknown"
@@ -1007,13 +1029,74 @@ class TestRouteReportedUsageCost:
         assert has_known_pricing("vendor/open-model-x", "custom", "https://litellm.example.com/v1")
         assert not has_known_pricing("vendor/open-model-x", "custom", "https://other.example.com/v1")
 
-    def test_hook_usage_summary_passes_the_reported_cost_through(self):
-        from agent.api_request_hooks import ApiRequestHooksMixin
+    @staticmethod
+    def _agent(tmp_path, monkeypatch, hosts):
+        import hermes_yaml as yaml
 
-        agent = SimpleNamespace(provider="custom", api_mode="chat_completions")
-        response = SimpleNamespace(usage={"prompt_tokens": 17, "completion_tokens": 8, "cost": 4.8077e-06})
-        summary = ApiRequestHooksMixin._usage_summary_for_api_request_hook(agent, response)
-        assert summary["reported_cost"] == 4.8077e-06
-        assert "raw_usage" not in summary
-        flagged = SimpleNamespace(usage={"prompt_tokens": 17, "completion_tokens": 8, "cost": True})
-        assert "reported_cost" not in ApiRequestHooksMixin._usage_summary_for_api_request_hook(agent, flagged)
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"pricing": {"reported_cost_hosts": hosts}}), encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        from run_agent import AIAgent
+
+        return AIAgent(api_key="k", base_url="https://litellm.example.com/v1", provider="custom",
+                       api_mode="chat_completions", model="vendor/open-model-x", session_id="t", platform="cli",
+                       quiet_mode=True, skip_context_files=True, skip_memory=True, save_trajectories=False,
+                       enabled_toolsets=["file"])
+
+    @staticmethod
+    def _record(agent, response):
+        from agent import turn_usage
+
+        turn_usage.record_response_usage(agent, response, messages=[{"role": "user", "content": "hi"}],
+                                         api_call_count=1, api_duration=0.2, compression_attempts=0,
+                                         max_compression_attempts=3)
+
+    @staticmethod
+    def _response(cost):
+        return SimpleNamespace(id=None, model="vendor/open-model-x",
+                               usage={"prompt_tokens": 17, "completion_tokens": 8, "total_tokens": 25, "cost": cost})
+
+    def test_core_prices_the_call_once_and_the_hook_carries_that_amount(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        try:
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "actual"
+            assert agent.session_estimated_cost_usd == pytest.approx(4.8077e-06)
+            summary = agent._usage_summary_for_api_request_hook(response)
+            assert summary["reported_cost"] == pytest.approx(4.8077e-06)
+            assert "raw_usage" not in summary
+            # Another response object (an older stash, a retry) never borrows this amount.
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(self._response(4.8077e-06))
+        finally:
+            agent.close()
+
+    def test_an_unlisted_route_keeps_the_old_summary_shape(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch, ["other.example.com"])
+        try:
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "unknown"
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.close()
+
+    def test_a_moa_slot_without_its_own_base_url_is_not_trusted(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        real_client = agent.client
+        try:
+            agent.client = SimpleNamespace(last_aggregator_slot={"model": "vendor/aggregator-y"})
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "unknown"
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+            agent.client = SimpleNamespace(last_aggregator_slot={
+                "model": "vendor/aggregator-y", "provider": "custom", "base_url": "https://litellm.example.com/v1"})
+            response2 = self._response(2.0e-06)
+            self._record(agent, response2)
+            assert agent.session_cost_status == "actual"
+            assert agent._usage_summary_for_api_request_hook(response2)["reported_cost"] == pytest.approx(2.0e-06)
+        finally:
+            agent.client = real_client
+            agent.close()

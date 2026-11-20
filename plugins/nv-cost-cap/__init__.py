@@ -20,10 +20,11 @@ the ``llm_execution`` middleware returns a synthetic terminal response,
 ``settings.estop_on_breach`` (default true) so cron/kanban are gated too.
 Immortal sessions cap per UTC day and are never hard-stopped. Unknown pricing is
 fail-CLOSED by default; ``settings.unknown_pricing: report`` records an
-``unknown_pricing`` episode instead of stopping. A call the route prices itself
-(``usage.cost`` on a ``pricing.reported_cost_hosts`` host) is priced as core prices
-it. Runtime policy is set through the orchestrator-only ``hermes cost-cap`` CLI;
-no env var is a source of truth.
+``unknown_pricing`` episode instead and stops only at
+``unknown_pricing_report_limit`` unpriced model calls. A call the route prices
+itself (``usage.cost`` on a ``pricing.reported_cost_hosts`` host) is accrued at
+core's own price for it (``reported_cost``). Runtime policy is set through the
+orchestrator-only ``hermes cost-cap`` CLI; no env var is a source of truth.
 """
 
 from __future__ import annotations
@@ -196,6 +197,17 @@ def _refresh_effective(session_id, *, strict=False) -> float:
     return store.bump_effective(session_id, reconciled)
 
 
+def _unpriced_blocks(session_id) -> bool:
+    """``store.unpriced_blocks`` over this session's fast-path unpriced count and reconcile marker.
+    Fails toward blocking when the state cannot be read."""
+    try:
+        state = store.get_state(session_id)
+        return store.unpriced_blocks(store.unpriced_count(session_id), state["recon_unpriced"])
+    except Exception:
+        logger.warning("nv-cost-cap unpriced check failed for %s", session_id, exc_info=True)
+        return True
+
+
 def _unpriced_signal(session_id) -> int:
     """Distinct unpriced signals across BOTH accrual paths.
 
@@ -243,9 +255,10 @@ def set_fleet_ceiling(value: float) -> None:
 
 
 def tier1_cap(profile_home) -> float:
-    """Rolling p90 over the profile's completed session totals (inf when none)."""
+    """Rolling p90 over the profile's completed session totals, raised to ``settings.tier1_floor_usd``
+    (inf when there is no history)."""
     window = _cfg_int("p90_window_sessions", DEFAULT_P90_WINDOW)
-    return policy.p90(policy.completed_session_totals(profile_home, window))
+    return policy.tier1_from(policy.completed_session_totals(profile_home, window), _cfg("tier1_floor_usd", 0.0))
 
 
 def reconcile_session(session_id, *, state_db_path) -> float:
@@ -261,34 +274,36 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
 
     Builds ``CanonicalUsage`` from the SELECTED canonical token fields — never
     splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
-    properties, not constructor args. A route-reported ``reported_cost`` rides along
-    as ``raw_usage`` so ``estimate_usage_cost`` trusts it exactly when core does.
-    Unknown pricing is fail-CLOSED by default: the call is recorded ``unpriced``
-    (never as free), which the middleware / ``pre_tool_call`` treat as a Tier-2
-    breach for a non-immortal session (``settings.unknown_pricing: report``: an
-    episode instead). Returns the running priced fast-path total.
+    properties, not constructor args. ``reported_cost`` (core's own price for this
+    response, from a route that reports its cost: ``agent/api_request_hooks.py``) is
+    used as-is, so both accrual paths hold the same number. Unknown pricing is
+    fail-CLOSED by default: the call is recorded ``unpriced`` (never as free), which the
+    middleware / ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal session
+    (``settings.unknown_pricing: report``: see ``store.unpriced_blocks``). Returns the
+    running priced fast-path total.
     """
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
     usage = usage or {}
-    reported = usage.get("reported_cost")
-    canonical = CanonicalUsage(
-        input_tokens=int(usage.get("input_tokens", 0) or 0),
-        output_tokens=int(usage.get("output_tokens", 0) or 0),
-        cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
-        cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
-        reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
-        request_count=int(usage.get("request_count", 1) or 1),
-        raw_usage=({"cost": reported}
-                   if isinstance(reported, (int, float)) and not isinstance(reported, bool) else None),
-    )
     amount = None
-    try:
-        result = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url)
-        amount = result.amount_usd
-    except Exception:
-        logger.warning("nv-cost-cap pricing failed for model=%s", model, exc_info=True)
-        amount = None
+    reported = usage.get("reported_cost")
+    if type(reported) is float and math.isfinite(reported) and reported >= 0:
+        amount = reported
+    else:
+        canonical = CanonicalUsage(
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
+            reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
+            request_count=int(usage.get("request_count", 1) or 1),
+        )
+        try:
+            result = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url)
+            amount = result.amount_usd
+        except Exception:
+            logger.warning("nv-cost-cap pricing failed for model=%s", model, exc_info=True)
+            amount = None
 
     priced = amount is not None
     total = store.record_call(
@@ -319,7 +334,7 @@ def _session_stopped(session_id, *, today, platform=None):
     state = store.get_state(session_id)
     if state["blocked"]:
         return True, "blocked"
-    if _unpriced_signal(session_id) > 0 and store.unknown_pricing_stops():
+    if _unpriced_blocks(session_id):
         return True, "unpriced"
     ceiling = resolve_ceiling()
     delta = effective - state["window_start_total"]
@@ -418,24 +433,24 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
     unpriced_now = _unpriced_signal(session_id)
     spend_increased = effective > state["last_evaluated_total"] + 1e-12
     unpriced_new = unpriced_now > state["last_unpriced_count"]
-    if not (spend_increased or unpriced_new):
+    unpriced_breach = _unpriced_blocks(session_id)
+    if not (spend_increased or unpriced_new or unpriced_breach):
         return False
 
     ceiling = resolve_ceiling()
     cap = tier1_cap(_current_profile_home())
     budget_gen = state["budget_gen"] + 1
     delta = effective - state["window_start_total"]
-    unpriced_stops = unpriced_new and store.unknown_pricing_stops()
-    if unpriced_new and not unpriced_stops:
+    if unpriced_new and not unpriced_breach:
         # settings.unknown_pricing: report -- tell the operator once per session and day, keep running.
         store.record_episode(
             session_id, "unknown_pricing", budget_gen, today,
             dedup_key=f"{session_id}:unpriced:{today}",
         )
-    crossed = unpriced_stops or (_finite(ceiling) and delta >= ceiling)
+    crossed = unpriced_breach or (_finite(ceiling) and delta >= ceiling)
 
     if crossed:
-        _record_breach(session_id, budget_gen, today, unpriced=unpriced_stops)
+        _record_breach(session_id, budget_gen, today, unpriced=unpriced_breach)
         store.set_state(
             session_id, blocked=1, budget_gen=budget_gen,
             last_evaluated_total=effective, last_unpriced_count=unpriced_now,

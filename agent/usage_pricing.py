@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone, UTC
@@ -687,16 +688,22 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 # final streamed usage chunk (``usage.cost``, with ``stream_options.include_usage``): the proxy's own
 # billing figure, after any negotiated discount, for models no public rate card lists. Other relays
 # may use a ``cost`` field differently, so it is trusted only for the exact HTTPS hosts the operator
-# lists in config ``pricing.reported_cost_hosts`` (default: none).
-_REPORTED_COST_VERSION = "route-reported-usage-cost"
+# lists in config ``pricing.reported_cost_hosts`` (default: none), and only as LiteLLM sends it: one
+# response's JSON number (int or float, finite, >= 0).
+REPORTED_COST_VERSION = "route-reported-usage-cost"
 
 
 def _reported_cost_hosts() -> frozenset[str]:
-    """Hostnames from config ``pricing.reported_cost_hosts``; empty on any read or shape problem."""
+    """Hostnames from config ``pricing.reported_cost_hosts``; empty on a failed read or a bad shape."""
     try:
         from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_read_errors import FailedConfigRead
 
-        hosts = ((load_config_readonly() or {}).get("pricing") or {}).get("reported_cost_hosts")
+        config = load_config_readonly()
+        if isinstance(config, FailedConfigRead) or not isinstance(config, dict):
+            return frozenset()
+        pricing = config.get("pricing")
+        hosts = pricing.get("reported_cost_hosts") if isinstance(pricing, dict) else None
     except Exception:
         logger.debug("pricing.reported_cost_hosts read failed", exc_info=True)
         return frozenset()
@@ -713,18 +720,25 @@ def reports_usage_cost(base_url: Optional[str]) -> bool:
     return scheme == "https" and bool(host) and host in _reported_cost_hosts()
 
 
+def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
+    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, >= 0)."""
+    if usage.request_count != 1 or not isinstance(usage.raw_usage, dict):
+        return None
+    value = usage.raw_usage.get("cost")
+    if type(value) not in (int, float):  # bool, str, Decimal, None and containers are refused
+        return None
+    try:
+        if not math.isfinite(float(value)) or value < 0:
+            return None
+    except OverflowError:  # an int too large for a float
+        return None
+    return Decimal(str(value))
+
+
 def reported_usage_cost(usage: CanonicalUsage, base_url: Optional[str]) -> Optional[Decimal]:
-    """The USD cost a listed route reported in ``usage.cost`` (finite, >= 0), else None."""
-    raw = usage.raw_usage if isinstance(usage.raw_usage, dict) else None
-    if not raw or "cost" not in raw:
-        return None
-    value = raw.get("cost")
-    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
-        return None
-    amount = _to_decimal(value)
-    if amount is None or not amount.is_finite() or amount < 0:
-        return None
-    return amount if reports_usage_cost(base_url) else None
+    """The USD cost a listed route reported for this one response, else None."""
+    amount = _parse_reported_request_cost(usage)
+    return amount if amount is not None and reports_usage_cost(base_url) else None
 
 
 def estimate_usage_cost(
@@ -740,7 +754,7 @@ def estimate_usage_cost(
     if route_cost is not None:
         return CostResult(
             amount_usd=route_cost, status="actual", source="provider_cost_api",
-            label=format_cost_label(route_cost), pricing_version=_REPORTED_COST_VERSION,
+            label=format_cost_label(route_cost), pricing_version=REPORTED_COST_VERSION,
             notes=("cost reported by the route (usage.cost)",),
         )
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)

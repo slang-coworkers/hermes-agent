@@ -160,7 +160,8 @@ def _cap_snapshot():
         window = int(_setting("p90_window_sessions", 50))
     except (TypeError, ValueError):
         window = 50
-    return policy.p90(policy.completed_session_totals(str(get_hermes_home()), window))
+    return policy.tier1_from(policy.completed_session_totals(str(get_hermes_home()), window),
+                             _setting("tier1_floor_usd", 0.0))
 
 
 # --- card creation (called by store.engage_owned after an owned publish) ----

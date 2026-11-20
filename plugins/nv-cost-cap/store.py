@@ -923,7 +923,7 @@ def session_resumes(session_id: str, *, belt_engaged: Optional[bool] = None) -> 
         state = get_state(session_id)
         if state["blocked"]:
             return False
-        if (unpriced_count(session_id) > 0 or state["recon_unpriced"]) and unknown_pricing_stops():
+        if unpriced_blocks(unpriced_count(session_id), state["recon_unpriced"]):
             return False
         ceiling = resolved_ceiling()
         baseline = state["day_start_total"] if state["immortal"] else state["window_start_total"]
@@ -1131,26 +1131,61 @@ def _dig(mapping, dotted_key):
     return cur
 
 
-def unknown_pricing_stops() -> bool:
-    """Whether an unpriced call stops a non-immortal session: ``settings.unknown_pricing``, CTX-FREE.
+DEFAULT_UNKNOWN_PRICING_REPORT_LIMIT = 10
 
-    ``stop`` (the default, and the answer to a missing, unreadable or unknown value) is fail-CLOSED: an
-    unpriced call counts as a Tier-2 breach. ``report`` records an ``unknown_pricing`` episode for the
-    operator instead and keeps the session running; for a route where some calls carry no price (one
-    that reports its cost only on streamed calls, say). One resolver for enforcement and resolution,
-    like ``resolved_ceiling``, so the two never disagree.
-    """
+
+def _plugin_settings_or_none():
+    """This plugin's settings from the merged config, or None on a failed read (fail-CLOSED callers)."""
     try:
         from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_read_errors import FailedConfigRead
 
-        settings = ((load_config_readonly() or {}).get("plugins", {}).get("entries", {})
-                    .get(PLUGIN_KEY, {}).get("settings", {})) or {}
+        config = load_config_readonly()
+        if isinstance(config, FailedConfigRead) or not isinstance(config, dict):
+            return None
+        settings = (config.get("plugins", {}).get("entries", {}).get(PLUGIN_KEY, {}).get("settings", {})) or {}
     except Exception:
-        logger.warning("nv-cost-cap unknown_pricing setting read failed", exc_info=True)
-        return True
-    if not isinstance(settings, dict):
+        logger.warning("nv-cost-cap settings read failed", exc_info=True)
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def unknown_pricing_stops() -> bool:
+    """Whether ONE unpriced call stops a non-immortal session: ``settings.unknown_pricing``, CTX-FREE.
+
+    ``stop`` (the default, and the answer to a missing, unreadable or unknown value) is fail-CLOSED: an
+    unpriced call counts as a Tier-2 breach. ``report``: see ``unpriced_blocks``. One resolver for
+    enforcement and resolution, like ``resolved_ceiling``, so the two never disagree.
+    """
+    settings = _plugin_settings_or_none()
+    if settings is None:
         return True
     return str(settings.get("unknown_pricing", "stop")).strip().lower() != "report"
+
+
+def unknown_pricing_report_limit() -> int:
+    """``settings.unknown_pricing_report_limit``: in ``report`` mode, the count of unpriced model calls
+    (the fast path's, one per request) at which a non-immortal session stops anyway. A positive int,
+    else the default."""
+    settings = _plugin_settings_or_none() or {}
+    value = settings.get("unknown_pricing_report_limit")
+    if type(value) is int and value > 0:
+        return value
+    return DEFAULT_UNKNOWN_PRICING_REPORT_LIMIT
+
+
+def unpriced_blocks(fast_count: int, recon_unpriced) -> bool:
+    """The one unpriced predicate for the mid-fire check, the fire boundary and ``session_resumes``.
+
+    ``stop``: any unpriced signal blocks (a fast-path unpriced call or the reconcile marker). ``report``:
+    an unpriced call is reported (an ``unknown_pricing`` episode per session and day) and the session runs
+    on until its fast-path unpriced calls reach ``unknown_pricing_report_limit``, which bounds the model
+    calls a blind cap lets through; the reconcile marker (an unknown core row, e.g. a non-streamed
+    auxiliary call) alone never blocks there.
+    """
+    if unknown_pricing_stops():
+        return fast_count > 0 or bool(recon_unpriced)
+    return fast_count >= unknown_pricing_report_limit()
 
 
 def resolved_ceiling() -> float:

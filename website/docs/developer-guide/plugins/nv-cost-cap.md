@@ -34,17 +34,23 @@ per-advisor MoA spend.
 
 `settings.unknown_pricing: report` relaxes this for a fleet whose route leaves some calls
 unpriced (a route that reports its cost only on streamed calls, say): an unknown-priced
-call then records one `unknown_pricing` episode per session and UTC day for the operator,
-counts as $0, and never stops the session or engages ESTOP; the Tier-2 ceiling still
-stops priced spend. Any other value, or none, keeps the fail-closed default.
+call then records one `unknown_pricing` episode per session and UTC day for the operator
+and counts as $0. The session runs on until its unpriced MODEL calls (the fast path's,
+one per request) reach `unknown_pricing_report_limit` (default 10), so a cap that has gone
+blind still stops a session; an unknown row only the reconcile sees (a non-streamed
+auxiliary call) never stops it. The Tier-2 ceiling still stops priced spend. Any other
+value, none, or a config read that failed keeps the fail-closed default.
 
 **A cost the route reports itself.** A LiteLLM proxy returns each request's USD cost in
 the final streamed usage chunk (`usage.cost`, with `stream_options.include_usage`). Core
 uses that number as the call's actual cost (`cost_status='actual'`,
-`provider_cost_api`) when the route's base URL is HTTPS on a host listed in config
-`pricing.reported_cost_hosts` (exact hostnames, default none), and the fast path passes
-it through as `reported_cost`, so both accrual paths agree. A route that is not listed is
-priced as before.
+`provider_cost_api`) when the route that served the call has an HTTPS base URL on a host
+listed in config `pricing.reported_cost_hosts` (exact hostnames, default none) and the
+value is one response's JSON number (finite, >= 0). For a mixture-of-agents turn that
+route is the aggregator slot's own base URL. Core prices the response once and the
+`post_api_request` usage summary carries that amount as `reported_cost` (absent
+otherwise), which the fast path accrues as-is, so both accrual paths hold the same number.
+A route that is not listed is priced as before.
 
 ## Two tiers
 
@@ -127,7 +133,9 @@ All settings live under `plugins.entries.nv-cost-cap.settings`.
 | `estop_on_breach` | engage the profile ESTOP belt on a non-immortal breach so cron/kanban are gated too (default `true`; `false` = precise per-session refusals only). |
 | `orchestrator_profile` | the profile allowed to run `hermes cost-cap set` (falls back to `kanban.orchestrator_profile`). |
 | `default_ceiling_usd` | the plugin-default Tier-2 ceiling when no override, managed pin, or owner-pinned default is set. |
-| `unknown_pricing` | `stop` (default): an unknown-priced call is a Tier-2 breach for a non-immortal session. `report`: one `unknown_pricing` episode per session and day instead, and the session keeps running. |
+| `unknown_pricing` | `stop` (default): an unknown-priced call is a Tier-2 breach for a non-immortal session. `report`: one `unknown_pricing` episode per session and day instead, and the session keeps running up to `unknown_pricing_report_limit` unpriced model calls. |
+| `unknown_pricing_report_limit` | in `report` mode, the count of unpriced model calls at which a non-immortal session stops anyway (a positive int, default 10). |
+| `tier1_floor_usd` | the lowest Tier-1 cap: the rolling p90 is raised to it (default 0, no floor); with no completed sessions there is still no Tier-1. |
 
 The fleet ceiling itself lives in managed scope and/or the owner-pinned fleet
 default — it is not a per-profile settings key.

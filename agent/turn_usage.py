@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
-from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
+from agent.usage_pricing import REPORTED_COST_VERSION, estimate_usage_cost, normalize_usage, with_served_service_tier
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -43,6 +43,14 @@ def _loop_mod():
     import agent.conversation_loop as _cl
 
     return _cl
+
+
+def _without_reported_cost(usage):
+    """``usage`` with any route-reported ``cost`` dropped from ``raw_usage`` (other raw fields kept)."""
+    raw = usage.raw_usage
+    if not isinstance(raw, dict) or "cost" not in raw:
+        return usage
+    return replace(usage, raw_usage={k: v for k, v in raw.items() if k != "cost"})
 
 
 def _fold_moa_usage(agent, canonical_usage):
@@ -79,6 +87,7 @@ def record_response_usage(
     consume a pending compaction verdict. Returns the loop-visible outcome."""
     rearmed = False
     compressor = agent.context_compressor
+    agent._route_reported_cost = None
     # Count every completed provider attempt, including providers that omit usage.
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
@@ -229,10 +238,18 @@ def record_response_usage(
         _agg_cost_model = _agg_slot["model"]
         _agg_cost_provider = _agg_slot.get("provider") or agent.provider
         _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
+        if not _agg_slot.get("base_url"):
+            # A route-reported cost is trusted only for the route that served the call: a slot with no base
+            # URL of its own is priced at the outer agent's URL, so its usage.cost is not used.
+            aggregator_usage = _without_reported_cost(aggregator_usage)
     cost_result = estimate_usage_cost(
         _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
     )
+    # The route-reported amount core just persisted, for this response only: the post_api_request hook
+    # (fired later for the same response object) passes it on as usage.reported_cost.
+    agent._route_reported_cost = (response, float(cost_result.amount_usd)) if (
+        cost_result.pricing_version == REPORTED_COST_VERSION and cost_result.amount_usd is not None) else None
     # Cost delta = aggregator + MoA advisor cost (already priced per-advisor at each
     # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
     # token counts.
