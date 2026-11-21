@@ -724,20 +724,25 @@ def reports_usage_cost(base_url: Optional[str]) -> bool:
 
 
 def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
-    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0)."""
+    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0).
+
+    The quote is converted to a float exactly once, here: the result is that float's exact value as a
+    Decimal, so the amount core persists and the amount plugins receive (both that float) are this number.
+    """
     if usage.request_count != 1 or not isinstance(usage.raw_usage, dict):
         return None
     value = usage.raw_usage.get("cost")
     if type(value) not in (int, float):  # bool, str, Decimal, None and containers are refused
         return None
     try:
-        # Strictly positive: a route may pass through a field it did not bill, and a zero quote cannot be told from
-        # one (a call left unknown stays fail-closed instead of becoming a $0 charge).
-        if not math.isfinite(float(value)) or value <= 0:
-            return None
+        amount = float(value)
     except OverflowError:  # an int too large for a float
         return None
-    return Decimal(str(value))
+    # Strictly positive: a route may pass through a field it did not bill, and a zero quote cannot be told from
+    # one (a call left unknown stays fail-closed instead of becoming a $0 charge).
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return Decimal(amount)
 
 
 def reported_usage_cost(usage: CanonicalUsage, base_url: Optional[str]) -> Optional[Decimal]:
