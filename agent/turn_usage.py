@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
 from agent.usage_pricing import REPORTED_COST_VERSION, estimate_usage_cost, normalize_usage, with_served_service_tier
+from utils import base_url_origin
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -138,6 +139,25 @@ def with_write_tier(usage: Any, tier: str | None) -> Any:
         return usage
     from dataclasses import replace
     return replace(usage, cache_write_by_ttl=(("1h", usage.cache_write_tokens),))
+
+
+def _never_follows_redirects(client: Any) -> bool:
+    """True when ``client`` (an OpenAI-style SDK client) sends through an httpx client that never follows a
+    redirect, so each response came from the URL its request named. Unknown is False (fail closed)."""
+    return getattr(getattr(client, "_client", None), "follow_redirects", None) is False
+
+
+def _answered_by_own_route(agent: Any, base_url: Any) -> bool:
+    """The main loop's clients (the primary and the cached per-request client) send to ``base_url``'s own origin
+    and never follow a redirect, so a response came from the route core prices against and that route may vouch
+    for the cost it reports. Anything unknown does not vouch."""
+    origin = base_url_origin(str(base_url or ""))
+    cache = getattr(agent, "_request_client_cache", None)
+    clients = [getattr(agent, "client", None), cache.get("client") if isinstance(cache, dict) else None]
+    clients = [c for c in clients if c is not None]
+    return bool(origin[1]) and bool(clients) and all(
+        _never_follows_redirects(c) and base_url_origin(str(getattr(c, "base_url", "") or "")) == origin
+        for c in clients)
 
 
 def record_response_usage(
@@ -304,13 +324,14 @@ def record_response_usage(
     # A route-reported usage.cost is trusted only for the main loop's own route (a fallback re-binds the agent's
     # route before the call), never for a MoA response: the aggregator's served route is not tracked. A response is
     # MoA when the MoA facade served it (its client keeps reference accounting) or the agent runs as the ``moa``
-    # provider, whether or not an aggregator slot was recorded.
+    # provider, whether or not an aggregator slot was recorded. A client that may follow a redirect, or that sends
+    # to another origin than the URL priced here, may have been answered by another host, so it never vouches.
     _moa_response = bool(_agg_slot) or (agent.provider or "") == "moa" or (
         _moa_client is not None and hasattr(_moa_client, "consume_reference_usage"))
     cost_result = estimate_usage_cost(
         _agg_cost_model, _with_declared_write_tier(aggregator_usage, _cache_event), provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
-        trust_reported_cost=not _moa_response,
+        trust_reported_cost=not _moa_response and _answered_by_own_route(agent, _agg_cost_base_url),
     )
     # One float for this call's own amount: it is the delta core persists and, for a route-reported price, the
     # usage.reported_cost the post_api_request hook (fired later for the same response object) passes to plugins.

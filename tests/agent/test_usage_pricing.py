@@ -990,7 +990,7 @@ class TestRouteReportedUsageCost:
         result = self._price(self._usage(4.8077e-06))
         assert result.status == "actual"
         assert result.source == "provider_cost_api"
-        assert result.amount_usd == Decimal("4.8077e-06")
+        assert result.amount_usd == Decimal.from_float(4.8077e-06)
         assert result.pricing_version == "route-reported-usage-cost"
         assert result.label == format_cost_label(Decimal("4.8077e-06"))
 
@@ -1108,23 +1108,6 @@ class TestRouteReportedUsageCost:
         finally:
             agent.close()
 
-    @pytest.mark.parametrize("slot", [
-        {"model": "vendor/aggregator-y"},
-        {"model": "vendor/aggregator-y", "provider": "custom", "base_url": "https://litellm.example.com/v1"},
-    ])
-    def test_a_moa_turn_is_never_priced_from_usage_cost(self, tmp_path, monkeypatch, slot):
-        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
-        real_client = agent.client
-        try:
-            agent.client = SimpleNamespace(last_aggregator_slot=slot)
-            response = self._response(4.8077e-06)
-            self._record(agent, response)
-            assert agent.session_cost_status == "unknown"
-            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
-        finally:
-            agent.client = real_client
-            agent.close()
-
     @staticmethod
     def _priced(monkeypatch):
         """Every CostResult core computes in ``record_response_usage``, in call order."""
@@ -1134,55 +1117,213 @@ class TestRouteReportedUsageCost:
         monkeypatch.setattr(turn_usage, "estimate_usage_cost", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
         return seen
 
-    @pytest.mark.parametrize("bind", ["moa_facade", "moa_provider"])
-    def test_a_moa_response_without_a_recorded_slot_is_never_priced_from_usage_cost(self, tmp_path, monkeypatch, bind):
-        """No MoA response is priced from usage.cost, also one whose aggregator slot was never recorded and whose pricing
-        URL is a listed host: the MoA facade (its client) or the ``moa`` provider marks the response as MoA."""
+    @staticmethod
+    def _eligible(client):
+        """Make ``client`` route-eligible: it sends to the listed base URL and never follows a redirect, so only
+        a MoA marker can keep its quote from being trusted."""
+        client._client = SimpleNamespace(follow_redirects=False)
+        client.base_url = "https://litellm.example.com/v1/"
+        return client
+
+    @pytest.mark.parametrize("marker", [
+        "control", "slot", "slot_with_listed_base_url", "facade_without_slot", "moa_provider",
+    ])
+    def test_no_moa_response_is_priced_from_usage_cost(self, tmp_path, monkeypatch, marker):
+        """No MoA response is priced from usage.cost: a recorded aggregator slot (with or without a base URL of
+        its own), the MoA facade's client with no recorded slot, or the ``moa`` provider. Each case runs on a
+        route-eligible client (listed base URL, no redirects), so only its MoA marker keeps the quote out; the
+        control, the same client with no marker, is priced from the quote."""
         from agent.moa_loop import MoAClient
 
+        slot = {"model": "vendor/aggregator-y"}
+        client, provider = {
+            "control": (SimpleNamespace(), "custom"),
+            "slot": (SimpleNamespace(last_aggregator_slot=slot), "custom"),
+            "slot_with_listed_base_url": (SimpleNamespace(last_aggregator_slot=dict(
+                slot, provider="custom", base_url="https://litellm.example.com/v1")), "custom"),
+            "facade_without_slot": (MoAClient("default"), "custom"),
+            "moa_provider": (SimpleNamespace(), "moa"),
+        }[marker]
         agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
         real_client, real_provider = agent.client, agent.provider
         seen = self._priced(monkeypatch)
         try:
-            if bind == "moa_facade":
-                agent.client = MoAClient("default")
+            agent.client, agent.provider = self._eligible(client), provider
+            if marker == "facade_without_slot":
                 assert agent.client.last_aggregator_slot is None
-            else:
-                agent.provider = "moa"
             assert agent.base_url == "https://litellm.example.com/v1"
             response = self._response(4.8077e-06)
             self._record(agent, response)
-            assert [r.pricing_version for r in seen] != ["route-reported-usage-cost"]
-            assert agent.session_cost_status != "actual"
-            assert agent.session_estimated_cost_usd == 0
-            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+            summary = agent._usage_summary_for_api_request_hook(response)
+            assert seen, "core never priced the response"
+            if marker == "control":
+                assert [r.pricing_version for r in seen] == ["route-reported-usage-cost"]
+                assert summary["reported_cost"] == 4.8077e-06
+            else:
+                assert all(r.pricing_version != "route-reported-usage-cost" for r in seen)
+                assert agent.session_cost_status != "actual"
+                assert agent.session_estimated_cost_usd == 0
+                assert "reported_cost" not in summary
         finally:
             agent.client, agent.provider = real_client, real_provider
             agent.close()
 
-    def test_a_quote_is_taken_once_as_the_float_core_persists(self, listed):
-        """An int quote a float cannot hold exactly (2**53 + 1) is converted once: the CostResult amount is that
-        float, written exactly, so no later conversion changes it."""
-        quote = 2**53 + 1
+    @pytest.mark.parametrize("quote", [0.1, 4.8077e-06, 2**53 + 1])
+    def test_a_quote_is_taken_once_as_the_float_core_persists(self, listed, quote):
+        """The quote is converted once, to a float: the CostResult amount is exactly that float (a fractional
+        quote and an int a float cannot hold, 2**53 + 1), so no later conversion changes it."""
         result = self._price(self._usage(quote))
         assert result.status == "actual"
         assert result.amount_usd == Decimal(float(quote))
         assert Decimal(float(result.amount_usd)) == result.amount_usd
 
     def test_core_and_the_hook_hold_one_usd_value(self, tmp_path, monkeypatch):
-        """One USD value: core's CostResult amount, the delta core persists and the hook's ``reported_cost`` are
-        the same number, also for an int quote a float cannot hold exactly (no conversion changes it later)."""
+        """One USD value through the real paths: core's CostResult amount, the per-call delta core hands to
+        persistence and the usage the real post_api_request dispatch hands to plugins are the same number, for a
+        fractional quote and for an int quote a float cannot hold exactly."""
+        from agent import turn_usage
+        from agent.turn_response_intake import _fire_post_api_request_hook
+        from hermes_cli import plugins as plugins_mod
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        manager = PluginManager()
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+        monkeypatch.setattr(plugins_mod, "_plugin_managers_by_home", {})
+        hooked = []
+        PluginContext(PluginManifest(name="usage-observer", source="user"), manager).register_hook(
+            "post_api_request", lambda **kw: hooked.append(kw.get("usage")))
+        queued = []
+        monkeypatch.setattr(turn_usage, "queue_usage", lambda agent, **counts: queued.append(counts))
         agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
         seen = self._priced(monkeypatch)
         try:
-            response = self._response(2**53 + 1)
+            agent._session_db, agent._session_db_created = SimpleNamespace(), True
+            for n, quote in enumerate((0.1, 2**53 + 1), start=1):
+                response = self._response(quote)
+                self._record(agent, response)
+                _fire_post_api_request_hook(
+                    agent, response, SimpleNamespace(content="ok", tool_calls=None), "stop", api_messages=[],
+                    api_call_count=1, api_duration=0.2, api_start_time=0.0, api_request_id=f"req-{n}",
+                    effective_task_id="task", turn_id="turn",
+                )
+                result = seen[-1]
+                assert result.pricing_version == "route-reported-usage-cost"
+                reported = hooked[-1]["reported_cost"]
+                assert type(reported) is float
+                persisted = queued[-1]["estimated_cost_usd"]
+                assert Decimal(reported) == result.amount_usd == Decimal(persisted), (quote, reported, persisted)
+        finally:
+            agent._session_db = None
+            agent.close()
+
+    @staticmethod
+    def _completion_body(cost):
+        return {"id": "c-1", "object": "chat.completion", "created": 1, "model": "vendor/open-model-x",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 8, "total_tokens": 25, "cost": cost}}
+
+    @pytest.mark.parametrize("follow_redirects", [True, False])
+    def test_a_quote_is_trusted_only_from_a_client_that_never_follows_a_redirect(
+            self, tmp_path, monkeypatch, follow_redirects):
+        """A client that follows redirects may have been answered by another host than the listed base URL, so
+        its quote is never trusted. A real OpenAI client over an httpx transport: with redirects followed, the
+        listed host's 307 hands the request to an unlisted host whose answer carries ``usage.cost``; a client
+        that never follows a redirect only gets the listed host's own answer, and that one is trusted."""
+        import httpx
+        from openai import OpenAI
+
+        body = self._completion_body(4.8077e-06)
+
+        def answer(request):
+            if follow_redirects and request.url.host == "litellm.example.com":
+                return httpx.Response(307, headers={"location": "https://unlisted.example.net/v1/chat/completions"})
+            return httpx.Response(200, json=body)
+
+        http = httpx.Client(transport=httpx.MockTransport(answer), follow_redirects=follow_redirects)
+        client = OpenAI(api_key="k", base_url="https://litellm.example.com/v1", http_client=http, max_retries=0)
+        response = client.chat.completions.create(model="vendor/open-model-x",
+                                                  messages=[{"role": "user", "content": "hi"}])
+        assert response.usage.cost == 4.8077e-06
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        real_client = agent.client
+        try:
+            agent.client = client
             self._record(agent, response)
             summary = agent._usage_summary_for_api_request_hook(response)
+            if follow_redirects:
+                assert agent.session_cost_status != "actual"
+                assert agent.session_estimated_cost_usd == 0
+                assert "reported_cost" not in summary
+            else:
+                assert agent.session_cost_status == "actual"
+                assert summary["reported_cost"] == 4.8077e-06
+        finally:
+            agent.client = real_client
+            client.close()
+            agent.close()
+
+    def test_the_production_clients_carry_a_listed_route_quote(self, tmp_path, monkeypatch):
+        """The clients Hermes itself builds are eligible: a completion through the production per-request client
+        factory (only the low-level transport is a mock answering as the listed host) is priced from its quote,
+        and the hook carries the same amount. Guards the positive path against a factory that follows redirects
+        or sends elsewhere, which would leave every quote unknown."""
+        import httpx
+
+        from agent import process_bootstrap
+
+        body = self._completion_body(4.8077e-06)
+        hosts = []
+
+        def answer(request):
+            hosts.append(request.url.host)
+            return httpx.Response(200, json=body)
+
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        monkeypatch.setattr(process_bootstrap, "_get_proxy_for_base_url", lambda base_url: None)
+        monkeypatch.setattr(process_bootstrap, "_get_shared_transport",
+                            lambda key, build: httpx.MockTransport(answer))
+        try:
+            request_client = agent._create_request_openai_client(reason="chat_completion_request")
+            assert request_client is not agent.client
+            response = request_client.chat.completions.create(model="vendor/open-model-x",
+                                                              messages=[{"role": "user", "content": "hi"}])
+            agent._close_request_openai_client(request_client, reason="request_complete")
+            assert hosts == ["litellm.example.com"]
+            assert agent._request_client_cache["client"] is request_client
+            self._record(agent, response)
+            assert agent.session_cost_status == "actual"
+            assert agent.session_estimated_cost_usd == 4.8077e-06
+            assert agent._usage_summary_for_api_request_hook(response)["reported_cost"] == 4.8077e-06
         finally:
             agent.close()
-        (result,) = seen
-        assert result.pricing_version == "route-reported-usage-cost"
-        reported = summary["reported_cost"]
-        assert type(reported) is float
-        assert Decimal(reported) == result.amount_usd
-        assert reported == agent.session_estimated_cost_usd
+
+    @pytest.mark.parametrize("slot", ["primary", "request"])
+    def test_a_quote_is_trusted_only_from_a_client_on_the_pricing_route(self, tmp_path, monkeypatch, slot):
+        """A main-loop client that sends to another origin than the URL core prices against never vouches,
+        even when neither follows a redirect: the primary client, or the cached per-request client, on an
+        unlisted host while the agent's base URL names the listed one."""
+        import httpx
+        from openai import OpenAI
+
+        body = self._completion_body(4.8077e-06)
+        http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+        unlisted = OpenAI(api_key="k", base_url="https://unlisted.example.net/v1", http_client=http, max_retries=0)
+        response = unlisted.chat.completions.create(model="vendor/open-model-x",
+                                                    messages=[{"role": "user", "content": "hi"}])
+        assert response.usage.cost == 4.8077e-06
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        real_client, real_cache = agent.client, getattr(agent, "_request_client_cache", None)
+        try:
+            assert agent.base_url == "https://litellm.example.com/v1"
+            if slot == "primary":
+                agent.client = unlisted
+            else:
+                agent._request_client_cache = {"client": unlisted, "key": None, "poisoned": False, "in_use": False}
+            self._record(agent, response)
+            assert agent.session_cost_status != "actual"
+            assert agent.session_estimated_cost_usd == 0
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.client, agent._request_client_cache = real_client, real_cache
+            unlisted.close()
+            agent.close()
