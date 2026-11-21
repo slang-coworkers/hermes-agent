@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone, UTC
@@ -798,15 +799,102 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
     return CostResult(amount_usd=None, status="unknown", source=source, label="n/a", notes=notes)
 
 
+# A request's cost as the route itself reports it. LiteLLM proxies put the request's USD cost in the
+# final streamed usage chunk (``usage.cost``, with ``stream_options.include_usage``): the proxy's own
+# billing figure, after any negotiated discount, for models no public rate card lists. Other relays
+# may use a ``cost`` field differently, so it is trusted only for the exact HTTPS hosts the operator
+# lists in config ``pricing.reported_cost_hosts`` (default: none), only as LiteLLM sends it (one
+# response's JSON number: int or float, finite and strictly positive), only where the
+# caller vouches that ``base_url`` is the route that served the call (``trust_reported_cost``: the main
+# loop's own route; never an auxiliary or MoA call, whose fallback routing is not tracked), and only for a
+# call Hermes cannot price itself: a rate Hermes has always wins.
+REPORTED_COST_VERSION = "route-reported-usage-cost"
+
+
+def _reported_cost_hosts() -> frozenset[str]:
+    """Hostnames from config ``pricing.reported_cost_hosts``; empty on a failed read or a bad shape."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_read_errors import FailedConfigRead
+
+        config = load_config_readonly()
+        if isinstance(config, FailedConfigRead) or not isinstance(config, dict):
+            return frozenset()
+        pricing = config.get("pricing")
+        hosts = pricing.get("reported_cost_hosts") if isinstance(pricing, dict) else None
+    except Exception:
+        logger.debug("pricing.reported_cost_hosts read failed", exc_info=True)
+        return frozenset()
+    if not isinstance(hosts, list):
+        return frozenset()
+    return frozenset(h.strip().lower().rstrip(".") for h in hosts if isinstance(h, str) and h.strip())
+
+
+def reports_usage_cost(base_url: Optional[str]) -> bool:
+    """True when ``base_url`` is an HTTPS URL on a host listed in ``pricing.reported_cost_hosts``."""
+    if not base_url:
+        return False
+    scheme, host, _port = base_url_origin(base_url)
+    return scheme == "https" and bool(host) and host in _reported_cost_hosts()
+
+
+def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
+    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0).
+
+    The quote is converted to a float exactly once, here: the result is that float written exactly as a
+    Decimal, so the amount core persists and the amount plugins receive (both floats) are this same number.
+    """
+    if usage.request_count != 1 or not isinstance(usage.raw_usage, dict):
+        return None
+    value = usage.raw_usage.get("cost")
+    if type(value) not in (int, float):  # bool, str, Decimal, None and containers are refused
+        return None
+    try:
+        amount = float(value)
+    except OverflowError:  # an int too large for a float
+        return None
+    # Strictly positive: a route may pass through a field it did not bill, and a zero quote cannot be told from
+    # one (a call left unknown stays fail-closed instead of becoming a $0 charge).
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return Decimal(repr(amount))
+
+
+def reported_usage_cost(usage: CanonicalUsage, base_url: Optional[str]) -> Optional[Decimal]:
+    """The USD cost a listed route reported for this one response, else None."""
+    amount = _parse_reported_request_cost(usage)
+    return amount if amount is not None and reports_usage_cost(base_url) else None
+
+
 def estimate_usage_cost(
     model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
-    base_url: Optional[str] = None, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None, trust_reported_cost: bool = False,
 ) -> CostResult:
+    """The call's cost. ``trust_reported_cost``: the caller vouches that ``base_url`` served this response,
+    so a listed route's own ``usage.cost`` may price a call Hermes has no rate for (see
+    ``REPORTED_COST_VERSION``)."""
     from providers import get_provider_profile
     profile = get_provider_profile(provider or '')
     reported = profile.get_usage_cost(model_name, usage) if profile else None
     if reported is not None:
         return reported
+    result = _estimate_from_rates(model_name, usage, provider=provider, base_url=base_url, api_key=api_key)
+    if result.status == "unknown" and trust_reported_cost:
+        route_cost = reported_usage_cost(usage, base_url)
+        if route_cost is not None:
+            return CostResult(
+                amount_usd=route_cost, status="actual", source="provider_cost_api",
+                label=format_cost_label(route_cost), pricing_version=REPORTED_COST_VERSION,
+                notes=("cost reported by the route (usage.cost)",),
+            )
+    return result
+
+
+def _estimate_from_rates(
+    model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None,
+) -> CostResult:
+    """Price ``usage`` from the rates Hermes knows for the route (snapshot, models API, models.dev)."""
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return CostResult(

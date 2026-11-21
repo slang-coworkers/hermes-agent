@@ -960,3 +960,229 @@ def test_anthropic_fast_response_without_a_fast_rate_is_unknown():
     result = estimate_usage_cost("claude-sonnet-4-6", _anthropic_usage("fast"), provider="anthropic")
     assert result.amount_usd is None
     assert result.status == "unknown"
+
+
+class TestRouteReportedUsageCost:
+    """``usage.cost`` a route reports itself (LiteLLM's final streamed usage chunk) prices a call only when the
+    caller vouches for the route (``trust_reported_cost``: the main loop's own route), the route is an exact HTTPS
+    host listed in ``pricing.reported_cost_hosts``, and Hermes has no rate of its own for the call."""
+
+    @pytest.fixture
+    def listed(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod, "load_config_readonly",
+            lambda: {"pricing": {"reported_cost_hosts": [" LiteLLM.Example.com. ", 7, ""]}},
+        )
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+
+    @staticmethod
+    def _usage(cost):
+        return CanonicalUsage(input_tokens=17, output_tokens=8, raw_usage={"cost": cost})
+
+    @staticmethod
+    def _price(usage, base_url="https://litellm.example.com/v1", *, trust=True, provider="custom",
+               model="vendor/open-model-x"):
+        return estimate_usage_cost(model, usage, provider=provider, base_url=base_url, trust_reported_cost=trust)
+
+    def test_listed_https_host_uses_the_reported_cost(self, listed):
+        result = self._price(self._usage(4.8077e-06))
+        assert result.status == "actual"
+        assert result.source == "provider_cost_api"
+        assert result.amount_usd == Decimal("4.8077e-06")
+        assert result.pricing_version == "route-reported-usage-cost"
+        assert result.label == format_cost_label(Decimal("4.8077e-06"))
+
+    def test_nothing_is_trusted_unless_the_caller_vouches_for_the_route(self, listed):
+        assert self._price(self._usage(4.8077e-06), trust=False).status == "unknown"
+
+    def test_a_rate_hermes_has_always_wins(self, listed):
+        result = self._price(self._usage(0.000001), provider="anthropic", model="claude-sonnet-4-6")
+        assert result.status == "estimated"
+        assert result.pricing_version != "route-reported-usage-cost"
+
+    @pytest.mark.parametrize("base_url", [
+        "https://other.example.com/v1", "http://litellm.example.com/v1",
+        "https://litellm.example.com.evil.test/v1", "https://sub.litellm.example.com/v1", "", None,
+    ])
+    def test_other_routes_ignore_the_field(self, listed, base_url):
+        result = self._price(self._usage(4.8077e-06), base_url)
+        assert result.status == "unknown"
+        assert result.amount_usd is None
+
+    @pytest.mark.parametrize("cost", [
+        True, -1, -0.5, float("nan"), float("inf"), "abc", "0.012", "1e400", 10**400, Decimal(1), None, [1], {"usd": 1},
+    ])
+    def test_malformed_cost_is_ignored(self, listed, cost):
+        assert self._price(self._usage(cost)).status == "unknown"
+
+    def test_a_zero_quote_is_never_trusted(self, listed):
+        assert self._price(self._usage(0)).status == "unknown"
+        assert self._price(self._usage(0.0)).status == "unknown"
+        assert self._price(CanonicalUsage(raw_usage={"cost": 0})).status == "unknown"
+        # Token counts the canonical buckets miss (a raw total only) cannot make a zero quote a $0 charge.
+        raw_total = normalize_usage({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 25, "cost": 0})
+        assert self._price(raw_total).status == "unknown"
+
+    def test_a_multi_request_usage_carries_no_single_reported_cost(self, listed):
+        usage = CanonicalUsage(input_tokens=17, output_tokens=8, request_count=2, raw_usage={"cost": 1.0})
+        assert self._price(usage).status == "unknown"
+
+    def test_a_failed_config_read_trusts_no_host(self, monkeypatch):
+        import hermes_cli.config as config_mod
+        from hermes_cli.config_read_errors import FailedConfigRead
+
+        stale = FailedConfigRead({"pricing": {"reported_cost_hosts": ["litellm.example.com"]}}, error=OSError("EIO"))
+        monkeypatch.setattr(config_mod, "load_config_readonly", lambda: stale)
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        assert self._price(self._usage(1.0)).status == "unknown"
+
+    def test_nothing_is_trusted_without_the_setting(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(config_mod, "load_config_readonly", lambda: {"pricing": {"reported_cost_hosts": "x"}})
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        assert self._price(self._usage(1.0)).status == "unknown"
+
+    def test_aggregated_usage_carries_no_reported_cost(self, listed):
+        both = self._usage(1.0) + self._usage(2.0)
+        assert both.raw_usage is None
+        assert self._price(both).status == "unknown"
+
+    def test_known_pricing_is_unchanged_for_a_listed_route(self, listed):
+        from agent.usage_pricing import has_known_pricing
+
+        assert not has_known_pricing("vendor/open-model-x", "custom", "https://litellm.example.com/v1")
+
+    @staticmethod
+    def _agent(tmp_path, monkeypatch, hosts):
+        import hermes_yaml as yaml
+
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"pricing": {"reported_cost_hosts": hosts}}), encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr("agent.usage_pricing.fetch_endpoint_model_metadata", lambda *a, **k: {})
+        from run_agent import AIAgent
+
+        return AIAgent(api_key="k", base_url="https://litellm.example.com/v1", provider="custom",
+                       api_mode="chat_completions", model="vendor/open-model-x", session_id="t", platform="cli",
+                       quiet_mode=True, skip_context_files=True, skip_memory=True, save_trajectories=False,
+                       enabled_toolsets=["file"])
+
+    @staticmethod
+    def _record(agent, response):
+        from agent import turn_usage
+
+        turn_usage.record_response_usage(agent, response, messages=[{"role": "user", "content": "hi"}],
+                                         api_call_count=1, api_duration=0.2, compression_attempts=0,
+                                         max_compression_attempts=3)
+
+    @staticmethod
+    def _response(cost):
+        return SimpleNamespace(id=None, model="vendor/open-model-x",
+                               usage={"prompt_tokens": 17, "completion_tokens": 8, "total_tokens": 25, "cost": cost})
+
+    def test_core_prices_the_call_once_and_the_hook_carries_that_amount(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        try:
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "actual"
+            assert agent.session_estimated_cost_usd == pytest.approx(4.8077e-06)
+            summary = agent._usage_summary_for_api_request_hook(response)
+            assert summary["reported_cost"] == pytest.approx(4.8077e-06)
+            assert "raw_usage" not in summary
+            # Another response object (an older stash, a retry) never borrows this amount.
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(self._response(4.8077e-06))
+        finally:
+            agent.close()
+
+    def test_an_unlisted_route_keeps_the_old_summary_shape(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch, ["other.example.com"])
+        try:
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "unknown"
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.close()
+
+    @pytest.mark.parametrize("slot", [
+        {"model": "vendor/aggregator-y"},
+        {"model": "vendor/aggregator-y", "provider": "custom", "base_url": "https://litellm.example.com/v1"},
+    ])
+    def test_a_moa_turn_is_never_priced_from_usage_cost(self, tmp_path, monkeypatch, slot):
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        real_client = agent.client
+        try:
+            agent.client = SimpleNamespace(last_aggregator_slot=slot)
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert agent.session_cost_status == "unknown"
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.client = real_client
+            agent.close()
+
+    @staticmethod
+    def _priced(monkeypatch):
+        """Every CostResult core computes in ``record_response_usage``, in call order."""
+        from agent import turn_usage
+
+        seen, real = [], turn_usage.estimate_usage_cost
+        monkeypatch.setattr(turn_usage, "estimate_usage_cost", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+        return seen
+
+    @pytest.mark.parametrize("bind", ["moa_facade", "moa_provider"])
+    def test_a_moa_response_without_a_recorded_slot_is_never_priced_from_usage_cost(self, tmp_path, monkeypatch, bind):
+        """No MoA response is priced from usage.cost, also one whose aggregator slot was never recorded and whose pricing
+        URL is a listed host: the MoA facade (its client) or the ``moa`` provider marks the response as MoA."""
+        from agent.moa_loop import MoAClient
+
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        real_client, real_provider = agent.client, agent.provider
+        seen = self._priced(monkeypatch)
+        try:
+            if bind == "moa_facade":
+                agent.client = MoAClient("default")
+                assert agent.client.last_aggregator_slot is None
+            else:
+                agent.provider = "moa"
+            assert agent.base_url == "https://litellm.example.com/v1"
+            response = self._response(4.8077e-06)
+            self._record(agent, response)
+            assert [r.pricing_version for r in seen] != ["route-reported-usage-cost"]
+            assert agent.session_cost_status != "actual"
+            assert agent.session_estimated_cost_usd == 0
+            assert "reported_cost" not in agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.client, agent.provider = real_client, real_provider
+            agent.close()
+
+    def test_a_quote_is_taken_once_as_the_float_core_persists(self, listed):
+        """An int quote a float cannot hold exactly (2**53 + 1) is converted once: the CostResult amount is that
+        float, written exactly, so no later conversion changes it."""
+        quote = 2**53 + 1
+        result = self._price(self._usage(quote))
+        assert result.status == "actual"
+        assert result.amount_usd == Decimal(float(quote))
+        assert Decimal(float(result.amount_usd)) == result.amount_usd
+
+    def test_core_and_the_hook_hold_one_usd_value(self, tmp_path, monkeypatch):
+        """One USD value: core's CostResult amount, the delta core persists and the hook's ``reported_cost`` are
+        the same number, also for an int quote a float cannot hold exactly (no conversion changes it later)."""
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        seen = self._priced(monkeypatch)
+        try:
+            response = self._response(2**53 + 1)
+            self._record(agent, response)
+            summary = agent._usage_summary_for_api_request_hook(response)
+        finally:
+            agent.close()
+        (result,) = seen
+        assert result.pricing_version == "route-reported-usage-cost"
+        reported = summary["reported_cost"]
+        assert type(reported) is float
+        assert Decimal(reported) == result.amount_usd
+        assert reported == agent.session_estimated_cost_usd

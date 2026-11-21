@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
-from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
+from agent.usage_pricing import REPORTED_COST_VERSION, estimate_usage_cost, normalize_usage, with_served_service_tier
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -149,6 +149,7 @@ def record_response_usage(
     consume a pending compaction verdict. Returns the loop-visible outcome."""
     rearmed = False
     compressor = agent.context_compressor
+    agent._route_reported_cost = None
     # Count every completed provider attempt, including providers that omit usage.
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
@@ -300,14 +301,26 @@ def record_response_usage(
     _cache_event = record_cache_response(
         agent, aggregator_usage, model=agent.model, provider=agent.provider, base_url=agent.base_url,
         api_mode=agent.api_mode, upstream=response_upstream(response))
+    # A route-reported usage.cost is trusted only for the main loop's own route (a fallback re-binds the agent's
+    # route before the call), never for a MoA response: the aggregator's served route is not tracked. A response is
+    # MoA when the MoA facade served it (its client keeps reference accounting) or the agent runs as the ``moa``
+    # provider, whether or not an aggregator slot was recorded.
+    _moa_response = bool(_agg_slot) or (agent.provider or "") == "moa" or (
+        _moa_client is not None and hasattr(_moa_client, "consume_reference_usage"))
     cost_result = estimate_usage_cost(
         _agg_cost_model, _with_declared_write_tier(aggregator_usage, _cache_event), provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
+        trust_reported_cost=not _moa_response,
     )
+    # One float for this call's own amount: it is the delta core persists and, for a route-reported price, the
+    # usage.reported_cost the post_api_request hook (fired later for the same response object) passes to plugins.
+    _call_cost = float(cost_result.amount_usd) if cost_result.amount_usd is not None else None
+    agent._route_reported_cost = (response, _call_cost) if (
+        cost_result.pricing_version == REPORTED_COST_VERSION and _call_cost is not None) else None
     # Cost delta = aggregator + MoA advisor cost (already priced per-advisor at each
     # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
     # token counts.
-    _cost_delta = float(cost_result.amount_usd) if cost_result.amount_usd is not None else None
+    _cost_delta = _call_cost
     if _moa_ref_cost is not None:
         try:
             _moa_cost = float(_moa_ref_cost)

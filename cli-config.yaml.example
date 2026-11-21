@@ -2269,6 +2269,22 @@ telemetry:
 
 
 # =============================================================================
+# Pricing
+# =============================================================================
+# A LiteLLM proxy reports each request's USD cost in the final streamed usage
+# chunk (`usage.cost`, with stream_options.include_usage). For a main-loop call
+# that Hermes has no rate for, that number becomes the call's actual cost, but
+# only when the route's base URL is HTTPS on a host listed here (exact host
+# names; any port and path on a listed host). Listing a host says its
+# `usage.cost` is its bill. A rate Hermes has always wins; auxiliary and
+# mixture-of-agents calls never use the field; a zero, negative or malformed
+# value leaves the call unpriced. Default: no host, so nothing changes.
+# pricing:
+#   reported_cost_hosts:
+#     - litellm.example.com
+
+
+# =============================================================================
 # Login Policy (credentials themselves live in auth.json / .env)
 # =============================================================================
 auth:
