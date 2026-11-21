@@ -32,6 +32,30 @@ core hook field exposing the resolved aggregator provider/model (a documented
 upstream ask), so until then the lineage reconcile is what folds in the real
 per-advisor MoA spend.
 
+**A cost the route reports itself.** A LiteLLM proxy returns each request's USD cost in
+the final streamed usage chunk (`usage.cost`, with `stream_options.include_usage`). Core
+uses that number as a main-loop call's actual cost (`cost_status='actual'`,
+`provider_cost_api`) only when all of these hold: Hermes has no rate of its own for the
+call (a rate always wins); the main loop's own route served it (a fallback re-binds the
+agent's route first; auxiliary calls and every mixture-of-agents response are never priced
+this way, also one with no recorded aggregator slot, since their served route is not
+tracked; and the main loop's clients send to that route's own origin and never follow a
+redirect, so core treats the answer as that route's own); that route's base URL is HTTPS on a host listed in config
+`pricing.reported_cost_hosts` (exact host names, default none; any port and path on a
+listed host); and the value is one response's JSON number, finite and strictly positive (a
+route may pass through a field it did not bill, and a zero quote cannot be told from one).
+Listing a host is the operator's statement that its `usage.cost` is its bill. Core converts
+the quote to a float once and prices the response with it; that float is the delta core
+persists, and the `post_api_request` usage summary carries the same float as
+`reported_cost` (absent otherwise), which the fast path accrues as-is, so both accrual paths
+hold one number. A call Hermes cannot otherwise price stays unknown when it has no usable
+quote, so the fail-closed rule above still applies to it. This is a core change; see
+[Core change (COST-F31)](#core-change-cost-f31).
+
+**Auxiliary calls** (titles, compression, vision) are recorded without a cost status, so
+the cap never sees an unknown price there: an auxiliary call on a model Hermes cannot
+price counts as $0.
+
 ## Two tiers
 
 **Tier-2 and the immortal daily cap are evaluated on the window delta**, never the
@@ -113,6 +137,7 @@ All settings live under `plugins.entries.nv-cost-cap.settings`.
 | `estop_on_breach` | engage the profile ESTOP belt on a non-immortal breach so cron/kanban are gated too (default `true`; `false` = precise per-session refusals only). |
 | `orchestrator_profile` | the profile allowed to run `hermes cost-cap set` (falls back to `kanban.orchestrator_profile`). |
 | `default_ceiling_usd` | the plugin-default Tier-2 ceiling when no override, managed pin, or owner-pinned default is set. |
+| `tier1_floor_usd` | the lowest Tier-1 cap: the rolling p90 is raised to it (default 0, no floor); with no completed sessions there is still no Tier-1. |
 
 The fleet ceiling itself lives in managed scope and/or the owner-pinned fleet
 default — it is not a per-profile settings key.
@@ -312,3 +337,51 @@ the window too. Upstream UA-28, an owner-aware ESTOP lock in core, closes it.
 | `resume_card_target` | unset | `send_message` target (`<platform>:<chat>[:<thread>]`) for cards and post-resume notices. Unset: nothing is posted, and the stop is kept. |
 | `resume_card_ttl_seconds` | `86400` | pending-card lifetime; an expired card keeps the stop. |
 | `resume_card_drain_seconds` | `5` | interval of the gateway's outbox drain (floor 1). Each new card or notice is also sent immediately. |
+
+## Core change (COST-F31)
+
+This section is the decision record for the one core change behind the route-reported cost.
+
+**Status.** Accepted for this fork only, as a CORE-CHANGE: owner ruling 2026-11-21 14:36Z
+("Yes, fork only": the core change, and the AI service's reported price for calls Hermes
+cannot price, only on the listed host). It is core debt until upstream takes it.
+
+**Context.** Hermes priced every call to a model that no rate card lists as "cost unknown,
+$0". This cap is fail-closed on unknown pricing, so it could not run on a fleet whose models
+a LiteLLM proxy serves. The proxy already reports its own bill for each request in
+`usage.cost`.
+
+**Decision.** Core prices a main-loop call with the route's `usage.cost` under the rules in
+[Accrual](#accrual--two-sources-kept-monotonic). Three core files change:
+
+- `agent/usage_pricing.py`: the `pricing.reported_cost_hosts` setting, the strict parser
+  (the quote becomes one float, once) and `estimate_usage_cost(trust_reported_cost=...)`
+  (default off; a rate Hermes has always wins).
+- `agent/turn_usage.py`: the main loop vouches for its own route, never for a
+  mixture-of-agents response (a recorded aggregator slot, the facade's client or the `moa`
+  provider), and only when its clients (the primary and the cached per-request client) send
+  to the priced URL's own origin and never follow a redirect (anything unknown does not
+  vouch); one float is the delta core persists and the amount the hook passes on.
+- `agent/api_request_hooks.py`: the `post_api_request` usage summary carries
+  `reported_cost` for the same response object only.
+
+**Why not a plugin.** The usage summary a plugin receives drops the raw usage, so a plugin
+cannot read `usage.cost`. Core's provider-profile hook (`get_usage_cost(model, usage)`) runs
+before rate lookup, gets no base URL and is off in safe-worker mode, and a named custom route
+reaches it as the generic `custom` provider: a plugin there would trust every custom route.
+
+**Consequences.** Opt-in: nothing changes until an operator lists a host. The check reads the
+main loop's clients when core accounts for a response, not a serving URL captured with the
+response, so a client replaced between the answer and its accounting would not be seen.
+Capturing the serving URL at the transport would touch a fourth core file, which this ruling
+does not cover. No provider profile in this fork overrides `get_usage_cost`, so no response is
+priced from `usage.cost` through that earlier hook either. The fork carries the patch at every
+re-pin; the UPG-F69 data rows (`tests/e2e-scenarios/UPG-F69/`) name this
+ruling. A downstream that shares the plugins takes the core change from the fork's release
+branch, never as a local patch. Tests: `tests/agent/test_usage_pricing.py`
+(`TestRouteReportedUsageCost`).
+
+**Exit.** The same change, ported to upstream `main`, waits on this fork's branch
+`upstream-pr/route-reported-usage-cost`; opening an upstream pull request from it needs its
+own approval. Drop this patch at the first re-pin onto an upstream release that has it or an
+equivalent.

@@ -55,9 +55,12 @@ M	.github/workflows/windows-bundle-sdk.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,m
 M	.github/workflows/windows-desktop-attach-e2e.yml	fork-ci	ruled	UPG-F69	5a/msg-206 + architect review E3
 M	.github/workflows/windows-install-update-e2e.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-3924,msg-206:5a,arch-msg-20
 M	.github/workflows/windows-venv-e2e.yml	fork-ci	fork-ci	F68+UPG-F69	msg-596,msg-206:5a,arch-msg-20
+M	agent/api_request_hooks.py	core	new	COST-F31	owner ruling 2026-11-21 14:36Z (AskUserQuestion, COST-F31): Yes, fork only - the core change in the fork, and the AI service's reported price for calls Hermes cannot price, on the listed host only (CORE-CHANGE; record: website/docs/developer-guide/plugins/nv-cost-cap.md, Core change (COST-F31))
 M	agent/session_persistence.py	core	replay	F68	GOV-F25 (UPG-F68 carry)
 M	agent/turn_facade.py	core	replay	F68	GOV-F25 (UPG-F68 carry)
 M	agent/turn_finalizer.py	core	replay	F68	GOV-F25 (UPG-F68 carry)
+M	agent/turn_usage.py	core	new	COST-F31	owner ruling 2026-11-21 14:36Z (AskUserQuestion, COST-F31): Yes, fork only - the core change in the fork, and the AI service's reported price for calls Hermes cannot price, on the listed host only (CORE-CHANGE; record: website/docs/developer-guide/plugins/nv-cost-cap.md, Core change (COST-F31))
+M	agent/usage_pricing.py	core	new	COST-F31	owner ruling 2026-11-21 14:36Z (AskUserQuestion, COST-F31): Yes, fork only - the core change in the fork, and the AI service's reported price for calls Hermes cannot price, on the listed host only (CORE-CHANGE; record: website/docs/developer-guide/plugins/nv-cost-cap.md, Core change (COST-F31))
 M	apps/desktop/e2e/chat.spec.ts	in-surface	replay	F68	
 A	apps/desktop/e2e/cost-f30-ac7.spec.ts	in-surface	replay	F68	
 M	apps/desktop/e2e/fixtures.ts	in-surface	replay	F68	
@@ -201,6 +204,7 @@ M	tests/agent/test_compression_review.py	in-surface	replay	F68
 A	tests/agent/test_loop_f36_workflows_overlays_adopt.py	in-surface	replay	F68	
 A	tests/agent/test_obs_f48_acceptance.py	in-surface	replay	F68	
 A	tests/agent/test_self_f57b_external_skill_mirror.py	in-surface	replay	F68+UPG-F69	ADR §D4 find_all_skills rename (UPG-F69 3) + architect msg 64 (st_mtime_ns restore)
+M	tests/agent/test_usage_pricing.py	in-surface	new	COST-F31	owner ruling 2026-11-21 14:36Z (COST-F31): the tests of the CORE-CHANGE
 A	tests/cron/test_sched_f32_acceptance.py	in-surface	replay	F68	
 A	tests/e2e-scenarios/A2A-F21/AC-A2A-F21-5.md	in-surface	replay	F68	
 A	tests/e2e-scenarios/A2A-F21/AC-LOOP-F35-5.md	in-surface	replay	F68	

@@ -188,6 +188,19 @@ def completed_session_totals(profile_home: str, window: int) -> list[float]:
         conn.close()
 
 
+def tier1_from(values: list[float], floor_usd=0.0) -> float:
+    """Tier-1 cap: the p90 of ``values``, raised to ``floor_usd`` (a finite number > 0) when there is one.
+    No history stays ``inf`` (no Tier-1 yet), floor or not; an unusable floor is ignored."""
+    cap = p90(values)
+    try:
+        floor = float(floor_usd)
+    except (TypeError, ValueError, OverflowError):
+        return cap
+    if math.isfinite(cap) and math.isfinite(floor) and floor > cap:
+        return floor
+    return cap
+
+
 def p90(values: list[float]) -> float:
     """Nearest-rank p90 over ``values``. Empty population -> ``inf`` (no Tier-1)."""
     vals = sorted(float(v) for v in values)

@@ -19,8 +19,10 @@ the ``llm_execution`` middleware returns a synthetic terminal response,
 (recovery slash-commands exempt), plus the profile ESTOP belt when
 ``settings.estop_on_breach`` (default true) so cron/kanban are gated too.
 Immortal sessions cap per UTC day and are never hard-stopped. Unknown pricing is
-fail-CLOSED. Runtime policy is set through the orchestrator-only ``hermes
-cost-cap`` CLI; no env var is a source of truth.
+fail-CLOSED. A call the route prices itself (``usage.cost`` on a
+``pricing.reported_cost_hosts`` host, priced by core) is accrued at core's own
+price for it (``reported_cost``). Runtime policy is set through the
+orchestrator-only ``hermes cost-cap`` CLI; no env var is a source of truth.
 """
 
 from __future__ import annotations
@@ -240,9 +242,10 @@ def set_fleet_ceiling(value: float) -> None:
 
 
 def tier1_cap(profile_home) -> float:
-    """Rolling p90 over the profile's completed session totals (inf when none)."""
+    """Rolling p90 over the profile's completed session totals, raised to ``settings.tier1_floor_usd``
+    (inf when there is no history)."""
     window = _cfg_int("p90_window_sessions", DEFAULT_P90_WINDOW)
-    return policy.p90(policy.completed_session_totals(profile_home, window))
+    return policy.tier1_from(policy.completed_session_totals(profile_home, window), _cfg("tier1_floor_usd", 0.0))
 
 
 def reconcile_session(session_id, *, state_db_path) -> float:
@@ -258,29 +261,36 @@ def record_api_request(session_id, model, usage, api_request_id, *, provider=Non
 
     Builds ``CanonicalUsage`` from the SELECTED canonical token fields — never
     splats the whole dict, whose ``prompt_tokens``/``total_tokens`` are derived
-    properties, not constructor args. Unknown pricing is fail-CLOSED: the call
-    is recorded ``unpriced`` (never as free), which the middleware /
-    ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal session.
-    Returns the running priced fast-path total.
+    properties, not constructor args. ``reported_cost`` (core's own price for this
+    response, from a route that reports its cost: ``agent/api_request_hooks.py``; a
+    finite float > 0, core's own contract) is accrued as-is, so both accrual paths hold
+    the same number. Unknown pricing is
+    fail-CLOSED: the call is recorded ``unpriced`` (never as free), which the
+    middleware / ``pre_tool_call`` treat as a Tier-2 breach for a non-immortal
+    session. Returns the running priced fast-path total.
     """
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
     usage = usage or {}
-    canonical = CanonicalUsage(
-        input_tokens=int(usage.get("input_tokens", 0) or 0),
-        output_tokens=int(usage.get("output_tokens", 0) or 0),
-        cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
-        cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
-        reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
-        request_count=int(usage.get("request_count", 1) or 1),
-    )
     amount = None
-    try:
-        result = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url)
-        amount = result.amount_usd
-    except Exception:
-        logger.warning("nv-cost-cap pricing failed for model=%s", model, exc_info=True)
-        amount = None
+    reported = usage.get("reported_cost")
+    if type(reported) is float and math.isfinite(reported) and reported > 0:
+        amount = reported
+    else:
+        canonical = CanonicalUsage(
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
+            reasoning_tokens=int(usage.get("reasoning_tokens", 0) or 0),
+            request_count=int(usage.get("request_count", 1) or 1),
+        )
+        try:
+            result = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url)
+            amount = result.amount_usd
+        except Exception:
+            logger.warning("nv-cost-cap pricing failed for model=%s", model, exc_info=True)
+            amount = None
 
     priced = amount is not None
     total = store.record_call(
@@ -414,7 +424,6 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
         return False
 
     ceiling = resolve_ceiling()
-    cap = tier1_cap(_current_profile_home())
     budget_gen = state["budget_gen"] + 1
     delta = effective - state["window_start_total"]
     crossed = unpriced_new or (_finite(ceiling) and delta >= ceiling)
@@ -429,6 +438,12 @@ def _evaluate_boundary(session_id, *, today, platform) -> bool:
             _engage_estop(session_id)
         return True
 
+    # Tier-1 only after the Tier-2 decision: a bad Tier-1 setting can never keep a breach from being recorded.
+    try:
+        cap = tier1_cap(_current_profile_home())
+    except Exception:
+        logger.warning("nv-cost-cap Tier-1 cap failed for %s", session_id, exc_info=True)
+        cap = math.inf
     if _finite(cap) and effective > cap:
         _record_escalation(session_id, budget_gen, today)
     store.set_state(
