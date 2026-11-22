@@ -1167,6 +1167,7 @@ class TestRouteReportedUsageCost:
         manager.discover_and_load()
         cap = manager._plugins["nv-cost-cap"]
         assert cap.enabled and cap.error is None, cap.error
+        cap.manager = manager
         monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
         monkeypatch.setattr(plugins_mod, "_plugin_managers_by_home", {})
         dispatched = []
@@ -1270,6 +1271,71 @@ class TestRouteReportedUsageCost:
             assert [r.pricing_version for r in seen] == ["route-reported-usage-cost"]
             assert agent.session_cost_status == "actual"
             assert reported == persisted == accrued == 0.0123
+            assert Decimal(reported) == seen[-1].amount_usd
+        finally:
+            db.close()
+            agent.close()
+
+    def test_a_full_turn_carries_a_streamed_quote_to_core_and_the_cap(self, tmp_path, monkeypatch):
+        """The production turn: run_conversation streams the answer through Hermes's own per-request client
+        (only the low-level transport is a mock, which answers the usage chunk only when the request asks for it
+        with stream_options.include_usage), then the loop itself records the usage and fires the real
+        post_api_request dispatch, in its own order. Core prices the call from the quote, and the delta persisted
+        to state.db, the dispatched reported_cost and nv-cost-cap's accrual through its own hook are that number."""
+        import json
+
+        import httpx
+
+        from agent import process_bootstrap
+        from hermes_cli.plugins import PluginContext, PluginManifest
+        from hermes_state import SessionDB
+
+        requests = []
+
+        def answer(request):
+            if request.url.host != "litellm.example.com":
+                return httpx.Response(404)
+            body = json.loads(request.content or b"{}")
+            requests.append(body)
+            if not (body.get("stream") is True and (body.get("stream_options") or {}).get("include_usage") is True):
+                return httpx.Response(400, json={"error": {"message": "the test expects stream + include_usage"}})
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=self._sse_body(0.0123).encode())
+
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        cap, dispatched = self._load_cap(tmp_path, monkeypatch)
+        request_ids = []
+        PluginContext(PluginManifest(name="request-id-observer", source="user"), cap.manager).register_hook(
+            "post_api_request", lambda **kw: request_ids.append(kw.get("api_request_id")))
+        monkeypatch.setattr(process_bootstrap, "_get_proxy_for_base_url", lambda base_url: None)
+        monkeypatch.setattr(process_bootstrap, "_get_shared_transport", lambda key, build: httpx.MockTransport(answer))
+        seen = self._priced(monkeypatch)
+        db = SessionDB(tmp_path / "state.db")
+        try:
+            agent._session_db, agent._session_db_created = db, False
+            agent._cached_system_prompt = "You are helpful."
+            agent.compression_enabled = False
+            agent.stream_delta_callback = lambda _text: None
+            monkeypatch.setattr(agent, "_save_trajectory", lambda *a, **k: None)
+            result = agent.run_conversation("hi")
+            assert result["final_response"] == "ok"
+            # The turn's one streamed request (a best-effort side task such as a title may also call the host).
+            assert len([r for r in requests if r.get("stream") is True]) == 1
+            assert [r.pricing_version for r in seen] == ["route-reported-usage-cost"]
+            assert db.flush_token_counts()
+            sid = agent.session_id
+            persisted = db.get_session(sid)["estimated_cost_usd"]
+            (request_id,) = request_ids
+            conn = cap.module.store._conn()
+            try:
+                accrued = conn.execute(
+                    "SELECT SUM(amount_usd) FROM calls WHERE session_id = ? AND api_request_id = ? AND priced = 1",
+                    (sid, request_id),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            reported = dispatched[-1]["reported_cost"]
+            assert reported == persisted == accrued == 0.0123, (reported, persisted, accrued)
             assert Decimal(reported) == seen[-1].amount_usd
         finally:
             db.close()

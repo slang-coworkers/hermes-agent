@@ -695,8 +695,8 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 # call Hermes cannot price itself: a rate Hermes has always wins.
 REPORTED_COST_VERSION = "route-reported-usage-cost"
 # The largest quote one response may carry. A larger figure is not a call's bill (no model call costs this much), so
-# it is refused like any malformed value: the call stays unpriced (fail-closed). The bound also keeps every running
-# total far inside the range where float sums of real charges stay exact to well below a cent.
+# it is refused like any malformed value: the call stays unpriced (fail-closed), and one absurd quote can never swamp
+# a running total. Totals stay floats, as all of Hermes's cost accounting is (state.db stores REAL), and round as such.
 MAX_REPORTED_COST_USD = 10_000.0
 
 
