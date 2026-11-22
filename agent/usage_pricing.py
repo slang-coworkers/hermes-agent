@@ -809,6 +809,10 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 # loop's own route; never an auxiliary or MoA call, whose fallback routing is not tracked), and only for a
 # call Hermes cannot price itself: a rate Hermes has always wins.
 REPORTED_COST_VERSION = "route-reported-usage-cost"
+# The largest quote one response may carry. A larger figure is not a call's bill (no model call costs this much), so
+# it is refused like any malformed value: the call stays unpriced (fail-closed), and one absurd quote can never swamp
+# a running total. Totals stay floats, as all of Hermes's cost accounting is (state.db stores REAL), and round as such.
+MAX_REPORTED_COST_USD = 10_000.0
 
 
 def _reported_cost_hosts() -> frozenset[str]:
@@ -839,7 +843,8 @@ def reports_usage_cost(base_url: Optional[str]) -> bool:
 
 
 def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
-    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0).
+    """One response's ``usage.cost`` as LiteLLM sends it (a JSON number, finite as a float, > 0 and at most
+    ``MAX_REPORTED_COST_USD``).
 
     The quote is converted to a float exactly once, here: the result is that float's exact value as a
     Decimal, so the amount core persists and the amount plugins receive (both that float) are this number.
@@ -854,8 +859,8 @@ def _parse_reported_request_cost(usage: CanonicalUsage) -> Optional[Decimal]:
     except OverflowError:  # an int too large for a float
         return None
     # Strictly positive: a route may pass through a field it did not bill, and a zero quote cannot be told from
-    # one (a call left unknown stays fail-closed instead of becoming a $0 charge).
-    if not math.isfinite(amount) or amount <= 0:
+    # one (a call left unknown stays fail-closed instead of becoming a $0 charge). Bounded: see MAX_REPORTED_COST_USD.
+    if not math.isfinite(amount) or amount <= 0 or amount > MAX_REPORTED_COST_USD:
         return None
     return Decimal(amount)
 

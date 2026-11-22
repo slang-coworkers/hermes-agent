@@ -1013,6 +1013,7 @@ class TestRouteReportedUsageCost:
 
     @pytest.mark.parametrize("cost", [
         True, -1, -0.5, float("nan"), float("inf"), "abc", "0.012", "1e400", 10**400, Decimal(1), None, [1], {"usd": 1},
+        10_000.01, 1e12, 2**53 + 1,
     ])
     def test_malformed_cost_is_ignored(self, listed, cost):
         assert self._price(self._usage(cost)).status == "unknown"
@@ -1168,10 +1169,10 @@ class TestRouteReportedUsageCost:
             agent.client, agent.provider = real_client, real_provider
             agent.close()
 
-    @pytest.mark.parametrize("quote", [0.1, 4.8077e-06, 2**53 + 1])
+    @pytest.mark.parametrize("quote", [0.1, 4.8077e-06, 1234.5678901234567, 10_000, 10_000.0])
     def test_a_quote_is_taken_once_as_the_float_core_persists(self, listed, quote):
-        """The quote is converted once, to a float: the CostResult amount is exactly that float (a fractional
-        quote and an int a float cannot hold, 2**53 + 1), so no later conversion changes it."""
+        """The quote is converted once, to a float: the CostResult amount is exactly that float (fractional
+        quotes, up to the bound MAX_REPORTED_COST_USD inclusive), so no later conversion changes it."""
         result = self._price(self._usage(quote))
         assert result.status == "actual"
         assert result.amount_usd == Decimal(float(quote))
@@ -1179,8 +1180,8 @@ class TestRouteReportedUsageCost:
 
     def test_core_and_the_hook_hold_one_usd_value(self, tmp_path, monkeypatch):
         """One USD value through the real paths: core's CostResult amount, the per-call delta core hands to
-        persistence and the usage the real post_api_request dispatch hands to plugins are the same number, for a
-        fractional quote and for an int quote a float cannot hold exactly."""
+        persistence and the usage the real post_api_request dispatch hands to plugins are the same number, for
+        fractional quotes."""
         from agent import turn_usage
         from agent.turn_response_intake import _fire_post_api_request_hook
         from hermes_cli import plugins as plugins_mod
@@ -1198,7 +1199,7 @@ class TestRouteReportedUsageCost:
         seen = self._priced(monkeypatch)
         try:
             agent._session_db, agent._session_db_created = SimpleNamespace(), True
-            for n, quote in enumerate((0.1, 2**53 + 1), start=1):
+            for n, quote in enumerate((0.1, 1234.5678901234567), start=1):
                 response = self._response(quote)
                 self._record(agent, response)
                 _fire_post_api_request_hook(
