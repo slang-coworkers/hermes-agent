@@ -472,9 +472,37 @@ def test_tier1_floor_raises_a_small_p90(tmp_path, monkeypatch):
     assert loaded.module.tier1_cap(str(hermes_home)) == 40.0
 
 
+def test_the_tier2_decision_never_reads_tier1(tmp_path, monkeypatch):
+    """Tier-1 is read only after the Tier-2 decision. A breach is recorded without reading it, so a failing
+    Tier-1 lookup can never keep a breach from being recorded; under the ceiling the boundary does read it and
+    survives its failure (no Tier-1, no escalation)."""
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch,
+        settings={"profile_ceiling_usd": 1.0, "p90_window_sessions": 5, "estop_on_breach": False},
+    )
+    _seed(
+        hermes_home,
+        sessions=[("h1", None, 2.0, 1.7e9), ("s-big", None, 5.0, None), ("s-small", None, 0.5, None)],
+        usage=[("h1", "m", "", 2.0), ("s-big", "m", "", 5.0), ("s-small", "m", "", 0.5)],
+    )
+    reads = []
+
+    def failing_tier1(profile_home):
+        reads.append(profile_home)
+        raise RuntimeError("a bad Tier-1 setting")
+
+    monkeypatch.setattr(loaded.module, "tier1_cap", failing_tier1)
+    assert _has(_pgd(manager, "rk", "s-big"), "skip")
+    assert [e["kind"] for e in loaded.module.episodes("s-big")] == ["breach"]
+    assert reads == [], "the Tier-2 breach path read Tier-1"
+    assert not _has(_pgd(manager, "rk-small", "s-small"), "skip")
+    assert len(reads) == 1, "under the ceiling the boundary must read Tier-1"
+    assert loaded.module.episodes("s-small") == []
+
+
 def test_an_oversized_tier1_floor_never_blocks_a_tier2_stop(tmp_path, monkeypatch):
     """A floor too large for a float (a YAML integer) is ignored (the p90 stands) and the Tier-2 breach is
-    still recorded at the boundary: Tier-1 is evaluated only after the Tier-2 decision."""
+    still recorded at the boundary."""
     hermes_home, manager, loaded = _load(
         tmp_path, monkeypatch,
         settings={"profile_ceiling_usd": 1.0, "p90_window_sessions": 5, "tier1_floor_usd": 10**400,

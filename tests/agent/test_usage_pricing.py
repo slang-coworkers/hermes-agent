@@ -977,6 +977,7 @@ class TestRouteReportedUsageCost:
 
     @pytest.mark.parametrize("cost", [
         True, -1, -0.5, float("nan"), float("inf"), "abc", "0.012", "1e400", 10**400, Decimal(1), None, [1], {"usd": 1},
+        10_000.01, 1e12, 2**53 + 1,
     ])
     def test_malformed_cost_is_ignored(self, listed, cost):
         assert self._price(self._usage(cost)).status == "unknown"
@@ -1132,31 +1133,26 @@ class TestRouteReportedUsageCost:
             agent.client, agent.provider = real_client, real_provider
             agent.close()
 
-    @pytest.mark.parametrize("quote", [0.1, 4.8077e-06, 2**53 + 1])
+    @pytest.mark.parametrize("quote", [0.1, 4.8077e-06, 1234.5678901234567, 10_000, 10_000.0])
     def test_a_quote_is_taken_once_as_the_float_core_persists(self, listed, quote):
-        """The quote is converted once, to a float: the CostResult amount is exactly that float (a fractional
-        quote and an int a float cannot hold, 2**53 + 1), so no later conversion changes it."""
+        """The quote is converted once, to a float: the CostResult amount is exactly that float (fractional
+        quotes, up to the bound MAX_REPORTED_COST_USD inclusive), so no later conversion changes it."""
         result = self._price(self._usage(quote))
         assert result.status == "actual"
         assert result.amount_usd == Decimal(float(quote))
         assert Decimal(float(result.amount_usd)) == result.amount_usd
 
-    def test_core_the_hook_and_the_cap_hold_one_usd_value(self, tmp_path, monkeypatch):
-        """One USD value from the quote to the cap, through the real paths: core's CostResult amount, the
-        per-call delta core persists to state.db, the usage the real post_api_request dispatch hands to plugins
-        and nv-cost-cap's accrual through its registered hook are the same number, for a fractional quote and
-        for an int quote a float cannot hold exactly."""
+    @staticmethod
+    def _load_cap(tmp_path, monkeypatch):
+        """nv-cost-cap loaded the way the gateway loads it, owning the post_api_request hook, plus an observer of
+        the usage the real dispatch hands to plugins. Returns ``(cap, dispatched_usages)``."""
         import shutil
         from pathlib import Path
 
         import hermes_yaml as yaml
-        from agent.turn_response_intake import _fire_post_api_request_hook
         from hermes_cli import plugins as plugins_mod
         from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
-        from hermes_state import SessionDB
 
-        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
-        # The cap, loaded the way the gateway loads it, owns the post_api_request hook.
         repo = Path(__file__).resolve().parents[2]
         shutil.copytree(repo / "plugins" / "nv-cost-cap", tmp_path / "plugins" / "nv-cost-cap")
         (tmp_path / "config.yaml").write_text(yaml.safe_dump({
@@ -1173,40 +1169,108 @@ class TestRouteReportedUsageCost:
         assert cap.enabled and cap.error is None, cap.error
         monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
         monkeypatch.setattr(plugins_mod, "_plugin_managers_by_home", {})
-        hooked = []
+        dispatched = []
         PluginContext(PluginManifest(name="usage-observer", source="user"), manager).register_hook(
-            "post_api_request", lambda **kw: hooked.append(kw.get("usage")))
+            "post_api_request", lambda **kw: dispatched.append(kw.get("usage")))
+        return cap, dispatched
+
+    @staticmethod
+    def _account(agent, db, cap, dispatched, response, sid, request_id):
+        """Run core's accounting and the real post_api_request dispatch for ``response``; return the dispatched
+        ``reported_cost``, the delta persisted to state.db and the cap's accrual for the request."""
+        from agent.turn_response_intake import _fire_post_api_request_hook
+
+        agent.session_id, agent._session_db_created = sid, False
+        TestRouteReportedUsageCost._record(agent, response)
+        _fire_post_api_request_hook(
+            agent, response, SimpleNamespace(content="ok", tool_calls=None), "stop", api_messages=[],
+            api_call_count=1, api_duration=0.2, api_start_time=0.0, api_request_id=request_id,
+            effective_task_id="task", turn_id="turn",
+        )
+        assert db.flush_token_counts()
+        conn = cap.module.store._conn()
+        try:
+            accrued = conn.execute(
+                "SELECT SUM(amount_usd) FROM calls WHERE session_id = ? AND api_request_id = ? AND priced = 1",
+                (sid, request_id),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return dispatched[-1]["reported_cost"], db.get_session(sid)["estimated_cost_usd"], accrued
+
+    def test_core_the_hook_and_the_cap_hold_one_usd_value(self, tmp_path, monkeypatch):
+        """One USD value from the quote to the cap, through the real paths: core's CostResult amount, the
+        per-call delta core persists to state.db, the usage the real post_api_request dispatch hands to plugins
+        and nv-cost-cap's accrual through its registered hook are the same number, for fractional quotes."""
+        from hermes_state import SessionDB
+
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        cap, dispatched = self._load_cap(tmp_path, monkeypatch)
         seen = self._priced(monkeypatch)
         db = SessionDB(tmp_path / "state.db")
         try:
             agent._session_db = db
-            for n, quote in enumerate((0.1, 2**53 + 1), start=1):
-                sid = f"one-value-{n}"
-                agent.session_id, agent._session_db_created = sid, False
-                response = self._response(quote)
-                self._record(agent, response)
-                _fire_post_api_request_hook(
-                    agent, response, SimpleNamespace(content="ok", tool_calls=None), "stop", api_messages=[],
-                    api_call_count=1, api_duration=0.2, api_start_time=0.0, api_request_id=f"req-{n}",
-                    effective_task_id="task", turn_id="turn",
-                )
-                assert db.flush_token_counts()
+            for n, quote in enumerate((0.1, 1234.5678901234567), start=1):
+                reported, persisted, accrued = self._account(
+                    agent, db, cap, dispatched, self._response(quote), f"one-value-{n}", f"req-{n}")
                 result = seen[-1]
                 assert result.pricing_version == "route-reported-usage-cost"
-                persisted = db.get_session(sid)["estimated_cost_usd"]
-                usage = hooked[-1]
-                reported = usage["reported_cost"]
                 assert type(reported) is float
-                conn = cap.module.store._conn()
-                try:
-                    accrued = conn.execute(
-                        "SELECT SUM(amount_usd) FROM calls WHERE session_id = ? AND api_request_id = ? AND priced = 1",
-                        (sid, f"req-{n}"),
-                    ).fetchone()[0]
-                finally:
-                    conn.close()
                 assert Decimal(reported) == result.amount_usd == Decimal(persisted) == Decimal(accrued), (
                     quote, reported, result.amount_usd, persisted, accrued)
+        finally:
+            db.close()
+            agent.close()
+
+    @staticmethod
+    def _sse_body(cost):
+        """A LiteLLM-style stream: content, finish, then the usage-only final chunk carrying ``usage.cost``."""
+        import json
+
+        head = {"id": "c-1", "object": "chat.completion.chunk", "created": 1, "model": "vendor/open-model-x"}
+        chunks = [
+            dict(head, choices=[{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": None}]),
+            dict(head, choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}]),
+            dict(head, choices=[], usage={"prompt_tokens": 17, "completion_tokens": 8, "total_tokens": 25,
+                                          "cost": cost}),
+        ]
+        return "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+
+    def test_a_streamed_answer_carries_its_quote_to_core_and_the_cap(self, tmp_path, monkeypatch):
+        """The deployed path: a streamed answer through Hermes's own streaming call and per-request client
+        factory (only the low-level transport is a mock answering as the listed host with a LiteLLM stream whose
+        final usage chunk carries usage.cost). Core prices it from the quote, and the persisted delta, the
+        dispatched reported_cost and the cap's accrual are that same number."""
+        import httpx
+
+        from agent import process_bootstrap
+        from hermes_state import SessionDB
+
+        body = self._sse_body(0.0123)
+        hosts = []
+
+        def answer(request):
+            hosts.append(request.url.host)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+
+        agent = self._agent(tmp_path, monkeypatch, ["litellm.example.com"])
+        cap, dispatched = self._load_cap(tmp_path, monkeypatch)
+        monkeypatch.setattr(process_bootstrap, "_get_proxy_for_base_url", lambda base_url: None)
+        monkeypatch.setattr(process_bootstrap, "_get_shared_transport", lambda key, build: httpx.MockTransport(answer))
+        seen = self._priced(monkeypatch)
+        db = SessionDB(tmp_path / "state.db")
+        try:
+            agent._session_db = db
+            agent._interrupt_requested = False
+            response = agent._interruptible_streaming_api_call(
+                {"model": "vendor/open-model-x", "messages": [{"role": "user", "content": "hi"}]})
+            assert hosts == ["litellm.example.com"]
+            assert response.choices[0].message.content == "ok"
+            reported, persisted, accrued = self._account(agent, db, cap, dispatched, response, "streamed", "req-s")
+            assert [r.pricing_version for r in seen] == ["route-reported-usage-cost"]
+            assert agent.session_cost_status == "actual"
+            assert reported == persisted == accrued == 0.0123
+            assert Decimal(reported) == seen[-1].amount_usd
         finally:
             db.close()
             agent.close()

@@ -43,7 +43,8 @@ tracked; and the main loop's clients send to that route's own origin and never f
 redirect, so core treats the answer as that route's own); that route's base URL is HTTPS on a host listed in config
 `pricing.reported_cost_hosts` (exact host names, default none; any port and path on a
 listed host); and the value is one response's JSON number, finite and strictly positive (a
-route may pass through a field it did not bill, and a zero quote cannot be told from one).
+route may pass through a field it did not bill, and a zero quote cannot be told from one) and
+at most $10,000 (a larger figure is not one call's bill).
 Listing a host is the operator's statement that its `usage.cost` is its bill. Core converts
 the quote to a float once and prices the response with it; that float is the delta core
 persists, and the `post_api_request` usage summary carries the same float as
@@ -346,17 +347,18 @@ This section is the decision record for the one core change behind the route-rep
 ("Yes, fork only": the core change, and the AI service's reported price for calls Hermes
 cannot price, only on the listed host). It is core debt until upstream takes it.
 
-**Context.** Hermes priced every call to a model that no rate card lists as "cost unknown,
-$0". This cap is fail-closed on unknown pricing, so it could not run on a fleet whose models
-a LiteLLM proxy serves. The proxy already reports its own bill for each request in
-`usage.cost`.
+**Context.** Hermes left a call unpriced ("cost unknown") when none of its rate sources (the
+bundled snapshot, the provider's models API, models.dev) had a rate for the model. This cap is
+fail-closed on unknown pricing, so it could not run on a fleet whose models a LiteLLM proxy
+serves. The proxy already reports its own bill for each request in `usage.cost`.
 
 **Decision.** Core prices a main-loop call with the route's `usage.cost` under the rules in
 [Accrual](#accrual--two-sources-kept-monotonic). Three core files change:
 
 - `agent/usage_pricing.py`: the `pricing.reported_cost_hosts` setting, the strict parser
-  (the quote becomes one float, once) and `estimate_usage_cost(trust_reported_cost=...)`
-  (default off; a rate Hermes has always wins).
+  (the quote becomes one float, once; above `MAX_REPORTED_COST_USD`, $10,000 for one response,
+  it is refused as not a bill) and `estimate_usage_cost(trust_reported_cost=...)` (default
+  off; a rate Hermes has always wins).
 - `agent/turn_usage.py`: the main loop vouches for its own route, never for a
   mixture-of-agents response (a recorded aggregator slot, the facade's client or the `moa`
   provider), and only when its clients (the primary and the cached per-request client) send
