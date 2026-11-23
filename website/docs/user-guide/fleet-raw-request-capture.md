@@ -1,7 +1,7 @@
 ---
 sidebar_position: 72
 title: "Fleet raw-request capture (on-call runbook)"
-description: "How to turn Hermes's built-in raw request capture (HERMES_DUMP_REQUESTS) on across a Bot-Mode fleet: the two activation surfaces, why a secondary profile's .env cannot enable the gateway-served path, the restart requirement, the retention dependency, and the privacy and disk trade-offs."
+description: "Raw request capture (HERMES_DUMP_REQUESTS) is OFF by default in a Bot-Mode fleet. How to turn it on deliberately to debug: the two activation surfaces, the onboarding opt-in, why a secondary profile's .env cannot enable the gateway-served path, the restart requirement, the retention dependency, and the privacy and disk trade-offs."
 ---
 
 # Fleet raw-request capture (on-call runbook)
@@ -15,6 +15,12 @@ Capture is Hermes-native: setting `HERMES_DUMP_REQUESTS=true` in a process's
 environment makes that process write a `request_dump_<session_id>_*.json` file
 beside its session files, secret-redacted, for every provider. There is no
 external proxy and no patched binary to install.
+
+**Capture is OFF by default.** A dump holds the full preflight payload, i.e.
+conversation content (see the privacy warning below). `nv-coworker-compose`
+never turns it on at install unless you opt in, and documents
+`HERMES_DUMP_REQUESTS=false` in each distribution's `.env.EXAMPLE`. Turn capture
+on only to debug, only where that is allowed, and turn it off again when done.
 
 ## What is captured (and what is not)
 
@@ -100,20 +106,35 @@ kanban workers (`hermes -p <bot> chat -q`) and the cron bot-chat delivery
 subprocess. Each of these loads the **active `.env`** of the invoked coworker
 profile into its own environment at startup.
 
-`nv-coworker-compose` handles this surface automatically: on install it upserts
-exactly one `HERMES_DUMP_REQUESTS=true` line into each coworker profile's active
-`.env` (idempotently — a re-install collapses any prior conflicting assignment to
-the one canonical line and never mutates the running process's environment). No
-operator step is needed for these surfaces on an unmanaged install; the render
-also carries the toggle in each distribution's `.env.EXAMPLE` as the documented
-default.
+`nv-coworker-compose` leaves this surface OFF on install: without the opt-in it
+writes nothing, and it removes the exact `HERMES_DUMP_REQUESTS=true` line earlier
+versions of the installer appended to every coworker profile's active `.env`, so
+re-onboarding turns that old default off. It does not change capture configured
+deliberately elsewhere: a value you set by hand in a profile `.env` (in any other
+form), the gateway or service environment (surface 1), or the managed scope. To
+lock capture off machine-wide, set a literal `HERMES_DUMP_REQUESTS=false` in the
+managed environment (`/etc/hermes/.env`), which wins over a profile `.env` at load.
 
-On a **managed install**, the profile write defers to machine policy: if the
-managed scope already sets `HERMES_DUMP_REQUESTS` to a truthy value, install
-treats the profile as already enabled and writes nothing; if managed policy pins
-the key falsy or the install is package-managed, install surfaces an explicit
-error instead of silently overriding policy — set `HERMES_DUMP_REQUESTS=true` in
-the managed environment (`/etc/hermes/.env`) and re-run onboarding.
+A profile `.env` that is a symlink or a hard link belongs to the owner of the file
+it points to (for example a shared secrets file): the default cleanup leaves it
+alone, and the opt-in refuses to rewrite it — set the value in that file yourself.
+
+To turn capture on for these surfaces, opt in explicitly for one run:
+`hermes onboard coworker <coworker-types.yaml> --gateway-url <url> --capture-requests`.
+Install then upserts exactly one `HERMES_DUMP_REQUESTS=true` line into each
+coworker profile's active `.env` (idempotently — a re-install collapses any prior
+conflicting assignment to the one canonical line and never mutates the running
+process's environment). Only that per-run flag on the standalone command opts in:
+nothing inherited from the environment does, and the in-process onboarding tool
+never does. Re-run onboarding without the flag to turn it off again.
+
+On a **managed install**, the opt-in defers to machine policy: if the managed
+scope already sets `HERMES_DUMP_REQUESTS` to a truthy value, install treats the
+profile as already enabled and writes nothing; if managed policy pins the key
+falsy or the install is package-managed, install surfaces an explicit error
+instead of silently overriding policy — set `HERMES_DUMP_REQUESTS=true` in the
+managed environment (`/etc/hermes/.env`) and re-run onboarding. These checks run
+before anything is installed.
 
 > In-process cron **agent** jobs tick inside a secret scope, like secondary
 > profiles, and are covered by the gateway process environment (surface 1), not

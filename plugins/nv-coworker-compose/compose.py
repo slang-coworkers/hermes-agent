@@ -343,12 +343,14 @@ _ENV_TEMPLATE_BODY = (
     "# The installer renames this file to .env.EXAMPLE; copy it to .env and\n"
     "# fill in real values before running.\n"
     "\n"
-    "# Fleet raw-request-capture default: dump preflight request payloads and\n"
-    "# terminal API-error response bodies (secret-redacted) beside each session\n"
-    "# file. This documents the default; the active .env the installer writes is\n"
-    "# what enables capture for spawned surfaces. See the fleet raw-request-\n"
-    "# capture runbook (website/docs/user-guide/fleet-raw-request-capture.md).\n"
-    "HERMES_DUMP_REQUESTS=true\n"
+    "# Fleet raw-request capture is OFF by default: a dump holds the preflight\n"
+    "# request payload (conversation content, secret-redacted) beside each session\n"
+    "# file. Turn it on only to debug, where that is allowed: run `hermes onboard\n"
+    "# coworker ... --capture-requests` (it then sets it in each installed profile's\n"
+    "# active .env), or see the fleet raw-request-capture runbook\n"
+    "# (website/docs/user-guide/fleet-raw-request-capture.md) for the gateway\n"
+    "# process. Terminal API-error response bodies are dumped regardless.\n"
+    "HERMES_DUMP_REQUESTS=false\n"
 )
 
 # Source workflow bodies carry this marker where render-time overlay bodies land.

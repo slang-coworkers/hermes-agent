@@ -101,3 +101,7 @@ def setup_onboard(parser: argparse.ArgumentParser) -> None:
     # Required on the standalone verb: without a gateway URL the read-only
     # preflight cannot run, so onboarding must not render/install anything.
     coworker_p.add_argument("--gateway-url", required=True, help="Loopback gateway /api/ws URL with a ?token or ?ticket credential")
+    # Raw request capture (OBS-F46) is OFF by default: a dump holds conversation content.
+    coworker_p.add_argument("--capture-requests", action="store_true",
+                            help="Debug only: turn raw request capture (HERMES_DUMP_REQUESTS) ON in each "
+                                 "installed profile's active .env for this run (default: OFF)")
