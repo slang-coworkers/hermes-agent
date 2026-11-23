@@ -433,3 +433,86 @@ def test_authoritative_unknown_boundary_failclosed_idempotent(tmp_path, monkeypa
     eps2 = loaded.module.episodes("s")
     assert len(eps2) == 1 and eps2[0]["budgetGen"] == gen
     estop.disengage()
+
+
+def test_reported_cost_from_core_is_accrued_as_is(tmp_path, monkeypatch):
+    """``reported_cost`` (core's own price for the response: a float) is the call's amount; anything else
+    there is ignored and the call is priced as before (unpriced, fail-closed, for an unknown model)."""
+    _, _, loaded = _load(tmp_path, monkeypatch, settings={"profile_ceiling_usd": 100.0})
+    store = loaded.module.store
+    usage = {"input_tokens": 17, "output_tokens": 8, "request_count": 1, "reported_cost": 4.8077e-06}
+    total = loaded.module.record_api_request(
+        "s-ok", "vendor/open-model-x", usage, "req-1", provider="anthropic", base_url="",
+    )
+    assert abs(total - 4.8077e-06) < 1e-15
+    assert store.unpriced_count("s-ok") == 0
+    assert loaded.module._session_stopped("s-ok", today="2026-01-01") == (False, "under")
+    for n, bad in enumerate((True, "0.1", -1.0, 0.0, float("nan"), float("inf"), 5), start=2):
+        sid = f"s-bad-{n}"
+        loaded.module.record_api_request(
+            sid, "vendor/open-model-x", dict(usage, reported_cost=bad), f"req-{n}", provider="anthropic", base_url="",
+        )
+        assert store.unpriced_count(sid) == 1, bad
+        assert loaded.module._session_stopped(sid, today="2026-01-01") == (True, "unpriced")
+
+
+def test_tier1_floor_raises_a_small_p90(tmp_path, monkeypatch):
+    """settings.tier1_floor_usd raises the rolling p90 to the floor (nanoclaw's $10); no history stays inf."""
+    hermes_home, _, loaded = _load(
+        tmp_path, monkeypatch, settings={"p90_window_sessions": 5, "tier1_floor_usd": 10},
+    )
+    assert loaded.module.tier1_cap(str(hermes_home)) == float("inf")
+    _seed(
+        hermes_home,
+        sessions=[("h1", None, 0.5, 1.7e9), ("h2", None, 2.0, 1.7e9)],
+        usage=[("h1", "m", "", 0.5), ("h2", "m", "", 2.0)],
+    )
+    assert loaded.module.tier1_cap(str(hermes_home)) == 10.0
+    _seed(hermes_home, sessions=[("h3", None, 40.0, 1.7e9)], usage=[("h3", "m", "", 40.0)])
+    assert loaded.module.tier1_cap(str(hermes_home)) == 40.0
+
+
+def test_the_tier2_decision_never_reads_tier1(tmp_path, monkeypatch):
+    """Tier-1 is read only after the Tier-2 decision. A breach is recorded without reading it, so a failing
+    Tier-1 lookup can never keep a breach from being recorded; under the ceiling the boundary does read it and
+    survives its failure (no Tier-1, no escalation)."""
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch,
+        settings={"profile_ceiling_usd": 1.0, "p90_window_sessions": 5, "estop_on_breach": False},
+    )
+    _seed(
+        hermes_home,
+        sessions=[("h1", None, 2.0, 1.7e9), ("s-big", None, 5.0, None), ("s-small", None, 0.5, None)],
+        usage=[("h1", "m", "", 2.0), ("s-big", "m", "", 5.0), ("s-small", "m", "", 0.5)],
+    )
+    reads = []
+
+    def failing_tier1(profile_home):
+        reads.append(profile_home)
+        raise RuntimeError("a bad Tier-1 setting")
+
+    monkeypatch.setattr(loaded.module, "tier1_cap", failing_tier1)
+    assert _has(_pgd(manager, "rk", "s-big"), "skip")
+    assert [e["kind"] for e in loaded.module.episodes("s-big")] == ["breach"]
+    assert reads == [], "the Tier-2 breach path read Tier-1"
+    assert not _has(_pgd(manager, "rk-small", "s-small"), "skip")
+    assert len(reads) == 1, "under the ceiling the boundary must read Tier-1"
+    assert loaded.module.episodes("s-small") == []
+
+
+def test_an_oversized_tier1_floor_never_blocks_a_tier2_stop(tmp_path, monkeypatch):
+    """A floor too large for a float (a YAML integer) is ignored (the p90 stands) and the Tier-2 breach is
+    still recorded at the boundary."""
+    hermes_home, manager, loaded = _load(
+        tmp_path, monkeypatch,
+        settings={"profile_ceiling_usd": 1.0, "p90_window_sessions": 5, "tier1_floor_usd": 10**400,
+                  "estop_on_breach": False},
+    )
+    _seed(
+        hermes_home,
+        sessions=[("h1", None, 2.0, 1.7e9), ("s-big", None, 5.0, None)],
+        usage=[("h1", "m", "", 2.0), ("s-big", "m", "", 5.0)],
+    )
+    assert loaded.module.tier1_cap(str(hermes_home)) == 2.0
+    assert _has(_pgd(manager, "rk", "s-big"), "skip")
+    assert [e["kind"] for e in loaded.module.episodes("s-big")] == ["breach"]

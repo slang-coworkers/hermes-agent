@@ -17,7 +17,8 @@ from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
-from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
+from agent.usage_pricing import REPORTED_COST_VERSION, estimate_usage_cost, normalize_usage, with_served_service_tier
+from utils import base_url_origin
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -70,6 +71,25 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
+def _never_follows_redirects(client: Any) -> bool:
+    """True when ``client`` (an OpenAI-style SDK client) sends through an httpx client that never follows a
+    redirect, so each response came from the URL its request named. Unknown is False (fail closed)."""
+    return getattr(getattr(client, "_client", None), "follow_redirects", None) is False
+
+
+def _answered_by_own_route(agent: Any, base_url: Any) -> bool:
+    """The main loop's clients (the primary and the cached per-request client) send to ``base_url``'s own origin
+    and never follow a redirect, so a response came from the route core prices against and that route may vouch
+    for the cost it reports. Anything unknown does not vouch."""
+    origin = base_url_origin(str(base_url or ""))
+    cache = getattr(agent, "_request_client_cache", None)
+    clients = [getattr(agent, "client", None), cache.get("client") if isinstance(cache, dict) else None]
+    clients = [c for c in clients if c is not None]
+    return bool(origin[1]) and bool(clients) and all(
+        _never_follows_redirects(c) and base_url_origin(str(getattr(c, "base_url", "") or "")) == origin
+        for c in clients)
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: list[dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
@@ -79,6 +99,7 @@ def record_response_usage(
     consume a pending compaction verdict. Returns the loop-visible outcome."""
     rearmed = False
     compressor = agent.context_compressor
+    agent._route_reported_cost = None
     # Count every completed provider attempt, including providers that omit usage.
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
@@ -229,17 +250,29 @@ def record_response_usage(
         _agg_cost_model = _agg_slot["model"]
         _agg_cost_provider = _agg_slot.get("provider") or agent.provider
         _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
+    # A route-reported usage.cost is trusted only for the main loop's own route (a fallback re-binds the agent's
+    # route before the call), never for a MoA response: the aggregator's served route is not tracked. A response is
+    # MoA when the MoA facade served it (its client keeps reference accounting) or the agent runs as the ``moa``
+    # provider, whether or not an aggregator slot was recorded. A client that may follow a redirect, or that sends
+    # to another origin than the URL priced here, may have been answered by another host, so it never vouches.
+    _moa_response = bool(_agg_slot) or (agent.provider or "") == "moa" or (
+        _moa_client is not None and hasattr(_moa_client, "consume_reference_usage"))
     cost_result = estimate_usage_cost(
         _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
+        trust_reported_cost=not _moa_response and _answered_by_own_route(agent, _agg_cost_base_url),
     )
+    # One float for this call's own amount: it is the delta core persists and, for a route-reported price, the
+    # usage.reported_cost the post_api_request hook (fired later for the same response object) passes to plugins.
+    _call_cost = float(cost_result.amount_usd) if cost_result.amount_usd is not None else None
+    agent._route_reported_cost = (response, _call_cost) if (
+        cost_result.pricing_version == REPORTED_COST_VERSION and _call_cost is not None) else None
     # Cost delta = aggregator + MoA advisor cost (already priced per-advisor at each
     # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
     # token counts.
-    _cost_delta = None
-    if cost_result.amount_usd is not None:
-        _cost_delta = float(cost_result.amount_usd)
-        agent.session_estimated_cost_usd += _cost_delta
+    _cost_delta = _call_cost
+    if _call_cost is not None:
+        agent.session_estimated_cost_usd += _call_cost
     if _moa_ref_cost is not None:
         try:
             _moa_cost = float(_moa_ref_cost)

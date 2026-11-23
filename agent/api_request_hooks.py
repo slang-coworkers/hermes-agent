@@ -46,6 +46,12 @@ class ApiRequestHooksMixin:
         summary.pop("raw_usage", None)
         summary["prompt_tokens"] = cu.prompt_tokens
         summary["total_tokens"] = cu.total_tokens
+        # The route-reported USD cost core priced THIS response at (agent/turn_usage.py: a listed
+        # ``pricing.reported_cost_hosts`` route, the route that served the call), so a plugin accrues the same
+        # number core persisted. Absent otherwise: other summaries keep their shape.
+        stash = getattr(self, "_route_reported_cost", None)
+        if isinstance(stash, tuple) and len(stash) == 2 and stash[0] is response and isinstance(stash[1], float):
+            summary["reported_cost"] = stash[1]
         return summary
 
     @staticmethod
