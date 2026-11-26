@@ -1526,6 +1526,10 @@ _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?gateway[.!?\s]*$", re.IGNORECASE),
     re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?hermes\s+gateway[.!?\s]*$", re.IGNORECASE),
     re.compile(r"^(?:please\s+)?restart\s+hermes[.!?\s]*$", re.IGNORECASE))
+# Slack: a message that is only "stop" (ASCII, any case; optional leading mentions and end punctuation) cancels the
+# running turn as /stop does, instead of steering it with the text "stop". Applied here, at adapter entry, so it
+# reaches the busy path as a command (the /stop access check still applies).
+_PLAINTEXT_STOP_RE = re.compile(r"\s*(?:<@[A-Za-z0-9]+(?:\|[^<>\r\n]*)?>[\s,:]*)*(?ai:stop)[\s.!?\u2026\uff01\uff1f\u3002]*")
 
 
 def coerce_plaintext_gateway_command(event: MessageEvent) -> None:
@@ -1537,6 +1541,10 @@ def coerce_plaintext_gateway_command(event: MessageEvent) -> None:
             return
         text = (event.text or "").strip()
         if not text or text.startswith("/"):
+            return
+        if (getattr(getattr(event, "source", None), "platform", None) == Platform.SLACK
+                and not getattr(event, "media_urls", None) and _PLAINTEXT_STOP_RE.fullmatch(text)):
+            event.text = "/stop"
             return
         if getattr(getattr(event, "source", None), "chat_type", None) != "dm":
             return

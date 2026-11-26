@@ -350,6 +350,24 @@ class GatewayTurnProgressMixin:
             adapter = self._runner._delivery_adapter_for(ctx.source)
         except Exception:
             adapter = None
+        _resolve = getattr(ctx, "resolve_display_setting", None)
+        _platform = getattr(getattr(ctx, "source", None), "platform", None)
+        if _resolve is not None and _platform is not None:
+            from gateway.run import _platform_config_key
+            _show_args = _resolve(getattr(ctx, "user_config", None) or {}, _platform_config_key(_platform),
+                                  "tool_progress_show_args", True)
+        else:
+            _show_args = True
+        if not _show_args:
+            # Verb only: no preview, no command block, no arguments (checked before anything reads them).
+            from agent.display import get_tool_verb
+            ctx.last_was_terminal_block[0] = False
+            verb = get_tool_verb(tool_name)
+            line = f"{emoji} {verb}" if verb else t("gateway.progress.tool_pending", emoji=emoji, tool=tool_name)
+            if ctx.progress_mode == "verbose":
+                ctx.progress_queue.put(line)
+                return None
+            return line
         code_full, code_short = self._progress_terminal_blocks(adapter, tool_name, args, emoji)
         verbose = ctx.progress_mode == "verbose"
         code = code_full if verbose else code_short
